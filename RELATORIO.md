@@ -94,14 +94,14 @@ Total de 12 arquivos de documentação:
 
 | Item | Status | Observação |
 |------|--------|------------|
-| `bun install` | VALIDADO | Dependências resolvidas com sucesso |
-| `bun run build` (tsc) | VALIDADO | Compilação TypeScript executada com sucesso |
-| `bun test` | VALIDADO | Testes unitários executados com sucesso |
-| `tsc --noEmit` | VALIDADO | Typecheck executado com sucesso |
-| Validação de estrutura (`scripts/validate.sh`) | VALIDADO | Todos os arquivos essenciais presentes |
-| Verificação de segredos (`scripts/check-secrets.sh`) | VALIDADO | Nenhum segredo real encontrado |
-| Validação de JSON | VALIDADO | `package.json` e `tsconfig.json` são JSON válido |
-| Gitignore | VALIDADO | `node_modules/`, `dist/`, `.env` ignorados corretamente |
+| `bun install` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Dependências resolvidas com sucesso |
+| `bun run build` (tsc) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Compilação TypeScript executada com sucesso |
+| `bun test` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Testes unitários executados com sucesso |
+| `tsc --noEmit` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Typecheck executado com sucesso |
+| Validação de estrutura (`scripts/validate.sh`) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Todos os arquivos essenciais presentes |
+| Verificação de segredos (`scripts/check-secrets.sh`) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Nenhum segredo real encontrado |
+| Validação de JSON | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | `package.json` e `tsconfig.json` são JSON válido |
+| Gitignore | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | `node_modules/`, `dist/`, `.env` ignorados corretamente |
 | `npm install @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
 | `bun add @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
 | Uso real com OpenCode | NÃO VALIDADO | Requer ambiente OpenCode |
