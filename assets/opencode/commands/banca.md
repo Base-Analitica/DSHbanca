@@ -36,7 +36,7 @@ Executa triagem de risco de IA.
 Parseia relatório CopySpider.
 
 ## `/banca:loop <loop-name>`
-Executa loop de correção contínua.
+Executa etapa assistida de preparação do loop (avalia meta de nota, cria snapshot de segurança e gera relatório com próximos passos). Não executa correções ou compilações autônomas.
 
 ## `/banca:checklist`
 Verifica checklist de entrega.

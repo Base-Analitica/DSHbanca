@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
-import { execSync } from "node:child_process"
+import { existsSync, readFileSync } from "node:fs"
+import { join, isAbsolute, resolve } from "node:path"
+import { spawnSync } from "node:child_process"
 import { tool } from "@opencode-ai/plugin"
+import { resolveInsideRoot, assertInsideRoot } from "../lib/safe_paths"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { saveReport } from "../lib/reports"
@@ -31,7 +32,11 @@ function parseHtmlTable(html: string): CopySpiderRow[] {
 }
 
 function parsePdfViaPdftotext(pdfPath: string): CopySpiderRow[] {
-  const text = execSync(`pdftotext "${pdfPath}" -`, { encoding: "utf-8", timeout: 30000 })
+  const result = spawnSync("pdftotext", [pdfPath, "-"], { encoding: "utf-8", timeout: 30000 })
+  if (result.status !== 0) {
+    throw new Error(`pdftotext failed: ${result.stderr || result.error}`)
+  }
+  const text = result.stdout || ""
   const rows: CopySpiderRow[] = []
   const lines = text.split("\n")
   for (const line of lines) {
@@ -56,25 +61,35 @@ function classify(si: number): string {
 export const bancaPlagio = tool({
   description: "Parse CopySpider report, classify similarity by severity, map to manuscript.",
   args: {
-    reportPath: z.string().describe("Path to CopySpider report (HTML or PDF)"),
+    reportPath: z.string().describe("Path to CopySpider report (HTML or PDF). If relative, resolved inside projectRoot. If absolute, validated to ensure it resides inside projectRoot."),
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
   },
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory
-    if (!existsSync(args.reportPath)) return "report not found"
+    
+    let finalReportPath: string
+    if (isAbsolute(args.reportPath)) {
+      assertInsideRoot(root, args.reportPath)
+      finalReportPath = resolve(args.reportPath)
+    } else {
+      finalReportPath = resolveInsideRoot(root, args.reportPath)
+    }
+
+    if (!existsSync(finalReportPath)) return "report not found"
 
     const config = loadConfig(root)
     const paths = resolveManuscriptPaths(root, config)
-    const ext = args.reportPath.toLowerCase()
+    const ext = finalReportPath.toLowerCase()
 
     let rows: CopySpiderRow[]
     if (ext.endsWith(".pdf")) {
-      if (!execSync("which pdftotext", { encoding: "utf-8", stdio: "pipe" }).trim()) {
+      const testRun = spawnSync("pdftotext", ["-v"], { encoding: "utf-8" })
+      if (testRun.error) {
         return "pdftotext not available. Install poppler-utils or use HTML report."
       }
-      rows = parsePdfViaPdftotext(args.reportPath)
+      rows = parsePdfViaPdftotext(finalReportPath)
     } else {
-      const html = readFileSync(args.reportPath, "utf-8")
+      const html = readFileSync(finalReportPath, "utf-8")
       rows = parseHtmlTable(html)
     }
 

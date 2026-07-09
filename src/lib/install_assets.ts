@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, cpSync, readdirSync, writeFileSync } from "node:fs"
-import { join, dirname } from "node:path"
+import { join, dirname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const __filename = fileURLToPath(import.meta.url)
@@ -111,10 +111,40 @@ const SKILLS: Record<string, Record<string, string>> = {
 }
 
 const TEMPLATES: Record<string, string> = {
-  "scorecard.md": "# Scorecard\n\n| Dimensão | Nota |\n|----------|------|\n| ABNT/Estrutura | 0.0 |\n| Citações/Fontes | 0.0 |\n| Conteúdo/Lógica | 0.0 |\n| Estilo Acadêmico | 0.0 |\n| **Final** | **0.0** |\n",
-  "iterations.md": "# Iterações\n\n| Data | Nota | Ação | Status |\n|------|------|------|--------|\n",
-  "checklist.md": "# Checklist\n\n- [ ] Formatação ABNT\n- [ ] Ficha catalográfica\n- [ ] Resumo/Abstract\n- [ ] Sumário\n- [ ] Lista de figuras\n- [ ] Lista de tabelas\n- [ ] Referências\n",
-  "knowledge.md": "# Base de Conhecimento\n\n",
+  "scorecard.md": `# Scorecard\n\n| Dimensão | Nota |\n|----------|------|\n| ABNT/Estrutura | 0.0 |\n| Citações/Fontes | 0.0 |\n| Conteúdo/Lógica | 0.0 |\n| Estilo Acadêmico | 0.0 |\n| **Final** | **0.0** |\n`,
+  "iterations.md": `# Iterações\n\n| Data | Nota | Ação | Status |\n|------|------|------|--------|\n`,
+  "checklist.md": `# Checklist\n\n- [ ] Formatação ABNT\n- [ ] Ficha catalográfica\n- [ ] Resumo/Abstract\n- [ ] Sumário\n- [ ] Lista de figuras\n- [ ] Lista de tabelas\n- [ ] Referências\n`,
+  "knowledge.md": `# Base de Conhecimento\n\n`,
+}
+
+function getFilesRecursively(dir: string): string[] {
+  const results: string[] = []
+  if (!existsSync(dir)) return results
+  const list = readdirSync(dir, { withFileTypes: true })
+  for (const file of list) {
+    const res = join(dir, file.name)
+    if (file.isDirectory()) {
+      results.push(...getFilesRecursively(res))
+    } else {
+      results.push(res)
+    }
+  }
+  return results
+}
+
+function copyDirectory(src: string, dest: string, force: boolean, installed: string[]) {
+  if (!existsSync(src)) return
+  const files = getFilesRecursively(src)
+  for (const file of files) {
+    const rel = relative(src, file)
+    const destPath = join(dest, rel)
+    const destDir = dirname(destPath)
+    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
+    if (!existsSync(destPath) || force) {
+      cpSync(file, destPath)
+      installed.push(destPath)
+    }
+  }
 }
 
 export function installAssets(projectRoot: string, force: boolean): string[] {
@@ -129,26 +159,46 @@ export function installAssets(projectRoot: string, force: boolean): string[] {
     }
   }
 
-  // agents
-  for (const [name, content] of Object.entries(AGENTS)) {
-    write(join(projectRoot, ".opencode", "agents", name), content)
-  }
+  const pluginAssetsDir = join(__dirname, "..", "..", "assets")
 
-  // commands
-  for (const [name, content] of Object.entries(COMMANDS)) {
-    write(join(projectRoot, ".opencode", "commands", name), content)
-  }
+  if (existsSync(pluginAssetsDir)) {
+    // Install versioned agents
+    copyDirectory(join(pluginAssetsDir, "opencode", "agents"), join(projectRoot, ".opencode", "agents"), force, installed)
+    
+    // Install versioned commands
+    copyDirectory(join(pluginAssetsDir, "opencode", "commands"), join(projectRoot, ".opencode", "commands"), force, installed)
+    
+    // Install versioned skills
+    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".opencode", "skills"), force, installed)
+    
+    // Install versioned templates
+    copyDirectory(join(pluginAssetsDir, "templates"), join(projectRoot, ".banca"), force, installed)
+  } else {
+    // Fallback agents
+    for (const [name, content] of Object.entries(AGENTS)) {
+      write(join(projectRoot, ".opencode", "agents", name), content)
+    }
 
-  // skills
-  for (const [skillName, files] of Object.entries(SKILLS)) {
-    for (const [fileName, content] of Object.entries(files)) {
-      write(join(projectRoot, ".opencode", "skills", skillName, fileName), content)
+    // Fallback commands
+    for (const [name, content] of Object.entries(COMMANDS)) {
+      write(join(projectRoot, ".opencode", "commands", name), content)
+    }
+
+    // Fallback skills
+    for (const [skillName, files] of Object.entries(SKILLS)) {
+      for (const [fileName, content] of Object.entries(files)) {
+        write(join(projectRoot, ".opencode", "skills", skillName, fileName), content)
+      }
     }
   }
 
-  // templates
+  // Ensure default templates exist (write them if not already copied from versioned folder)
   for (const [name, content] of Object.entries(TEMPLATES)) {
-    write(join(projectRoot, ".banca", name), content)
+    const destPath = join(projectRoot, ".banca", name)
+    // Check if it was already installed via versioned copy
+    if (!installed.includes(destPath)) {
+      write(destPath, content)
+    }
   }
 
   return installed

@@ -1,7 +1,7 @@
 ---
 name: banca-loop-orquestrador
 role: orchestrator
-description: Orquestra loops de correção contínua.
+description: Orquestra etapa assistida e preparatória do loop de correção.
 readOnly: false
 tools:
   - banca_loop
@@ -11,7 +11,7 @@ tools:
 
 ## Orquestrador de Loops
 
-Coordena execução de loops de correção contínua.
+Coordena execução de etapa assistida e preparatória do loop de correção.
 
 ### Loops Disponíveis
 

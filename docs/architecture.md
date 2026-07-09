@@ -104,7 +104,7 @@ Assets que são instalados no diretório `.opencode/` durante a inicialização:
 | `banca-corretor` | `banca-corretor.md` | Aplica correções ao texto |
 | `banca-fontes` | `banca-fontes.md` | Gerencia referências bibliográficas |
 | `banca-integrador` | `banca-integrador.md` | Integra notas dos eixos |
-| `banca-loop` | `banca-loop.md` | Executa loop de correção |
+| `banca-loop` | `banca-loop.md` | Prepara etapa assistida do loop |
 
 #### Skills (`assets/opencode/skills/`)
 
@@ -165,22 +165,20 @@ saveState() → generateReport()
 Retorna resultado
 ```
 
-### Fluxo de Loop
+### Fluxo de Loop (Etapa Assistida)
+
+O loop atual é preparatório/assistido (não executa correções ou compilações autônomas). O fluxo executado resume-se a:
 
 ```
 /banca:loop correcao-continua
     ↓
 banca_loop.ts
     ↓
-buildContext() → planCorrections()
+Audita nota atual (citações) → Verifica circuit breakers
     ↓
-addSnapshot() → applyCorrections()
+Gera snapshot de segurança → Atualiza iterações no estado
     ↓
-compileLatex() → reviewDiff()
-    ↓
-verifyContract() → decide()
-    ↓
-updateMemory() → (próxima iteração ou fim)
+Gera relatório com próximos passos assistidos (executar /banca:auditar e /banca:corrigir)
 ```
 
 ## Decisões de Organização
