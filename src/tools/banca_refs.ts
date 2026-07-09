@@ -84,7 +84,7 @@ export const bancaRefs = tool({
     const reportPath = join(reportDir, `refs-${Date.now()}.md`)
     writeFileSync(reportPath, lines.filter(Boolean).join("\n"), "utf-8")
 
-    return [
+    const baseMessage = [
       `References: ${entries.length}`,
       `Avg Score: ${avgScore}/100`,
       `Verified: ${verified}`,
@@ -93,5 +93,10 @@ export const bancaRefs = tool({
       `Provider breakdown: ${Object.entries(providerCounts).map(([p, c]) => `${p}=${c}`).join(", ")}`,
       `Report: ${reportPath}`,
     ].filter(Boolean).join("\n")
+
+    if (mcpCmd === null) {
+      return `MCP não habilitado, validação segue por fallback.\n${baseMessage}`
+    }
+    return baseMessage
   },
 })

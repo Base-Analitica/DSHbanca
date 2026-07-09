@@ -116,7 +116,7 @@ Se um MCP não estiver disponível, o plugin declara limitação mas não falha.
 > ⚠️ O OpenBanca **não registra MCPs automaticamente** por padrão.
 > Para habilitar o auto-registro experimental do `crossref-academic`, defina:
 > ```bash
-> export OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1
+> export OPENBANCA_ENABLE_CROSSREF_MCP=1
 > ```
 > Use apenas em ambiente controlado.
 
@@ -134,8 +134,8 @@ Isso mostra o estado atual do projeto e confirma que everything está configurad
 
 | Item | Status | Observação |
 |------|--------|------------|
-| `bun install` | VALIDADO | Dependências resolvidas com sucesso |
-| `bun run build` (tsc) | VALIDADO | Compilação TypeScript executada com sucesso |
+| `bun install` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Dependências resolvidas com sucesso |
+| `bun run build` (tsc) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Compilação TypeScript executada com sucesso |
 | `npm install @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
 | `bun add @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
 | `/banca:init` | NÃO VALIDADO | Requer teste real no OpenCode |
@@ -146,8 +146,8 @@ Isso mostra o estado atual do projeto e confirma que everything está configurad
 | `/banca:ia` | NÃO VALIDADO | Requer teste real no OpenCode |
 | `/banca:compile` | NÃO VALIDADO | Requer LaTeX instalado e OpenCode |
 | `/banca:loop` | NÃO VALIDADO | Requer teste real no OpenCode |
-| `bun test` | VALIDADO | Testes unitários executados com sucesso |
-| `tsc --noEmit` | VALIDADO | Typecheck executado com sucesso |
+| `bun test` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Testes unitários executados com sucesso |
+| `tsc --noEmit` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Typecheck executado com sucesso |
 
 ## Troubleshooting
 

@@ -12,7 +12,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - Documentação de instalação ajustada para refletir pacote ainda não publicado (`private: true`)
 - Matriz de validação alinhada com testes realmente executados (nada marcado como testado sem evidência)
 - Compilação LaTeX ajustada para evitar execução via shell string (`execSync` → `spawnSync` com args separados)
-- Auto-registro do MCP crossref-academic tornado explícito/opt-in (requer `OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1`)
+- Auto-registro do MCP crossref-academic tornado explícito/opt-in (requer `OPENBANCA_ENABLE_CROSSREF_MCP=1`)
 - Script de verificação de segredos ajustado para reduzir falsos positivos (modo `--ci` ignora docs/prompts)
 
 ### Segurança

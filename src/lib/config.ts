@@ -44,7 +44,7 @@ const DEFAULTS: ProjectConfig = {
   rubricProfile: "banca-rigorosa",
   targetScore: 9.0,
   providers: { references: { primary: "mcp:crossref-academic", fallbacks: ["rest:crossref", "cache"], timeoutMs: 20000 } },
-  mcp: { crossrefAcademicEnabled: true },
+  mcp: { crossrefAcademicEnabled: false },
 }
 
 export function getProjectDir(projectRoot: string): string {
@@ -65,7 +65,7 @@ function migrate(raw: any): any {
       raw.providers.references.timeoutMs ??= 20000
     }
     raw.mcp ??= {}
-    raw.mcp.crossrefAcademicEnabled ??= true
+    raw.mcp.crossrefAcademicEnabled ??= false
     raw.version = 1
   }
   return raw
@@ -112,7 +112,7 @@ function sanitizeConfig(raw: any): ProjectConfig {
       },
     } : { references: { ...DEFAULTS.providers.references } },
     mcp: raw.mcp ? {
-      crossrefAcademicEnabled: raw.mcp.crossrefAcademicEnabled !== false,
+      crossrefAcademicEnabled: raw.mcp.crossrefAcademicEnabled === true,
     } : { ...DEFAULTS.mcp },
   }
 }
@@ -148,5 +148,6 @@ import { mkdirSync } from "node:fs"
 export function getMcpCommand(projectRoot: string): string[] | null {
   const config = loadConfig(projectRoot)
   if (!config.mcp.crossrefAcademicEnabled) return null
+  if (process.env.OPENBANCA_ENABLE_CROSSREF_MCP !== "1") return null
   return ["uvx", "--from", "crossref-academic-mcp-server", "crossref-server"]
 }

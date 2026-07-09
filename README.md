@@ -174,7 +174,7 @@ Executa ciclo completo: context → planner → snapshot → worker → compile 
 Gera certidão de referências via cadeia MCP → REST → cache.
 
 > ⚠️ O MCP `crossref-academic` não é registrado automaticamente.  
-> Para habilitar o auto-registro experimental, use `OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1`.
+> Para habilitar o auto-registro experimental, use `OPENBANCA_ENABLE_CROSSREF_MCP=1`.
 
 ### Verificar risco de IA
 

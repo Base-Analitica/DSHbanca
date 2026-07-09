@@ -35,7 +35,7 @@ const plugin: Plugin = async () => {
   // ...
   return {
     tool: { banca_init: bancaInit, ... },
-    config: async (cfg) => { /* MCP auto-registration is opt-in (OPENBANCA_AUTO_REGISTER_CROSSREF_MCP) */ },
+    config: async (cfg) => { /* MCP auto-registration is opt-in (OPENBANCA_ENABLE_CROSSREF_MCP) */ },
   }
 }
 ```

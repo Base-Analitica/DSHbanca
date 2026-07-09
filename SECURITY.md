@@ -82,7 +82,7 @@ O OpenBanca pode utilizar MCPs (Model Context Protocol) para validação de refe
 
 - O MCP `crossref-academic` invoca `uvx` para baixar e executar código Python de terceiros
 - Por padrão, o plugin **não registra MCPs automaticamente**
-- Para habilitar o auto-registro experimental, defina `OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1`
+- Para habilitar o auto-registro experimental, defina `OPENBANCA_ENABLE_CROSSREF_MCP=1`
 - Revise a fonte do MCP antes de ativar o auto-registro
 - Considere configurar MCPs manualmente em `opencode.json` em vez de usar auto-registro
 

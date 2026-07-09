@@ -42,10 +42,10 @@ const plugin: Plugin = async () => {
     },
     config: async (cfg) => {
       // crossref-academic MCP auto-registration is opt-in
-      // Set OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1 to enable experimental auto-registration
+      // Set OPENBANCA_ENABLE_CROSSREF_MCP=1 to enable experimental auto-registration
       const autoRegisterCrossrefMcp =
-        process.env.OPENBANCA_AUTO_REGISTER_CROSSREF_MCP === "1" ||
-        process.env.OPENBANCA_AUTO_REGISTER_CROSSREF_MCP === "true"
+        process.env.OPENBANCA_ENABLE_CROSSREF_MCP === "1" ||
+        process.env.OPENBANCA_ENABLE_CROSSREF_MCP === "true"
 
       if (autoRegisterCrossrefMcp) {
         if (!cfg.mcp) cfg.mcp = {}

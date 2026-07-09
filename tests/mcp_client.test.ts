@@ -78,4 +78,29 @@ describe("McpClient via process spawn", () => {
     expect(toolsResp).toBeDefined()
     expect(toolsResp.result.tools[0].name).toBe("get_paper_details")
   })
+
+  test("getMcpCommand returns null by default and honors env var", async () => {
+    const { getMcpCommand } = await import("../src/lib/config")
+    
+    // Default
+    expect(getMcpCommand(tmpDir)).toBeNull()
+    
+    // With mcp enabled but no env var
+    const { writeFileSync, mkdirSync } = await import("node:fs")
+    const { join } = await import("node:path")
+    mkdirSync(join(tmpDir, ".banca"), { recursive: true })
+    writeFileSync(join(tmpDir, ".banca", "project.json"), JSON.stringify({
+      version: 1,
+      mcp: { crossrefAcademicEnabled: true }
+    }))
+    expect(getMcpCommand(tmpDir)).toBeNull()
+    
+    // With env var set to 1
+    process.env.OPENBANCA_ENABLE_CROSSREF_MCP = "1"
+    expect(getMcpCommand(tmpDir)).not.toBeNull()
+    expect(getMcpCommand(tmpDir)).toEqual(["uvx", "--from", "crossref-academic-mcp-server", "crossref-server"])
+    
+    // Clean up env var
+    delete process.env.OPENBANCA_ENABLE_CROSSREF_MCP
+  })
 })
