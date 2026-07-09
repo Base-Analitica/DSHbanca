@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
-import { resolveManuscriptPaths, isPathProtected, globToRegex } from "../lib/paths"
+import { resolveManuscriptPaths, isPathProtected, globToRegex, toPosixPath } from "../lib/paths"
 import { loadState } from "../lib/state"
 import { saveReport } from "../lib/reports"
 const z = tool.schema
@@ -32,7 +32,7 @@ export const bancaContract = tool({
       if (!files.includes(c.file)) files.push(c.file)
 
       // check immutable facts (relative path)
-      const relPath = c.file.replace(/[/\\]/g, "/")
+      const relPath = toPosixPath(c.file)
       for (const fact of config.immutableFacts) {
         if (globToRegex(fact).test(relPath)) {
           immutableBlocked = true
@@ -47,7 +47,7 @@ export const bancaContract = tool({
       scoreBefore: state.currentScore,
       files: files.map((f) => ({
         path: f,
-        protected: isPathProtected(f.replace(/[/\\]/g, "/"), config),
+        protected: isPathProtected(toPosixPath(f), config),
         immutable: false,
       })),
       corrections: corrections.length,

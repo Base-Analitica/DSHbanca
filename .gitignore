@@ -56,3 +56,8 @@ _original_snapshot/
 *.tmp
 *.temp
 *.tmp.*
+
+# Banca internal data
+.banca/snapshots/
+.banca/cache/
+

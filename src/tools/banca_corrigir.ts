@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, writeFileSync, cpSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
+import { join, dirname } from "node:path"
 import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
-import { resolveManuscriptPaths, isPathProtected, isPathAllowed, globToRegex } from "../lib/paths"
+import { resolveManuscriptPaths, isPathProtected, isPathAllowed, globToRegex, toPosixPath } from "../lib/paths"
 import { resolveInsideRoot, relativeInsideRoot, PathTraversalError } from "../lib/safe_paths"
 import { loadState, saveState, addIteration } from "../lib/state"
 const z = tool.schema
@@ -39,7 +39,7 @@ export const bancaCorrigir = tool({
 
     // immutableFacts guard: block edits to immutable files
     for (const c of corrections) {
-      const relPath = relativeInsideRoot(root, c.file).replace(/[/\\]/g, "/")
+      const relPath = toPosixPath(relativeInsideRoot(root, c.file))
       for (const fact of config.immutableFacts) {
         if (globToRegex(fact).test(relPath)) {
           return `blocked: ${c.file} is immutable (immutableFacts: "${fact}"). ${c.oldText.substring(0, 60)}...`
@@ -58,7 +58,7 @@ export const bancaCorrigir = tool({
         if (existsSync(fp)) {
           const rel = relativeInsideRoot(root, c.file)
           const dest = resolveInsideRoot(snapDir, rel)
-          mkdirSync(dest.replace(/\/[^/]+$/, ""), { recursive: true })
+          mkdirSync(dirname(dest), { recursive: true })
           cpSync(fp, dest)
         }
       }
@@ -69,7 +69,7 @@ export const bancaCorrigir = tool({
       const fp = resolveInsideRoot(root, c.file)
       if (!existsSync(fp)) { results.push(`✗ ${c.file}: not found`); continue }
 
-      const canonizedRelPath = relativeInsideRoot(root, c.file).replace(/[/\\]/g, "/")
+      const canonizedRelPath = toPosixPath(relativeInsideRoot(root, c.file))
       if (isPathProtected(canonizedRelPath, config)) { results.push(`✗ ${c.file}: protected path`); continue }
       if (!isPathAllowed(canonizedRelPath, config)) { results.push(`✗ ${c.file}: not in allowed paths`); continue }
 

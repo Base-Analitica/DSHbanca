@@ -121,7 +121,7 @@ export function installAssets(projectRoot: string, force: boolean): string[] {
   const installed: string[] = []
 
   function write(path: string, content: string) {
-    const dir = path.replace(/\/[^/]+$/, "")
+    const dir = dirname(path)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     if (!existsSync(path) || force) {
       writeFileSync(path, content, "utf-8")

@@ -52,8 +52,12 @@ export function globToRegex(pattern: string): RegExp {
   return new RegExp(s)
 }
 
+export function toPosixPath(p: string): string {
+  return p.replace(/[/\\]+/g, "/")
+}
+
 export function isPathProtected(filePath: string, config: ProjectConfig): boolean {
-  const normalized = filePath.replace(sep, "/")
+  const normalized = toPosixPath(filePath)
   for (const pattern of config.protectedPaths) {
     if (globToRegex(pattern).test(normalized)) return true
   }
@@ -61,7 +65,7 @@ export function isPathProtected(filePath: string, config: ProjectConfig): boolea
 }
 
 export function isPathAllowed(filePath: string, config: ProjectConfig): boolean {
-  const normalized = filePath.replace(sep, "/")
+  const normalized = toPosixPath(filePath)
   for (const pattern of config.allowedPaths) {
     if (globToRegex(pattern).test(normalized)) return true
   }

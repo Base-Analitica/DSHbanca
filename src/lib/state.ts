@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
+import { join, dirname } from "node:path"
 import { resolveInsideRoot } from "./safe_paths"
 
 export interface ProjectState {
@@ -37,7 +37,7 @@ export function loadState(projectRoot: string): ProjectState {
 
 export function saveState(projectRoot: string, state: ProjectState): void {
   const p = getStatePath(projectRoot)
-  const dir = p.replace(/\/[^/]+$/, "")
+  const dir = dirname(p)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   writeFileSync(p, JSON.stringify(state, null, 2), "utf-8")
 }

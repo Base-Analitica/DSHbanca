@@ -52,15 +52,15 @@ export class McpClient {
       }
     })
 
-    await this.send("initialize", {
+    await this.request("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
       clientInfo: { name: "opencode-banca", version: "0.1.0" },
     })
-    await this.send("notifications/initialized", {})
+    this.notify("notifications/initialized", {})
   }
 
-  private send(method: string, params: any): Promise<any> {
+  async request(method: string, params: any): Promise<any> {
     return new Promise((resolve, reject) => {
       const id = ++seq
       const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n"
@@ -72,6 +72,15 @@ export class McpClient {
       this.pending.set(id, { resolve, reject, timer })
       this.proc?.stdin?.write(msg)
     })
+  }
+
+  notify(method: string, params: any): void {
+    const msg = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n"
+    this.proc?.stdin?.write(msg)
+  }
+
+  private send(method: string, params: any): Promise<any> {
+    return this.request(method, params)
   }
 
   async listTools(): Promise<McpTool[]> {

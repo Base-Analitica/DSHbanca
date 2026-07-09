@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
+import { join, dirname } from "node:path"
 import type { RefMetadata, ValidationResult } from "./academic"
 
 interface CacheEntry {
@@ -25,7 +25,7 @@ export class RefCache {
   }
 
   private save(): void {
-    const dir = this.path.replace(/\/[^/]+$/, "")
+    const dir = dirname(this.path)
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     writeFileSync(this.path, JSON.stringify(this.data, null, 2), "utf-8")
   }

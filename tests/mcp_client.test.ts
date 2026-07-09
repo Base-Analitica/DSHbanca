@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { writeFileSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { spawn } from "node:child_process"
+import { McpClient } from "../src/lib/mcp_client"
 
 // inlined fake MCP server speaks JSON-RPC 2.0 over stdio
 const FAKE_SERVER = `
@@ -103,4 +104,18 @@ describe("McpClient via process spawn", () => {
     // Clean up env var
     delete process.env.OPENBANCA_ENABLE_CROSSREF_MCP
   })
+
+  test("McpClient closes processes on failure or timeout", async () => {
+    const client = new McpClient(["node", "-e", "setTimeout(() => {}, 5000)"], 100)
+    let err: Error | null = null
+    try {
+      await client.start()
+    } catch (e: any) {
+      err = e
+    }
+    expect(err).not.toBeNull()
+    expect(err!.message).toContain("timeout")
+    await client.close()
+  })
 })
+

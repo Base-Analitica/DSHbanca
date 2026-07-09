@@ -4,10 +4,9 @@
 
 Se você encontrar um problema de segurança, por favor:
 
-1. **Não abra uma issue pública** — isso expõe o problema
-2. **Envie um e-mail** para [PENDENTE: definir e-mail de segurança]
-3. **Descreva o problema** com detalhes suficientes para reprodução
-4. **Aguarde resposta** antes de divulgar publicamente
+1. **Canal privado ainda não definido.**
+2. **Não publique detalhes sensíveis em issue pública.**
+3. **Para problemas não sensíveis, abra uma issue sem incluir segredo, token, exploit funcional ou dados privados.**
 
 ## Dados que Não Devem ser Commitados
 
@@ -107,6 +106,7 @@ bash scripts/check-secrets.sh --audit
 
 ## Contato
 
-Para questões de segurança, entre em contato via:
-- E-mail: [PENDENTE]
-- Issue com tag `security` (para problemas não sensíveis)
+Para questões de segurança:
+- Canal privado ainda não definido.
+- Não publique detalhes sensíveis em issue pública.
+- Para problemas não sensíveis, abra uma issue sem incluir segredo, token, exploit funcional ou dados privados.

@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
-import { compileLatex, findLatexEngine, findBibEngine, validateEngine, validateBibEngine, type LatexCommand } from "../lib/latex"
+import { compileLatex, findLatexEngine, findBibEngine, validateEngine, validateBibEngine, buildCompileCommands, type LatexCommand } from "../lib/latex"
 const z = tool.schema
 
 export const bancaCompile = tool({
@@ -16,21 +16,14 @@ export const bancaCompile = tool({
 
     if (!config.compile.enabled) return "compilation disabled in config"
 
-    const engine = findLatexEngine()
-    if (!engine) return "no LaTeX engine found (install TeX Live)"
-    if (!validateEngine(engine)) return `invalid LaTeX engine: ${engine}`
+    const configCommands = config.compile.command
+    for (const cmd of configCommands) {
+      if (!validateEngine(cmd) && !validateBibEngine(cmd)) {
+        return `invalid engine in compile.command: ${cmd}`
+      }
+    }
 
-    const mainFile = paths.main
-    const mainBase = mainFile.replace(/\.tex$/, "")
-    const bibEngine = findBibEngine() || "bibtex"
-    if (!validateBibEngine(bibEngine)) return `invalid bibliography engine: ${bibEngine}`
-
-    const steps: LatexCommand[] = [
-      { command: engine, args: ["-interaction=nonstopmode", mainBase], label: "latex pass 1" },
-      { command: bibEngine, args: [mainBase], label: "bibliography" },
-      { command: engine, args: ["-interaction=nonstopmode", mainBase], label: "latex pass 2" },
-      { command: engine, args: ["-interaction=nonstopmode", mainBase], label: "latex pass 3" },
-    ]
+    const steps = buildCompileCommands(configCommands, paths.main, paths.root)
 
     const result = compileLatex(paths.root, paths.main, steps)
 

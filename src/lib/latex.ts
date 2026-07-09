@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
-import { resolve } from "node:path"
+import { resolve, relative } from "node:path"
 
 export interface CompileResult {
   success: boolean
@@ -24,6 +24,33 @@ export function validateEngine(engine: string): boolean {
 
 export function validateBibEngine(engine: string): boolean {
   return ALLOWED_BIB_ENGINES.has(engine)
+}
+
+export function buildCompileCommands(
+  compileCommand: string[],
+  mainFileAbs: string,
+  cwdAbs: string
+): LatexCommand[] {
+  const relMain = relative(cwdAbs, mainFileAbs)
+  const relMainBase = relMain.replace(/\.tex$/, "")
+  const commands: LatexCommand[] = []
+  for (let i = 0; i < compileCommand.length; i++) {
+    const cmd = compileCommand[i]
+    if (ALLOWED_ENGINES.has(cmd)) {
+      commands.push({
+        command: cmd,
+        args: ["-interaction=nonstopmode", relMain],
+        label: `${cmd} pass ${i + 1}`
+      })
+    } else if (ALLOWED_BIB_ENGINES.has(cmd)) {
+      commands.push({
+        command: cmd,
+        args: [relMainBase],
+        label: `${cmd} bibliography`
+      })
+    }
+  }
+  return commands
 }
 
 export function findLatexEngine(): string | null {

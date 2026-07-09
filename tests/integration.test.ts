@@ -236,4 +236,75 @@ describe("Integration — path traversal safety", () => {
     expect(result).toContain("blocked")
     expect(result).toContain("escapes project root")
   })
+
+  test("snapshots ignoram arquivos proibidos como .env", async () => {
+    mockProjectJson()
+    mockMainTex()
+    writeFileSync(join(testRoot, ".env"), "SECRET=123")
+    mkdirSync(join(testRoot, ".banca", "cache"), { recursive: true })
+    writeFileSync(join(testRoot, ".banca", "cache", "refs.json"), "{}")
+    mkdirSync(join(testRoot, ".opencode", "agents"), { recursive: true })
+    writeFileSync(join(testRoot, ".opencode", "agents", "x.md"), "agent")
+
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    const result = await bancaSnapshot.execute({
+      projectRoot: testRoot,
+      label: "test-exclude",
+    }, {} as any)
+
+    expect(result).toContain("snapshot →")
+    const snapDir = join(testRoot, ".banca", "snapshots", "test-exclude")
+    expect(existsSync(join(snapDir, "main.tex"))).toBe(true)
+    expect(existsSync(join(snapDir, ".env"))).toBe(false)
+    expect(existsSync(join(snapDir, ".banca", "cache", "refs.json"))).toBe(false)
+    expect(existsSync(join(snapDir, ".opencode", "agents", "x.md"))).toBe(false)
+  })
 })
+
+describe("Integration — buildCompileCommands", () => {
+  test("buildCompileCommands com caminhos relativos e espaços", async () => {
+    const { buildCompileCommands } = await import("../src/lib/latex")
+    const commands = ["pdflatex", "bibtex", "pdflatex"]
+    const mainFileAbs = "/workspace/project/trabalho final/main.tex"
+    const cwdAbs = "/workspace/project"
+    const steps = buildCompileCommands(commands, mainFileAbs, cwdAbs)
+    
+    expect(steps.length).toBe(3)
+    expect(steps[0]).toEqual({
+      command: "pdflatex",
+      args: ["-interaction=nonstopmode", "trabalho final/main.tex"],
+      label: "pdflatex pass 1"
+    })
+    expect(steps[1]).toEqual({
+      command: "bibtex",
+      args: ["trabalho final/main"],
+      label: "bibtex bibliography"
+    })
+    expect(steps[2]).toEqual({
+      command: "pdflatex",
+      args: ["-interaction=nonstopmode", "trabalho final/main.tex"],
+      label: "pdflatex pass 3"
+    })
+  })
+})
+
+describe("Integration — path portability", () => {
+  test("toPosixPath converte caminhos Windows para POSIX", async () => {
+    const { toPosixPath, isPathProtected, isPathAllowed } = await import("../src/lib/paths")
+    
+    expect(toPosixPath("capitulos\\intro.tex")).toBe("capitulos/intro.tex")
+    expect(toPosixPath("capitulos\\\\intro.tex")).toBe("capitulos/intro.tex")
+    expect(toPosixPath("capitulos/intro.tex")).toBe("capitulos/intro.tex")
+
+    const config = {
+      allowedPaths: ["capitulos/*.tex"],
+      protectedPaths: [".banca/snapshots/**"]
+    } as any
+
+    expect(isPathAllowed("capitulos\\intro.tex", config)).toBe(true)
+    expect(isPathProtected(".banca\\snapshots\\snap-1\\main.tex", config)).toBe(true)
+  })
+})
+
+
+

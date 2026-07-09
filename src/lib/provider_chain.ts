@@ -23,10 +23,12 @@ export async function resolveRef(
     return { result: cached, provider: "cache" }
   }
 
+  let mcpError: string | undefined
+
   // 2. try MCP (if command configured)
   if (mcpCmd && mcpCmd.length > 0) {
+    const client = new McpClient(mcpCmd, 20000)
     try {
-      const client = new McpClient(mcpCmd, 20000)
       await client.start()
 
       let mcpResult: any
@@ -36,27 +38,35 @@ export async function resolveRef(
         mcpResult = await client.callTool("search_papers", { query: [ref.title, ref.year, ref.authors?.[0]].filter(Boolean).join(" "), limit: 3 })
       }
 
-      await client.close()
-
       if (mcpResult) {
         const parsed = parseMcpResult(mcpResult, ref)
         cache.set(ref.key, ref.doi, parsed)
         return { result: parsed, provider: "mcp:crossref-academic" }
       }
     } catch (err: any) {
-      // MCP failed, fall through
+      mcpError = `MCP fallback (${err.message ? String(err.message).slice(0, 50) : "unknown"})`
+    } finally {
+      await client.close().catch(() => {})
     }
   }
 
   // 3. fallback: REST API
   try {
     const restResult = await validateRef(ref)
+    if (mcpError) {
+      restResult.evidence = restResult.evidence ? `${restResult.evidence} | ${mcpError}` : mcpError
+    }
     cache.set(ref.key, ref.doi, restResult)
     return { result: restResult, provider: restResult.found ? "rest:crossref" : "rest:crossref" }
   } catch (err: any) {
     // 4. last resort: cache even if not found
     const cached = cache.get(ref)
-    if (cached) return { result: cached, provider: "cache" }
+    if (cached) {
+      if (mcpError) {
+        cached.evidence = cached.evidence ? `${cached.evidence} | ${mcpError}` : mcpError
+      }
+      return { result: cached, provider: "cache" }
+    }
 
     // 5. mark pending
     cache.markPending([ref])
@@ -66,7 +76,7 @@ export async function resolveRef(
       score: 0,
       status: "nao_encontrada",
       matchedBy: "none",
-      evidence: "all providers failed — pending retry",
+      evidence: [mcpError, "all providers failed — pending retry"].filter(Boolean).join(" | "),
       error: "network_unavailable",
     }
     return { result: pending, provider: "none" }
