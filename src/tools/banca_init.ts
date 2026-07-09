@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import { execSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { tool } from "@opencode-ai/plugin"
 import { ensureBancaDir, configPath, saveConfig } from "../lib/config"
 import { loadState, saveState } from "../lib/state"
@@ -30,11 +30,11 @@ export const bancaInit = tool({
       immutableFacts: [], externalDependencies: [],
       rubricProfile: "banca-rigorosa", targetScore: 9.0,
       providers: { references: { primary: "mcp:crossref-academic", fallbacks: ["rest:crossref", "cache"], timeoutMs: 20000 } },
-      mcp: { crossrefAcademicEnabled: true },
+      mcp: { crossrefAcademicEnabled: false },
     }
 
     for (const cmd of ["lualatex", "xelatex", "pdflatex"]) {
-      try { execSync(`${cmd} --version`, { stdio: "ignore" }); config.compile.command[0] = cmd; break } catch { }
+      try { const r = spawnSync(cmd, ["--version"], { stdio: "ignore", timeout: 10000 }); if (r.status === 0) { config.compile.command[0] = cmd; break } } catch { }
     }
 
     saveConfig(root, config)
