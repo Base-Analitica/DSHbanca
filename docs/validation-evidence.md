@@ -7,13 +7,13 @@ This document logs the evidence of local validation checks executed successfully
 - **Runtime**: Bun v1.3.9
 - **Compiler**: TypeScript v5.9.3
 - **Repository**: RenyEnnos/openbanca
-- **Branch**: `fix/auditoria-extrema-openbanca`
+- **Branch**: `fix/auditoria-extrema-2026-07-09`
 
 ## Executed Commands & Results
 
 ### 1. `bun install`
-- **Command**: `bun install`
-- **Result**: Success. All dependencies successfully resolved and locked.
+- **Command**: `bun install --frozen-lockfile`
+- **Result**: Success. All dependencies successfully resolved and locked (no changes).
 
 ### 2. `bun run build`
 - **Command**: `bun run build`
@@ -25,9 +25,11 @@ This document logs the evidence of local validation checks executed successfully
 
 ### 4. `bun test`
 - **Command**: `bun test`
-- **Result**: Success. 26 passing tests, 0 failures.
+- **Result**: Success. 38 passing tests, 0 failures.
   - Verification of path traversal safety controls (`Integration — path traversal safety`).
   - Verification of `getMcpCommand` honoring the opt-in configurations.
+  - Verification of `banca_ia` path traversal safety checks.
+  - Verification of secure path parameter handling in `banca_ia` (no Python code injection).
   - All existing unit and integration tests passing.
 
 ### 5. `bash scripts/validate.sh`

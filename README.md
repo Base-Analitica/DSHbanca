@@ -20,24 +20,26 @@ O plugin se integra ao OpenCode como uma coleção de ferramentas, agentes e ski
 
 **Experimental / Protótipo (v0.1.0)** — pacote `@opencode/banca` **não publicado no npm** (`private: true`).
 
-### O que já funciona
+### Funcionalidades implementadas no código — validação externa pendente
 
-- Inicialização de projeto com `/banca:init`
-- Auditoria em 4 eixos com nota integrada
-- Correção com guardrails (proteção de arquivos imutáveis)
-- Validação de referências via cadeia MCP → REST → cache
-- Detecção heurística de padrões de IA
-- Loop de correção contínua com circuit breaker
-- Snapshots para versionamento de correções
-- Compilação LaTeX
-- Checklist de entrega
+- **Inicialização de projeto (`/banca:init`)**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
+- **Auditoria em 4 eixos com nota integrada**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
+- **Correção com guardrails (arquivos imutáveis)**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
+- **Validação de referências (cadeia MCP → REST → cache)**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO COM MCP REAL`
+- **Detecção heurística/python de padrões de IA**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM CI (EXECUÇÃO GITHUB PENDENTE)`
+- **Loop de correção contínua com circuit breaker**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
+- **Snapshots para versionamento de correções**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
+- **Compilação LaTeX**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO COM LATEX REAL`
+- **Checklist de entrega**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
 
-### O que ainda precisa ser validado
+### Estado de Validação Geral
 
-- Compatibilidade completa com diferentes versões do OpenCode
-- Funcionamento real dos MCPs (crossref-academic, semantic-scholar, pubmed)
-- Performance em trabalhos grandes
-- Integração com diferentes formatos além de LaTeX
+- `IMPLEMENTADO`: Sim, codificado no repositório.
+- `COBERTO POR TESTE LOCAL`: Sim, verificado via suíte de testes do Bun localmente.
+- `NÃO VALIDADO EM CI`: O workflow do GitHub Actions existe, mas a execução no GitHub ainda é pendente.
+- `NÃO VALIDADO EM OPENCODE`: O plugin e os comandos/agentes ainda não foram executados em um cliente real do OpenCode.
+- `NÃO VALIDADO COM MCP REAL`: Os testes utilizam mock do protocolo MCP, o funcionamento com servidores MCP reais (ex: crossref-academic executado via uvx) não foi verificado.
+- `NÃO VALIDADO COM LATEX REAL`: A lógica de compilação foi testada com comandos mock e unitários; a compilação real de documentos complexos LaTeX não foi executada de ponta a ponta pelo plugin.
 
 ### Riscos e limitações conhecidas
 

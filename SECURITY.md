@@ -4,9 +4,9 @@
 
 Se você encontrar um problema de segurança, por favor:
 
-1. **Canal privado ainda não definido.**
+1. **Canal privado ainda não definido.** Recomenda-se fortemente definir um canal privado seguro (como um e-mail de segurança dedicado) antes de qualquer divulgação ou publicação pública.
 2. **Não publique detalhes sensíveis em issue pública.**
-3. **Para problemas não sensíveis, abra uma issue sem incluir segredo, token, exploit funcional ou dados privados.**
+3. **Para problemas não sensíveis**, é permitido abrir uma issue pública desde que não inclua segredo, token, exploit funcional ou dados privados.
 
 ## Dados que Não Devem ser Commitados
 
@@ -107,6 +107,6 @@ bash scripts/check-secrets.sh --audit
 ## Contato
 
 Para questões de segurança:
-- Canal privado ainda não definido.
+- **Canal privado ainda não definido.** Recomenda-se definir um canal privado seguro antes de publicação/divulgação pública.
 - Não publique detalhes sensíveis em issue pública.
-- Para problemas não sensíveis, abra uma issue sem incluir segredo, token, exploit funcional ou dados privados.
+- Para problemas não sensíveis, é permitido abrir uma issue pública sem incluir segredo, token, exploit funcional ou dados privados.

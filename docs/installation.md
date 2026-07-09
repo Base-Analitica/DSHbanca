@@ -134,20 +134,20 @@ Isso mostra o estado atual do projeto e confirma que everything está configurad
 
 | Item | Status | Observação |
 |------|--------|------------|
-| `bun install` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Dependências resolvidas com sucesso |
-| `bun run build` (tsc) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Compilação TypeScript executada com sucesso |
-| `npm install @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
-| `bun add @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
-| `/banca:init` | NÃO VALIDADO | Requer teste real no OpenCode |
-| `/banca:status` | NÃO VALIDADO | Requer teste real no OpenCode |
-| `/banca:auditar` | NÃO VALIDADO | Requer teste real no OpenCode |
-| `/banca:corrigir` | NÃO VALIDADO | Requer teste real no OpenCode |
-| `/banca:refs` | NÃO VALIDADO | Requer MCP configurado e OpenCode |
-| `/banca:ia` | NÃO VALIDADO | Requer teste real no OpenCode |
-| `/banca:compile` | NÃO VALIDADO | Requer LaTeX instalado e OpenCode |
-| `/banca:loop` | NÃO VALIDADO | Requer teste real no OpenCode |
-| `bun test` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Testes unitários executados com sucesso |
-| `tsc --noEmit` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Typecheck executado com sucesso |
+| `bun install` | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Dependências resolvidas com sucesso localmente |
+| `bun run build` (tsc) | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Compilação TypeScript executada com sucesso localmente |
+| `npm install @opencode/banca` | `NÃO IMPLEMENTADO` \| `PENDENTE` | Pacote ainda não publicado no npm (`private: true`) |
+| `bun add @opencode/banca` | `NÃO IMPLEMENTADO` \| `PENDENTE` | Pacote ainda não publicado no npm (`private: true`) |
+| `/banca:init` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
+| `/banca:status` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
+| `/banca:auditar` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
+| `/banca:corrigir` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
+| `/banca:refs` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO COM MCP REAL` | Requer MCP real configurado e OpenCode |
+| `/banca:ia` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
+| `/banca:compile` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO COM LATEX REAL` | Requer LaTeX real e OpenCode |
+| `/banca:loop` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
+| `bun test` | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Testes unitários/integração executados com sucesso localmente |
+| `tsc --noEmit` | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Typecheck executado com sucesso localmente |
 
 ## Troubleshooting
 

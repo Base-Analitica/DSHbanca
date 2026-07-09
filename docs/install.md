@@ -5,7 +5,8 @@
 - Node.js >= 18 ou Bun >= 1.x
 - LaTeX: TeX Live com lualatex (opcional)
 
-## Instalação
+> ⚠️ **PENDENTE**: o pacote `@opencode/banca` ainda **não está publicado no npm**.  
+> O `package.json` marca `"private": true`. As instruções de instalação via npm/bun abaixo são **planos futuros, não instruções validadas**.
 
 ```json
 // opencode.json
@@ -15,9 +16,11 @@
 ```
 
 ```bash
-npm install @opencode/banca
-# ou
-bun add @opencode/banca
+# Para instalação de desenvolvimento local (não publicado):
+git clone https://github.com/RenyEnnos/openbanca.git
+cd openbanca
+bun install
+bun run build
 ```
 
 ## Inicialização

@@ -34,7 +34,7 @@
 - [ ] Expandir testes automatizados
 - [ ] Criar changelog por versão
 - [ ] Preparar release inicial
-- [ ] Configurar CI/CD
+- [/] Configurar CI/CD (Workflow local e arquivo ci.yml criados com Bun 1.3.9 fixado; execução automática no GitHub Actions pendente)
 - [ ] Adicionar linting e formatting
 
 ## Fase 5 — Publicação

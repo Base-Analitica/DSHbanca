@@ -5,6 +5,7 @@ import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { saveReport } from "../lib/reports"
+import { assertInsideRoot } from "../lib/safe_paths"
 const z = tool.schema
 
 const PATTERNS: RegExp[] = [
@@ -25,14 +26,23 @@ function hasPythonEnsemble(): boolean {
   }
 }
 
-function runPythonEnsemble(filePath: string): { risk: number; confidence: number } | null {
+function runPythonEnsemble(filePath: string, moduleDir: string): { risk: number; confidence: number } | null {
   try {
     const script = `
-import sys, json
-sys.path.insert(0, "${__dirname.replace(/\\/g, "\\\\/")}")
+import sys
+import json
+
+if len(sys.argv) < 3:
+    print(json.dumps({"risk": 0, "confidence": 0, "error": "missing arguments"}))
+    sys.exit(1)
+
+module_dir = sys.argv[1]
+file_path = sys.argv[2]
+
+sys.path.insert(0, module_dir)
 try:
     from pt_ai_detector import detect_text
-    with open("${filePath.replace(/\\/g, "\\\\/")}", encoding="utf-8") as f:
+    with open(file_path, encoding="utf-8") as f:
         text = f.read()
     paragraphs = [p for p in text.split("\\n\\n") if len(p.strip()) > 20]
     scores = []
@@ -43,8 +53,10 @@ try:
     print(json.dumps({"risk": round(risk, 4), "confidence": 0.85, "paragraphs_analyzed": len(scores)}))
 except ImportError:
     print(json.dumps({"risk": 0, "confidence": 0, "error": "pt_ai_detector not available"}))
+except Exception as e:
+    print(json.dumps({"risk": 0, "confidence": 0, "error": str(e)}))
 `
-    const result = spawnSync("python3", ["-c", script], { encoding: "utf-8", timeout: 60000 })
+    const result = spawnSync("python3", ["-c", script, moduleDir, filePath], { encoding: "utf-8", timeout: 60000 })
     if (result.status !== 0) {
       return null
     }
@@ -75,11 +87,12 @@ export const bancaIa = tool({
     let fileCount = 0
 
     for (const file of files) {
+      assertInsideRoot(root, file)
       const content = readFileSync(file, "utf-8")
       const name = file.replace(root, "").replace(/^\//, "")
 
       if (pythonAvailable) {
-        const result = runPythonEnsemble(file)
+        const result = runPythonEnsemble(file, __dirname)
         if (result && result.confidence > 0) {
           const riskLabel = result.risk > 0.5 ? "high" : result.risk > 0.2 ? "moderate" : "low"
           const confidence = result.confidence

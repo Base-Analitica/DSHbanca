@@ -94,21 +94,21 @@ Total de 12 arquivos de documentação:
 
 | Item | Status | Observação |
 |------|--------|------------|
-| `bun install` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Dependências resolvidas com sucesso |
-| `bun run build` (tsc) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Compilação TypeScript executada com sucesso |
-| `bun test` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Testes unitários executados com sucesso |
-| `tsc --noEmit` | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Typecheck executado com sucesso |
-| Validação de estrutura (`scripts/validate.sh`) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Todos os arquivos essenciais presentes |
-| Verificação de segredos (`scripts/check-secrets.sh`) | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | Nenhum segredo real encontrado |
-| Validação de JSON | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | `package.json` e `tsconfig.json` são JSON válido |
-| Gitignore | VALIDAÇÃO LOCAL DECLARADA — SEM CI / PENDENTE DE CI | `node_modules/`, `dist/`, `.env` ignorados corretamente |
-| `npm install @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
-| `bun add @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
-| Uso real com OpenCode | NÃO VALIDADO | Requer ambiente OpenCode |
-| Funcionamento dos MCPs | NÃO VALIDADO | Requer configuração externa |
-| Compilação LaTeX | NÃO VALIDADO | Requer TeX Live instalado |
-| Performance em trabalhos grandes | NÃO VALIDADO | Sem evidência de teste |
-| Compatibilidade com versões do OpenCode | NÃO VALIDADO | Testado apenas com a versão atual das dependências |
+| `bun install` | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Dependências resolvidas com sucesso localmente |
+| `bun run build` (tsc) | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Compilação TypeScript executada com sucesso localmente |
+| `bun test` | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Testes unitários/integração executados com sucesso localmente |
+| `tsc --noEmit` | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Typecheck executado com sucesso localmente |
+| Validação de estrutura (`scripts/validate.sh`) | `COBERTO POR TESTE LOCAL` | Script executado com sucesso localmente |
+| Verificação de segredos (`scripts/check-secrets.sh`) | `COBERTO POR TESTE LOCAL` | Script executado com sucesso localmente |
+| Validação de JSON | `COBERTO POR TESTE LOCAL` | `package.json` e `tsconfig.json` validados localmente |
+| Gitignore | `COBERTO POR TESTE LOCAL` | Configuração verificada localmente |
+| `npm install @opencode/banca` | `NÃO IMPLEMENTADO` \| `PENDENTE` | Pacote ainda não publicado no npm (`private: true`) |
+| `bun add @opencode/banca` | `NÃO IMPLEMENTADO` \| `PENDENTE` | Pacote ainda não publicado no npm (`private: true`) |
+| Uso real com OpenCode | `NÃO VALIDADO EM OPENCODE` | Requer ambiente OpenCode real |
+| Funcionamento dos MCPs | `NÃO VALIDADO COM MCP REAL` | Requer configuração externa e servidores MCP reais |
+| Compilação LaTeX | `NÃO VALIDADO COM LATEX REAL` | Requer TeX Live instalado e compilação real de ponta a ponta |
+| Performance em trabalhos grandes | `NÃO VALIDADO` | Sem evidência de teste com documentos reais longos |
+| Compatibilidade com versões do OpenCode | `NÃO VALIDADO EM OPENCODE` | Testado apenas com a versão atual das dependências |
 
 ## Próximos Passos Recomendados
 

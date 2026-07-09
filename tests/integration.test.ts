@@ -386,6 +386,26 @@ describe("Integration — Auditoria Extrema Fixes", () => {
     expect(existsSync(agentPath)).toBe(true)
     expect(readFileSync(agentPath, "utf-8")).toContain("Orquestra etapa assistida")
   })
+
+  test("banca_ia com caminho contendo aspas e caracteres especiais não executa código injetado", async () => {
+    const filename = "main_\"_inject.tex"
+    mockProjectJson({
+      manuscript: { format: "latex", root: ".", main: filename, bib: "refs.bib", chapters: [], outputDir: "trabalhos" }
+    })
+    writeFileSync(join(testRoot, filename), "Ademais, é imperativo que o faça.")
+    
+    const { bancaIa } = await import("../src/tools/banca_ia")
+    const result = await bancaIa.execute({ projectRoot: testRoot }, {} as any)
+    expect(result).toContain("IA Detection Report")
+  })
+
+  test("banca_ia rejeita arquivos fora do projectRoot", async () => {
+    mockProjectJson({
+      manuscript: { format: "latex", root: ".", main: "../evil.tex", bib: "refs.bib", chapters: [], outputDir: "trabalhos" }
+    })
+    const { bancaIa } = await import("../src/tools/banca_ia")
+    expect(bancaIa.execute({ projectRoot: testRoot }, {} as any)).rejects.toThrow()
+  })
 })
 
 
