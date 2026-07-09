@@ -306,5 +306,87 @@ describe("Integration — path portability", () => {
   })
 })
 
+describe("Integration — Auditoria Extrema Fixes", () => {
+  beforeEach(() => {
+    testRoot = join(tmpBase, `fixes-${Date.now()}`)
+    mkdirSync(testRoot, { recursive: true })
+    mkdirSync(join(testRoot, ".banca"), { recursive: true })
+  })
+  afterEach(() => {
+    rmSync(tmpBase, { recursive: true, force: true })
+  })
+
+  test("banca_ia com forceRegex executa com sucesso sem shell", async () => {
+    mockProjectJson()
+    writeFileSync(join(testRoot, "main.tex"), "Ademais, é imperativo que o faça.")
+    const { bancaIa } = await import("../src/tools/banca_ia")
+    const result = await bancaIa.execute({ projectRoot: testRoot, forceRegex: true }, {} as any)
+    expect(result).toContain("Regex heuristic")
+  })
+
+  test("banca_plagio com HTML executa com sucesso sem shell", async () => {
+    mockProjectJson()
+    const reportHtml = join(testRoot, "report.html")
+    writeFileSync(reportHtml, "<table><tr><td>origem.tex</td><td>15,5%</td><td>12,0%</td><td>termo1</td></tr></table>")
+    const { bancaPlagio } = await import("../src/tools/banca_plagio")
+    const result = await bancaPlagio.execute({ projectRoot: testRoot, reportPath: reportHtml }, {} as any)
+    expect(result).toContain("Plágio — Report")
+  })
+
+  test("banca_plagio rejeita reportPath absoluto fora do projectRoot", async () => {
+    mockProjectJson()
+    const { bancaPlagio } = await import("../src/tools/banca_plagio")
+    expect(bancaPlagio.execute({ projectRoot: testRoot, reportPath: "/etc/passwd" }, {} as any)).rejects.toThrow()
+  })
+
+  test("banca_restore sem confirm executa apenas dry-run", async () => {
+    mockProjectJson()
+    mockMainTex()
+    // Create snapshot
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    await bancaSnapshot.execute({ projectRoot: testRoot, label: "snap-restore-test" }, {} as any)
+
+    // Modify file
+    const mainPath = join(testRoot, "main.tex")
+    writeFileSync(mainPath, "MODIFIED CONTENT")
+
+    // Restore without confirm
+    const { bancaRestore } = await import("../src/tools/banca_restore")
+    const result = await bancaRestore.execute({ projectRoot: testRoot, snapshotId: "snap-restore-test" }, {} as any)
+    expect(result).toContain("Restore Dry-Run")
+    expect(readFileSync(mainPath, "utf-8")).toContain("MODIFIED CONTENT")
+  })
+
+  test("banca_restore com confirm cria backup e restaura", async () => {
+    mockProjectJson()
+    mockMainTex()
+    // Create snapshot
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    await bancaSnapshot.execute({ projectRoot: testRoot, label: "snap-restore-test" }, {} as any)
+
+    // Modify file
+    const mainPath = join(testRoot, "main.tex")
+    writeFileSync(mainPath, "MODIFIED CONTENT")
+
+    // Restore with confirm
+    const { bancaRestore } = await import("../src/tools/banca_restore")
+    const result = await bancaRestore.execute({ projectRoot: testRoot, snapshotId: "snap-restore-test", confirm: true }, {} as any)
+    expect(result).toContain("restored from snap-restore-test")
+    expect(result).toContain("Safety backup created")
+    expect(readFileSync(mainPath, "utf-8")).not.toContain("MODIFIED CONTENT")
+    expect(readFileSync(mainPath, "utf-8")).toContain("Introduction paragraph")
+  })
+
+  test("installAssets instala assets versionados representativos", async () => {
+    const { installAssets } = await import("../src/lib/install_assets")
+    const installed = installAssets(testRoot, true)
+    expect(installed.length).toBeGreaterThan(0)
+    // Check if the agent file is copied
+    const agentPath = join(testRoot, ".opencode", "agents", "banca-loop.md")
+    expect(existsSync(agentPath)).toBe(true)
+    expect(readFileSync(agentPath, "utf-8")).toContain("Orquestra etapa assistida")
+  })
+})
+
 
 

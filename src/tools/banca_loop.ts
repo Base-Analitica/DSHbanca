@@ -8,12 +8,12 @@ import { generateReport, saveReport } from "../lib/reports"
 const z = tool.schema
 
 export const bancaLoop = tool({
-  description: "Run a correction loop cycle: context → audit → snapshot → correct → compile → review → decide.",
+  description: "Runs an assisted loop step (checks target, takes snapshot, audits citations, prepares next steps). Implementation is preparatory/assisted and does not run autonomous corrections.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
-    maxIterations: z.number().optional().describe("Max iterations (default: 3)"),
+    maxIterations: z.number().optional().describe("Max iterations (default: 3) (preparatory loop, compatibility only)"),
     targetScore: z.number().optional().describe("Target score (default: from config)"),
-    phase: z.string().optional().describe("Start from specific phase: audit|snapshot|correct|compile|review"),
+    phase: z.string().optional().describe("Start from specific phase (preparatory loop, compatibility only)"),
   },
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory

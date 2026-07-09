@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
-import { execSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
@@ -18,8 +18,8 @@ const PATTERNS: RegExp[] = [
 
 function hasPythonEnsemble(): boolean {
   try {
-    const r = execSync("python3 -c \"import pt_ai_detector; print('ok')\"", { encoding: "utf-8", timeout: 5000, stdio: "pipe" })
-    return r.trim() === "ok"
+    const result = spawnSync("python3", ["-c", "import pt_ai_detector; print('ok')"], { encoding: "utf-8", timeout: 5000 })
+    return result.stdout ? result.stdout.trim() === "ok" : false
   } catch {
     return false
   }
@@ -44,8 +44,11 @@ try:
 except ImportError:
     print(json.dumps({"risk": 0, "confidence": 0, "error": "pt_ai_detector not available"}))
 `
-    const result = execSync("python3 -c " + JSON.stringify(script), { encoding: "utf-8", timeout: 60000, stdio: "pipe" })
-    return JSON.parse(result.trim())
+    const result = spawnSync("python3", ["-c", script], { encoding: "utf-8", timeout: 60000 })
+    if (result.status !== 0) {
+      return null
+    }
+    return JSON.parse((result.stdout || "").trim())
   } catch {
     return null
   }

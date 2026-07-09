@@ -163,7 +163,7 @@ Aplica correções com guardrails (protege arquivos imutáveis).
 /banca:loop correcao-continua
 ```
 
-Executa ciclo completo: context → planner → snapshot → worker → compile → review → verify → decide → memory.
+Executa etapa assistida de preparação do loop: avalia meta de nota, cria snapshot de segurança e gera relatório com próximos passos estruturados (não executa ações autônomas de correção ou compilação).
 
 ### Validar referências
 
@@ -225,7 +225,7 @@ TODO: escolher uma licença apropriada (MIT, Apache-2.0, GPL-3.0 ou proprietári
 | `/banca:refs` | Valida referências (MCP→REST→cache) |
 | `/banca:ia` | Risco IA (regex) |
 | `/banca:plagio` | Parse CopySpider |
-| `/banca:loop` | Loop correção contínua |
+| `/banca:loop` | Etapa assistida do loop (preparatório) |
 | `/banca:snapshot` | Snapshot direcionado |
 | `/banca:restore` | Restaura de snapshot |
 | `/banca:compile` | Compila LaTeX |

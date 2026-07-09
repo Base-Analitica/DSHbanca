@@ -31,10 +31,10 @@ Inicializa o projeto criando `.banca/` e `.opencode/`.
 - `projectRoot`: Diretório raiz do projeto (padrão: cwd)
 - `force`: Sobrescrever configuração existente
 
-**Saída esperada:**
+**Saída esperada (aproximada/dinâmica):**
 ```
 ✓ .banca/ + config + state
-✓ 12 assets installed
+✓ X assets installed
 ```
 
 ### `/banca:auditar`
@@ -91,10 +91,9 @@ Valida referências bibliográficas via cadeia MCP → REST → cache.
 
 **Parâmetros opcionais:**
 - `projectRoot`: Diretório raiz do projeto
-- `forceRefresh`: Forçar atualização do cache
 
 **Saída esperada:**
-Gera "certidão de referências" com status de cada referência.
+Gera "certidão de referências" com status de cada referência. Se o MCP não estiver habilitado, a saída conterá o aviso: `MCP não habilitado, validação segue por fallback.`
 
 ### `/banca:ia`
 
@@ -113,26 +112,33 @@ Detecta padrões heurísticos de IA no texto.
 risk=medium patterns=5 files=3
 ```
 
+### `/banca:plagio`
+
+Parseia o relatório do CopySpider (HTML ou PDF), classifica o nível de similaridade por severidade e mapeia para o manuscrito.
+
+```bash
+/banca:plagio --reportPath <caminho>
+```
+
+**Parâmetros:**
+- `reportPath`: Caminho para o relatório CopySpider (HTML ou PDF). Se relativo, resolvido no `projectRoot`. Se absoluto, deve residir estritamente dentro do `projectRoot`.
+- `projectRoot`: Diretório raiz do projeto (opcional).
+
+**Saída esperada:**
+Gera um relatório de plágio detalhado listando fontes suspeitas sob as categorias ENTREVISTAR, REESCREVER e PULAR.
+
 ### `/banca:loop`
 
-Executa loop de correção contínua.
+Executa etapa assistida de preparação do loop de correção.
 
 ```bash
 /banca:loop correcao-continua
 ```
 
-**Fluxo do loop:**
-1. Build Context: carrega estado, scorecard, knowledge base
-2. Planner: define plano de correção
-3. Snapshot: backup do manuscrito
-4. Worker: aplica correções
-5. Compile: compila LaTeX
-6. Review: revisa diff, valida contrato
-7. Verify: scripts determinísticos
-8. Decide: target atingido? → fim. Não? → próxima iteração
-9. Memory: atualiza scorecard e histórico
+**Comportamento:**
+Avalia a meta de nota integrada com base nas citações, cria um snapshot de segurança automático e gera um relatório com os próximos passos recomendados. O loop é **preparatório/assistido**, exigindo que o usuário ou o agente orquestrador execute manualmente `/banca:auditar` e `/banca:corrigir` sequencialmente. Não realiza alterações de arquivos nem compilação de forma autônoma.
 
-**Circuit breaker:** Para se detectar estagnação (3 iterações sem melhoria).
+**Circuit breaker:** Interrompe a iteração se detectar estagnação (3 iterações seguidas com a mesma nota) ou oscilação de notas.
 
 ### `/banca:snapshot`
 
@@ -144,11 +150,20 @@ Cria snapshot do estado atual do manuscrito.
 
 ### `/banca:restore`
 
-Restaura de um snapshot anterior.
+Restaura o projeto a partir de um snapshot. Por padrão, opera de forma segura executando apenas um dry-run.
 
 ```bash
 /banca:restore
 ```
+
+**Parâmetros opcionais:**
+- `snapshotId`: ID ou label do snapshot a ser restaurado. Se ausente, lista os snapshots disponíveis.
+- `confirm`: Se `true`, realiza a restauração de fato; caso contrário, realiza dry-run de simulação.
+- `projectRoot`: Diretório raiz do projeto.
+
+**Segurança:**
+- Quando executado com `confirm: true`, cria automaticamente um snapshot de backup `pre-restore-<timestamp>` antes de alterar qualquer arquivo.
+- Restaura apenas os arquivos correspondentes à configuração real do manuscrito (usando `resolveManuscriptPaths()`).
 
 ### `/banca:compile`
 
