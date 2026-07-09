@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
+import { resolveInsideRoot } from "./safe_paths"
 
 export interface ProjectState {
   currentScore: number | null
@@ -21,7 +22,7 @@ export interface ProjectState {
 }
 
 export function getStatePath(projectRoot: string): string {
-  return join(projectRoot, ".banca", "state.json")
+  return resolveInsideRoot(projectRoot, join(".banca", "state.json"))
 }
 
 export function loadState(projectRoot: string): ProjectState {

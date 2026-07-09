@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths, isPathProtected, isPathAllowed, globToRegex } from "../lib/paths"
+import { resolveInsideRoot, relativeInsideRoot, PathTraversalError } from "../lib/safe_paths"
 import { loadState, saveState, addIteration } from "../lib/state"
 const z = tool.schema
 
@@ -28,9 +29,17 @@ export const bancaCorrigir = tool({
 
     if (corrections.length === 0) return "no corrections provided"
 
+    for (const c of corrections) {
+      try {
+        resolveInsideRoot(root, c.file)
+      } catch {
+        return `blocked: ${c.file} escapes project root`
+      }
+    }
+
     // immutableFacts guard: block edits to immutable files
     for (const c of corrections) {
-      const relPath = c.file.replace(/[/\\]/g, "/")
+      const relPath = relativeInsideRoot(root, c.file).replace(/[/\\]/g, "/")
       for (const fact of config.immutableFacts) {
         if (globToRegex(fact).test(relPath)) {
           return `blocked: ${c.file} is immutable (immutableFacts: "${fact}"). ${c.oldText.substring(0, 60)}...`
@@ -40,13 +49,15 @@ export const bancaCorrigir = tool({
 
     // snapshot
     if (!args.skipSnapshot) {
-      const snapDir = join(root, ".banca", "snapshots", `pre-${Date.now()}`)
+      const snapLabel = `pre-${Date.now()}`
+      const snapDir = join(root, ".banca", "snapshots", snapLabel)
+      resolveInsideRoot(join(root, ".banca", "snapshots"), snapLabel)
       mkdirSync(snapDir, { recursive: true })
-      const uniqueFiles = new Set(corrections.map((c) => join(root, c.file)))
-      for (const fp of uniqueFiles) {
+      for (const c of corrections) {
+        const fp = resolveInsideRoot(root, c.file)
         if (existsSync(fp)) {
-          const rel = fp.replace(root, "").replace(/^\//, "")
-          const dest = join(snapDir, rel)
+          const rel = relativeInsideRoot(root, c.file)
+          const dest = resolveInsideRoot(snapDir, rel)
           mkdirSync(dest.replace(/\/[^/]+$/, ""), { recursive: true })
           cpSync(fp, dest)
         }
@@ -55,10 +66,12 @@ export const bancaCorrigir = tool({
 
     const results: string[] = []
     for (const c of corrections) {
-      const fp = join(root, c.file)
+      const fp = resolveInsideRoot(root, c.file)
       if (!existsSync(fp)) { results.push(`✗ ${c.file}: not found`); continue }
-      if (isPathProtected(c.file.replace(/[/\\]/g, "/"), config)) { results.push(`✗ ${c.file}: protected path`); continue }
-      if (!isPathAllowed(c.file.replace(/[/\\]/g, "/"), config)) { results.push(`✗ ${c.file}: not in allowed paths`); continue }
+
+      const canonizedRelPath = relativeInsideRoot(root, c.file).replace(/[/\\]/g, "/")
+      if (isPathProtected(canonizedRelPath, config)) { results.push(`✗ ${c.file}: protected path`); continue }
+      if (!isPathAllowed(canonizedRelPath, config)) { results.push(`✗ ${c.file}: not in allowed paths`); continue }
 
       const content = readFileSync(fp, "utf-8")
       if (!content.includes(c.oldText)) { results.push(`✗ ${c.file}: oldText not found`); continue }

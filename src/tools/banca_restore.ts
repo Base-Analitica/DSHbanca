@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { tool } from "@opencode-ai/plugin"
 import { loadState } from "../lib/state"
 import { loadConfig } from "../lib/config"
+import { resolveInsideRoot, PathTraversalError } from "../lib/safe_paths"
 const z = tool.schema
 
 export const bancaRestore = tool({
@@ -26,7 +27,9 @@ export const bancaRestore = tool({
     const snap = state.snapshots.find((s) => s.id === args.snapshotId || s.label === args.snapshotId)
     if (!snap) return `snapshot not found: ${args.snapshotId}`
 
-    const snapDir = join(root, ".banca", "snapshots", snap.label)
+    const snapshotsDir = join(root, ".banca", "snapshots")
+    const snapDir = join(snapshotsDir, snap.label)
+    try { resolveInsideRoot(snapshotsDir, snap.label) } catch { return `blocked: snapshot path escapes project root` }
     if (!existsSync(snapDir)) return `snapshot directory not found: ${snapDir}`
 
     if (args.dryRun) {

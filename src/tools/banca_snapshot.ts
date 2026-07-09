@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { tool } from "@opencode-ai/plugin"
 import { addSnapshot } from "../lib/state"
 import { loadConfig } from "../lib/config"
+import { sanitizeSnapshotLabel, resolveInsideRoot, PathTraversalError } from "../lib/safe_paths"
 const z = tool.schema
 
 export const bancaSnapshot = tool({
@@ -13,9 +14,15 @@ export const bancaSnapshot = tool({
   },
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory
-    const label = args.label || `pre-${Date.now()}`
+    const rawLabel = args.label || `pre-${Date.now()}`
+    if (rawLabel.includes("..") || rawLabel.includes("/") || rawLabel.includes("\\")) {
+      return `blocked: snapshot path escapes project root`
+    }
+    const label = sanitizeSnapshotLabel(rawLabel)
     const config = loadConfig(root)
-    const snapDir = join(root, ".banca", "snapshots", label)
+    const snapshotsDir = join(root, ".banca", "snapshots")
+    const snapDir = join(snapshotsDir, label)
+    try { resolveInsideRoot(snapshotsDir, label) } catch { return `blocked: snapshot path escapes project root` }
     mkdirSync(snapDir, { recursive: true })
 
     const keepDirs = new Set([

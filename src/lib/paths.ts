@@ -1,6 +1,7 @@
 import { resolve, sep } from "node:path"
 import { existsSync, mkdirSync, readdirSync } from "node:fs"
 import type { ProjectConfig } from "./config"
+import { resolveInsideRoot } from "./safe_paths"
 
 export interface ResolvedPaths {
   root: string
@@ -11,17 +12,17 @@ export interface ResolvedPaths {
 }
 
 export function resolveManuscriptPaths(projectRoot: string, config: ProjectConfig): ResolvedPaths {
-  const root = resolve(projectRoot, config.manuscript.root)
-  const main = resolve(root, config.manuscript.main)
-  const bib = resolve(root, config.manuscript.bib)
-  const chaptersDir = resolve(root, "capitulos")
+  const root = resolveInsideRoot(projectRoot, config.manuscript.root)
+  const main = resolveInsideRoot(root, config.manuscript.main)
+  const bib = resolveInsideRoot(root, config.manuscript.bib)
+  const chaptersDir = resolveInsideRoot(root, "capitulos")
   let chapters: string[] = []
   if (existsSync(chaptersDir)) {
     chapters = readdirSync(chaptersDir)
       .filter((f) => f.endsWith(".tex"))
-      .map((f) => resolve(chaptersDir, f))
+      .map((f) => resolveInsideRoot(chaptersDir, f))
   }
-  const outputDir = resolve(projectRoot, config.manuscript.outputDir)
+  const outputDir = resolveInsideRoot(projectRoot, config.manuscript.outputDir)
   return { root, main, bib, chapters, outputDir }
 }
 

@@ -176,3 +176,64 @@ describe("Integration — loop circuit breaker", () => {
     expect(result).toContain("Loop iteration")
   })
 })
+
+describe("Integration — path traversal safety", () => {
+  beforeEach(() => {
+    testRoot = join(tmpBase, `path-safety-${Date.now()}`)
+    mkdirSync(testRoot, { recursive: true })
+    mkdirSync(join(testRoot, ".banca"), { recursive: true })
+  })
+  afterEach(() => {
+    rmSync(tmpBase, { recursive: true, force: true })
+  })
+
+  test("rejeita ../evil.tex em bancaCorrigir", async () => {
+    mockProjectJson()
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const result = await bancaCorrigir.execute({
+      projectRoot: testRoot,
+      corrections: [{ file: "../evil.tex", oldText: "a", newText: "b" }],
+      skipSnapshot: true,
+    }, {} as any)
+    expect(result).toContain("blocked")
+    expect(result).toContain("escapes project root")
+  })
+
+  test("rejeita path absoluto em bancaCorrigir", async () => {
+    mockProjectJson()
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const result = await bancaCorrigir.execute({
+      projectRoot: testRoot,
+      corrections: [{ file: "/etc/passwd", oldText: "a", newText: "b" }],
+      skipSnapshot: true,
+    }, {} as any)
+    expect(result).toContain("blocked")
+    expect(result).toContain("escapes project root")
+  })
+
+  test("rejeita snapshot label com ../ em bancaSnapshot", async () => {
+    mockProjectJson()
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    const result = await bancaSnapshot.execute({
+      projectRoot: testRoot,
+      label: "../evil-label",
+    }, {} as any)
+    expect(result).toContain("blocked")
+    expect(result).toContain("escapes project root")
+  })
+
+  test("restore não aceita label que sai de .banca/snapshots", async () => {
+    mockProjectJson()
+    const { addSnapshot } = await import("../src/lib/state")
+    // Register a malicious snapshot label in state.json manually
+    const id = addSnapshot(testRoot, "../evil-label", 5.0)
+
+    const { bancaRestore } = await import("../src/tools/banca_restore")
+    const result = await bancaRestore.execute({
+      projectRoot: testRoot,
+      snapshotId: id,
+    }, {} as any)
+    expect(result).toContain("blocked")
+    expect(result).toContain("escapes project root")
+  })
+})
