@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 
@@ -9,12 +9,31 @@ export interface CompileResult {
   elapsedMs: number
 }
 
+export interface LatexCommand {
+  command: string
+  args: string[]
+  label?: string
+}
+
+const ALLOWED_ENGINES = new Set(["lualatex", "xelatex", "pdflatex"])
+const ALLOWED_BIB_ENGINES = new Set(["bibtex", "biber"])
+
+export function validateEngine(engine: string): boolean {
+  return ALLOWED_ENGINES.has(engine)
+}
+
+export function validateBibEngine(engine: string): boolean {
+  return ALLOWED_BIB_ENGINES.has(engine)
+}
+
 export function findLatexEngine(): string | null {
   for (const cmd of ["lualatex", "xelatex", "pdflatex"]) {
     try {
-      execSync(`${cmd} --version`, { stdio: "ignore" })
-      return cmd
-    } catch { }
+      const result = spawnSync(cmd, ["--version"], { stdio: "ignore", timeout: 10_000 })
+      if (result.status === 0) return cmd
+    } catch {
+      continue
+    }
   }
   return null
 }
@@ -22,28 +41,56 @@ export function findLatexEngine(): string | null {
 export function findBibEngine(): string | null {
   for (const cmd of ["bibtex", "biber"]) {
     try {
-      execSync(`${cmd} --version`, { stdio: "ignore" })
-      return cmd
-    } catch { }
+      const result = spawnSync(cmd, ["--version"], { stdio: "ignore", timeout: 10_000 })
+      if (result.status === 0) return cmd
+    } catch {
+      continue
+    }
   }
   return null
 }
 
-export function compileLatex(projectRoot: string, mainFile: string, command: string[]): CompileResult {
+export function runCommand(cmd: LatexCommand, cwd: string): { stdout: string; stderr: string; status: number | null } {
+  const result = spawnSync(cmd.command, cmd.args, {
+    cwd,
+    encoding: "utf-8",
+    timeout: 120_000,
+  })
+
+  return {
+    stdout: result.stdout?.toString() ?? "",
+    stderr: result.stderr?.toString() ?? "",
+    status: result.status,
+  }
+}
+
+export function compileLatex(
+  projectRoot: string,
+  mainFile: string,
+  steps: LatexCommand[]
+): CompileResult {
   const start = Date.now()
   const allErrors: string[] = []
   const allOutput: string[] = []
 
-  for (const step of command) {
+  for (const step of steps) {
     if (!existsSync(resolve(projectRoot, mainFile))) {
       return { success: false, output: "", errors: [`main file not found: ${mainFile}`], elapsedMs: Date.now() - start }
     }
+
+    const label = step.label ?? `${step.command} ${step.args.join(" ")}`
     try {
-      const out = execSync(step, { cwd: projectRoot, stdio: ["pipe", "pipe", "pipe"], timeout: 120_000 })
-      allOutput.push(out.toString())
+      const result = runCommand(step, projectRoot)
+      allOutput.push(result.stdout)
+
+      if (result.status !== 0) {
+        const msg = result.stderr || `exit code ${result.status}`
+        allErrors.push(`[${label}] ${msg}`)
+        allOutput.push(result.stderr)
+      }
     } catch (err: any) {
-      const msg = err.stderr?.toString() || err.message || String(err)
-      allErrors.push(`[${step}] ${msg}`)
+      const msg = err.message || String(err)
+      allErrors.push(`[${label}] ${msg}`)
       allOutput.push(msg)
     }
   }
