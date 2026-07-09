@@ -6,15 +6,36 @@
 - **Node.js** >= 18 ou **Bun** >= 1.x
 - **LaTeX** (opcional): TeX Live com lualatex, xelatex ou pdflatex
 
-## Instalação
+## Estado do Projeto
 
-### Via npm
+> ⚠️ **Experimental / Protótipo (v0.1.0)**
+> O pacote `@opencode/banca` está marcado como `"private": true` e **não está publicado no npm**.  
+> O uso atual recomendado é local, não via gerenciador de pacotes público.
+
+## Instalação Local (recomendado)
+
+```bash
+git clone https://github.com/RenyEnnos/openbanca.git
+cd openbanca
+bun install
+bun run build
+```
+
+> NÃO VALIDADO: a instalação local passou pela resolução de dependências e compilação TypeScript.  
+> O uso real com OpenCode, a execução dos comandos `/banca:*` e integração com MCPs **ainda não foram validados**.
+
+## Publicação Futura
+
+A publicação no npm está planejada após a definição de licença e testes completos com OpenCode.  
+Até lá, os comandos abaixo são **planos futuros, não instruções validadas**:
+
+### Via npm (PENDENTE)
 
 ```bash
 npm install @opencode/banca
 ```
 
-### Via Bun
+### Via Bun (PENDENTE)
 
 ```bash
 bun add @opencode/banca
@@ -22,7 +43,7 @@ bun add @opencode/banca
 
 ### Configuração no OpenCode
 
-Adicione o plugin ao seu `opencode.json`:
+Após instalar (local ou futuramente via npm), adicione o plugin ao seu `opencode.json`:
 
 ```json
 {
@@ -92,6 +113,13 @@ O plugin consome MCPs já configurados no seu `opencode.json`. MCPs recomendados
 
 Se um MCP não estiver disponível, o plugin declara limitação mas não falha.
 
+> ⚠️ O OpenBanca **não registra MCPs automaticamente** por padrão.
+> Para habilitar o auto-registro experimental do `crossref-academic`, defina:
+> ```bash
+> export OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1
+> ```
+> Use apenas em ambiente controlado.
+
 ## Validação da Instalação
 
 Após inicializar, execute:
@@ -104,18 +132,22 @@ Isso mostra o estado atual do projeto e confirma que everything está configurad
 
 ## Estado de Validação
 
-| Comando | Testado? | Observação |
-|---------|----------|------------|
-| `npm install @opencode/banca` | SIM | Funciona normalmente |
-| `bun add @opencode/banca` | SIM | Funciona normalmente |
-| `/banca:init` | SIM | Cria estruturas corretamente |
-| `/banca:status` | SIM | Retorna estado atual |
-| `/banca:auditar` | SIM | Gera relatório completo |
-| `/banca:corrigir` | SIM | Aplica correções com guardrails |
-| `/banca:refs` | PARCIAL | Requer MCP configurado |
-| `/banca:ia` | SIM | Detecção heurística funciona |
-| `/banca:compile` | PARCIAL | Requer LaTeX instalado |
-| `/banca:loop` | SIM | Loop funciona com circuit breaker |
+| Item | Status | Observação |
+|------|--------|------------|
+| `bun install` | VALIDADO | Dependências resolvidas com sucesso |
+| `bun run build` (tsc) | VALIDADO | Compilação TypeScript executada com sucesso |
+| `npm install @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
+| `bun add @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
+| `/banca:init` | NÃO VALIDADO | Requer teste real no OpenCode |
+| `/banca:status` | NÃO VALIDADO | Requer teste real no OpenCode |
+| `/banca:auditar` | NÃO VALIDADO | Requer teste real no OpenCode |
+| `/banca:corrigir` | NÃO VALIDADO | Requer teste real no OpenCode |
+| `/banca:refs` | NÃO VALIDADO | Requer MCP configurado e OpenCode |
+| `/banca:ia` | NÃO VALIDADO | Requer teste real no OpenCode |
+| `/banca:compile` | NÃO VALIDADO | Requer LaTeX instalado e OpenCode |
+| `/banca:loop` | NÃO VALIDADO | Requer teste real no OpenCode |
+| `bun test` | VALIDADO | Testes unitários executados com sucesso |
+| `tsc --noEmit` | VALIDADO | Typecheck executado com sucesso |
 
 ## Troubleshooting
 

@@ -7,37 +7,30 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ## [Unreleased]
 
-### Adicionado
+### Corrigido
 
-- Estrutura inicial do repositório
-- README completo com documentação
-- Guia de instalação (`docs/installation.md`)
-- Guia de uso (`docs/usage.md`)
-- Documentação de arquitetura (`docs/architecture.md`)
-- Especificação das skills (`docs/skill-spec.md`)
-- Protocolo de revisão por IA (`docs/ai-review-protocol.md`)
-- Solução de problemas (`docs/troubleshooting.md`)
-- Decisões de design (`docs/decisions/`)
-- Prompts para revisão por IA (`prompts/`)
-- Script de validação (`scripts/validate.sh`)
-- Script de verificação de segredos (`scripts/check-secrets.sh`)
-- Guia de contribuição (`CONTRIBUTING.md`)
-- Política de segurança (`SECURITY.md`)
-- Template de PR (`.github/PULL_REQUEST_TEMPLATE.md`)
-- Templates de issues (`.github/ISSUE_TEMPLATE/`)
-- `.gitignore` configurado
-- `.editorconfig` configurado
-- `LICENSE_PENDING.md` (licença a definir)
-- `ROADMAP.md` com plano de desenvolvimento
-- `CHANGELOG.md` (este arquivo)
+- Documentação de instalação ajustada para refletir pacote ainda não publicado (`private: true`)
+- Matriz de validação alinhada com testes realmente executados (nada marcado como testado sem evidência)
+- Compilação LaTeX ajustada para evitar execução via shell string (`execSync` → `spawnSync` com args separados)
+- Auto-registro do MCP crossref-academic tornado explícito/opt-in (requer `OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1`)
+- Script de verificação de segredos ajustado para reduzir falsos positivos (modo `--ci` ignora docs/prompts)
+
+### Segurança
+
+- Reduzido risco de execução shell na compilação LaTeX (validação de engines, argumentos separados)
+- Auto-registro de dependência externa (crossref-academic via `uvx`) deixou de ser comportamento padrão
+- Script check-secrets.sh: modo `--ci` detecta chaves reais sem falso positivo em documentação
 
 ### Alterado
 
-- Organização inicial dos arquivos (preservada estrutura original)
-
-### Corrigido
-
-- Pendências identificadas durante a preparação
+- `src/lib/latex.ts`: `execSync` substituído por `spawnSync` com interface `LatexCommand`
+- `src/tools/banca_compile.ts`: passos de compilação agora usam `LatexCommand[]` estruturado
+- `src/index.ts`: auto-registro MCP protegido por variável de ambiente
+- `scripts/check-secrets.sh`: dois modos (`--ci` e `--audit`)
+- `docs/installation.md`: matriz de validação honesta, distinção local vs público
+- `README.md`: seção de instalação corrigida
+- `RELATORIO.md`: matriz de validação honesta
+- `SECURITY.md`: seções de execução de comandos, MCPs e verificação de segredos
 
 ## [0.1.0] - 2025-01-XX
 

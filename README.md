@@ -18,7 +18,7 @@ O plugin se integra ao OpenCode como uma coleção de ferramentas, agentes e ski
 
 ## Estado atual
 
-**Experimental / Protótipo (v0.1.0)**
+**Experimental / Protótipo (v0.1.0)** — pacote `@opencode/banca` **não publicado no npm** (`private: true`).
 
 ### O que já funciona
 
@@ -92,14 +92,29 @@ O plugin se integra ao OpenCode como uma coleção de ferramentas, agentes e ski
 - Node.js >= 18 ou Bun >= 1.x
 - LaTeX: TeX Live com lualatex (opcional, para compilação)
 
-### Instalação via npm/bun
+### Instalação via npm/bun (PENDENTE)
+
+> ⚠️ **PENDENTE**: o pacote `@opencode/banca` ainda **não está publicado no npm**.  
+> O `package.json` marca `"private": true` e `"license": "UNLICENSED"`.  
+> Os comandos abaixo são **planos futuros**, não instruções validadas.
 
 ```bash
-# Adicionar ao seu projeto OpenCode
+# PENDENTE: pacote ainda não publicado
 npm install @opencode/banca
 # ou
 bun add @opencode/banca
 ```
+
+### Instalação local (recomendado atualmente)
+
+```bash
+git clone https://github.com/RenyEnnos/openbanca.git
+cd openbanca
+bun install
+bun run build
+```
+
+> NÃO VALIDADO: a instalação local com Bun foi testada apenas quanto à resolução de dependências e compilação TypeScript. O uso real com OpenCode não foi validado.
 
 ### Configuração no OpenCode
 
@@ -157,6 +172,9 @@ Executa ciclo completo: context → planner → snapshot → worker → compile 
 ```
 
 Gera certidão de referências via cadeia MCP → REST → cache.
+
+> ⚠️ O MCP `crossref-academic` não é registrado automaticamente.  
+> Para habilitar o auto-registro experimental, use `OPENBANCA_AUTO_REGISTER_CROSSREF_MCP=1`.
 
 ### Verificar risco de IA
 

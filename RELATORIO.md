@@ -90,30 +90,33 @@ Total de 12 arquivos de documentação:
 - ✅ `.gitignore` configurado corretamente
 - ⚠️ Padrões sensíveis mencionados apenas em documentação (exemplos do que NÃO fazer)
 
-## O que Foi Testado
+## Matriz de Validação
 
-- ✅ Validação de estrutura (`scripts/validate.sh`) - Todos os arquivos essenciais presentes
-- ✅ Verificação de segredos (`scripts/check-secrets.sh`) - Nenhum segredo real encontrado
-- ✅ Validação de JSON - `package.json` e `tsconfig.json` são JSON válido
-- ✅ Gitignore - `node_modules/`, `dist/`, `.env` ignorados corretamente
-- ✅ Git init - Repositório inicializado com sucesso
-- ✅ Commit inicial - 83 arquivos commitados (6061 inserções)
-
-## O que Não Foi Testado
-
-- ❌ Instalação via npm/bun (requer publicação)
-- ❌ Uso real com OpenCode (requer ambiente OpenCode)
-- ❌ Funcionamento dos MCPs (requer configuração)
-- ❌ Compilação LaTeX (requer instalação)
-- ❌ Performance em trabalhos grandes
-- ❌ Compatibilidade com diferentes versões do OpenCode
+| Item | Status | Observação |
+|------|--------|------------|
+| `bun install` | VALIDADO | Dependências resolvidas com sucesso |
+| `bun run build` (tsc) | VALIDADO | Compilação TypeScript executada com sucesso |
+| `bun test` | VALIDADO | Testes unitários executados com sucesso |
+| `tsc --noEmit` | VALIDADO | Typecheck executado com sucesso |
+| Validação de estrutura (`scripts/validate.sh`) | VALIDADO | Todos os arquivos essenciais presentes |
+| Verificação de segredos (`scripts/check-secrets.sh`) | VALIDADO | Nenhum segredo real encontrado |
+| Validação de JSON | VALIDADO | `package.json` e `tsconfig.json` são JSON válido |
+| Gitignore | VALIDADO | `node_modules/`, `dist/`, `.env` ignorados corretamente |
+| `npm install @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
+| `bun add @opencode/banca` | PENDENTE | Pacote ainda não publicado no npm |
+| Uso real com OpenCode | NÃO VALIDADO | Requer ambiente OpenCode |
+| Funcionamento dos MCPs | NÃO VALIDADO | Requer configuração externa |
+| Compilação LaTeX | NÃO VALIDADO | Requer TeX Live instalado |
+| Performance em trabalhos grandes | NÃO VALIDADO | Sem evidência de teste |
+| Compatibilidade com versões do OpenCode | NÃO VALIDADO | Testado apenas com a versão atual das dependências |
 
 ## Próximos Passos Recomendados
 
 ### Imediatos
 1. **Definir licença** - Escolher MIT, Apache-2.0, GPL-3.0 ou proprietária
 2. **Rodar revisão por IA** - Usar prompts em `prompts/` para revisão completa
-3. **Testar instalação** - Verificar se plugin funciona com OpenCode
+3. **Testar com OpenCode real** - Verificar se plugin funciona em ambiente OpenCode controlado
+4. **Publicar no npm** - Somente após definir licença e validar funcionamento com OpenCode
 
 ### Curto Prazo
 4. **Configurar CI/CD** - Adicionar GitHub Actions para validação automática
