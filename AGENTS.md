@@ -36,7 +36,7 @@ O Initial Setup do Jules disponibiliza o binário do OpenCode para testes de int
 
 Regras obrigatórias:
 
-- execute `command -v opencode` e `opencode --version` no início da tarefa;
+- execute o preflight para resolver `OPENCODE_BIN` e use `"$OPENCODE_BIN" --version` no início da tarefa;
 - registre branch e SHA efetivamente testados;
 - não trate a versão histórica documentada como garantia da versão atual;
 - use projeto temporário para testes diagnósticos quando possível;
