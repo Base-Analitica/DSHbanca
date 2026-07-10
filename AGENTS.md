@@ -8,6 +8,7 @@ Estas regras se aplicam a qualquer agente que revise código, crie issues, imple
 2. Leia `docs/issue-labeling-policy.md` antes de criar, editar, priorizar ou fechar issues.
 3. Consulte `.github/labels.yml`; ele é a fonte de verdade dos labels permitidos.
 4. Avalie apenas o estado real do código e da documentação. Não trate intenção, comentários ou arquivos copiados como prova de funcionamento.
+5. Quando a tarefa depender do OpenCode no Jules, leia `docs/jules-opencode-environment.md` e execute o preflight documentado antes de testar.
 
 ## Labels obrigatórios
 
@@ -28,6 +29,24 @@ Não altere prioridade silenciosamente. Qualquer mudança de prioridade deve ser
 - `agent:blocked`: não implemente até o bloqueio documentado ser removido.
 - `needs:human-decision`: investigue e proponha opções, mas não escolha silenciosamente pela pessoa responsável.
 - `needs:e2e`: não feche o issue sem evidência da validação real solicitada.
+
+## Testes com OpenCode no Jules
+
+O Initial Setup do Jules disponibiliza o binário do OpenCode para testes de integração, mas cada tarefa deve confirmar o ambiente atual antes de usá-lo.
+
+Regras obrigatórias:
+
+- execute o preflight para resolver `OPENCODE_BIN` e use `"$OPENCODE_BIN" --version` no início da tarefa;
+- registre branch e SHA efetivamente testados;
+- não trate a versão histórica documentada como garantia da versão atual;
+- use projeto temporário para testes diagnósticos quando possível;
+- não reinstale o OpenCode dentro da tarefa quando o problema for ausência do snapshot; classifique como falha de ambiente;
+- não use `OPENCODE_API_KEY` em testes que não dependem de modelo;
+- nunca imprima, versione ou grave credenciais em logs;
+- diferencie claramente teste do instalador, teste do parser/OpenCode e teste comportamental com LLM;
+- não declare descoberta de skills aprovada quando a inicialização tiver falhado antes da listagem.
+
+Consulte `docs/jules-opencode-environment.md` para o procedimento completo e a evidência histórica.
 
 ## Escrita e segurança
 
