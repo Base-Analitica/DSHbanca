@@ -1,0 +1,32 @@
+name: Sync issue labels
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/labels.yml"
+      - ".github/workflows/sync-labels.yml"
+      - "scripts/sync-labels.rb"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Ruby syntax
+        run: ruby -c scripts/sync-labels.rb
+
+      - name: Synchronize labels
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ruby scripts/sync-labels.rb

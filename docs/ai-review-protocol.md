@@ -10,60 +10,96 @@ Este documento define o protocolo para revisão deste repositório por modelos d
 - **Compatibilidade**: O plugin funciona com o OpenCode?
 - **Qualidade dos prompts/skills**: Os prompts são eficazes e seguros?
 - **Documentação**: A documentação é completa e clara?
-- **Manutenção**: O projeto é fácil de manuter e evoluir?
+- **Manutenção**: O projeto é fácil de manter e evoluir?
 
 ## Regras para a IA Revisora
 
-1. **Não invente funcionalidades** — avalie apenas o que existe no código
-2. **Cite arquivos e trechos específicos** — não faça afirmações genéricas
-3. **Separe problemas por gravidade** — crítico, importante, opcional
-4. **Sugira correções práticas** — não apenas aponte problemas
-5. **Não reescreva tudo sem necessidade** — respeite a intenção original
-6. **Preserve a intenção do autor** — melhore, não substitua
-7. **Identifique riscos de segurança** — tokens, caminhos, comandos perigosos
-8. **Identifique ambiguidades** — onde o comportamento é incerto
-9. **Identifique oportunidades de simplificação** — código desnecessário
-10. **Entregue um relatório objetivo** — sem rodeios, direto ao ponto
+1. **Não invente funcionalidades** — avalie apenas o que existe no código.
+2. **Cite arquivos e trechos específicos** — não faça afirmações genéricas.
+3. **Separe problemas por gravidade** — use a política oficial de prioridade.
+4. **Sugira correções práticas** — não apenas aponte problemas.
+5. **Não reescreva tudo sem necessidade** — respeite a intenção original.
+6. **Preserve a intenção do autor** — melhore, não substitua.
+7. **Identifique riscos de segurança** — tokens, caminhos e comandos perigosos.
+8. **Identifique ambiguidades** — onde o comportamento é incerto.
+9. **Identifique oportunidades de simplificação** — código desnecessário.
+10. **Entregue um relatório objetivo** — sem rodeios e direto ao ponto.
+11. **Não declare validação que não ocorreu** — diferencie inspeção, teste automatizado e execução real.
+12. **Não tome decisões humanas silenciosamente** — marque escolhas de produto, política ou arquitetura.
+
+## Triagem e labels de issues
+
+Antes de criar, editar, priorizar ou fechar um issue, o agente deve ler:
+
+- [Política de labels para issues](issue-labeling-policy.md);
+- [Fonte estruturada dos labels](../.github/labels.yml);
+- [Instruções gerais para agentes](../AGENTS.md).
+
+Todo issue aberto deve possuir:
+
+- exatamente um tipo: `bug`, `enhancement` ou `documentation`;
+- exatamente uma prioridade: `priority:p0`, `priority:p1`, `priority:p2` ou `priority:p3`;
+- uma ou duas áreas `area:*`;
+- labels operacionais somente quando os critérios documentados forem atendidos.
+
+### Regras obrigatórias
+
+1. Não inventar labels.
+2. Não aplicar duas prioridades.
+3. Não aplicar mais de duas áreas.
+4. Não alterar prioridade sem comentário com evidência e impacto residual.
+5. Usar `needs:human-decision` quando houver escolha não resolvida.
+6. Usar `needs:e2e` quando mocks e testes unitários não forem evidência suficiente.
+7. Aplicar `agent:ready` somente quando os critérios de aceite forem executáveis sem nova decisão.
+8. Aplicar `agent:blocked` somente com comentário que identifique o bloqueio e a condição de desbloqueio.
+9. Não fechar issue marcado `needs:e2e` sem evidência da execução real.
+10. Não fechar issue marcado `needs:human-decision` enquanto a decisão não estiver registrada.
 
 ## Formato da Revisão
 
 ### Resumo Executivo
 
-Breve resumo do estado geral do projeto (3-5 linhas).
+Breve resumo do estado geral do projeto em três a cinco linhas.
 
 ### Pontos Fortes
 
-O que o projeto faz bem. Citar exemplos específicos.
+O que o projeto faz bem, citando exemplos específicos.
 
 ### Problemas Críticos
 
-Problemas que impedem uso ou causam danos. Exemplos:
-- Segurança comprometida
-- Funcionalidade quebrada
-- Dados expostos
+Problemas que impedem uso, causam danos ou invalidam resultados centrais. Exemplos:
 
-### Problemas Important
+- segurança comprometida;
+- funcionalidade principal quebrada;
+- dados expostos;
+- auditoria analisando conteúdo incompleto;
+- decisão central baseada em cálculo impossível.
 
-Problemas que afetam usabilidade ou qualidade. Exemplos:
-- Documentação incompleta
-- Código difícil de manter
-- Falta de testes
+### Problemas Importantes
+
+Problemas que afetam usabilidade, confiabilidade ou qualidade. Exemplos:
+
+- documentação incorreta;
+- código difícil de manter;
+- falta de testes essenciais;
+- permissões não aplicadas;
+- heurísticas apresentadas como prova.
 
 ### Melhorias Opcionais
 
-Sugestões que melhorariam o projeto mas não são urgentes.
+Sugestões que melhorariam o projeto, mas não são urgentes.
 
 ### Riscos de Segurança
 
-Lista de riscos de segurança encontrados, classificados por gravidade.
+Lista de riscos de segurança encontrados, classificados por gravidade e com evidência.
 
 ### Problemas de Documentação
 
-Lacunas ou erros na documentação.
+Lacunas, divergências ou afirmações sem validação.
 
 ### Sugestões de Estrutura
 
-Melhorias na organização do repositório.
+Melhorias na organização do repositório e redução de duplicidade.
 
 ### Arquivos que Precisam de Atenção
 
@@ -71,66 +107,56 @@ Lista de arquivos que requerem revisão específica.
 
 ### Próximas Ações Recomendadas
 
-Lista priorizada de ações para melhorar o projeto.
+Lista priorizada de ações, incluindo dependências e validações necessárias.
+
+## Requisitos para criação de issues
+
+Quando a revisão identificar um problema acionável, o issue deve conter, quando aplicável:
+
+1. resumo;
+2. evidência no repositório;
+3. impacto;
+4. severidade justificada;
+5. direção de correção;
+6. critérios de aceite;
+7. testes necessários;
+8. arquivos prováveis;
+9. restrições e ações que não devem ser feitas.
+
+O título deve descrever o problema. A prioridade deve ser representada pelo label; prefixos de prioridade existentes podem permanecer durante a migração.
+
+## Requisitos para fechamento
+
+O comentário de fechamento deve registrar:
+
+- o que mudou;
+- commit ou PR relevante;
+- testes executados;
+- itens não validados;
+- limitações restantes;
+- issues de acompanhamento.
+
+Arquivos presentes, build aprovado ou testes unitários isolados não provam, por si só, integração real com OpenCode, MCP, LaTeX ou GitHub Actions.
 
 ## Prompts Disponíveis
 
 Use os prompts na pasta `prompts/` para diferentes tipos de revisão:
 
 | Prompt | Foco |
-|--------|------|
+|---|---|
 | `ai-reviewer-general.md` | Revisão abrangente |
 | `ai-reviewer-code.md` | Código e estrutura |
 | `ai-reviewer-docs.md` | Documentação |
 | `ai-reviewer-security.md` | Segurança |
 
-## Exemplo de Revisão
+## Exemplo resumido de finding
 
 ```markdown
-## Resumo Executivo
+## P1 — Processo MCP pode permanecer vivo após erro
 
-O OpenBanca é um plugin OpenCode bem estruturado para gestão de trabalhos acadêmicos.
-O código é limpo e a documentação é razoável. Há problemas de segurança menores e
-algumas lacunas na documentação.
-
-## Pontos Fortes
-
-- Estrutura de diretórios clara e lógica
-- Sistema de guardrails bem implementado
-- Testes abrangentes para funcionalidades críticas
-- Documentação técnica detalhada
-
-## Problemas Críticos
-
-Nenhum problema crítico encontrado.
-
-## Problemas Importantes
-
-1. **Falta de LICENSE** (`LICENSE_PENDING.md`): O projeto não tem licença definida.
-   - **Arquivo**: `LICENSE_PENDING.md`
-   - **Impacto**: Impede uso público
-   - **Sugestão**: Definir licença (MIT, Apache-2.0, etc.)
-
-2. **MCP client sem tratamento de erro** (`src/lib/mcp_client.ts:45`):
-   - **Problema**: Timeout não tratado corretamente
-   - **Impacto**: Pode travar o plugin
-   - **Sugestão**: Adicionar try/catch com timeout
-
-## Melhorias Opcionais
-
-1. Adicionar mais exemplos de uso
-2. Criar script de setup automático
-3. Adicionar linting e formatting
-
-## Riscos de Segurança
-
-- **Baixo**: Não há tokens ou credenciais expostos
-- **Baixo**: Comandos LaTeX são executados via execSync (risco controlado)
-
-## Próximas Ações Recomendadas
-
-1. Definir licença
-2. Adicionar CI/CD
-3. Expandir testes
-4. Melhorar exemplos de uso
+**Área:** referências e segurança  
+**Evidência:** `src/lib/provider_chain.ts` cria o cliente fora de um bloco com encerramento garantido.  
+**Impacto:** processos órfãos, timeouts e fallback silencioso.  
+**Labels:** `bug`, `priority:p1`, `area:references`, `area:security`, `needs:e2e`.  
+**Aceite:** processo encerrado em sucesso, erro e timeout; teste mockado e validação integrada registradas.
 ```

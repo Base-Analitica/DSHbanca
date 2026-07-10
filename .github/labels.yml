@@ -1,0 +1,136 @@
+version: 1
+
+# Fonte de verdade da taxonomia de issues do OpenBanca.
+# O workflow sync-labels.yml cria ou atualiza estes labels, mas nunca apaga
+# labels fora desta lista automaticamente.
+labels:
+  - name: "bug"
+    color: "d73a4a"
+    description: "Comportamento incorreto, falha funcional ou defeito verificável."
+    group: "type"
+
+  - name: "enhancement"
+    color: "a2eeef"
+    description: "Melhoria, nova capacidade ou redesenho estrutural."
+    group: "type"
+
+  - name: "documentation"
+    color: "0075ca"
+    description: "Correção ou melhoria predominantemente documental."
+    group: "type"
+
+  - name: "priority:p0"
+    color: "b60205"
+    description: "Bloqueador, risco crítico ou resultado central fundamentalmente inválido."
+    group: "priority"
+
+  - name: "priority:p1"
+    color: "d93f0b"
+    description: "Falha grave, alto impacto e sem contorno aceitável."
+    group: "priority"
+
+  - name: "priority:p2"
+    color: "fbca04"
+    description: "Problema moderado, localizado ou com contorno temporário."
+    group: "priority"
+
+  - name: "priority:p3"
+    color: "0e8a16"
+    description: "Melhoria menor, manutenção ou baixo impacto."
+    group: "priority"
+
+  - name: "area:opencode"
+    color: "5319e7"
+    description: "Commands, skills, agents, permissões ou integração com o OpenCode."
+    group: "area"
+
+  - name: "area:audit"
+    color: "1d76db"
+    description: "Rubricas, findings, notas, ABNT, conteúdo ou estilo."
+    group: "area"
+
+  - name: "area:manuscript"
+    color: "0e8a16"
+    description: "Ingestão, formatos, includes, parsing ou proveniência do manuscrito."
+    group: "area"
+
+  - name: "area:references"
+    color: "006b75"
+    description: "BibTeX, DOI, Crossref, MCP, cache, referências ou citações."
+    group: "area"
+
+  - name: "area:correction"
+    color: "c5def5"
+    description: "Correções, snapshots, restore, rollback, diff ou contrato."
+    group: "area"
+
+  - name: "area:security"
+    color: "8b0000"
+    description: "Segurança, isolamento, paths, processos externos ou exposição de dados."
+    group: "area"
+
+  - name: "area:ci"
+    color: "7057ff"
+    description: "CI, GitHub Actions, build, testes, release ou validação automatizada."
+    group: "area"
+
+  - name: "agent:ready"
+    color: "0e8a16"
+    description: "Critérios claros e reproduzíveis; um agente pode implementar sem decisão adicional."
+    group: "execution"
+
+  - name: "agent:blocked"
+    color: "e99695"
+    description: "Existe dependência concreta impedindo o trabalho; o bloqueio deve estar comentado."
+    group: "execution"
+
+  - name: "needs:human-decision"
+    color: "f9d0c4"
+    description: "Exige decisão humana de produto, arquitetura, política ou risco."
+    group: "execution"
+
+  - name: "needs:e2e"
+    color: "0052cc"
+    description: "Não pode ser encerrado apenas com testes unitários; exige validação real de ponta a ponta."
+    group: "execution"
+
+rules:
+  type:
+    required: true
+    exclusive: true
+    allowed:
+      - "bug"
+      - "enhancement"
+      - "documentation"
+
+  priority:
+    required: true
+    exclusive: true
+    allowed:
+      - "priority:p0"
+      - "priority:p1"
+      - "priority:p2"
+      - "priority:p3"
+
+  area:
+    required: true
+    exclusive: false
+    minimum: 1
+    maximum: 2
+    allowed:
+      - "area:opencode"
+      - "area:audit"
+      - "area:manuscript"
+      - "area:references"
+      - "area:correction"
+      - "area:security"
+      - "area:ci"
+
+  execution:
+    required: false
+    exclusive: false
+    allowed:
+      - "agent:ready"
+      - "agent:blocked"
+      - "needs:human-decision"
+      - "needs:e2e"
