@@ -35,8 +35,10 @@ set -euo pipefail
 
 OPENCODE_BIN="$(command -v opencode || true)"
 
-if [ -z "$OPENCODE_BIN" ] && [ -x /home/jules/.local/bin/opencode ]; then
-  OPENCODE_BIN=/home/jules/.local/bin/opencode
+if [ -z "$OPENCODE_BIN" ] || [ ! -x "$OPENCODE_BIN" ]; then
+  if [ -x /home/jules/.local/bin/opencode ]; then
+    OPENCODE_BIN=/home/jules/.local/bin/opencode
+  fi
 fi
 
 if [ -z "$OPENCODE_BIN" ] || [ ! -x "$OPENCODE_BIN" ]; then
