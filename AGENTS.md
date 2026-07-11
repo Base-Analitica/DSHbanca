@@ -9,6 +9,7 @@ Estas regras se aplicam a qualquer agente que revise código, crie issues, imple
 3. Consulte `.github/labels.yml`; ele é a fonte de verdade dos labels permitidos.
 4. Avalie apenas o estado real do código e da documentação. Não trate intenção, comentários ou arquivos copiados como prova de funcionamento.
 5. Quando a tarefa depender do OpenCode no Jules, leia `docs/jules-opencode-environment.md` e execute o preflight documentado antes de testar.
+6. Antes de aplicar ou remover o label `jules`, leia `docs/jules-dispatch-protocol.md`.
 
 ## Labels obrigatórios
 
@@ -17,7 +18,8 @@ Todo issue aberto deve possuir:
 - exatamente um tipo: `bug`, `enhancement` ou `documentation`;
 - exatamente uma prioridade: `priority:p0` a `priority:p3`;
 - uma ou duas áreas `area:*`;
-- labels operacionais somente quando seus critérios forem atendidos.
+- labels operacionais somente quando seus critérios forem atendidos;
+- o label de automação `jules` somente quando o protocolo de despacho estiver integralmente atendido.
 
 Não invente labels.
 
@@ -29,6 +31,21 @@ Não altere prioridade silenciosamente. Qualquer mudança de prioridade deve ser
 - `agent:blocked`: não implemente até o bloqueio documentado ser removido.
 - `needs:human-decision`: investigue e proponha opções, mas não escolha silenciosamente pela pessoa responsável.
 - `needs:e2e`: não feche o issue sem evidência da validação real solicitada.
+- `jules`: gatilho de execução, não sinal de prontidão; não aplicar sem `agent:ready` nem manter diante de bloqueio ou decisão pendente.
+
+## Despacho ao Jules
+
+O label `jules` inicia uma tarefa automática do Google Jules a partir da issue. Antes de aplicá-lo:
+
+- confirme que a issue está corretamente triada e possui `agent:ready`;
+- confirme que não possui `agent:blocked` nem `needs:human-decision`;
+- verifique que não existe tarefa do Jules ou PR aberta já vinculada;
+- registre um contrato de tarefa completo, com evidência, escopo, critérios, testes, riscos, branch-base e destino da PR;
+- use `master` como branch-base por padrão; PR empilhada exige autorização humana explícita e base exata;
+- não use o label para correções de uma PR existente; nesse caso, instrua `@jules` na própria PR;
+- remova o label se os pré-requisitos deixarem de ser verdadeiros.
+
+Consulte `docs/jules-dispatch-protocol.md` para o fluxo completo.
 
 ## Testes com OpenCode no Jules
 

@@ -2,14 +2,15 @@
 
 ## Objetivo
 
-Esta política define como humanos e agentes de IA devem classificar, atualizar e encerrar issues do OpenBanca.
+Esta política define como humanos e agentes de IA devem classificar, atualizar, despachar e encerrar issues do OpenBanca.
 
-Os labels existem para responder quatro perguntas sem depender de interpretação livre:
+Os labels existem para responder cinco perguntas sem depender de interpretação livre:
 
 1. Que tipo de trabalho é este?
 2. Qual é o impacto atual?
 3. Qual subsistema está afetado?
 4. Um agente pode agir sozinho ou ainda falta decisão/validação?
+5. A execução automática pelo Jules foi deliberadamente autorizada?
 
 A fonte de verdade dos nomes, cores, descrições e grupos é [`.github/labels.yml`](../.github/labels.yml).
 
@@ -20,7 +21,8 @@ Todo issue aberto deve possuir:
 - exatamente **um label de tipo**;
 - exatamente **um label de prioridade**;
 - de **um a dois labels de área**;
-- zero ou mais labels operacionais.
+- zero ou mais labels operacionais;
+- zero ou um label de automação.
 
 Exemplo válido:
 
@@ -32,7 +34,7 @@ needs:e2e
 agent:ready
 ```
 
-Um issue sem tipo, prioridade ou área está incompletamente triado.
+Um issue sem tipo, prioridade ou área está incompletamente triado. O label `jules` não corrige triagem incompleta e não substitui `agent:ready`.
 
 ## Labels de tipo
 
@@ -149,6 +151,38 @@ Exemplos:
 
 O issue só pode ser fechado quando a evidência E2E estiver registrada no próprio issue ou em PR/artefato claramente vinculado.
 
+## Label de automação
+
+### `jules`
+
+O label `jules` é um **gatilho de execução** para a integração oficial do Google Jules. Ele não representa tipo, prioridade, área, prontidão ou aprovação.
+
+Aplicar somente quando todas as condições abaixo forem verdadeiras:
+
+- a issue possui exatamente um tipo, uma prioridade e uma ou duas áreas;
+- `agent:ready` está aplicado;
+- `agent:blocked` e `needs:human-decision` não estão aplicados;
+- o corpo da issue ou um comentário explícito do mantenedor contém contrato completo de tarefa;
+- não existe tarefa do Jules ativa para a issue;
+- não existe PR aberta que já implemente o mesmo escopo;
+- dependências e conflitos com outras branches ou PRs foram verificados;
+- a branch-base é `master`, salvo autorização humana explícita para PR empilhada;
+- o destino esperado da PR está registrado;
+- arquivos permitidos, testes, riscos e ações fora de escopo estão registrados.
+
+O contrato de tarefa deve seguir [`docs/jules-dispatch-protocol.md`](jules-dispatch-protocol.md).
+
+Não aplicar `jules`:
+
+- para pedir correções em PR já existente; use `@jules` na própria PR;
+- enquanto houver decisão humana pendente;
+- quando o trabalho estiver bloqueado;
+- como fila genérica para qualquer issue pronta;
+- para iniciar duas tarefas concorrentes sobre o mesmo escopo;
+- sem confirmar que o aplicativo Jules possui acesso ao repositório.
+
+Se qualquer pré-requisito deixar de ser verdadeiro antes do início da execução, remova o label e registre a razão.
+
 ## Algoritmo obrigatório para agentes
 
 Antes de criar ou atualizar um issue:
@@ -163,6 +197,7 @@ Antes de criar ou atualizar um issue:
 8. Aplicar `agent:ready` somente se o trabalho estiver executável sem decisão adicional.
 9. Se usar `agent:blocked`, comentar o bloqueio concreto.
 10. Conferir que não existem dois labels de prioridade ou mais de dois labels de área.
+11. Antes de aplicar `jules`, executar integralmente o protocolo de despacho e verificar duplicidade de tarefa ou PR.
 
 ## Regras para criação de issues
 
@@ -217,7 +252,8 @@ Quando um issue depende de outro:
 - citar o número do issue bloqueador no corpo ou comentário;
 - usar `agent:blocked` se a dependência realmente impedir execução;
 - remover `agent:blocked` assim que a condição for satisfeita;
-- reavaliar `agent:ready` após o desbloqueio.
+- reavaliar `agent:ready` após o desbloqueio;
+- não aplicar `jules` antes da remoção comprovada do bloqueio.
 
 ## Automação
 
@@ -229,6 +265,8 @@ A automação:
 - atualiza cor e descrição de labels existentes;
 - não remove labels desconhecidos automaticamente;
 - falha diante de nomes duplicados, cores inválidas ou configuração incompleta.
+
+O label `jules` possui um efeito adicional externo ao workflow: quando aplicado a uma issue e o aplicativo Jules está autorizado, a integração do Google inicia uma tarefa e comenta automaticamente na issue.
 
 A remoção ou renomeação de um label deve ser uma mudança deliberada, revisada e acompanhada de migração dos issues afetados.
 
@@ -245,4 +283,5 @@ Um issue está corretamente classificado quando:
 [ ] necessidade de E2E está marcada
 [ ] bloqueios possuem comentário concreto
 [ ] agent:ready só aparece em trabalho realmente executável
+[ ] jules só aparece após o protocolo de despacho e sem tarefa ou PR duplicada
 ```

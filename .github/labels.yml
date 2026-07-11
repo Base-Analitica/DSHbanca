@@ -94,6 +94,11 @@ labels:
     description: "Não pode ser encerrado apenas com testes unitários; exige validação real de ponta a ponta."
     group: "execution"
 
+  - name: "jules"
+    color: "4285f4"
+    description: "Dispara uma tarefa do Google Jules para implementar esta issue sob protocolo controlado."
+    group: "automation"
+
 rules:
   type:
     required: true
@@ -134,3 +139,9 @@ rules:
       - "agent:blocked"
       - "needs:human-decision"
       - "needs:e2e"
+
+  automation:
+    required: false
+    exclusive: true
+    allowed:
+      - "jules"
