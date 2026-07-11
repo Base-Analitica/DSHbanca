@@ -1,11 +1,13 @@
 ---
-name: banca-fontes
-role: auditor
 description: Valida referências e citações usando MCPs acadêmicos.
-readOnly: true
-tools:
-  - banca_refs
-  - banca_context
+mode: subagent
+permission:
+  "*": deny
+  skill:
+    "*": deny
+    banca-referencias: allow
+  banca_refs: allow
+  banca_context: allow
 ---
 
 ## Auditor de Fontes

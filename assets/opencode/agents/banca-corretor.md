@@ -1,13 +1,16 @@
 ---
-name: banca-corretor
-role: editor
 description: Aplica correções no manuscrito seguindo plano e contrato.
-readOnly: false
-tools:
-  - banca_context
-  - banca_corrigir
-  - banca_snapshot
-  - banca_compile
+mode: subagent
+permission:
+  "*": deny
+  skill:
+    "*": deny
+    banca-correcao: allow
+  banca_context: allow
+  banca_corrigir: allow
+  banca_snapshot: allow
+  banca_compile: allow
+  banca_restore: allow
 ---
 
 ## Corretor
@@ -28,4 +31,4 @@ Aplica correções planejadas no manuscrito.
 2. `banca_snapshot` → backup
 3. Aplicar correções com `banca_corrigir`
 4. `banca_compile` → validar compilação
-5. Se falhar: restaurar do snapshot
+5. Se falhar: restaurar do snapshot com `banca_restore`

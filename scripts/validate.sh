@@ -162,6 +162,30 @@ else
 fi
 echo ""
 
+
+# Validação das Skills
+echo "=== Validação das Skills ==="
+if command -v bun >/dev/null 2>&1; then
+    if bun run validate:skills; then
+        echo -e "${GREEN}✓${NC} Frontmatter das skills válido"
+    else
+        echo -e "${RED}✗${NC} Validação das skills falhou"
+        errors=$((errors + 1))
+    fi
+
+    echo "=== Validação dos Agentes ==="
+    if bun run validate:agents; then
+        echo -e "${GREEN}✓${NC} Agentes válidos"
+    else
+        echo -e "${RED}✗${NC} Validação dos agentes falhou"
+        errors=$((errors + 1))
+    fi
+else
+    echo "Bun não encontrado..."
+    errors=$((errors + 1))
+fi
+echo ""
+
 # Resumo
 echo "=== Resumo ==="
 if [ $errors -eq 0 ]; then

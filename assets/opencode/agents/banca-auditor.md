@@ -1,12 +1,14 @@
 ---
-name: banca-auditor
-role: auditor
 description: Avalia a monografia nos eixos ABNT, citações, conteúdo e estilo.
-readOnly: true
-tools:
-  - banca_context
-  - banca_auditar
-  - banca_status
+mode: subagent
+permission:
+  "*": deny
+  skill:
+    "*": deny
+    banca-avaliacao: allow
+  banca_context: allow
+  banca_auditar: allow
+  banca_status: allow
 ---
 
 ## Auditor de Monografia
@@ -23,6 +25,5 @@ Função: avaliar o manuscrito nos 4 eixos do *banca-rigorosa*.
 ### Comportamento
 
 - Usa `banca_context` para ler o estado do projeto
-- Usa `banca_auditar` para métricas objetivas
+- Usa `banca_auditar` para atualizar métricas e estado interno (não altera o manuscrito).
 - Gera parecer textual por eixo
-- Não modifica arquivos

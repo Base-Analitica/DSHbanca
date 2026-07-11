@@ -1,12 +1,14 @@
 ---
-name: banca-loop-orquestrador
-role: orchestrator
 description: Orquestra etapa assistida e preparatória do loop de correção.
-readOnly: false
-tools:
-  - banca_loop
-  - banca_status
-  - banca_context
+mode: subagent
+permission:
+  "*": deny
+  skill:
+    "*": deny
+    banca-planejador: allow
+  banca_loop: allow
+  banca_status: allow
+  banca_context: allow
 ---
 
 ## Orquestrador de Loops

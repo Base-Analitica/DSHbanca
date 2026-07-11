@@ -19,14 +19,20 @@ assets/opencode/skills/
 
 ### Formato do Arquivo SKILL.md
 
+O OpenCode exige obrigatoriamente um bloco de `frontmatter` YAML no topo do `SKILL.md`, contendo regras rígidas para descoberta do Agent Skills.
+
 ```markdown
+---
+name: banca-nome-da-skill
+description: Descrição específica, não vazia e semanticamente útil da skill.
+---
 # Skill: Nome da Skill
 
-Descrição curta do que a skill faz.
+A descrição no frontmatter ajuda o Agente a decidir quando utilizar a skill. Não declare capacidades que o código não possui.
 
 ## Ativação
 
-Como invocar a skill (agente, comando, etc.).
+Como invocar a skill.
 
 ## Protocolo
 
@@ -34,86 +40,77 @@ Como invocar a skill (agente, comando, etc.).
 2. Passo 2
 3. ...
 
-## Configuração (opcional)
-
-Parâmetros específicos da skill.
-
 ## Saída
 
 O que a skill produz.
 ```
 
+### Campos do Frontmatter
+
+O OpenCode reconhece os seguintes campos no frontmatter das skills:
+
+- `name`
+- `description`
+- `license`
+- `compatibility`
+- `metadata`
+
+**Regras estritas:**
+- **`name`**: Obrigatório. 1 a 64 caracteres. Deve corresponder exatamente ao nome do diretório e seguir a regex `^[a-z0-9]+(-[a-z0-9]+)*$`.
+- **`description`**: Obrigatório. 1 a 1024 caracteres. Descreve sucintamente a skill para a heurística de roteamento do OpenCode.
+
+## Descoberta e Carregamento
+
+### Como uma skill é descoberta
+Uma skill é descoberta pelo OpenCode analisando o diretório de skills configurado no projeto (ex: `.opencode/skills/`). O OpenCode identifica cada subdiretório e lê o respectivo `SKILL.md`. Para a descoberta funcionar, o frontmatter YAML deve ser válido e o `name` no frontmatter deve bater com o nome da pasta. Arquivos copiados sem esse formato estrito falham silenciosamente e não são disponibilizados para o agente.
+
+### Como carregar pela ferramenta `skill`
+Após inicializar o projeto com `/banca-init`, a ferramenta nativa `skill` do OpenCode pode ser usada para carregar o workflow.
+Para invocar uma skill, você deve passar o `name` da skill (exemplo: `name: "banca-avaliacao"`), e não um nome de agente.
+
+**Nota Importante:** O nome carregado na ferramenta `skill` deve ser o nome da skill (`banca-avaliacao`, por exemplo). `@banca-auditor` é um agente, não uma skill. Você interage com `@banca-auditor` pelo chat para pedir que o agente trabalhe, mas quando se usa a ferramenta programática `skill`, deve-se informar o identificador da skill.
+
+## Procedimento de Verificação no OpenCode
+Ao testar no OpenCode:
+1. Crie um projeto temporário.
+2. Rode `/banca-init`.
+3. Abra o OpenCode e certifique-se de que as 8 skills aparecem disponíveis no contexto.
+4. Chame a ferramenta `skill` com `name: "banca-avaliacao"`.
+5. Verifique se o conteúdo correto foi carregado.
+
 ## Skills Disponíveis
 
 ### banca-avaliacao
-
+**Função:** Avalia monografias nos eixos ABNT, citações, conteúdo e estilo.
 **Arquivo:** `assets/opencode/skills/banca-avaliacao/SKILL.md`
 
-**Função:** Avalia monografias nos eixos ABNT, citações, conteúdo e estilo.
-
-**Ativação:** Invocar agente `@banca-auditor`.
-
-**Protocolo:**
-1. Carregar contexto via `banca_context`
-2. Executar `banca_auditar` para métricas objetivas
-3. Avaliar cada eixo com base no contexto e nas métricas
-4. Gerar parecer textual por eixo
-5. Delegar ao integrador para nota final
-
-**Rubrica (perfil `banca-rigorosa`):**
-- ABNT/Estrutura: peso 3
-- Citações/Fontes: peso 3
-- Conteúdo/Lógica: peso 2
-- Estilo Acadêmico: peso 2
-
-**Travas:**
-- >30% parágrafos sem citação → nota máxima 4.0
-- Ficha catalográfica caseira (sem CRB) → nota máxima 6.0
-- Conclusão rotulada como "Conclusão" em vez de "Considerações Finais" → nota máxima 6.0
-
-**Saída:** Relatório markdown em `.banca/reports/`.
-
 ### banca-correcao
-
+**Função:** Aplica correções ao manuscrito com proteção de guardrails.
 **Arquivo:** `assets/opencode/skills/banca-correcao/SKILL.md`
 
-**Função:** Aplica correções ao manuscrito com proteção de guardrails.
-
 ### banca-detector-ia
-
+**Função:** Analisa padrões estilísticos sinalizados pela heurística interna e produz uma triagem não conclusiva, sem determinar autoria por IA.
 **Arquivo:** `assets/opencode/skills/banca-detector-ia/SKILL.md`
 
-**Função:** Detecta padrões heurísticos de IA no texto.
-
 ### banca-grille
-
+**Função:** Executa entrevista ou clarificação com o usuário antes de aplicar alterações complexas.
 **Arquivo:** `assets/opencode/skills/banca-grille/SKILL.md`
 
-**Função:** Grade de avaliação para padronizar correções.
-
 ### banca-plagio
-
+**Função:** Verificação de plágio via CopySpider.
 **Arquivo:** `assets/opencode/skills/banca-plagio/SKILL.md`
 
-**Função:** Verificação de plágio via CopySpider.
-
 ### banca-planejador
-
+**Função:** Planeja correções com base na auditoria.
 **Arquivo:** `assets/opencode/skills/banca-planejador/SKILL.md`
 
-**Função:** Planeja correções com base na auditoria.
-
 ### banca-referencias
-
+**Função:** Valida referências bibliográficas.
 **Arquivo:** `assets/opencode/skills/banca-referencias/SKILL.md`
 
-**Função:** Valida referências bibliográficas.
-
 ### banca-revisor
-
+**Função:** Revisa o diff das correções aplicadas para bloquear regressões e proteger dados.
 **Arquivo:** `assets/opencode/skills/banca-revisor/SKILL.md`
-
-**Função:** Revisão acadêmica abrangente.
 
 ## Convenções de Nome
 
@@ -121,23 +118,3 @@ O que a skill produz.
 - **Agentes**: `banca-{nome}` (lowercase, kebab-case)
 - **Tools**: `banca_{nome}` (lowercase, snake_case)
 - **Comandos**: `/banca:{nome}` (lowercase, snake_case)
-
-## Como Adicionar Nova Skill
-
-1. Criar diretório em `assets/opencode/skills/{nome-skill}/`
-2. Criar arquivo `SKILL.md` seguindo o formato acima
-3. Se a skill requer nova tool, criar em `src/tools/`
-4. Registrar a tool em `src/index.ts`
-5. Adicionar import lazy no entry point
-6. Criar agente correspondente em `assets/opencode/agents/` (se necessário)
-7. Documentar em `docs/skill-spec.md`
-8. Criar teste em `tests/`
-
-## Como Revisar uma Skill
-
-1. Verificar se o `SKILL.md` está completo
-2. Verificar se a skill invoca tools corretas
-3. Verificar se a saída é clara e útil
-4. Verificar se há guardrails adequados
-5. Verificar se a skill está documentada
-6. Executar testes associados

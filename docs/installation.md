@@ -56,7 +56,7 @@ Após instalar (local ou futuramente via npm), adicione o plugin ao seu `opencod
 Após instalar, inicialize o projeto:
 
 ```bash
-/banca:init
+/banca-init
 ```
 
 Isso cria as seguintes estruturas:
@@ -138,7 +138,7 @@ Isso mostra o estado atual do projeto e confirma que everything está configurad
 | `bun run build` (tsc) | `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM CI` | Compilação TypeScript executada com sucesso localmente |
 | `npm install @opencode/banca` | `NÃO IMPLEMENTADO` \| `PENDENTE` | Pacote ainda não publicado no npm (`private: true`) |
 | `bun add @opencode/banca` | `NÃO IMPLEMENTADO` \| `PENDENTE` | Pacote ainda não publicado no npm (`private: true`) |
-| `/banca:init` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
+| `/banca-init` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Inicialização portável utilizando o comando `/banca-init` e ferramenta nativa `banca_init`. Substituiu a sintaxe anterior (`/banca:init`) para evitar problemas no Windows. |
 | `/banca:status` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
 | `/banca:auditar` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |
 | `/banca:corrigir` | `IMPLEMENTADO` \| `COBERTO POR TESTE LOCAL` \| `NÃO VALIDADO EM OPENCODE` | Requer teste real no OpenCode |

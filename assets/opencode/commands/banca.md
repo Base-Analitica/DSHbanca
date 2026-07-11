@@ -3,46 +3,24 @@ name: banca
 description: Comandos do sistema de banca acadêmica
 ---
 
-# Comandos `/banca:*`
+# Comandos do OpenBanca
 
-## `/banca:init`
-Inicializa estrutura `.banca/` no projeto.
+## Comando Registrado
 
-Flags:
-- `--force` sobrescreve config existente
+### `/banca-init`
+Inicializa a estrutura `.banca/` no projeto utilizando a ferramenta `banca_init` registrada no plugin.
 
-## `/banca:status`
-Exibe estado atual do projeto.
+## Funcionalidades Futuras Planejadas
 
-## `/banca:auditar`
-Executa painel de avaliação (4 avaliadores + integrador).
+Estes comandos ainda não possuem arquivos de comando registrados no OpenCode, mas suas funcionalidades poderão ser acessadas delegando tarefas para os agentes ou futuramente por comandos diretos:
 
-## `/banca:corrigir`
-Aplica correções com snapshot automático.
-
-Flags:
-- `--file <path>` especifica arquivo alvo
-- `--old <text>` texto a substituir
-- `--new <text>` novo texto
-- `--score <n>` nota anterior (valida regressão)
-
-## `/banca:refs`
-Gera certidão de referências.
-
-## `/banca:ia`
-Executa triagem de risco de IA.
-
-## `/banca:plagio <report-path>`
-Parseia relatório CopySpider.
-
-## `/banca:loop <loop-name>`
-Executa etapa assistida de preparação do loop (avalia meta de nota, cria snapshot de segurança e gera relatório com próximos passos). Não executa correções ou compilações autônomas.
-
-## `/banca:checklist`
-Verifica checklist de entrega.
-
-## `/banca:snapshot`
-Cria snapshot manual.
-
-## `/banca:compile`
-Compila manuscrito LaTeX.
+- `/banca:status` — Exibir estado atual do projeto.
+- `/banca:auditar` — Executar painel de avaliação (4 avaliadores + integrador).
+- `/banca:corrigir` — Aplicar correções com snapshot automático.
+- `/banca:refs` — Gerar certidão de referências.
+- `/banca:ia` — Executar triagem de risco de IA.
+- `/banca:plagio` — Parsear relatório CopySpider.
+- `/banca:loop` — Executar etapa assistida de preparação do loop.
+- `/banca:checklist` — Verificar checklist de entrega.
+- `/banca:snapshot` — Criar snapshot manual.
+- `/banca:compile` — Compilar manuscrito LaTeX.

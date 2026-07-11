@@ -6,18 +6,25 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "assets", "docs"],
+  "files": [
+    "dist",
+    "assets",
+    "docs"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "validate:skills": "bun run scripts/validate-skills.ts",
+    "validate:agents": "bun run scripts/validate-agents.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.13"
   },
   "devDependencies": {
+    "@types/node": "20.19.43",
     "typescript": "5.9.3",
-    "@types/node": "20.19.43"
+    "yaml": "2.7.0"
   }
 }

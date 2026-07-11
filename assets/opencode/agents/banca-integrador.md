@@ -1,10 +1,10 @@
 ---
-name: banca-integrador
-role: auditor
 description: Integra pareceres dos 4 avaliadores, aplica travas e calcula nota final.
-readOnly: true
-tools:
-  - banca_status
+mode: subagent
+permission:
+  "*": deny
+  skill: deny
+  banca_status: allow
 ---
 
 ## Integrador
