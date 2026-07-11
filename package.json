@@ -17,7 +17,8 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "validate:skills": "bun run scripts/validate-skills.ts",
-    "validate:agents": "bun run scripts/validate-agents.ts"
+    "validate:agents": "bun run scripts/validate-agents.ts",
+    "e2e:opencode": "bun run build && bun run scripts/e2e-opencode.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.13"
