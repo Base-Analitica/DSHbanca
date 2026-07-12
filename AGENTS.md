@@ -10,6 +10,7 @@ Estas regras se aplicam a qualquer agente que revise código, crie issues, imple
 4. Avalie apenas o estado real do código e da documentação. Não trate intenção, comentários ou arquivos copiados como prova de funcionamento.
 5. Quando a tarefa depender do OpenCode no Jules, leia `docs/jules-opencode-environment.md` e execute o preflight documentado antes de testar.
 6. Antes de aplicar ou remover o label `jules`, leia `docs/jules-dispatch-protocol.md`.
+7. Antes de preparar qualquer tarefa para o Jules, leia `docs/jules-task-sizing.md` e confirme que a issue é uma folha pequena e verificável.
 
 ## Labels obrigatórios
 
@@ -39,13 +40,18 @@ O label `jules` inicia uma tarefa automática do Google Jules a partir da issue.
 
 - confirme que a issue está corretamente triada e possui `agent:ready`;
 - confirme que não possui `agent:blocked` nem `needs:human-decision`;
+- confirme que é uma issue-folha, não uma issue-mãe, tracking issue ou plano amplo de migração;
+- aplique a política de `docs/jules-task-sizing.md`; tarefas com quatro ou mais pontos de complexidade devem ser divididas;
+- use como padrão um único componente, até três arquivos de produção esperados, até 250 linhas de produção alteradas e até seis comportamentos independentes;
+- exceções de tamanho exigem justificativa humana registrada antes do despacho;
 - verifique que não existe tarefa do Jules ou PR aberta já vinculada;
-- registre um contrato de tarefa completo, com evidência, escopo, critérios, testes, riscos, branch-base e destino da PR;
+- registre um contrato de tarefa completo, curto e específico, com evidência, escopo, critérios, testes, riscos, branch-base e destino da PR;
+- referencie regras permanentes em vez de copiar blocos extensos de governança em todo prompt;
 - use `master` como branch-base por padrão; PR empilhada exige autorização humana explícita e base exata;
 - não use o label para correções de uma PR existente; nesse caso, instrua `@jules` na própria PR;
 - remova o label se os pré-requisitos deixarem de ser verdadeiros.
 
-Consulte `docs/jules-dispatch-protocol.md` para o fluxo completo.
+Consulte `docs/jules-dispatch-protocol.md` para o fluxo completo e `docs/jules-task-sizing.md` para decomposição e limites.
 
 ## Testes com OpenCode no Jules
 
