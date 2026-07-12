@@ -45,7 +45,11 @@ O label `jules` inicia uma tarefa automática do Google Jules a partir da issue.
 - use como padrão um único componente, até três arquivos de produção esperados, até 250 linhas de produção alteradas e até seis comportamentos independentes;
 - exceções de tamanho exigem justificativa humana registrada antes do despacho;
 - verifique que não existe tarefa do Jules ou PR aberta já vinculada;
-- registre um contrato de tarefa completo, curto e específico, com evidência, escopo, critérios, testes, riscos, branch-base e destino da PR;
+- transforme o **corpo da issue** no contrato executável completo, curto e específico, com evidência, escopo, critérios, testes, riscos, branch-base e destino da PR;
+- não trate comentários como parte garantida do prompt inicial do despacho por label;
+- finalize e releia o corpo da issue antes de aplicar `jules`; nunca aplique o label primeiro e publique o contrato depois;
+- use comentários somente para decisões, evidência, bloqueios, desbloqueios e auditoria;
+- depois que o bot confirmar o início, não presuma que editar o corpo ou comentar atualizará a tarefa já criada;
 - referencie regras permanentes em vez de copiar blocos extensos de governança em todo prompt;
 - use `master` como branch-base por padrão; PR empilhada exige autorização humana explícita e base exata;
 - não use o label para correções de uma PR existente; nesse caso, instrua `@jules` na própria PR;
