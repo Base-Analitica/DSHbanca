@@ -8,6 +8,8 @@ O manual é **independente de fornecedor**. O nome da ferramenta CLI não altera
 
 Este documento **complementa, mas não substitui** a governança existente. A fonte principal de governança é `AGENTS.md`. Consulte os protocolos especializados conforme o tipo de tarefa:
 
+Para a regra arquitetural host-first, leia a seção **Invariante arquitetural: OpenCode é o harness** do `AGENTS.md` e a divisão conceitual em `docs/architecture.md`. Antes de criar cliente, adapter, runtime, servidor ou integração, registre no relatório as respostas do preflight: capacidade do OpenCode e API/configuração verificada, lacuna concreta, justificativa acadêmica, limite de escopo, evidência E2E real e plano de remoção/migração. A regra foi consolidada nas issues [#64](https://github.com/RenyEnnos/openbanca/issues/64) e [#65](https://github.com/RenyEnnos/openbanca/issues/65).
+
 | Situação | Documento obrigatório |
 |---|---|
 | Qualquer revisão ou avaliação de código | `docs/ai-review-protocol.md` |

@@ -13,6 +13,49 @@ Estas regras se aplicam a qualquer agente que revise código, crie issues, imple
 7. Antes de preparar qualquer tarefa para o Jules, leia `docs/jules-task-sizing.md` e confirme que a issue é uma folha pequena e verificável.
 8. Antes de codar com um agente de IA no terminal, leia `docs/terminal-agent-workflow.md` e siga o preflight, o fluxo de branch, os testes e o relatório de evidência ali definidos.
 
+## Invariante arquitetural: OpenCode é o harness
+
+Conforme a decisão vinculante da [issue #64](https://github.com/RenyEnnos/openbanca/issues/64), o OpenBanca é um plugin/camada de domínio acadêmico executado sobre o OpenCode. O OpenCode é o harness e fornece:
+
+- modelos, autenticação e integração geral com provedores;
+- sessões, histórico e contexto conversacional geral;
+- agents, subagents, tool loop e delegação;
+- commands e permissões;
+- configuração e lifecycle de MCPs.
+
+O OpenBanca é responsável somente pela camada acadêmica:
+
+- representação canônica do manuscrito e segmentação/cobertura por lotes;
+- rubricas e perfis institucionais;
+- findings estruturados, proveniência e fingerprints;
+- validações acadêmicas determinísticas e guardrails de correção;
+- snapshots, changesets e estado específico do projeto;
+- tools acadêmicas consumidas pelo OpenCode.
+
+### Preflight host-first obrigatório
+
+Antes de criar qualquer cliente, adapter, runtime, servidor, subprocesso permanente ou integração, o agente deve responder no relatório da tarefa:
+
+1. O OpenCode já fornece essa capacidade?
+2. Qual API, SDK, configuração, agent, skill, command, tool ou integração do OpenCode foi verificada?
+3. Qual lacuna concreta do host permanece?
+4. Por que a implementação pertence especificamente ao domínio acadêmico?
+5. Como o componente será impedido de evoluir para infraestrutura geral?
+6. Qual evidência E2E em OpenCode real comprova a necessidade?
+7. Qual será o plano de remoção ou migração se o OpenCode passar a fornecer a capacidade?
+
+Sem uma lacuna concreta e documentada, a implementação deve usar o OpenCode. O relatório deve ainda identificar, para cada integração, o proprietário do lifecycle, ambiente, credenciais, fallback e evidência E2E.
+
+### MCPs, agents e modelos
+
+MCPs devem ser configurados e gerenciados pelo OpenCode por padrão. Processo, autenticação, lifecycle, observabilidade e chamadas genéricas pertencem ao host. O OpenBanca pode implementar apenas comportamento acadêmico sobre resultados, como matching de referências, normalização de metadados, cache acadêmico, TTL/invalidação, classificação de correspondência e interpretação/persistência de evidências.
+
+Não criar nem ampliar cliente MCP genérico dentro do OpenBanca. Um adapter MCP interno só pode existir como exceção temporária, com lacuna comprovada do OpenCode, escopo acadêmico específico, teste E2E real, limites de segurança e plano de migração. O `src/lib/mcp_client.ts` não deve ser removido ou refatorado nesta regra documental.
+
+O OpenBanca não deve implementar seleção ou roteamento geral de modelos, autenticação direta em provedores de LLM, sessão/conversa paralela, agent loop genérico, executor autônomo de subagents, permission engine próprio ou sistema de commands paralelo. `banca_loop` não deve se transformar em um segundo harness; a coordenação de auditoria, correção, compilação, referências e revisão deve usar agents, skills, commands, tools, sessões e permissões do OpenCode.
+
+Embeddings locais com modelos pequenos e classificadores/rerankers locais são possibilidades futuras auxiliares para memória, recuperação e deduplicação, somente após benchmark e decisão explícita do mantenedor. Não são prioridade do roadmap imediato, não podem substituir a cobertura exaustiva do manuscrito, decidir quais partes do TCC deixar de analisar, criar servidor autônomo, roteador geral de modelos ou segundo harness, e não devem ser implementados nesta tarefa.
+
 ## Agentes de IA no terminal
 
 O procedimento operacional independente de fornecedor está em `docs/terminal-agent-workflow.md`. Esse manual não substitui este arquivo nem os protocolos especializados.
