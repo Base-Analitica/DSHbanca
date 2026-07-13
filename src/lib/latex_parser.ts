@@ -4,6 +4,10 @@ export interface LatexIncludeDirective {
   sourceFile: string
   line: number
   order: number
+  /** Zero-based index of the first character of the directive in the full content. */
+  startOffset: number
+  /** Zero-based exclusive end index of the directive in the full content. */
+  endOffset: number
 }
 
 /**
@@ -30,6 +34,25 @@ function stripComments(line: string): string {
 }
 
 /**
+ * Split content into lines while preserving each line's absolute start offset
+ * in the original string (so \r\n and \n both map correctly).
+ */
+function linesWithOffsets(content: string): Array<{ text: string; start: number; lineNumber: number }> {
+  const result: Array<{ text: string; start: number; lineNumber: number }> = []
+  let start = 0
+  let lineNumber = 1
+  const newlineRe = /\r?\n/g
+  let match: RegExpExecArray | null
+  while ((match = newlineRe.exec(content)) !== null) {
+    result.push({ text: content.slice(start, match.index), start, lineNumber })
+    start = match.index + match[0].length
+    lineNumber++
+  }
+  result.push({ text: content.slice(start), start, lineNumber })
+  return result
+}
+
+/**
  * Parses LaTeX source content for \input{...} and \include{...} directives.
  *
  * @param sourceFile The path or name of the source file being parsed.
@@ -38,7 +61,7 @@ function stripComments(line: string): string {
  */
 export function parseLatexIncludes(sourceFile: string, content: string): LatexIncludeDirective[] {
   const directives: LatexIncludeDirective[] = []
-  const lines = content.split(/\r?\n/)
+  const lines = linesWithOffsets(content)
   let globalOrder = 0
 
   // Regex to find \input{target} or \include{target}
@@ -46,9 +69,8 @@ export function parseLatexIncludes(sourceFile: string, content: string): LatexIn
   // We use \s* to allow spaces between command and brace.
   const directiveRegex = /(\\+)(input|include)\s*\{([^}]+)\}/g
 
-  for (let i = 0; i < lines.length; i++) {
-    const lineNumber = i + 1
-    const cleanLine = stripComments(lines[i])
+  for (const { text: line, start: lineStart, lineNumber } of lines) {
+    const cleanLine = stripComments(line)
 
     let match: RegExpExecArray | null
     directiveRegex.lastIndex = 0
@@ -62,12 +84,18 @@ export function parseLatexIncludes(sourceFile: string, content: string): LatexIn
       const kind = match[2] as "input" | "include"
       const target = match[3].trim()
 
+      // The last backslash is the command introducer; any preceding even pair is text.
+      const commandStartInLine = match.index + backslashes.length - 1
+      const commandEndInLine = match.index + match[0].length
+
       directives.push({
         kind,
         target,
         sourceFile,
         line: lineNumber,
         order: ++globalOrder,
+        startOffset: lineStart + commandStartInLine,
+        endOffset: lineStart + commandEndInLine,
       })
     }
   }

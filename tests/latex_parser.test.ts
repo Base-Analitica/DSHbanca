@@ -23,15 +23,20 @@ Hello World!
       target: "chapter1",
       sourceFile: fileName,
       line: 1,
-      order: 1
+      order: 1,
+      startOffset: 0,
+      endOffset: "\\input{chapter1}".length,
     })
 
+    const line2Start = content.indexOf("\\include{chapter2}")
     expect(results[1]).toEqual({
       kind: "include",
       target: "chapter2",
       sourceFile: fileName,
       line: 2,
-      order: 2
+      order: 2,
+      startOffset: line2Start,
+      endOffset: line2Start + "\\include{chapter2}".length,
     })
   })
 
@@ -55,6 +60,22 @@ Hello World!
     expect(results[1].target).toBe("b")
     expect(results[0].order).toBe(1)
     expect(results[1].order).toBe(2)
+    expect(results[0].startOffset).toBe(0)
+    expect(results[0].endOffset).toBe("\\input{a}".length)
+    expect(content.slice(results[0].startOffset, results[0].endOffset)).toBe("\\input{a}")
+    expect(content.slice(results[1].startOffset, results[1].endOffset)).toBe("\\include{b}")
+  })
+
+  test("reports deterministic offsets for prefix / mid / suffix on one line", () => {
+    const content = "prefixo \\input{a} meio \\include{b} sufixo"
+    const results = parseLatexIncludes(fileName, content)
+    expect(results).toHaveLength(2)
+    expect(content.slice(0, results[0].startOffset)).toBe("prefixo ")
+    expect(content.slice(results[0].endOffset, results[1].startOffset)).toBe(" meio ")
+    expect(content.slice(results[1].endOffset)).toBe(" sufixo")
+    expect(results[0].startOffset).toBeLessThan(results[0].endOffset)
+    expect(results[0].endOffset).toBeLessThanOrEqual(results[1].startOffset)
+    expect(results[1].startOffset).toBeLessThan(results[1].endOffset)
   })
 
   test("handles targets with and without .tex extension", () => {
@@ -108,6 +129,10 @@ Hello World!
     expect(results).toHaveLength(2)
     expect(results[0].target).toBe("active1")
     expect(results[1].target).toBe("active2")
+    // Odd parity with extra leading backslash: only the command introducer is in the span
+    const active2LineStart = content.indexOf("\\\\\\input{active2}")
+    expect(results[1].startOffset).toBe(active2LineStart + 2)
+    expect(content.slice(results[1].startOffset, results[1].endOffset)).toBe("\\input{active2}")
   })
 
   test("correctly identifies line numbers in mixed content", () => {
@@ -127,5 +152,7 @@ Some text here.
     expect(results).toHaveLength(2)
     expect(results[0]).toMatchObject({ target: "chapters/intro", line: 6 })
     expect(results[1]).toMatchObject({ target: "chapters/cap1", line: 10 })
+    expect(content.slice(results[0].startOffset, results[0].endOffset)).toBe("\\input{chapters/intro}")
+    expect(content.slice(results[1].startOffset, results[1].endOffset)).toBe("\\include{chapters/cap1}")
   })
 })
