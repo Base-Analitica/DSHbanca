@@ -11,6 +11,27 @@ Estas regras se aplicam a qualquer agente que revise código, crie issues, imple
 5. Quando a tarefa depender do OpenCode no Jules, leia `docs/jules-opencode-environment.md` e execute o preflight documentado antes de testar.
 6. Antes de aplicar ou remover o label `jules`, leia `docs/jules-dispatch-protocol.md`.
 7. Antes de preparar qualquer tarefa para o Jules, leia `docs/jules-task-sizing.md` e confirme que a issue é uma folha pequena e verificável.
+8. Antes de codar com um agente de IA no terminal, leia `docs/terminal-agent-workflow.md` e siga o preflight, o fluxo de branch, os testes e o relatório de evidência ali definidos.
+
+## Agentes de IA no terminal
+
+O procedimento operacional independente de fornecedor está em `docs/terminal-agent-workflow.md`. Esse manual não substitui este arquivo nem os protocolos especializados.
+
+Antes de editar, o agente deve:
+
+- ler `docs/terminal-agent-workflow.md`;
+- registrar branch, SHA, base autorizada da PR (`BASE_REF`, em geral `origin/master`), merge-base, versões de Node/Bun e alterações locais preexistentes;
+- preservar mudanças locais fora do escopo;
+- trabalhar na branch da tarefa (branch dedicada nova **ou** branch de PR existente, conforme o contrato);
+- não criar branch ou PR duplicada quando o trabalho já pertence a uma PR;
+- não fazer push direto em `master` nem force push sem autorização humana explícita;
+- revisar o diff local com `git --no-pager` e, no HEAD final, o range completo `"$BASE_REF"...HEAD`;
+- descobrir e executar testes compatíveis com os arquivos alterados e com `package.json` / CI;
+- classificar evidência por nível (inspeção, unitário, integração, OpenCode real, modelo real);
+- classificar fases externas como `PASS`, `FAIL` ou `BLOCKED`;
+- registrar honestamente testes não executados.
+
+Não substitua execução real por mock, build, plano, catálogo de modelos, arquivo em disco ou relato do agente. A suíte baseline atual do CI está documentada no fluxo terminal e em `.github/workflows/ci.yml`; confirme os scripts reais antes de declarar validação.
 
 ## Labels obrigatórios
 
