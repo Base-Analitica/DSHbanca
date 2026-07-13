@@ -31,6 +31,11 @@ export interface ProjectConfig {
   mcp: {
     crossrefAcademicEnabled: boolean
   }
+  analysis?: {
+    coverageMode: "exhaustive"
+    /** Limite de uma unidade de execução; o manuscrito completo pode gerar vários lotes. */
+    maxCharactersPerBatch: number
+  }
 }
 
 const DEFAULTS: ProjectConfig = {
@@ -45,7 +50,8 @@ const DEFAULTS: ProjectConfig = {
   targetScore: 9.0,
   providers: { references: { primary: "mcp:crossref-academic", fallbacks: ["rest:crossref", "cache"], timeoutMs: 20000 } },
   mcp: { crossrefAcademicEnabled: false },
-}
+  analysis: { coverageMode: "exhaustive", maxCharactersPerBatch: 50_000 },
+} as Required<ProjectConfig>
 
 export function getProjectDir(projectRoot: string): string {
   return join(projectRoot, ".banca")
@@ -71,19 +77,34 @@ function migrate(raw: any): any {
   return raw
 }
 
-export function loadConfig(projectRoot: string): ProjectConfig {
+function sanitizeAnalysis(rawAnalysis: any, defaults: Required<ProjectConfig>["analysis"]): Required<ProjectConfig>["analysis"] {
+  if (typeof rawAnalysis !== "object" || rawAnalysis === null || Array.isArray(rawAnalysis)) return { ...defaults }
+  const limit = rawAnalysis.maxCharactersPerBatch !== undefined
+    ? rawAnalysis.maxCharactersPerBatch
+    : rawAnalysis.budgetCharacters
+  return {
+    coverageMode: "exhaustive",
+    maxCharactersPerBatch: typeof limit === "number" && Number.isFinite(limit) && Number.isInteger(limit) && limit > 0
+      ? limit
+      : defaults.maxCharactersPerBatch,
+  }
+}
+
+export function loadConfig(projectRoot: string): Required<ProjectConfig> {
   const path = configPath(projectRoot)
-  if (!existsSync(path)) return { ...DEFAULTS, manuscript: { ...DEFAULTS.manuscript }, compile: { ...DEFAULTS.compile }, allowedPaths: [...DEFAULTS.allowedPaths], protectedPaths: [...DEFAULTS.protectedPaths], immutableFacts: [...DEFAULTS.immutableFacts], externalDependencies: [...DEFAULTS.externalDependencies], providers: { references: { ...DEFAULTS.providers.references } }, mcp: { ...DEFAULTS.mcp } }
+  const defs = DEFAULTS as Required<ProjectConfig>
+  if (!existsSync(path)) return { ...defs, manuscript: { ...defs.manuscript }, compile: { ...defs.compile }, allowedPaths: [...defs.allowedPaths], protectedPaths: [...defs.protectedPaths], immutableFacts: [...defs.immutableFacts], externalDependencies: [...defs.externalDependencies], providers: { references: { ...defs.providers.references } }, mcp: { ...defs.mcp }, analysis: { ...defs.analysis } }
   try {
     const raw = JSON.parse(readFileSync(path, "utf-8"))
     const migrated = migrate(raw)
     return sanitizeConfig(migrated)
   } catch {
-    return { ...DEFAULTS }
+    return { ...defs, manuscript: { ...defs.manuscript }, compile: { ...defs.compile }, allowedPaths: [...defs.allowedPaths], protectedPaths: [...defs.protectedPaths], immutableFacts: [...defs.immutableFacts], externalDependencies: [...defs.externalDependencies], providers: { references: { ...defs.providers.references } }, mcp: { ...defs.mcp }, analysis: { ...defs.analysis } }
   }
 }
 
-function sanitizeConfig(raw: any): ProjectConfig {
+function sanitizeConfig(raw: any): Required<ProjectConfig> {
+  const defs = DEFAULTS as Required<ProjectConfig>
   return {
     version: typeof raw.version === "number" ? raw.version : 1,
     manuscript: raw.manuscript ? {
@@ -93,11 +114,11 @@ function sanitizeConfig(raw: any): ProjectConfig {
       bib: raw.manuscript.bib || "referencias.bib",
       chapters: Array.isArray(raw.manuscript.chapters) ? raw.manuscript.chapters : ["capitulos/*.tex"],
       outputDir: raw.manuscript.outputDir || "trabalhos",
-    } : { ...DEFAULTS.manuscript },
+    } : { ...defs.manuscript },
     compile: raw.compile ? {
       enabled: raw.compile.enabled !== false,
       command: Array.isArray(raw.compile.command) ? raw.compile.command : ["lualatex", "bibtex", "lualatex", "lualatex"],
-    } : { ...DEFAULTS.compile },
+    } : { ...defs.compile },
     allowedPaths: Array.isArray(raw.allowedPaths) ? raw.allowedPaths : ["**/*.tex", "**/*.bib", "**/*.md"],
     protectedPaths: Array.isArray(raw.protectedPaths) ? raw.protectedPaths : ["dados/**", ".banca/snapshots/**", ".git/**"],
     immutableFacts: Array.isArray(raw.immutableFacts) ? raw.immutableFacts : [],
@@ -110,10 +131,11 @@ function sanitizeConfig(raw: any): ProjectConfig {
         fallbacks: Array.isArray(raw.providers.references.fallbacks) ? raw.providers.references.fallbacks : ["rest:crossref", "cache"],
         timeoutMs: typeof raw.providers.references.timeoutMs === "number" ? raw.providers.references.timeoutMs : 20000,
       },
-    } : { references: { ...DEFAULTS.providers.references } },
+    } : { references: { ...defs.providers.references } },
     mcp: raw.mcp ? {
       crossrefAcademicEnabled: raw.mcp.crossrefAcademicEnabled === true,
-    } : { ...DEFAULTS.mcp },
+    } : { ...defs.mcp },
+    analysis: sanitizeAnalysis(raw.analysis, defs.analysis),
   }
 }
 
@@ -126,14 +148,33 @@ export function validateConfig(projectRoot: string): { valid: boolean; errors: s
     if (typeof raw.version !== "number" || raw.version < 1) errs.push("version must be >= 1")
     if (raw.manuscript?.format && !["latex", "markdown", "docx"].includes(raw.manuscript.format)) errs.push("manuscript.format must be latex|markdown|docx")
     if (raw.targetScore !== undefined && (typeof raw.targetScore !== "number" || raw.targetScore < 0 || raw.targetScore > 10)) errs.push("targetScore must be 0-10")
+    if (raw.analysis !== undefined) {
+      if (typeof raw.analysis !== "object" || raw.analysis === null || Array.isArray(raw.analysis)) {
+        errs.push("analysis must be an object")
+      } else {
+        if (raw.analysis.coverageMode !== undefined && raw.analysis.coverageMode !== "exhaustive") {
+          errs.push('analysis.coverageMode must be "exhaustive"')
+        }
+        if (raw.analysis.maxCharactersPerBatch !== undefined && raw.analysis.budgetCharacters !== undefined) {
+          errs.push("analysis must not define both maxCharactersPerBatch and budgetCharacters")
+        }
+        const limit = raw.analysis.maxCharactersPerBatch !== undefined
+          ? raw.analysis.maxCharactersPerBatch
+          : raw.analysis.budgetCharacters
+        if (limit !== undefined && (typeof limit !== "number" || !Number.isFinite(limit) || !Number.isInteger(limit) || limit <= 0)) {
+          errs.push("analysis.maxCharactersPerBatch must be a finite integer > 0")
+        }
+      }
+    }
     return { valid: errs.length === 0, errors: errs }
   } catch (err: any) {
     return { valid: false, errors: [err.message] }
   }
 }
 
-export function saveConfig(projectRoot: string, config: ProjectConfig): void {
-  writeFileSync(configPath(projectRoot), JSON.stringify(config, null, 2), "utf-8")
+export function saveConfig(projectRoot: string, config: Required<ProjectConfig> | ProjectConfig): void {
+  const defaults = DEFAULTS as Required<ProjectConfig>
+  writeFileSync(configPath(projectRoot), JSON.stringify({ ...config, analysis: sanitizeAnalysis(config.analysis, defaults.analysis) }, null, 2), "utf-8")
 }
 
 export function ensureBancaDir(projectRoot: string): void {
