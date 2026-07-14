@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test"
 import {
   planAnalysisCoverage,
+  planExhaustiveAnalysisBatches,
   type AnalysisCoveragePlan,
 } from "../src/lib/analysis_coverage"
 import type {
@@ -671,5 +672,220 @@ describe("planAnalysisCoverage", () => {
     expect(plan.coverage.coveragePercent).toBe(100)
     expect(plan.chunks).toEqual([])
     expect(plan.fingerprint).toBe(FP)
+  })
+})
+
+describe("planExhaustiveAnalysisBatches", () => {
+  test("covers every ordered span across first, middle, and last batches", () => {
+    const ms = manuscript([
+      span("one.tex", "abc", 1, 1),
+      span("two.tex", "defg", 2, 2),
+      span("three.tex", "hij", 4, 4),
+    ])
+
+    const plan = planExhaustiveAnalysisBatches(ms, 4)
+
+    expect(plan.status).toBe("complete")
+    expect(plan.fingerprint).toBe(FP)
+    expect(plan.strategy).toBe("ordered-source-spans-exhaustive-v1")
+    expect(plan.coverage).toEqual({
+      totalCharacters: 10,
+      plannedCharacters: 10,
+      coveragePercent: 100,
+      batchCount: 3,
+    })
+    expect(plan.batches.map((batch) => batch.characters)).toEqual([4, 4, 2])
+    expect(plan.batches.flatMap((batch) => batch.chunks.map((chunk) => chunk.text)).join(""))
+      .toBe("abcdefghij")
+    expect(plan.batches.flatMap((batch) => batch.chunks.map((chunk) => chunk.source))).toEqual([
+      { file: "one.tex", startLine: 1, endLine: 1, sourceSpanIndex: 0, startOffset: 0, endOffset: 3 },
+      { file: "two.tex", startLine: 2, endLine: 2, sourceSpanIndex: 1, startOffset: 0, endOffset: 1 },
+      { file: "two.tex", startLine: 2, endLine: 2, sourceSpanIndex: 1, startOffset: 1, endOffset: 4 },
+      { file: "three.tex", startLine: 4, endLine: 4, sourceSpanIndex: 2, startOffset: 0, endOffset: 1 },
+      { file: "three.tex", startLine: 4, endLine: 4, sourceSpanIndex: 2, startOffset: 1, endOffset: 3 },
+    ])
+  })
+
+  test("keeps an exactly fitting document in one batch", () => {
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("main.tex", "abcd")]),
+      4,
+    )
+
+    expect(plan.status).toBe("complete")
+    expect(plan.batches).toHaveLength(1)
+    expect(plan.batches[0].characters).toBe(4)
+    expect(plan.batches[0].chunks[0].source).toMatchObject({
+      sourceSpanIndex: 0,
+      startOffset: 0,
+      endOffset: 4,
+    })
+  })
+
+  test("splits a monolithic span across as many batches as required with contiguous offsets", () => {
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("main.tex", "abcdefghij", 8, 8)]),
+      3,
+    )
+
+    expect(plan.batches.map((batch) => batch.characters)).toEqual([3, 3, 3, 1])
+    expect(plan.batches.every((batch) => batch.characters > 0 && batch.characters <= 3)).toBe(true)
+    const chunks = plan.batches.flatMap((batch) => batch.chunks)
+    expect(chunks.map((chunk) => chunk.text).join("")).toBe("abcdefghij")
+    expect(chunks.map((chunk) => [chunk.source.startOffset, chunk.source.endOffset])).toEqual([
+      [0, 3], [3, 6], [6, 9], [9, 10],
+    ])
+    expect(chunks.every((chunk) => chunk.source.sourceSpanIndex === 0)).toBe(true)
+  })
+
+  test("splits long single lines and never divides a UTF-16 surrogate pair", () => {
+    const text = "ab😀cdef"
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("line.tex", text, 42, 42)]),
+      3,
+    )
+
+    const chunks = plan.batches.flatMap((batch) => batch.chunks)
+    expect(chunks.map((chunk) => chunk.text)).toEqual(["ab", "😀c", "def"])
+    expect(chunks.map((chunk) => chunk.text).join("")).toBe(text)
+    expect(plan.batches.every((batch) => batch.characters <= 3)).toBe(true)
+    expect(chunks.every((chunk) => chunk.text.length <= 3)).toBe(true)
+    expect(chunks.map((chunk) => [chunk.source.startOffset, chunk.source.endOffset])).toEqual([
+      [0, 2], [2, 5], [5, 8],
+    ])
+  })
+
+  test("rejects a budget that cannot contain an astral UTF-16 scalar", () => {
+    expect(() => planExhaustiveAnalysisBatches(
+      manuscript([span("line.tex", "😀x")]),
+      1,
+    )).toThrow(RangeError)
+  })
+
+  test("includes the batch budget in deterministic batch identity", () => {
+    const ms = manuscript([span("main.tex", "abcdef")])
+
+    const three = planExhaustiveAnalysisBatches(ms, 3)
+    const four = planExhaustiveAnalysisBatches(ms, 4)
+
+    expect(three.batches[0].batchId).not.toBe(four.batches[0].batchId)
+  })
+
+  test("derives fragment line ranges from multiline source offsets", () => {
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("main.tex", "ab\ncd\nef", 10, 12)]),
+      3,
+    )
+
+    expect(plan.batches.flatMap((batch) => batch.chunks.map((chunk) => ({
+      text: chunk.text,
+      startLine: chunk.source.startLine,
+      endLine: chunk.source.endLine,
+    })))).toEqual([
+      { text: "ab\n", startLine: 10, endLine: 10 },
+      { text: "cd\n", startLine: 11, endLine: 11 },
+      { text: "ef", startLine: 12, endLine: 12 },
+    ])
+  })
+
+  test("large multiline span with unit batches keeps linear line provenance", () => {
+    // Structural regression for O(n²) lineAtOffset rescans: many chunks over one
+    // span must still yield offset-derived lines matching loader `\n` semantics
+    // (newline stays on the terminating line; endOffset exclusive). Avoids
+    // timing assertions — correctness of every unit chunk proves the precomputed
+    // index path is used for all offsets.
+    const lineBodies = Array.from({ length: 2500 }, (_, i) => `L${String(i).padStart(4, "0")}`)
+    const text = lineBodies.join("\n")
+    const baseLine = 7
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("big.tex", text, baseLine, baseLine + lineBodies.length - 1)]),
+      1,
+    )
+
+    const chunks = plan.batches.flatMap((batch) => batch.chunks)
+    expect(chunks).toHaveLength(text.length)
+    expect(plan.coverage.plannedCharacters).toBe(text.length)
+    expect(chunks.map((chunk) => chunk.text).join("")).toBe(text)
+
+    let expectedLine = baseLine
+    for (let offset = 0; offset < text.length; offset++) {
+      const chunk = chunks[offset]!
+      expect(chunk.text).toBe(text[offset]!)
+      expect(chunk.source).toEqual({
+        file: "big.tex",
+        startLine: expectedLine,
+        endLine: expectedLine,
+        sourceSpanIndex: 0,
+        startOffset: offset,
+        endOffset: offset + 1,
+      })
+      if (text.charCodeAt(offset) === 0x0a) expectedLine += 1
+    }
+    expect(expectedLine).toBe(baseLine + lineBodies.length - 1)
+  })
+
+  test("uses stable unique IDs and does not mutate complete input", () => {
+    const ms = manuscript([
+      span("a.tex", "abc"),
+      span("b.tex", "defgh"),
+    ])
+    const before = deepCloneJson(ms)
+    const first = planExhaustiveAnalysisBatches(ms, 3)
+    const second = planExhaustiveAnalysisBatches(ms, 3)
+    const ids = first.batches.map((batch) => batch.batchId)
+
+    expect(first).toEqual(second)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ms).toEqual(before)
+  })
+
+  test("blocks incomplete manuscripts with copied diagnostics", () => {
+    const diagnostics: LoaderDiagnostic[] = [{
+      code: "include_not_found",
+      severity: "error",
+      message: "missing",
+    }]
+    const ms = manuscript([span("main.tex", "partial")], {
+      complete: false,
+      fingerprint: null,
+      diagnostics,
+    })
+
+    const plan = planExhaustiveAnalysisBatches(ms, 2)
+
+    expect(plan.status).toBe("blocked")
+    expect(plan.fingerprint).toBeNull()
+    expect(plan.batches).toEqual([])
+    expect(plan.diagnostics).toEqual(diagnostics)
+    expect(plan.diagnostics).not.toBe(diagnostics)
+  })
+
+  test("rejects invalid structures and non-positive exhaustive budgets", () => {
+    const valid = manuscript([span("main.tex", "x")])
+    for (const bad of [0, -1, 1.5, Number.NaN, Infinity, -Infinity]) {
+      expect(() => planExhaustiveAnalysisBatches(valid, bad)).toThrow(RangeError)
+    }
+    expect(() => planExhaustiveAnalysisBatches(
+      { ...valid, orderedSources: "no" } as unknown as CanonicalLatexManuscriptResult,
+      1,
+    )).toThrow(TypeError)
+    expect(() => planExhaustiveAnalysisBatches(
+      manuscript([{ file: "a.tex", startLine: 1, endLine: 1 } as SourceSpan]),
+      1,
+    )).toThrow(TypeError)
+  })
+
+  test("returns full coverage with no batches for a complete empty manuscript", () => {
+    const plan = planExhaustiveAnalysisBatches(manuscript([]), 1)
+
+    expect(plan.status).toBe("complete")
+    expect(plan.fingerprint).toBe(FP)
+    expect(plan.batches).toEqual([])
+    expect(plan.coverage).toEqual({
+      totalCharacters: 0,
+      plannedCharacters: 0,
+      coveragePercent: 100,
+      batchCount: 0,
+    })
   })
 })
