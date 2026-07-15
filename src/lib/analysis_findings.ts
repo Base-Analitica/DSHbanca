@@ -4,8 +4,12 @@
  * Validates provenance (plan, fingerprint, batch, file, line range), assigns a
  * deterministic SHA-256 findingId, and merges exact duplicates idempotently.
  *
+ * Plan shape and canonical planId come from analysis-checkpoint-v2
+ * (`computePlanIdentity`). Findings add only: source-span fragment continuity,
+ * fingerprint/batch/file matching, and line-range union coverage.
+ *
  * No filesystem, ProjectState, tools, OpenCode, models, clock, randomness,
- * scoring, or global state. Plan identity is delegated to computePlanIdentity.
+ * scoring, or global state.
  */
 
 import { createHash } from "node:crypto"
@@ -360,159 +364,48 @@ function assertValidStoredFinding(
 }
 
 /**
- * Fail-closed validation of every batch chunk (not covered by computePlanIdentity).
- * Global chunk indices must be sequential from 0 across batches in order.
- * Empty chunks are rejected. Same-span fragments must be contiguous in plan order.
- * batch.characters must equal sum of chunk.text.length.
+ * Source-span fragment continuity across the plan.
+ *
+ * Call only after `resolvePlanId` / `computePlanIdentity` succeeds. Checkpoint
+ * v2 already guarantees batch/chunk shape, global indices, non-empty text,
+ * source file/lines, sourceSpanIndex type, offsets, offset↔text.length
+ * coherence, batch character sums, and content digest binding.
+ *
+ * Findings still require these continuity invariants (not in checkpoint v2):
+ * - sourceSpanIndex is non-decreasing in global plan order
+ * - first fragment of each span has startOffset === 0
+ * - fragments of the same sourceSpanIndex share the same file
+ * - consecutive same-span fragments are contiguous
+ *   (startOffset === previous endOffset)
  */
-function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
-  if (!Array.isArray(plan.batches)) {
-    throw new AnalysisFindingError(
-      "invalid_plan",
-      "plan.batches must be an array",
-    )
-  }
-
-  let expectedChunkIndex = 0
-  // Continuity state for source-span fragments across the whole plan.
+function assertPlanSourceSpanContinuity(plan: ExhaustiveAnalysisPlan): void {
   let prevSpanIndex: number | null = null
   let prevSpanFile: string | null = null
   let prevEndOffset: number | null = null
 
   for (let bi = 0; bi < plan.batches.length; bi++) {
     const batch = plan.batches[bi]
-    if (batch == null || typeof batch !== "object") {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `plan.batches[${bi}] is malformed`,
-      )
-    }
-    if (batch.index !== bi) {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `plan.batches[${bi}].index must equal ${bi}`,
-      )
-    }
-    if (typeof batch.batchId !== "string" || batch.batchId.length === 0) {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `plan.batches[${bi}].batchId must be a non-empty string`,
-      )
-    }
-    if (!Array.isArray(batch.chunks)) {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `plan.batches[${bi}].chunks must be an array`,
-      )
-    }
-
-    let textSum = 0
     for (let ci = 0; ci < batch.chunks.length; ci++) {
       const chunk = batch.chunks[ci]
       const path = `plan.batches[${bi}].chunks[${ci}]`
-      if (chunk == null || typeof chunk !== "object") {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path} is malformed`,
-        )
-      }
-      if (
-        typeof chunk.index !== "number" ||
-        !Number.isInteger(chunk.index) ||
-        chunk.index !== expectedChunkIndex
-      ) {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.index must be sequential global index ${expectedChunkIndex}`,
-        )
-      }
-      if (typeof chunk.text !== "string") {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.text must be a string`,
-        )
-      }
-      if (chunk.text.length === 0) {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.text must be non-empty`,
-        )
-      }
-      const source = chunk.source
-      if (source == null || typeof source !== "object") {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.source is malformed`,
-        )
-      }
-      if (typeof source.file !== "string" || source.file.length === 0) {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.source.file must be a non-empty string`,
-        )
-      }
-      const s = source.startLine
-      const e = source.endLine
-      if (
-        typeof s !== "number" ||
-        typeof e !== "number" ||
-        !Number.isInteger(s) ||
-        !Number.isInteger(e) ||
-        s < 1 ||
-        e < s
-      ) {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.source line range is malformed`,
-        )
-      }
-      if (
-        typeof source.sourceSpanIndex !== "number" ||
-        !Number.isInteger(source.sourceSpanIndex) ||
-        source.sourceSpanIndex < 0
-      ) {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.source.sourceSpanIndex must be an integer >= 0`,
-        )
-      }
-      const startOffset = source.startOffset
-      const endOffset = source.endOffset
-      if (
-        typeof startOffset !== "number" ||
-        typeof endOffset !== "number" ||
-        !Number.isInteger(startOffset) ||
-        !Number.isInteger(endOffset) ||
-        startOffset < 0 ||
-        endOffset <= startOffset
-      ) {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}.source offsets are malformed (require 0 <= startOffset < endOffset)`,
-        )
-      }
-      if (endOffset - startOffset !== chunk.text.length) {
-        throw new AnalysisFindingError(
-          "invalid_plan",
-          `${path}: endOffset - startOffset must equal text.length`,
-        )
-      }
+      const { sourceSpanIndex, file, startOffset, endOffset } = chunk.source
 
-      // Same-span fragment continuity / non-decreasing sourceSpanIndex.
-      if (prevSpanIndex === null) {
+      if (prevSpanIndex === null || sourceSpanIndex > prevSpanIndex) {
+        // First fragment of the plan or of a new span.
         if (startOffset !== 0) {
           throw new AnalysisFindingError(
             "invalid_plan",
             `${path}: first fragment of a source span must have startOffset === 0`,
           )
         }
-      } else if (source.sourceSpanIndex < prevSpanIndex) {
+      } else if (sourceSpanIndex < prevSpanIndex) {
         throw new AnalysisFindingError(
           "invalid_plan",
           `${path}.source.sourceSpanIndex must be non-decreasing in plan order`,
         )
-      } else if (source.sourceSpanIndex === prevSpanIndex) {
-        if (source.file !== prevSpanFile) {
+      } else {
+        // Same span as the previous fragment.
+        if (file !== prevSpanFile) {
           throw new AnalysisFindingError(
             "invalid_plan",
             `${path}.source.file must match prior fragment of the same sourceSpanIndex`,
@@ -524,32 +417,11 @@ function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
             `${path}: same-span fragments must be contiguous (startOffset === previous endOffset)`,
           )
         }
-      } else {
-        // New span: first fragment must start at offset 0.
-        if (startOffset !== 0) {
-          throw new AnalysisFindingError(
-            "invalid_plan",
-            `${path}: first fragment of a source span must have startOffset === 0`,
-          )
-        }
       }
 
-      prevSpanIndex = source.sourceSpanIndex
-      prevSpanFile = source.file
+      prevSpanIndex = sourceSpanIndex
+      prevSpanFile = file
       prevEndOffset = endOffset
-      textSum += chunk.text.length
-      expectedChunkIndex += 1
-    }
-
-    if (
-      typeof batch.characters !== "number" ||
-      !Number.isInteger(batch.characters) ||
-      batch.characters !== textSum
-    ) {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `plan.batches[${bi}].characters must equal sum of chunk.text.length (${textSum})`,
-      )
     }
   }
 }
@@ -676,10 +548,10 @@ export function createAnalysisFinding(
   plan: ExhaustiveAnalysisPlan,
   input: AnalysisFindingInput,
 ): AnalysisFinding {
-  // Canonical plan shape + identity (fail-closed via AnalysisCheckpointError map).
+  // Canonical plan shape + identity (checkpoint v2; maps to invalid_plan).
   const planId = resolvePlanId(plan)
-  // Chunk/batch provenance is outside computePlanIdentity — validate fully here.
-  assertPlanChunkProvenance(plan)
+  // Continuity only: shape/content already validated by resolvePlanId.
+  assertPlanSourceSpanContinuity(plan)
 
   if (plan.status === "blocked") {
     throw new AnalysisFindingError(

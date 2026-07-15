@@ -398,7 +398,9 @@ describe("createAnalysisFinding — rejection", () => {
     }
   })
 
-  test("rejects malformed chunk provenance with invalid_plan (fail-closed)", () => {
+  test("rejects malformed chunk provenance with invalid_plan via checkpoint v2", () => {
+    // Shape/content failures are owned by computePlanIdentity; findings map them
+    // to AnalysisFindingError("invalid_plan") without a second structural walker.
     const plan = threeBatchPlan()
     const input = baseInput(plan)
 
@@ -422,6 +424,13 @@ describe("createAnalysisFinding — rejection", () => {
     // Missing text
     expectInvalidPlan((p) => {
       delete (p.batches[0].chunks[0] as { text?: string }).text
+    })
+
+    // Empty text
+    expectInvalidPlan((p) => {
+      const c = p.batches[0].chunks[0]
+      c.text = ""
+      c.source.endOffset = c.source.startOffset
     })
 
     // Wrong endOffset vs text.length
@@ -450,7 +459,6 @@ describe("createAnalysisFinding — rejection", () => {
       const c = p.batches[0].chunks[0]
       c.source.startOffset = 5
       c.source.endOffset = 2
-      // keep characters consistent enough that only offset shape fails first
     })
 
     // Non-integer offsets
@@ -500,8 +508,9 @@ describe("createAnalysisFinding — rejection", () => {
     )
   })
 
-  test("rejects same-span fragment gap, overlap, reorder, and decreasing span index", () => {
+  test("rejects same-span fragment gap, overlap, reorder, file drift, and decreasing span index", () => {
     // Mid-line split: single 10-char line, budget 4 → contiguous fragments of span 0.
+    // Shape still valid under checkpoint v2; continuity is findings-local.
     const plan = planExhaustiveAnalysisBatches(
       manuscript([span("line.tex", "0123456789", 1, 1)]),
       4,
@@ -545,15 +554,20 @@ describe("createAnalysisFinding — rejection", () => {
       c1.text = c0.text
     })
 
-    // Decreasing sourceSpanIndex
+    // Divergent file on the same sourceSpanIndex (shape-valid, continuity-invalid)
     expectInvalidPlan((p) => {
-      p.batches[1].chunks[0].source.sourceSpanIndex = -1 as unknown as number
-      // -1 also fails integer >= 0; use 0 then force decrease from later fragment
+      p.batches[1].chunks[0].source.file = "other.tex"
     })
+
+    // First fragment of a span must start at offset 0
     expectInvalidPlan((p) => {
-      // First chunk span 0; make second claim span 0 is fine; make third claim span 0
-      // after we've already left... force batch 2 to sourceSpanIndex 0 while batch1 stays 0
-      // better: set batch 0 to span 1 and batch 1 to span 0
+      const c0 = p.batches[0].chunks[0]
+      c0.source.startOffset = 1
+      c0.source.endOffset = 1 + c0.text.length
+    })
+
+    // Decreasing sourceSpanIndex (type still valid: integer >= 0)
+    expectInvalidPlan((p) => {
       p.batches[0].chunks[0].source.sourceSpanIndex = 1
       p.batches[0].chunks[0].source.startOffset = 0
       p.batches[1].chunks[0].source.sourceSpanIndex = 0
@@ -561,6 +575,40 @@ describe("createAnalysisFinding — rejection", () => {
       p.batches[1].chunks[0].source.endOffset =
         p.batches[1].chunks[0].text.length
     })
+  })
+
+  test("same-length chunk text change yields different planId and findingId", () => {
+    // Checkpoint v2 binds SHA-256 of chunk text; length alone is insufficient.
+    const plan = threeBatchPlan()
+    const input = baseInput(plan)
+    const original = createAnalysisFinding(plan, input)
+
+    const altered = deepCloneJson(plan) as ExhaustiveAnalysisPlan
+    const chunk = altered.batches[0].chunks[0]
+    expect(chunk.text.length).toBeGreaterThan(0)
+    // Replace with different characters of identical length; keep file/lines/offsets.
+    chunk.text = "x".repeat(chunk.text.length)
+
+    const fromAltered = createAnalysisFinding(altered, baseInput(altered))
+    expect(fromAltered.planId).not.toBe(original.planId)
+    expect(fromAltered.findingId).not.toBe(original.findingId)
+    expect(fromAltered.planId).toBe(computePlanIdentity(altered))
+    expect(original.planId).toBe(computePlanIdentity(plan))
+  })
+
+  test("findings module does not implement a second plan identity", async () => {
+    const source = await Bun.file(
+      new URL("../src/lib/analysis_findings.ts", import.meta.url),
+    ).text()
+    // Sole plan identity path is computePlanIdentity via resolvePlanId.
+    expect(source).toContain("computePlanIdentity")
+    expect(source).toMatch(/function resolvePlanId/)
+    expect(source).not.toMatch(/function\s+\w*PlanIdentity\w*/)
+    expect(source).not.toMatch(/analysis-checkpoint-v1/)
+    // createHash is only for findingId framing, not a local plan digest.
+    const hashSites = source.match(/createHash\s*\(/g) ?? []
+    expect(hashSites.length).toBe(1)
+    expect(source).toContain("function computeFindingIdentity")
   })
 })
 
