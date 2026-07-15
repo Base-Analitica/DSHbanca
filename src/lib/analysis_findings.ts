@@ -362,6 +362,7 @@ function assertValidStoredFinding(
 /**
  * Fail-closed validation of every batch chunk (not covered by computePlanIdentity).
  * Global chunk indices must be sequential from 0 across batches in order.
+ * Empty chunks are rejected. Same-span fragments must be contiguous in plan order.
  * batch.characters must equal sum of chunk.text.length.
  */
 function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
@@ -373,6 +374,11 @@ function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
   }
 
   let expectedChunkIndex = 0
+  // Continuity state for source-span fragments across the whole plan.
+  let prevSpanIndex: number | null = null
+  let prevSpanFile: string | null = null
+  let prevEndOffset: number | null = null
+
   for (let bi = 0; bi < plan.batches.length; bi++) {
     const batch = plan.batches[bi]
     if (batch == null || typeof batch !== "object") {
@@ -426,6 +432,12 @@ function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
           `${path}.text must be a string`,
         )
       }
+      if (chunk.text.length === 0) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.text must be non-empty`,
+        )
+      }
       const source = chunk.source
       if (source == null || typeof source !== "object") {
         throw new AnalysisFindingError(
@@ -472,11 +484,11 @@ function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
         !Number.isInteger(startOffset) ||
         !Number.isInteger(endOffset) ||
         startOffset < 0 ||
-        endOffset < startOffset
+        endOffset <= startOffset
       ) {
         throw new AnalysisFindingError(
           "invalid_plan",
-          `${path}.source offsets are malformed (require 0 <= startOffset <= endOffset)`,
+          `${path}.source offsets are malformed (require 0 <= startOffset < endOffset)`,
         )
       }
       if (endOffset - startOffset !== chunk.text.length) {
@@ -485,6 +497,46 @@ function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
           `${path}: endOffset - startOffset must equal text.length`,
         )
       }
+
+      // Same-span fragment continuity / non-decreasing sourceSpanIndex.
+      if (prevSpanIndex === null) {
+        if (startOffset !== 0) {
+          throw new AnalysisFindingError(
+            "invalid_plan",
+            `${path}: first fragment of a source span must have startOffset === 0`,
+          )
+        }
+      } else if (source.sourceSpanIndex < prevSpanIndex) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.source.sourceSpanIndex must be non-decreasing in plan order`,
+        )
+      } else if (source.sourceSpanIndex === prevSpanIndex) {
+        if (source.file !== prevSpanFile) {
+          throw new AnalysisFindingError(
+            "invalid_plan",
+            `${path}.source.file must match prior fragment of the same sourceSpanIndex`,
+          )
+        }
+        if (startOffset !== prevEndOffset) {
+          throw new AnalysisFindingError(
+            "invalid_plan",
+            `${path}: same-span fragments must be contiguous (startOffset === previous endOffset)`,
+          )
+        }
+      } else {
+        // New span: first fragment must start at offset 0.
+        if (startOffset !== 0) {
+          throw new AnalysisFindingError(
+            "invalid_plan",
+            `${path}: first fragment of a source span must have startOffset === 0`,
+          )
+        }
+      }
+
+      prevSpanIndex = source.sourceSpanIndex
+      prevSpanFile = source.file
+      prevEndOffset = endOffset
       textSum += chunk.text.length
       expectedChunkIndex += 1
     }

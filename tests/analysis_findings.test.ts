@@ -458,6 +458,110 @@ describe("createAnalysisFinding — rejection", () => {
       p.batches[0].chunks[0].source.startOffset = 0.5 as unknown as number
     })
   })
+
+  test("rejects empty chunk injection (ghost file coverage blocked)", () => {
+    const plan = threeBatchPlan()
+    const tampered = deepCloneJson(plan) as ExhaustiveAnalysisPlan
+    const lastBatch = tampered.batches[tampered.batches.length - 1]
+    const lastChunk = lastBatch.chunks[lastBatch.chunks.length - 1]
+    // Empty chunk does not change batch.characters sum; would invent ghost.tex coverage.
+    lastBatch.chunks.push({
+      index: lastChunk.index + 1,
+      text: "",
+      source: {
+        file: "ghost.tex",
+        startLine: 1,
+        endLine: 99,
+        sourceSpanIndex: lastChunk.source.sourceSpanIndex + 1,
+        startOffset: 0,
+        endOffset: 0,
+      },
+    })
+
+    try {
+      createAnalysisFinding(
+        tampered,
+        baseInput(tampered, {
+          batchId: lastBatch.batchId,
+          file: "ghost.tex",
+          startLine: 1,
+          endLine: 99,
+        }),
+      )
+      expect.unreachable("expected invalid_plan for empty chunk")
+    } catch (e) {
+      expect(e).toBeInstanceOf(AnalysisFindingError)
+      expect((e as AnalysisFindingError).code).toBe("invalid_plan")
+    }
+
+    // Valid finding on real batch content still works on the unmutated plan.
+    expect(createAnalysisFinding(plan, baseInput(plan)).file).not.toBe(
+      "ghost.tex",
+    )
+  })
+
+  test("rejects same-span fragment gap, overlap, reorder, and decreasing span index", () => {
+    // Mid-line split: single 10-char line, budget 4 → contiguous fragments of span 0.
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("line.tex", "0123456789", 1, 1)]),
+      4,
+    )
+    expect(plan.batches.length).toBe(3)
+    const input = baseInput(plan)
+
+    const expectInvalidPlan = (mutator: (p: ExhaustiveAnalysisPlan) => void) => {
+      const tampered = deepCloneJson(plan) as ExhaustiveAnalysisPlan
+      mutator(tampered)
+      try {
+        createAnalysisFinding(tampered, input)
+        expect.unreachable("expected invalid_plan")
+      } catch (e) {
+        expect(e).toBeInstanceOf(AnalysisFindingError)
+        expect((e as AnalysisFindingError).code).toBe("invalid_plan")
+      }
+    }
+
+    // Gap: second fragment starts after previous endOffset
+    expectInvalidPlan((p) => {
+      const c1 = p.batches[1].chunks[0]
+      c1.source.startOffset = c1.source.startOffset + 1
+      c1.source.endOffset = c1.source.startOffset + c1.text.length
+    })
+
+    // Overlap: second fragment starts before previous endOffset
+    expectInvalidPlan((p) => {
+      const c1 = p.batches[1].chunks[0]
+      c1.source.startOffset = c1.source.startOffset - 1
+      c1.source.endOffset = c1.source.startOffset + c1.text.length
+    })
+
+    // Reorder: second fragment claims offsets of first (not contiguous after first)
+    expectInvalidPlan((p) => {
+      const c0 = p.batches[0].chunks[0]
+      const c1 = p.batches[1].chunks[0]
+      c1.source.startOffset = c0.source.startOffset
+      c1.source.endOffset = c0.source.endOffset
+      // Keep text length consistent with offsets
+      c1.text = c0.text
+    })
+
+    // Decreasing sourceSpanIndex
+    expectInvalidPlan((p) => {
+      p.batches[1].chunks[0].source.sourceSpanIndex = -1 as unknown as number
+      // -1 also fails integer >= 0; use 0 then force decrease from later fragment
+    })
+    expectInvalidPlan((p) => {
+      // First chunk span 0; make second claim span 0 is fine; make third claim span 0
+      // after we've already left... force batch 2 to sourceSpanIndex 0 while batch1 stays 0
+      // better: set batch 0 to span 1 and batch 1 to span 0
+      p.batches[0].chunks[0].source.sourceSpanIndex = 1
+      p.batches[0].chunks[0].source.startOffset = 0
+      p.batches[1].chunks[0].source.sourceSpanIndex = 0
+      p.batches[1].chunks[0].source.startOffset = 0
+      p.batches[1].chunks[0].source.endOffset =
+        p.batches[1].chunks[0].text.length
+    })
+  })
 })
 
 describe("mid-line split provenance", () => {
