@@ -36,6 +36,11 @@ function span(
   }
 }
 
+/** Build multi-line SourceSpan text from real line breaks (planner uses `\n`). */
+function linesText(lines: string[]): string {
+  return lines.join("\n")
+}
+
 function manuscript(
   orderedSources: SourceSpan[],
   opts?: {
@@ -74,20 +79,31 @@ function threeBatchPlan(): ExhaustiveAnalysisPlan {
 }
 
 /**
- * Multi-line spans so line-range coverage can be tested meaningfully.
- * chap.tex lines 1-10 (content length padded), other.tex lines 20-25.
- * Budget large enough that each file can land in separate batches.
+ * Multi-line spans with real newlines so planner-derived line ranges are meaningful.
+ * chap.tex lines 1-5 (two contiguous source spans → union coverage in one batch),
+ * other.tex lines 10-12. Large budget keeps everything in a single batch.
  */
 function multiLinePlan(): ExhaustiveAnalysisPlan {
-  // 40 chars on lines 1-10 of chap.tex, 20 chars on lines 20-25 of other.tex
-  const chapText = "L".repeat(40)
-  const otherText = "O".repeat(20)
   return planExhaustiveAnalysisBatches(
     manuscript([
-      span("chap.tex", chapText, 1, 10),
-      span("other.tex", otherText, 20, 25),
+      span("chap.tex", linesText(["L1aaaa", "L2bbbb", "L3cccc"]), 1, 3),
+      span("chap.tex", linesText(["L4dddd", "L5eeee"]), 4, 5),
+      span("other.tex", linesText(["O10xx", "O11yy", "O12zz"]), 10, 12),
     ]),
-    30,
+    200,
+  )
+}
+
+/**
+ * Same file with a deliberate gap in coverage (lines 1-2 and 5-6, no 3-4).
+ */
+function gappedMultiLinePlan(): ExhaustiveAnalysisPlan {
+  return planExhaustiveAnalysisBatches(
+    manuscript([
+      span("chap.tex", linesText(["L1aaaa", "L2bbbb"]), 1, 2),
+      span("chap.tex", linesText(["L5eeee", "L6ffff"]), 5, 6),
+    ]),
+    200,
   )
 }
 
@@ -277,6 +293,21 @@ describe("createAnalysisFinding — rejection", () => {
     }
   })
 
+  test("rejects malformed plan via canonical assertPlanShape", () => {
+    const plan = threeBatchPlan()
+    const broken = deepCloneJson(plan) as ExhaustiveAnalysisPlan
+    // Violate complete-plan invariant checked by analysis_checkpoint.assertPlanShape
+    broken.coverage.coveragePercent = 50
+
+    try {
+      createAnalysisFinding(broken, baseInput(plan))
+      expect.unreachable("expected invalid_plan")
+    } catch (e) {
+      expect(e).toBeInstanceOf(AnalysisFindingError)
+      expect((e as AnalysisFindingError).code).toBe("invalid_plan")
+    }
+  })
+
   test("rejects file absent from batch", () => {
     const plan = threeBatchPlan()
     // first batch has one.tex and two.tex, not three.tex
@@ -306,63 +337,6 @@ describe("createAnalysisFinding — rejection", () => {
         baseInput(plan, { file: "./one.tex" }),
       ),
     ).toThrow(AnalysisFindingError)
-  })
-
-  test("rejects line range before, after, or partially outside batch coverage", () => {
-    const plan = multiLinePlan()
-    // Locate batch that covers chap.tex
-    const chapBatch = plan.batches.find((b) =>
-      b.chunks.some((c) => c.source.file === "chap.tex"),
-    )
-    expect(chapBatch).toBeDefined()
-    const chapChunk = chapBatch!.chunks.find((c) => c.source.file === "chap.tex")!
-    const coveredStart = chapChunk.source.startLine
-    const coveredEnd = chapChunk.source.endLine
-
-    const mk = (startLine: number, endLine: number) =>
-      createAnalysisFinding(
-        plan,
-        baseInput(plan, {
-          batchId: chapBatch!.batchId,
-          file: "chap.tex",
-          startLine,
-          endLine,
-          manuscriptFingerprint: plan.fingerprint!,
-        }),
-      )
-
-    // Valid interior range
-    expect(mk(coveredStart, coveredEnd).file).toBe("chap.tex")
-
-    // Before coverage
-    expect(() => mk(coveredStart - 5, coveredStart - 1)).toThrow(
-      AnalysisFindingError,
-    )
-    // After coverage
-    expect(() => mk(coveredEnd + 1, coveredEnd + 3)).toThrow(
-      AnalysisFindingError,
-    )
-    // Partially outside (starts before)
-    if (coveredStart > 1) {
-      expect(() => mk(coveredStart - 1, coveredEnd)).toThrow(
-        AnalysisFindingError,
-      )
-    } else {
-      // force partial by extending past end
-      expect(() => mk(coveredStart, coveredEnd + 1)).toThrow(
-        AnalysisFindingError,
-      )
-    }
-    // Partially outside (ends after)
-    expect(() => mk(coveredStart, coveredEnd + 2)).toThrow(
-      AnalysisFindingError,
-    )
-
-    try {
-      mk(coveredEnd + 1, coveredEnd + 2)
-    } catch (e) {
-      expect((e as AnalysisFindingError).code).toBe("line_range_not_covered")
-    }
   })
 
   test("rejects invalid lines and inverted range", () => {
@@ -423,6 +397,168 @@ describe("createAnalysisFinding — rejection", () => {
       expect((e as AnalysisFindingError).code).toBe("invalid_field")
     }
   })
+
+  test("rejects malformed chunk source with invalid_plan (fail-closed)", () => {
+    const plan = threeBatchPlan()
+    const tampered = deepCloneJson(plan) as ExhaustiveAnalysisPlan
+    // Keep coverage/batch invariants so resolvePlanId succeeds; break chunk.source.
+    const chunk = tampered.batches[0].chunks[0]
+    ;(chunk as { source: { startLine: number } }).source.startLine = 0
+
+    try {
+      createAnalysisFinding(
+        tampered,
+        baseInput(tampered, {
+          file: chunk.source.file,
+          startLine: 1,
+          endLine: 1,
+        }),
+      )
+      expect.unreachable("expected invalid_plan")
+    } catch (e) {
+      expect(e).toBeInstanceOf(AnalysisFindingError)
+      expect((e as AnalysisFindingError).code).toBe("invalid_plan")
+    }
+  })
+})
+
+describe("line-range coverage (real newlines)", () => {
+  test("contiguous chunk union is accepted; partial outside is rejected", () => {
+    const plan = multiLinePlan()
+    expect(plan.status).toBe("complete")
+    expect(plan.batches.length).toBe(1)
+
+    const batch = plan.batches[0]
+    const chapChunks = batch.chunks.filter((c) => c.source.file === "chap.tex")
+    expect(chapChunks.length).toBe(2)
+    // Real newline spans: lines 1-3 and 4-5 → union 1-5
+    expect(chapChunks[0].source.startLine).toBe(1)
+    expect(chapChunks[0].source.endLine).toBe(3)
+    expect(chapChunks[1].source.startLine).toBe(4)
+    expect(chapChunks[1].source.endLine).toBe(5)
+
+    const mk = (startLine: number, endLine: number) =>
+      createAnalysisFinding(
+        plan,
+        baseInput(plan, {
+          batchId: batch.batchId,
+          file: "chap.tex",
+          startLine,
+          endLine,
+          manuscriptFingerprint: plan.fingerprint!,
+        }),
+      )
+
+    // Full contiguous union
+    expect(mk(1, 5).file).toBe("chap.tex")
+    // Single-chunk interiors
+    expect(mk(1, 3).startLine).toBe(1)
+    expect(mk(4, 5).endLine).toBe(5)
+    // Single lines inside union
+    expect(mk(2, 2).startLine).toBe(2)
+    expect(mk(3, 4).startLine).toBe(3)
+
+    // Before coverage
+    expect(() => mk(0 as unknown as number, 1)).toThrow(AnalysisFindingError)
+    // After coverage
+    expect(() => mk(6, 7)).toThrow(AnalysisFindingError)
+    // Partial outside (ends after union)
+    expect(() => mk(1, 6)).toThrow(AnalysisFindingError)
+    // Partial outside (starts before — invalid line also caught)
+    expect(() => mk(1, 6)).toThrow(AnalysisFindingError)
+
+    try {
+      mk(5, 6)
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("line_range_not_covered")
+    }
+  })
+
+  test("gap in coverage is rejected; each side of the gap is accepted", () => {
+    const plan = gappedMultiLinePlan()
+    expect(plan.batches.length).toBe(1)
+    const batch = plan.batches[0]
+    const chapChunks = batch.chunks.filter((c) => c.source.file === "chap.tex")
+    expect(chapChunks.length).toBe(2)
+    expect(chapChunks[0].source).toMatchObject({ startLine: 1, endLine: 2 })
+    expect(chapChunks[1].source).toMatchObject({ startLine: 5, endLine: 6 })
+
+    const mk = (startLine: number, endLine: number) =>
+      createAnalysisFinding(
+        plan,
+        baseInput(plan, {
+          batchId: batch.batchId,
+          file: "chap.tex",
+          startLine,
+          endLine,
+          manuscriptFingerprint: plan.fingerprint!,
+        }),
+      )
+
+    expect(mk(1, 2).endLine).toBe(2)
+    expect(mk(5, 6).startLine).toBe(5)
+    // Gap lines 3-4 are not covered
+    expect(() => mk(1, 5)).toThrow(AnalysisFindingError)
+    expect(() => mk(2, 5)).toThrow(AnalysisFindingError)
+    expect(() => mk(3, 4)).toThrow(AnalysisFindingError)
+    expect(() => mk(4, 5)).toThrow(AnalysisFindingError)
+
+    try {
+      mk(1, 6)
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("line_range_not_covered")
+    }
+  })
+
+  test("independent startLine/endLine changes alter findingId", () => {
+    const plan = multiLinePlan()
+    const batch = plan.batches[0]
+    const base = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: batch.batchId,
+        file: "chap.tex",
+        startLine: 1,
+        endLine: 5,
+        manuscriptFingerprint: plan.fingerprint!,
+      }),
+    )
+    const byStart = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: batch.batchId,
+        file: "chap.tex",
+        startLine: 2,
+        endLine: 5,
+        manuscriptFingerprint: plan.fingerprint!,
+      }),
+    )
+    const byEnd = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: batch.batchId,
+        file: "chap.tex",
+        startLine: 1,
+        endLine: 4,
+        manuscriptFingerprint: plan.fingerprint!,
+      }),
+    )
+    const single = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: batch.batchId,
+        file: "chap.tex",
+        startLine: 1,
+        endLine: 1,
+        manuscriptFingerprint: plan.fingerprint!,
+      }),
+    )
+
+    expect(byStart.findingId).not.toBe(base.findingId)
+    expect(byEnd.findingId).not.toBe(base.findingId)
+    expect(single.findingId).not.toBe(base.findingId)
+    expect(byStart.findingId).not.toBe(byEnd.findingId)
+  })
 })
 
 describe("finding identity determinism", () => {
@@ -439,7 +575,6 @@ describe("finding identity determinism", () => {
     const plan = threeBatchPlan()
     const base = createAnalysisFinding(plan, baseInput(plan))
 
-    // category / severity / claim / evidence / sectionId via re-create
     const byCategory = createAnalysisFinding(
       plan,
       baseInput(plan, { category: "other-category" }),
@@ -470,7 +605,6 @@ describe("finding identity determinism", () => {
     )
     expect(bySection.findingId).not.toBe(base.findingId)
 
-    // batchId: use intermediate batch if available
     if (plan.batches.length > 1) {
       const mid = plan.batches[1]
       const chunk = mid.chunks[0]
@@ -487,39 +621,6 @@ describe("finding identity determinism", () => {
       expect(byBatch.batchId).not.toBe(base.batchId)
     }
 
-    // start/end line on multi-line plan
-    const ml = multiLinePlan()
-    const chapBatch = ml.batches.find((b) =>
-      b.chunks.some((c) => c.source.file === "chap.tex"),
-    )!
-    const chapChunk = chapBatch.chunks.find((c) => c.source.file === "chap.tex")!
-    const s = chapChunk.source.startLine
-    const e = chapChunk.source.endLine
-    if (e > s) {
-      const full = createAnalysisFinding(
-        ml,
-        baseInput(ml, {
-          batchId: chapBatch.batchId,
-          file: "chap.tex",
-          startLine: s,
-          endLine: e,
-          manuscriptFingerprint: ml.fingerprint!,
-        }),
-      )
-      const partial = createAnalysisFinding(
-        ml,
-        baseInput(ml, {
-          batchId: chapBatch.batchId,
-          file: "chap.tex",
-          startLine: s,
-          endLine: s,
-          manuscriptFingerprint: ml.fingerprint!,
-        }),
-      )
-      expect(full.findingId).not.toBe(partial.findingId)
-    }
-
-    // Direct identity helper: planId / version / fingerprint / file
     const idBase = computeFindingIdentity({
       version: ANALYSIS_FINDING_VERSION,
       planId: base.planId,
@@ -613,7 +714,6 @@ describe("finding identity determinism", () => {
     expect(restored).toEqual(finding)
     expect(restored.findingId).toBe(finding.findingId)
 
-    // Recompute identity from restored payload
     const recomputed = computeFindingIdentity({
       version: restored.version,
       planId: restored.planId,
@@ -686,7 +786,6 @@ describe("mergeAnalysisFindings", () => {
     expect(a).toEqual(aSnap)
     expect(plan).toEqual(planSnap)
 
-    // Mutating result must not affect originals
     merged[0].claim = "mutated"
     expect(a.claim).toBe("A")
     expect(existing[0].claim).toBe("A")
@@ -707,22 +806,157 @@ describe("mergeAnalysisFindings", () => {
     expect(input).toEqual(inputSnap)
   })
 
-  test("rejects same findingId with different payload", () => {
+  test("rejects tampered payload whose findingId no longer matches", () => {
     const plan = threeBatchPlan()
     const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
-    const collision: AnalysisFinding = {
+    const tampered: AnalysisFinding = {
       ...a,
       claim: "tampered claim with same id",
     }
 
-    expect(() => mergeAnalysisFindings([a], [collision])).toThrow(
+    expect(() => mergeAnalysisFindings([a], [tampered])).toThrow(
       AnalysisFindingError,
     )
 
     try {
-      mergeAnalysisFindings([a], [collision])
+      mergeAnalysisFindings([a], [tampered])
     } catch (e) {
-      expect((e as AnalysisFindingError).code).toBe("finding_id_collision")
+      expect((e as AnalysisFindingError).code).toBe("finding_id_mismatch")
+    }
+  })
+
+  test("rejects structurally invalid findings from existing", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+
+    const cases: Array<{ label: string; finding: unknown; code: string }> = [
+      {
+        label: "missing category",
+        finding: { ...a, category: "" },
+        code: "invalid_finding",
+      },
+      {
+        label: "whitespace claim",
+        finding: { ...a, claim: "   " },
+        code: "invalid_finding",
+      },
+      {
+        label: "non-object",
+        finding: null,
+        code: "invalid_finding",
+      },
+      {
+        label: "bad startLine",
+        finding: { ...a, startLine: 0 },
+        code: "invalid_finding",
+      },
+      {
+        label: "inverted lines",
+        finding: { ...a, startLine: 3, endLine: 1 },
+        code: "invalid_finding",
+      },
+      {
+        label: "empty file",
+        finding: { ...a, file: "" },
+        code: "invalid_finding",
+      },
+      {
+        label: "empty planId",
+        finding: { ...a, planId: "" },
+        code: "invalid_finding",
+      },
+      {
+        label: "empty batchId",
+        finding: { ...a, batchId: "" },
+        code: "invalid_finding",
+      },
+      {
+        label: "empty fingerprint",
+        finding: { ...a, manuscriptFingerprint: "" },
+        code: "invalid_finding",
+      },
+      {
+        label: "wrong version",
+        finding: { ...a, version: "analysis-finding-v0" },
+        code: "invalid_finding",
+      },
+    ]
+
+    for (const c of cases) {
+      try {
+        mergeAnalysisFindings([c.finding as AnalysisFinding], [])
+        expect.unreachable(`expected reject for ${c.label}`)
+      } catch (e) {
+        expect(e).toBeInstanceOf(AnalysisFindingError)
+        expect((e as AnalysisFindingError).code).toBe(c.code)
+      }
+    }
+  })
+
+  test("rejects structurally invalid findings from incoming", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+    const bad = { ...a, severity: "" }
+
+    try {
+      mergeAnalysisFindings([a], [bad as AnalysisFinding])
+      expect.unreachable("expected invalid_finding")
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("invalid_finding")
+    }
+  })
+
+  test("rejects findingId that does not match recomputed payload identity", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+    const mismatched: AnalysisFinding = {
+      ...a,
+      findingId: "f".repeat(64),
+    }
+
+    try {
+      mergeAnalysisFindings([], [mismatched])
+      expect.unreachable("expected finding_id_mismatch")
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("finding_id_mismatch")
+    }
+
+    try {
+      mergeAnalysisFindings([mismatched], [])
+      expect.unreachable("expected finding_id_mismatch from existing")
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("finding_id_mismatch")
+    }
+  })
+
+  test("rejects wrong version even when findingId is recomputed for that version", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan))
+    // Identity for a different version would differ; still reject on version gate.
+    const wrongVersion = {
+      ...a,
+      version: "analysis-finding-v0" as typeof ANALYSIS_FINDING_VERSION,
+      findingId: computeFindingIdentity({
+        version: "analysis-finding-v0",
+        planId: a.planId,
+        manuscriptFingerprint: a.manuscriptFingerprint,
+        batchId: a.batchId,
+        category: a.category,
+        severity: a.severity,
+        claim: a.claim,
+        evidence: a.evidence,
+        file: a.file,
+        startLine: a.startLine,
+        endLine: a.endLine,
+        sectionId: a.sectionId,
+      }),
+    }
+
+    try {
+      mergeAnalysisFindings([wrongVersion as AnalysisFinding], [])
+      expect.unreachable("expected invalid_finding for wrong version")
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("invalid_finding")
     }
   })
 })
