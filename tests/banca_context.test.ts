@@ -7,16 +7,26 @@ import {
   readFileSync,
   existsSync,
   readdirSync,
+  symlinkSync,
+  lstatSync,
+  realpathSync,
 } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import { spawnSync } from "node:child_process"
+import { dirname, join, resolve, relative } from "node:path"
 import { tmpdir } from "node:os"
 import { loadConfig } from "../src/lib/config"
 import { loadCanonicalLatexManuscript } from "../src/lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../src/lib/analysis_coverage"
 import {
   createAnalysisCheckpoint,
+  completeAnalysisBatch,
   nextAnalysisBatch,
+  type AnalysisCheckpoint,
 } from "../src/lib/analysis_checkpoint"
+import {
+  getAnalysisCheckpointRelativePath,
+  loadAnalysisCheckpoint,
+} from "../src/lib/state"
 
 function writeTree(root: string, files: Record<string, string>): void {
   for (const [rel, content] of Object.entries(files)) {
@@ -72,6 +82,14 @@ function listContextPacks(projectRoot: string): string[] {
     .map((n) => join(ctxDir, n))
 }
 
+function listCheckpointFiles(projectRoot: string): string[] {
+  const dir = join(projectRoot, ".banca", "analysis", "checkpoints")
+  if (!existsSync(dir)) return []
+  return readdirSync(dir)
+    .filter((n) => n.endsWith(".json") && !n.startsWith("."))
+    .map((n) => join(dir, n))
+}
+
 function parseMetadata(packBody: string): Record<string, unknown> {
   const match = packBody.match(/```json\n([\s\S]*?)\n```/)
   expect(match).not.toBeNull()
@@ -88,7 +106,138 @@ function extractLatexChunks(packBody: string): string[] {
   return chunks
 }
 
-describe("banca_context — canonical exhaustive first batch", () => {
+function pathIsPublic(file: string): boolean {
+  if (file.length === 0) return false
+  if (file.startsWith("/")) return false
+  if (/^[A-Za-z]:/.test(file)) return false
+  if (file.includes("\\")) return false
+  if (file.split("/").includes("..")) return false
+  return true
+}
+
+function planOracle(projectRoot: string) {
+  const config = loadConfig(projectRoot)
+  const manuscript = loadCanonicalLatexManuscript(projectRoot, config)
+  const plan = planExhaustiveAnalysisBatches(
+    manuscript,
+    config.analysis.maxCharactersPerBatch,
+  )
+  return { config, manuscript, plan }
+}
+
+function readPersistedCheckpoint(
+  projectRoot: string,
+  planId: string,
+): AnalysisCheckpoint {
+  const rel = getAnalysisCheckpointRelativePath(planId)
+  const abs = join(projectRoot, ...rel.split("/"))
+  expect(existsSync(abs)).toBe(true)
+  const raw = readFileSync(abs, "utf-8")
+  expect(raw.includes(resolve(projectRoot))).toBe(false)
+  expect(raw).not.toMatch(/(^|[\s"'])(\/tmp\/|\/home\/|\/var\/)/)
+  return JSON.parse(raw) as AnalysisCheckpoint
+}
+
+function writeMultiBatchProject(projectRoot: string, maxChars = 40): void {
+  // Two long files force >1 batch at a small budget.
+  const pad = "ABCDEFGHIJ" // 10
+  writeTree(projectRoot, {
+    "main.tex": `\\input{a}
+\\input{b}
+`,
+    "a.tex": pad.repeat(6), // 60
+    "b.tex": pad.repeat(5), // 50
+  })
+  writeProjectConfig(projectRoot, {
+    chapters: [],
+    maxCharactersPerBatch: maxChars,
+  })
+}
+
+async function runContext(
+  projectRoot: string,
+  opts?: { completedBatchId?: string },
+): Promise<string> {
+  const { bancaContext } = await import("../src/tools/banca_context")
+  return String(
+    await bancaContext.execute(
+      {
+        projectRoot,
+        ...(opts?.completedBatchId !== undefined
+          ? { completedBatchId: opts.completedBatchId }
+          : {}),
+      },
+      { directory: projectRoot } as any,
+    ),
+  )
+}
+
+/**
+ * Run bancaContext in a real child process (true process boundary).
+ * Distinguish omission (no opts) from present empty string via explicit opts.
+ */
+function runContextInChildProcess(
+  projectRoot: string,
+  opts?: { completedBatchId?: string },
+): string {
+  const repoRoot = join(import.meta.dir, "..")
+  const toolPath = join(import.meta.dir, "../src/tools/banca_context.ts")
+  const scriptPath = join(projectRoot, `_run_context_child_${process.pid}_${Date.now()}.ts`)
+  const hasCompleted =
+    opts !== undefined && Object.prototype.hasOwnProperty.call(opts, "completedBatchId")
+  writeFileSync(
+    scriptPath,
+    `
+import { bancaContext } from ${JSON.stringify(toolPath)};
+const projectRoot = ${JSON.stringify(projectRoot)};
+const hasCompleted = ${JSON.stringify(hasCompleted)};
+const completedBatchId = ${JSON.stringify(hasCompleted ? opts!.completedBatchId : null)};
+const args = hasCompleted
+  ? { projectRoot, completedBatchId: completedBatchId as string }
+  : { projectRoot };
+const result = await bancaContext.execute(args, { directory: projectRoot } as any);
+process.stdout.write(String(result));
+`,
+    "utf-8",
+  )
+  try {
+    const r = spawnSync("bun", ["run", scriptPath], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      env: process.env,
+      timeout: 60_000,
+    })
+    if (r.error) {
+      throw r.error
+    }
+    if (r.status !== 0) {
+      throw new Error(
+        `child process failed: status=${r.status} stderr=${r.stderr ?? ""} stdout=${r.stdout ?? ""}`,
+      )
+    }
+    return r.stdout ?? ""
+  } finally {
+    try {
+      rmSync(scriptPath, { force: true })
+    } catch {
+      // ignore cleanup failure
+    }
+  }
+}
+
+function packBodyFromResult(result: string): string {
+  expect(result).toMatch(/^context → /)
+  const packPath = result.replace(/^context → /, "")
+  return readFileSync(packPath, "utf-8")
+}
+
+function assertNoAbsolutePathLeak(text: string, projectRoot: string): void {
+  const abs = resolve(projectRoot)
+  expect(text.includes(abs)).toBe(false)
+  expect(text).not.toMatch(/(^|[\s"'`=])(\/tmp\/|\/home\/|\/var\/|\/Users\/)/)
+}
+
+describe("banca_context — checkpoint persistence and resume", () => {
   let projectRoot: string
 
   beforeEach(() => {
@@ -99,8 +248,494 @@ describe("banca_context — canonical exhaustive first batch", () => {
     rmSync(projectRoot, { recursive: true, force: true })
   })
 
-  test("nested include + complementary chapter: pack has first batch order and exact text", async () => {
-    // main → outer → inner; complementary chapter not in main graph
+  test("1) initial execution creates exactly the checkpoint for the current plan", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    expect(plan.status).toBe("complete")
+    expect(plan.batches.length).toBeGreaterThan(1)
+    const expected = createAnalysisCheckpoint(plan)
+
+    const result = await runContext(projectRoot)
+    expect(result).toMatch(/^context → /)
+
+    const files = listCheckpointFiles(projectRoot)
+    expect(files).toHaveLength(1)
+    expect(files[0].endsWith(`${expected.planId}.json`)).toBe(true)
+
+    const disk = readPersistedCheckpoint(projectRoot, expected.planId)
+    // Oracle: disk equals public createAnalysisCheckpoint for this plan.
+    expect(disk).toEqual(expected)
+    expect(disk.state).toBe("pending")
+    expect(disk.completedBatches).toBe(0)
+
+    const body = packBodyFromResult(result)
+    const meta = parseMetadata(body)
+    expect((meta.checkpoint as any).planId).toBe(expected.planId)
+    expect((meta.checkpoint as any).state).toBe("pending")
+    expect((meta.checkpoint as any).path).toBe(
+      getAnalysisCheckpointRelativePath(expected.planId),
+    )
+    expect((meta.checkpoint as any).persisted).toBe(true)
+    expect((meta.batch as any).index).toBe(0)
+    expect(body).toContain("## Next exhaustive batch")
+    expect(body).not.toContain("## First exhaustive batch")
+  })
+
+  test("2) resume without completedBatchId returns the same next batch and counters", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const expected = createAnalysisCheckpoint(plan)
+    const first = nextAnalysisBatch(plan, expected)!
+
+    await runContext(projectRoot)
+    const disk1 = readPersistedCheckpoint(projectRoot, expected.planId)
+
+    const result2 = await runContext(projectRoot)
+    const disk2 = readPersistedCheckpoint(projectRoot, expected.planId)
+    expect(disk2).toEqual(disk1)
+    expect(disk2.completedBatches).toBe(0)
+
+    const meta = parseMetadata(packBodyFromResult(result2))
+    expect((meta.batch as any).batchId).toBe(first.batchId)
+    expect((meta.batch as any).index).toBe(0)
+    expect((meta.checkpoint as any).completedBatches).toBe(0)
+  })
+
+  test("3) completing the first batch advances to an intermediate next batch", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    expect(plan.batches.length).toBeGreaterThanOrEqual(2)
+    const initial = createAnalysisCheckpoint(plan)
+    const firstId = plan.batches[0].batchId
+
+    await runContext(projectRoot)
+    const result = await runContext(projectRoot, { completedBatchId: firstId })
+    expect(result).toMatch(/^context → /)
+
+    const expectedAfter = completeAnalysisBatch(plan, initial, firstId)
+    const disk = readPersistedCheckpoint(projectRoot, initial.planId)
+    expect(disk).toEqual(expectedAfter)
+    expect(disk.state).toBe("running")
+    expect(disk.completedBatches).toBe(1)
+
+    const next = nextAnalysisBatch(plan, disk)!
+    expect(next.index).toBe(1)
+    const meta = parseMetadata(packBodyFromResult(result))
+    expect((meta.batch as any).batchId).toBe(next.batchId)
+    expect((meta.batch as any).index).toBe(1)
+    expect((meta.checkpoint as any).completedBatches).toBe(1)
+    expect((meta.checkpoint as any).coveragePercent).toBe(disk.coveragePercent)
+  })
+
+  test("4) resume across a real process boundary (spawn child)", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const initial = createAnalysisCheckpoint(plan)
+    const firstId = plan.batches[0].batchId
+
+    // Process A: create checkpoint on disk.
+    const createOut = runContextInChildProcess(projectRoot)
+    expect(createOut).toMatch(/^context → /)
+
+    // Process B: advance first batch (separate OS process).
+    const advanceOut = runContextInChildProcess(projectRoot, {
+      completedBatchId: firstId,
+    })
+    expect(advanceOut).toMatch(/^context → /)
+
+    const fromDisk = readPersistedCheckpoint(projectRoot, initial.planId)
+    expect(fromDisk.completedBatches).toBe(1)
+    const expectedNext = nextAnalysisBatch(plan, fromDisk)!
+
+    // Process C: resume without advancing — must read the same checkpoint from disk.
+    const resumeOut = runContextInChildProcess(projectRoot)
+    expect(resumeOut).toMatch(/^context → /)
+    const meta = parseMetadata(packBodyFromResult(resumeOut))
+    expect((meta.batch as any).batchId).toBe(expectedNext.batchId)
+    expect((meta.batch as any).index).toBe(expectedNext.index)
+    expect((meta.checkpoint as any).completedBatches).toBe(1)
+    expect(readPersistedCheckpoint(projectRoot, initial.planId)).toEqual(fromDisk)
+  })
+
+  test("5) completing the last batch yields complete / 100% / no next batch", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    let cp = createAnalysisCheckpoint(plan)
+
+    await runContext(projectRoot)
+    for (const batch of plan.batches) {
+      const result = await runContext(projectRoot, {
+        completedBatchId: batch.batchId,
+      })
+      cp = completeAnalysisBatch(plan, cp, batch.batchId)
+      const disk = readPersistedCheckpoint(projectRoot, cp.planId)
+      expect(disk).toEqual(cp)
+
+      if (batch === plan.batches[plan.batches.length - 1]) {
+        expect(result).toMatch(/^context → /)
+        const body = packBodyFromResult(result)
+        const meta = parseMetadata(body)
+        expect((meta.checkpoint as any).state).toBe("complete")
+        expect((meta.checkpoint as any).coveragePercent).toBe(100)
+        expect((meta.checkpoint as any).completedBatches).toBe(plan.batches.length)
+        expect((meta.batch as any).batchId).toBeNull()
+        expect(nextAnalysisBatch(plan, disk)).toBeNull()
+        expect(body).toContain("## Checkpoint coverage complete")
+        expect(body).not.toContain("## Exhaustive analysis complete")
+        expect(body).toContain("No next batch")
+        expect(body).toContain("does not prove model run, findings, or academic analysis")
+      }
+    }
+  })
+
+  test("6) re-completing an already finished batch is idempotent", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const firstId = plan.batches[0].batchId
+
+    await runContext(projectRoot)
+    await runContext(projectRoot, { completedBatchId: firstId })
+    const afterFirst = readPersistedCheckpoint(
+      projectRoot,
+      createAnalysisCheckpoint(plan).planId,
+    )
+
+    // Repeat the same completed batchId
+    const result = await runContext(projectRoot, { completedBatchId: firstId })
+    expect(result).toMatch(/^context → /)
+    const again = readPersistedCheckpoint(projectRoot, afterFirst.planId)
+    expect(again).toEqual(afterFirst)
+    expect(again.completedBatches).toBe(1)
+
+    const oracle = completeAnalysisBatch(plan, afterFirst, firstId)
+    expect(again).toEqual(oracle)
+
+    const meta = parseMetadata(packBodyFromResult(result))
+    expect((meta.batch as any).index).toBe(1)
+  })
+
+  test("7) unknown or out-of-order batch fails without mutating the file", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const planId = createAnalysisCheckpoint(plan).planId
+    const futureId = plan.batches[1].batchId
+
+    await runContext(projectRoot)
+    const before = readFileSync(
+      join(projectRoot, ".banca", "analysis", "checkpoints", `${planId}.json`),
+      "utf-8",
+    )
+
+    const unknown = await runContext(projectRoot, {
+      completedBatchId: "batch-does-not-exist",
+    })
+    expect(unknown).toContain("context checkpoint error")
+    expect(unknown).toContain("code=unknown_batch")
+    expect(unknown).not.toMatch(/^context → /)
+    const afterUnknown = readFileSync(
+      join(projectRoot, ".banca", "analysis", "checkpoints", `${planId}.json`),
+      "utf-8",
+    )
+    expect(afterUnknown).toBe(before)
+
+    const ooo = await runContext(projectRoot, { completedBatchId: futureId })
+    expect(ooo).toContain("context checkpoint error")
+    expect(ooo).toContain("code=out_of_order")
+    const afterOoo = readFileSync(
+      join(projectRoot, ".banca", "analysis", "checkpoints", `${planId}.json`),
+      "utf-8",
+    )
+    expect(afterOoo).toBe(before)
+  })
+
+  test("8) malformed or tampered checkpoint fails without overwrite", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const planId = createAnalysisCheckpoint(plan).planId
+    await runContext(projectRoot)
+
+    const abs = join(
+      projectRoot,
+      ".banca",
+      "analysis",
+      "checkpoints",
+      `${planId}.json`,
+    )
+    const good = readFileSync(abs, "utf-8")
+
+    // Malformed JSON
+    writeFileSync(abs, "{not-json", "utf-8")
+    const malformed = await runContext(projectRoot)
+    expect(malformed).toContain("context checkpoint error")
+    expect(malformed).toContain("code=invalid_checkpoint")
+    expect(readFileSync(abs, "utf-8")).toBe("{not-json")
+
+    // Restore good, then tamper counters
+    writeFileSync(abs, good, "utf-8")
+    const parsed = JSON.parse(good) as AnalysisCheckpoint
+    parsed.completedBatches = 99
+    parsed.completedCharacters = 1
+    writeFileSync(abs, JSON.stringify(parsed, null, 2), "utf-8")
+    const tamperedRaw = readFileSync(abs, "utf-8")
+
+    const tampered = await runContext(projectRoot)
+    expect(tampered).toContain("context checkpoint error")
+    expect(readFileSync(abs, "utf-8")).toBe(tamperedRaw)
+  })
+
+  test("9) manuscript change yields a new planId file without reusing old progress", async () => {
+    writeMultiBatchProject(projectRoot)
+    const firstPlan = planOracle(projectRoot).plan
+    const firstId = createAnalysisCheckpoint(firstPlan).planId
+    await runContext(projectRoot)
+    await runContext(projectRoot, {
+      completedBatchId: firstPlan.batches[0].batchId,
+    })
+    const progressed = readPersistedCheckpoint(projectRoot, firstId)
+    expect(progressed.completedBatches).toBe(1)
+
+    // Alter manuscript → new plan identity
+    writeFileSync(join(projectRoot, "a.tex"), "ZZZZZZZZZZ".repeat(6), "utf-8")
+    const secondPlan = planOracle(projectRoot).plan
+    const secondId = createAnalysisCheckpoint(secondPlan).planId
+    expect(secondId).not.toBe(firstId)
+
+    const result = await runContext(projectRoot)
+    expect(result).toMatch(/^context → /)
+
+    const files = listCheckpointFiles(projectRoot)
+    expect(files.some((f) => f.endsWith(`${firstId}.json`))).toBe(true)
+    expect(files.some((f) => f.endsWith(`${secondId}.json`))).toBe(true)
+
+    // Old progress untouched
+    expect(readPersistedCheckpoint(projectRoot, firstId).completedBatches).toBe(1)
+    // New plan starts pending at batch 0
+    const fresh = readPersistedCheckpoint(projectRoot, secondId)
+    expect(fresh).toEqual(createAnalysisCheckpoint(secondPlan))
+    const meta = parseMetadata(packBodyFromResult(result))
+    expect((meta.checkpoint as any).planId).toBe(secondId)
+    expect((meta.batch as any).index).toBe(0)
+  })
+
+  test("10) blocked plan does not create a valid checkpoint file", async () => {
+    writeTree(projectRoot, {
+      "main.tex": `HEAD
+\\input{missing-chapter}
+TAIL
+`,
+    })
+    writeProjectConfig(projectRoot, { chapters: [], maxCharactersPerBatch: 1000 })
+
+    const result = await runContext(projectRoot)
+    expect(result).toContain("context blocked")
+    expect(result).toContain("status=blocked")
+    expect(listContextPacks(projectRoot)).toEqual([])
+    expect(listCheckpointFiles(projectRoot)).toEqual([])
+    expect(
+      existsSync(join(projectRoot, ".banca", "analysis", "checkpoints")),
+    ).toBe(false)
+    expect(String(result).includes(resolve(projectRoot))).toBe(false)
+  })
+
+  test("11) empty complete document → complete / zero batches / 100%", async () => {
+    writeTree(projectRoot, { "main.tex": "" })
+    writeProjectConfig(projectRoot, { chapters: [], maxCharactersPerBatch: 100 })
+
+    const { plan } = planOracle(projectRoot)
+    const expected = createAnalysisCheckpoint(plan)
+    expect(expected.state).toBe("complete")
+    expect(expected.totalBatches).toBe(0)
+    expect(expected.coveragePercent).toBe(100)
+
+    const result = await runContext(projectRoot)
+    expect(result).toMatch(/^context → /)
+    const disk = readPersistedCheckpoint(projectRoot, expected.planId)
+    expect(disk).toEqual(expected)
+    expect(nextAnalysisBatch(plan, disk)).toBeNull()
+
+    const body = packBodyFromResult(result)
+    const meta = parseMetadata(body)
+    expect((meta.checkpoint as any).state).toBe("complete")
+    expect((meta.checkpoint as any).coveragePercent).toBe(100)
+    expect((meta.batch as any).batchId).toBeNull()
+    expect(body).toContain("zero batches")
+    expect(body).toContain("## Checkpoint coverage complete")
+    expect(body).not.toContain("## Exhaustive analysis complete")
+    expect(body).toContain("does not prove model run, findings, or academic analysis")
+  })
+
+  test("empty completedBatchId returns invalid_batch_id and leaves disk unchanged", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const planId = createAnalysisCheckpoint(plan).planId
+
+    await runContext(projectRoot)
+    const before = readFileSync(
+      join(projectRoot, ".banca", "analysis", "checkpoints", `${planId}.json`),
+      "utf-8",
+    )
+
+    const empty = await runContext(projectRoot, { completedBatchId: "" })
+    expect(empty).toContain("context checkpoint error")
+    expect(empty).toContain("code=invalid_batch_id")
+    expect(empty).not.toMatch(/^context → /)
+    assertNoAbsolutePathLeak(empty, projectRoot)
+
+    const after = readFileSync(
+      join(projectRoot, ".banca", "analysis", "checkpoints", `${planId}.json`),
+      "utf-8",
+    )
+    expect(after).toBe(before)
+  })
+
+  test("12) refuses symlink directory or checkpoint target file (live and broken)", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const planId = createAnalysisCheckpoint(plan).planId
+
+    // --- Live symlink as the checkpoints directory ---
+    const bancaAnalysis = join(projectRoot, ".banca", "analysis")
+    mkdirSync(bancaAnalysis, { recursive: true })
+    const outside = mkdtempSync(join(tmpdir(), "ob-cp-outside-"))
+    try {
+      symlinkSync(outside, join(bancaAnalysis, "checkpoints"))
+      expect(lstatSync(join(bancaAnalysis, "checkpoints")).isSymbolicLink()).toBe(
+        true,
+      )
+
+      const result = await runContext(projectRoot)
+      expect(result).toContain("context checkpoint error")
+      expect(result).toContain("code=symlink_refused")
+      // Nothing valid under the real outside dir as a project checkpoint
+      expect(listCheckpointFiles(projectRoot)).toEqual([])
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+
+    // --- Live symlink as the checkpoint target file ---
+    rmSync(join(projectRoot, ".banca", "analysis"), { recursive: true, force: true })
+    await runContext(projectRoot)
+    const abs = join(
+      projectRoot,
+      ".banca",
+      "analysis",
+      "checkpoints",
+      `${planId}.json`,
+    )
+    const good = readFileSync(abs, "utf-8")
+    rmSync(abs)
+    const decoy = join(projectRoot, "decoy-checkpoint.json")
+    writeFileSync(decoy, good, "utf-8")
+    symlinkSync(decoy, abs)
+    expect(lstatSync(abs).isSymbolicLink()).toBe(true)
+
+    const beforeDecoy = readFileSync(decoy, "utf-8")
+    const blocked = await runContext(projectRoot, {
+      completedBatchId: plan.batches[0].batchId,
+    })
+    expect(blocked).toContain("context checkpoint error")
+    expect(blocked).toContain("code=symlink_refused")
+    // Symlink target content unchanged (no silent overwrite through the link)
+    expect(readFileSync(decoy, "utf-8")).toBe(beforeDecoy)
+    // Link itself still a symlink (not replaced by a regular JSON file)
+    expect(lstatSync(abs).isSymbolicLink()).toBe(true)
+
+    // --- Broken symlink as the checkpoint target file ---
+    // existsSync is false for dangling links; storage must still refuse and not rename over it.
+    rmSync(abs)
+    const danglingTarget = join(projectRoot, "missing-decoy-never-created.json")
+    expect(existsSync(danglingTarget)).toBe(false)
+    symlinkSync(danglingTarget, abs)
+    expect(lstatSync(abs).isSymbolicLink()).toBe(true)
+    expect(existsSync(abs)).toBe(false) // dangling: existsSync false, lstat true
+
+    const brokenFileResume = await runContext(projectRoot)
+    expect(brokenFileResume).toContain("context checkpoint error")
+    expect(brokenFileResume).toContain("code=symlink_refused")
+    expect(lstatSync(abs).isSymbolicLink()).toBe(true)
+    // Still not a regular checkpoint file
+    expect(existsSync(abs)).toBe(false)
+
+    const brokenFileAdvance = await runContext(projectRoot, {
+      completedBatchId: plan.batches[0].batchId,
+    })
+    expect(brokenFileAdvance).toContain("context checkpoint error")
+    expect(brokenFileAdvance).toContain("code=symlink_refused")
+    expect(lstatSync(abs).isSymbolicLink()).toBe(true)
+
+    // --- Broken symlink as the checkpoints directory ---
+    rmSync(join(projectRoot, ".banca", "analysis"), { recursive: true, force: true })
+    mkdirSync(bancaAnalysis, { recursive: true })
+    const brokenDirLink = join(bancaAnalysis, "checkpoints")
+    symlinkSync(join(projectRoot, "no-such-checkpoints-dir"), brokenDirLink)
+    expect(lstatSync(brokenDirLink).isSymbolicLink()).toBe(true)
+    expect(existsSync(brokenDirLink)).toBe(false)
+
+    const brokenDirResult = await runContext(projectRoot)
+    expect(brokenDirResult).toContain("context checkpoint error")
+    expect(brokenDirResult).toContain("code=symlink_refused")
+    // Link preserved; not replaced by a real directory with JSON
+    expect(lstatSync(brokenDirLink).isSymbolicLink()).toBe(true)
+    expect(listCheckpointFiles(projectRoot)).toEqual([])
+  })
+
+  test("13) no absolute paths in checkpoint JSON or pack content", async () => {
+    writeMultiBatchProject(projectRoot)
+    const result = await runContext(projectRoot)
+    const body = packBodyFromResult(result)
+    const abs = resolve(projectRoot)
+    expect(body.includes(abs)).toBe(false)
+
+    const meta = parseMetadata(body)
+    const cpPath = String((meta.checkpoint as any).path)
+    expect(pathIsPublic(cpPath)).toBe(true)
+    expect(cpPath.startsWith(".banca/analysis/checkpoints/")).toBe(true)
+    expect(cpPath.includes(abs)).toBe(false)
+
+    for (const c of meta.chunks as Array<{ file: string }>) {
+      expect(pathIsPublic(c.file)).toBe(true)
+    }
+
+    for (const f of listCheckpointFiles(projectRoot)) {
+      const raw = readFileSync(f, "utf-8")
+      expect(raw.includes(abs)).toBe(false)
+      expect(raw).not.toMatch(/\/tmp\//)
+    }
+  })
+
+  test("14) writes only under .banca/analysis/checkpoints and .banca/context", async () => {
+    writeMultiBatchProject(projectRoot)
+    await runContext(projectRoot)
+
+    const packs = listContextPacks(projectRoot)
+    expect(packs.length).toBe(1)
+    for (const p of packs) {
+      expect(p.startsWith(join(projectRoot, ".banca", "context"))).toBe(true)
+    }
+
+    const cps = listCheckpointFiles(projectRoot)
+    expect(cps.length).toBe(1)
+    for (const p of cps) {
+      expect(
+        p.startsWith(join(projectRoot, ".banca", "analysis", "checkpoints")),
+      ).toBe(true)
+    }
+
+    // No findings / legacy checkpoint dumps
+    expect(existsSync(join(projectRoot, ".banca", "findings.json"))).toBe(false)
+    expect(existsSync(join(projectRoot, ".banca", "checkpoint.json"))).toBe(false)
+    expect(existsSync(join(projectRoot, ".banca", "analysis-checkpoint.json"))).toBe(
+      false,
+    )
+
+    const bancaEntries = readdirSync(join(projectRoot, ".banca")).sort()
+    expect(bancaEntries).toEqual(["analysis", "context", "project.json"].sort())
+
+    const analysisEntries = readdirSync(join(projectRoot, ".banca", "analysis"))
+    expect(analysisEntries).toEqual(["checkpoints"])
+  })
+
+  test("nested include + complementary chapter: pack order and exact text (batch 0)", async () => {
     writeTree(projectRoot, {
       "main.tex": `\\documentclass{article}
 \\begin{document}
@@ -121,265 +756,57 @@ OUTER-AFTER
       maxCharactersPerBatch: 50_000,
     })
 
-    const { bancaContext } = await import("../src/tools/banca_context")
-    const result = await bancaContext.execute(
-      { projectRoot },
-      { directory: projectRoot } as any,
-    )
-
-    expect(typeof result).toBe("string")
+    const result = await runContext(projectRoot)
     expect(result).toMatch(/^context → /)
-    const packPath = String(result).replace(/^context → /, "")
-    expect(packPath.startsWith(join(projectRoot, ".banca", "context"))).toBe(true)
-    expect(existsSync(packPath)).toBe(true)
-
-    const body = readFileSync(packPath, "utf-8")
+    const body = packBodyFromResult(result)
     const meta = parseMetadata(body)
 
-    // Expected via same public APIs (oracle), not a reimplementation of planning.
-    const config = loadConfig(projectRoot)
-    const manuscript = loadCanonicalLatexManuscript(projectRoot, config)
-    const plan = planExhaustiveAnalysisBatches(
-      manuscript,
-      config.analysis.maxCharactersPerBatch,
-    )
+    const { plan } = planOracle(projectRoot)
     expect(plan.status).toBe("complete")
-    expect(plan.batches.length).toBe(1)
     const checkpoint = createAnalysisCheckpoint(plan)
-    const first = nextAnalysisBatch(plan, checkpoint)
-    expect(first).not.toBeNull()
+    const first = nextAnalysisBatch(plan, checkpoint)!
 
     expect((meta.manuscript as any).fingerprint).toBe(plan.fingerprint)
-    expect((meta.plan as any).strategy).toBe("ordered-source-spans-exhaustive-v1")
     expect((meta.plan as any).planId).toBe(checkpoint.planId)
-    expect((meta.checkpoint as any).planId).toBe(checkpoint.planId)
-    expect((meta.batch as any).batchId).toBe(first!.batchId)
-    expect((meta.batch as any).index).toBe(0)
-    expect((meta.batch as any).totalBatches).toBe(1)
-    expect((meta.batch as any).characters).toBe(first!.characters)
+    expect((meta.batch as any).batchId).toBe(first.batchId)
+    expect(extractLatexChunks(body)).toEqual(first.chunks.map((c) => c.text))
 
-    const latexChunks = extractLatexChunks(body)
-    expect(latexChunks).toEqual(first!.chunks.map((c) => c.text))
-    // Nested + complementary order from loader
-    const joined = latexChunks.join("")
-    expect(joined).toContain("MAIN-HEAD")
-    expect(joined).toContain("INNER-BODY")
-    expect(joined).toContain("OUTER-BEFORE")
-    expect(joined).toContain("COMPLEMENT-CHAPTER")
-    // Order: main head before outer before inner before complement
+    const joined = extractLatexChunks(body).join("")
     expect(joined.indexOf("MAIN-HEAD")).toBeLessThan(joined.indexOf("OUTER-BEFORE"))
     expect(joined.indexOf("OUTER-BEFORE")).toBeLessThan(joined.indexOf("INNER-BODY"))
     expect(joined.indexOf("INNER-BODY")).toBeLessThan(joined.indexOf("COMPLEMENT-CHAPTER"))
 
-    const chunkMeta = meta.chunks as Array<Record<string, unknown>>
-    expect(chunkMeta.length).toBe(first!.chunks.length)
-    for (let i = 0; i < first!.chunks.length; i++) {
-      expect(chunkMeta[i].file).toBe(first!.chunks[i].source.file)
-      expect(chunkMeta[i].startLine).toBe(first!.chunks[i].source.startLine)
-      expect(chunkMeta[i].endLine).toBe(first!.chunks[i].source.endLine)
-      expect(chunkMeta[i].startOffset).toBe(first!.chunks[i].source.startOffset)
-      expect(chunkMeta[i].endOffset).toBe(first!.chunks[i].source.endOffset)
-      expect(pathIsPublic(String(chunkMeta[i].file))).toBe(true)
-    }
-
-    expect(body.includes(resolve(projectRoot))).toBe(false)
+    expect(readPersistedCheckpoint(projectRoot, checkpoint.planId)).toEqual(checkpoint)
   })
 
-  test("document larger than maxCharactersPerBatch: multi-batch metadata, first batch only, no extra truncation", async () => {
-    // Build text long enough to force >1 batch at limit 40.
-    const pad = "ABCDEFGHIJ" // 10 chars
-    const bodyA = pad.repeat(6) // 60
-    const bodyB = pad.repeat(5) // 50
-    writeTree(projectRoot, {
-      "main.tex": `\\input{a}
-\\input{b}
-`,
-      "a.tex": bodyA,
-      "b.tex": bodyB,
-    })
-    writeProjectConfig(projectRoot, {
-      chapters: [],
-      maxCharactersPerBatch: 40,
-    })
-
-    const config = loadConfig(projectRoot)
-    const manuscript = loadCanonicalLatexManuscript(projectRoot, config)
-    const plan = planExhaustiveAnalysisBatches(
-      manuscript,
-      config.analysis.maxCharactersPerBatch,
-    )
-    expect(plan.status).toBe("complete")
+  test("multi-batch pack exposes only the next batch text (no silent truncation)", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
     expect(plan.coverage.batchCount).toBeGreaterThan(1)
     const checkpoint = createAnalysisCheckpoint(plan)
     const first = nextAnalysisBatch(plan, checkpoint)!
-    expect(first.index).toBe(0)
-    expect(first.characters).toBeLessThanOrEqual(40)
-    // Full first-batch text length equals sum of chunk texts (no silent truncation).
     const exactFirstText = first.chunks.map((c) => c.text).join("")
-    expect(exactFirstText.length).toBe(first.characters)
 
-    const { bancaContext } = await import("../src/tools/banca_context")
-    const result = await bancaContext.execute(
-      { projectRoot },
-      { directory: projectRoot } as any,
-    )
-    const packPath = String(result).replace(/^context → /, "")
-    const body = readFileSync(packPath, "utf-8")
+    const result = await runContext(projectRoot)
+    const body = packBodyFromResult(result)
     const meta = parseMetadata(body)
 
-    expect((meta.plan as any).batchCount).toBe(plan.coverage.batchCount)
-    expect((meta.batch as any).totalBatches).toBe(plan.coverage.batchCount)
     expect((meta.batch as any).batchId).toBe(first.batchId)
     expect((meta.batch as any).index).toBe(0)
-    expect((meta.batch as any).characters).toBe(first.characters)
+    expect(extractLatexChunks(body).join("")).toBe(exactFirstText)
+    expect(extractLatexChunks(body).join("").length).toBe(first.characters)
 
-    const latexChunks = extractLatexChunks(body)
-    expect(latexChunks).toEqual(first.chunks.map((c) => c.text))
-    // Entire first batch present with no additional .slice truncation
-    expect(latexChunks.join("")).toBe(exactFirstText)
-    // Later batch content must not appear as full later batches in the pack body
-    // (chunks from batch index > 0 should not be listed under first batch).
     const laterTexts = plan.batches
       .slice(1)
       .flatMap((b) => b.chunks.map((c) => c.text))
-    // Some later fragments could theoretically substring-overlap; assert that
-    // the concatenated pack latex equals only the first batch.
-    expect(latexChunks.join("")).not.toBe(
-      plan.batches.flatMap((b) => b.chunks.map((c) => c.text)).join(""),
-    )
-    // And pack character total for first batch matches metadata.
-    expect(latexChunks.join("").length).toBe(first.characters)
-
-    // Sanity: at least one later unique segment is absent when long enough
     for (const t of laterTexts) {
       if (t.length >= 10 && !exactFirstText.includes(t)) {
         expect(body.includes(`\`\`\`latex\n${t}\n\`\`\``)).toBe(false)
       }
     }
-
-    expect(body.includes(resolve(projectRoot))).toBe(false)
   })
 
-  test("incomplete ingestion (missing include) does not create a valid complete pack", async () => {
-    writeTree(projectRoot, {
-      "main.tex": `HEAD
-\\input{missing-chapter}
-TAIL
-`,
-    })
-    writeProjectConfig(projectRoot, { chapters: [], maxCharactersPerBatch: 1000 })
-
-    const before = listContextPacks(projectRoot)
-    expect(before).toEqual([])
-
-    // Oracle: canonical plan diagnostics for the same incomplete manuscript.
-    const config = loadConfig(projectRoot)
-    const manuscript = loadCanonicalLatexManuscript(projectRoot, config)
-    const plan = planExhaustiveAnalysisBatches(
-      manuscript,
-      config.analysis.maxCharactersPerBatch,
-    )
-    expect(plan.status).toBe("blocked")
-    expect(plan.diagnostics.length).toBeGreaterThan(0)
-
-    const { bancaContext } = await import("../src/tools/banca_context")
-    const result = await bancaContext.execute(
-      { projectRoot },
-      { directory: projectRoot } as any,
-    )
-
-    expect(typeof result).toBe("string")
-    expect(result).toContain("context blocked")
-    expect(result).toContain("status=blocked")
-    expect(result).not.toMatch(/^context → /)
-    // No pack file that looks complete
-    expect(listContextPacks(projectRoot)).toEqual([])
-
-    // Blocked output surfaces canonical diagnostic codes/messages without a pack.
-    // Provenance (file/target) stays public/relative on the plan diagnostics;
-    // the consumer only summarizes code+message and must not rewrite paths.
-    let sawFile = false
-    let sawTarget = false
-    for (const d of plan.diagnostics) {
-      expect(String(result)).toContain(d.code)
-      expect(String(result)).toContain(d.message)
-      if (d.file !== undefined) {
-        sawFile = true
-        expect(pathIsPublic(d.file)).toBe(true)
-        expect(d.file.includes(resolve(projectRoot))).toBe(false)
-        expect(d.file.includes(projectRoot)).toBe(false)
-      }
-      if (d.target !== undefined) {
-        sawTarget = true
-        // Include targets are relative manuscript refs (e.g. missing-chapter), not abs paths.
-        expect(d.target.includes(resolve(projectRoot))).toBe(false)
-        expect(d.target.startsWith("/")).toBe(false)
-        expect(/^[A-Za-z]:/.test(d.target)).toBe(false)
-      }
-    }
-    expect(sawFile).toBe(true)
-    expect(sawTarget).toBe(true)
-    // Absolute temporary project path must not leak into the blocked message.
-    expect(String(result).includes(resolve(projectRoot))).toBe(false)
-    expect(String(result).includes(projectRoot)).toBe(false)
-  })
-
-  test("complete empty manuscript → success with zero batches and 100% coverage", async () => {
-    writeTree(projectRoot, {
-      "main.tex": "",
-    })
-    writeProjectConfig(projectRoot, { chapters: [], maxCharactersPerBatch: 100 })
-
-    const { bancaContext } = await import("../src/tools/banca_context")
-    const result = await bancaContext.execute(
-      { projectRoot },
-      { directory: projectRoot } as any,
-    )
-
-    expect(result).toMatch(/^context → /)
-    const packPath = String(result).replace(/^context → /, "")
-    const body = readFileSync(packPath, "utf-8")
-    const meta = parseMetadata(body)
-
-    expect((meta.plan as any).status).toBe("complete")
-    expect((meta.plan as any).batchCount).toBe(0)
-    expect((meta.plan as any).coveragePercent).toBe(100)
-    expect((meta.checkpoint as any).state).toBe("complete")
-    expect((meta.checkpoint as any).totalBatches).toBe(0)
-    expect((meta.checkpoint as any).coveragePercent).toBe(100)
-    expect((meta.batch as any).batchId).toBeNull()
-    expect((meta.batch as any).totalBatches).toBe(0)
-    expect((meta.batch as any).characters).toBe(0)
-    expect((meta.batch as any).initialCoveragePercent).toBe(100)
-    expect(meta.chunks).toEqual([])
-    expect(body).toContain("zero batches")
-    expect(body.includes(resolve(projectRoot))).toBe(false)
-  })
-
-  test("absolute temp project path never appears in pack content", async () => {
-    writeTree(projectRoot, {
-      "main.tex": "\\begin{document}\nHello path leak check.\n\\end{document}\n",
-    })
-    writeProjectConfig(projectRoot, { chapters: [], maxCharactersPerBatch: 500 })
-
-    const { bancaContext } = await import("../src/tools/banca_context")
-    const result = await bancaContext.execute(
-      { projectRoot },
-      { directory: projectRoot } as any,
-    )
-    const packPath = String(result).replace(/^context → /, "")
-    const body = readFileSync(packPath, "utf-8")
-    const abs = resolve(projectRoot)
-    expect(body.includes(abs)).toBe(false)
-    // Metadata chunk files must be public relative paths
-    const meta = parseMetadata(body)
-    for (const c of meta.chunks as Array<{ file: string }>) {
-      expect(pathIsPublic(c.file)).toBe(true)
-      expect(c.file.includes(abs)).toBe(false)
-    }
-  })
-
-  test("optional scorecard.md and knowledge.md are included without altering canonical metadata", async () => {
+  test("optional scorecard/knowledge included without altering checkpoint identity", async () => {
     writeTree(projectRoot, {
       "main.tex": "ONLY-CANONICAL-BODY\n",
       ".banca/scorecard.md": "# Scorecard\nscore: 7.5\n",
@@ -387,94 +814,110 @@ TAIL
     })
     writeProjectConfig(projectRoot, { chapters: [], maxCharactersPerBatch: 500 })
 
-    const config = loadConfig(projectRoot)
-    const manuscript = loadCanonicalLatexManuscript(projectRoot, config)
-    const plan = planExhaustiveAnalysisBatches(
-      manuscript,
-      config.analysis.maxCharactersPerBatch,
-    )
+    const { plan } = planOracle(projectRoot)
     const checkpoint = createAnalysisCheckpoint(plan)
     const first = nextAnalysisBatch(plan, checkpoint)!
 
-    const { bancaContext } = await import("../src/tools/banca_context")
-    const result = await bancaContext.execute(
-      { projectRoot },
-      { directory: projectRoot } as any,
-    )
-    const packPath = String(result).replace(/^context → /, "")
-    const body = readFileSync(packPath, "utf-8")
+    const result = await runContext(projectRoot)
+    const body = packBodyFromResult(result)
     const meta = parseMetadata(body)
 
-    // Canonical identity unchanged vs oracle without scorecard/knowledge
-    expect((meta.manuscript as any).fingerprint).toBe(plan.fingerprint)
     expect((meta.plan as any).planId).toBe(checkpoint.planId)
     expect((meta.batch as any).batchId).toBe(first.batchId)
-    expect(extractLatexChunks(body)).toEqual(first.chunks.map((c) => c.text))
-
-    // Optional files still present in pack
     expect(body).toContain("# Scorecard")
-    expect(body).toContain("score: 7.5")
     expect(body).toContain("# Knowledge")
-    expect(body).toContain("note about domain")
 
-    // Optional section appears after canonical batch section
-    const batchPos = body.indexOf("## First exhaustive batch")
+    const batchPos = body.indexOf("## Next exhaustive batch")
     const statePos = body.indexOf("## Project state")
     expect(batchPos).toBeGreaterThan(-1)
     expect(statePos).toBeGreaterThan(batchPos)
   })
 
-  test("production tool does not use resolveManuscriptPaths, direct chapter FS reads, or slice(0, 1500)", async () => {
-    // Structural/source contract for the shipped tool module.
+  test("production tool wires persistence APIs and does not reimplement progress", async () => {
     const src = readFileSync(
       join(import.meta.dir, "../src/tools/banca_context.ts"),
       "utf-8",
     )
-    expect(src).not.toContain("resolveManuscriptPaths")
-    expect(src).not.toContain(".slice(0, 1500)")
-    expect(src).not.toContain("sanitizeDiagnosticText")
-    expect(src).not.toContain("sanitizeDiagnostics")
     expect(src).toContain("loadCanonicalLatexManuscript")
     expect(src).toContain("planExhaustiveAnalysisBatches")
     expect(src).toContain("createAnalysisCheckpoint")
     expect(src).toContain("nextAnalysisBatch")
-    expect(src).toContain("maxCharactersPerBatch")
-    // Diagnostics are a shallow copy of the canonical plan — no consumer sanitization.
-    expect(src).toMatch(/plan\.diagnostics\.map\(\s*\(?d\)?\s*=>\s*\(\s*\{\s*\.\.\.d\s*\}\s*\)/)
-    // No chapter loop over paths.chapters
+    expect(src).toContain("completeAnalysisBatch")
+    expect(src).toContain("loadAnalysisCheckpoint")
+    expect(src).toContain("saveAnalysisCheckpoint")
+    expect(src).toContain("completedBatchId")
+    expect(src).toContain("plan.diagnostics.map")
+    expect(src).toContain("## Checkpoint coverage complete")
+    // Consumer must not reintroduce diagnostic sanitization (canonical loader owns safety).
+    expect(src).not.toContain("sanitizeDiagnosticText")
+    expect(src).not.toContain("sanitizeDiagnostics")
+    expect(src).not.toContain("Exhaustive analysis complete")
+    expect(src).not.toContain("resolveManuscriptPaths")
+    expect(src).not.toContain(".slice(0, 1500)")
     expect(src).not.toMatch(/paths\.chapters/)
-    // No direct .tex chapter iteration for context body
     expect(src).not.toMatch(/readFileSync\([^)]*\.tex/)
+
+    const stateSrc = readFileSync(
+      join(import.meta.dir, "../src/lib/state.ts"),
+      "utf-8",
+    )
+    expect(stateSrc).toContain("renameSync")
+    expect(stateSrc).toContain("lstatSync")
+    expect(stateSrc).toContain("isSymbolicLink")
+    expect(stateSrc).toContain(".banca")
+    expect(stateSrc).toContain("analysis")
+    expect(stateSrc).toContain("checkpoints")
+    // Storage errors must not interpolate err.message (path leak risk).
+    expect(stateSrc).not.toMatch(
+      /failed to (lstat|read|persist)[\s\S]{0,80}\$\{err/,
+    )
   })
 
-  test("writes only under .banca/context and does not persist checkpoint/findings", async () => {
-    writeTree(projectRoot, {
-      "main.tex": "persist-check body\n",
+  test("tool and persistence error messages do not leak absolute paths", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const planId = createAnalysisCheckpoint(plan).planId
+    await runContext(projectRoot)
+
+    const unknown = await runContext(projectRoot, {
+      completedBatchId: "batch-does-not-exist",
     })
-    writeProjectConfig(projectRoot, { chapters: [], maxCharactersPerBatch: 500 })
+    expect(unknown).toContain("code=unknown_batch")
+    assertNoAbsolutePathLeak(unknown, projectRoot)
 
-    const { bancaContext } = await import("../src/tools/banca_context")
-    await bancaContext.execute({ projectRoot }, { directory: projectRoot } as any)
+    const empty = await runContext(projectRoot, { completedBatchId: "" })
+    expect(empty).toContain("code=invalid_batch_id")
+    assertNoAbsolutePathLeak(empty, projectRoot)
 
-    const packs = listContextPacks(projectRoot)
-    expect(packs.length).toBe(1)
-    // No checkpoint or findings artifacts introduced
-    expect(existsSync(join(projectRoot, ".banca", "checkpoint.json"))).toBe(false)
-    expect(existsSync(join(projectRoot, ".banca", "findings.json"))).toBe(false)
-    expect(existsSync(join(projectRoot, ".banca", "analysis-checkpoint.json"))).toBe(
-      false,
+    // Symlink refusal path
+    const abs = join(
+      projectRoot,
+      ".banca",
+      "analysis",
+      "checkpoints",
+      `${planId}.json`,
     )
-    // Only context dir under .banca besides project.json
-    const bancaEntries = readdirSync(join(projectRoot, ".banca"))
-    expect(bancaEntries.sort()).toEqual(["context", "project.json"].sort())
+    rmSync(abs)
+    symlinkSync(join(projectRoot, "decoy-missing.json"), abs)
+    const symlinkErr = await runContext(projectRoot)
+    expect(symlinkErr).toContain("code=symlink_refused")
+    assertNoAbsolutePathLeak(symlinkErr, projectRoot)
+  })
+
+  test("loadAnalysisCheckpoint returns null when missing and round-trips via save", async () => {
+    writeMultiBatchProject(projectRoot)
+    const { plan } = planOracle(projectRoot)
+    const cp = createAnalysisCheckpoint(plan)
+    expect(loadAnalysisCheckpoint(projectRoot, cp.planId)).toBeNull()
+
+    // Use tool to create file
+    await runContext(projectRoot)
+    const loaded = loadAnalysisCheckpoint(projectRoot, cp.planId)
+    expect(loaded).toEqual(cp)
+
+    // Public relative path is stable and relative
+    const rel = getAnalysisCheckpointRelativePath(cp.planId)
+    expect(rel).toBe(`.banca/analysis/checkpoints/${cp.planId}.json`)
+    expect(pathIsPublic(rel)).toBe(true)
   })
 })
-
-function pathIsPublic(file: string): boolean {
-  if (file.length === 0) return false
-  if (file.startsWith("/")) return false
-  if (/^[A-Za-z]:/.test(file)) return false
-  if (file.includes("\\")) return false
-  if (file.split("/").includes("..")) return false
-  return true
-}

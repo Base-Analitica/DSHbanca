@@ -5,16 +5,50 @@ import { loadConfig } from "../lib/config"
 import { loadCanonicalLatexManuscript } from "../lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../lib/analysis_coverage"
 import {
+  AnalysisCheckpointError,
   createAnalysisCheckpoint,
+  completeAnalysisBatch,
   nextAnalysisBatch,
   type AnalysisCheckpoint,
 } from "../lib/analysis_checkpoint"
+import {
+  getAnalysisCheckpointRelativePath,
+  loadAnalysisCheckpoint,
+  saveAnalysisCheckpoint,
+} from "../lib/state"
 const z = tool.schema
 
+/**
+ * Format checkpoint errors for the tool surface.
+ * AnalysisCheckpointError messages are assumed safe at source (no absolute paths).
+ * Unexpected errors never surface raw host messages.
+ */
+function formatCheckpointError(err: unknown): string {
+  if (err instanceof AnalysisCheckpointError) {
+    return [
+      "context checkpoint error",
+      `code=${err.code}`,
+      `message=${err.message}`,
+    ].join("\n")
+  }
+  return [
+    "context checkpoint error",
+    `code=unexpected`,
+    `message=an unexpected checkpoint error occurred`,
+  ].join("\n")
+}
+
 export const bancaContext = tool({
-  description: "Build context pack from project state for agents.",
+  description:
+    "Build context pack from the canonical manuscript plan and the persisted exhaustive-analysis checkpoint. Progress advances only when completedBatchId is supplied.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
+    completedBatchId: z
+      .string()
+      .optional()
+      .describe(
+        "Optional batchId to mark complete before selecting the next batch. Omit to resume without advancing.",
+      ),
   },
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory
@@ -27,6 +61,7 @@ export const bancaContext = tool({
     const diagnostics = plan.diagnostics.map((d) => ({ ...d }))
 
     if (plan.status === "blocked") {
+      // Blocked plan: do not create or modify any checkpoint file.
       const diagSummary = diagnostics
         .map((d) => `${d.code}: ${d.message}`)
         .join("; ")
@@ -41,9 +76,44 @@ export const bancaContext = tool({
       ].join("\n")
     }
 
-    // Complete plan (including empty document): in-memory checkpoint only — never persisted.
-    const checkpoint: AnalysisCheckpoint = createAnalysisCheckpoint(plan)
-    const firstBatch = nextAnalysisBatch(plan, checkpoint)
+    let checkpoint: AnalysisCheckpoint
+    let checkpointRelPath: string
+    try {
+      // Identity for storage key comes from the canonical initial checkpoint.
+      const initial = createAnalysisCheckpoint(plan)
+      checkpointRelPath = getAnalysisCheckpointRelativePath(initial.planId)
+
+      const loaded = loadAnalysisCheckpoint(root, initial.planId)
+      if (loaded === null) {
+        checkpoint = initial
+        saveAnalysisCheckpoint(root, checkpoint)
+      } else {
+        checkpoint = loaded
+      }
+
+      // Validate loaded/created checkpoint against the plan via public APIs.
+      // completeAnalysisBatch / nextAnalysisBatch both assert compatibility.
+      // When completedBatchId is present (including empty string), always route
+      // through completeAnalysisBatch so invalid_batch_id is returned for "".
+      // Only true omission/undefined resumes without advancing.
+      if (args.completedBatchId !== undefined) {
+        checkpoint = completeAnalysisBatch(plan, checkpoint, args.completedBatchId)
+        saveAnalysisCheckpoint(root, checkpoint)
+      } else {
+        // Resume-only: force validation without advancing.
+        nextAnalysisBatch(plan, checkpoint)
+      }
+    } catch (err) {
+      return formatCheckpointError(err)
+    }
+
+    // Next batch after optional advance (null when complete / empty).
+    let nextBatch
+    try {
+      nextBatch = nextAnalysisBatch(plan, checkpoint)
+    } catch (err) {
+      return formatCheckpointError(err)
+    }
 
     const optionalParts: string[] = []
     for (const p of [join(root, ".banca", "scorecard.md"), join(root, ".banca", "knowledge.md")]) {
@@ -51,7 +121,7 @@ export const bancaContext = tool({
     }
 
     const batchMeta =
-      firstBatch === null
+      nextBatch === null
         ? {
             batchId: null as string | null,
             batchIndex: null as number | null,
@@ -70,10 +140,10 @@ export const bancaContext = tool({
             }>,
           }
         : {
-            batchId: firstBatch.batchId,
-            batchIndex: firstBatch.index,
-            batchCharacters: firstBatch.characters,
-            chunks: firstBatch.chunks.map((c) => ({
+            batchId: nextBatch.batchId,
+            batchIndex: nextBatch.index,
+            batchCharacters: nextBatch.characters,
+            chunks: nextBatch.chunks.map((c) => ({
               index: c.index,
               text: c.text,
               source: {
@@ -113,14 +183,17 @@ export const bancaContext = tool({
         totalCharacters: checkpoint.totalCharacters,
         completedCharacters: checkpoint.completedCharacters,
         coveragePercent: checkpoint.coveragePercent,
+        // Public project-relative path only (never absolute).
+        path: checkpointRelPath,
+        persisted: true,
       },
       batch: {
         batchId: batchMeta.batchId,
         index: batchMeta.batchIndex,
         totalBatches: plan.coverage.batchCount,
         characters: batchMeta.batchCharacters,
-        // Initial coverage before any batch is marked complete.
-        initialCoveragePercent: checkpoint.coveragePercent,
+        // Coverage of the persisted checkpoint (progress so far), not a claim of academic quality.
+        coveragePercent: checkpoint.coveragePercent,
       },
       chunks: batchMeta.chunks.map((c) => ({
         index: c.index,
@@ -145,9 +218,15 @@ export const bancaContext = tool({
       `\`\`\`json\n${JSON.stringify(metadata, null, 2)}\n\`\`\`\n`,
     ]
 
-    if (firstBatch !== null) {
-      parts.push(`## First exhaustive batch (${firstBatch.batchId})\n`)
-      for (const chunk of firstBatch.chunks) {
+    const coverageDisclaimer =
+      "This reports checkpoint/coverage progress only; it does not prove model run, findings, or academic analysis."
+
+    if (nextBatch !== null) {
+      parts.push(
+        `## Next exhaustive batch (${nextBatch.batchId})\n`,
+        `_Checkpoint ${checkpoint.state}: completed ${checkpoint.completedBatches}/${checkpoint.totalBatches} batches, coverage ${checkpoint.coveragePercent}%. Persisted at \`${checkpointRelPath}\`. ${coverageDisclaimer}_\n`,
+      )
+      for (const chunk of nextBatch.chunks) {
         parts.push(
           `### chunk ${chunk.index} — ${chunk.source.file}` +
             ` L${chunk.source.startLine}-${chunk.source.endLine}` +
@@ -155,10 +234,15 @@ export const bancaContext = tool({
             `\`\`\`latex\n${chunk.text}\n\`\`\`\n`,
         )
       }
+    } else if (checkpoint.state === "complete" && checkpoint.totalBatches === 0) {
+      parts.push(
+        `## Checkpoint coverage complete\n\n` +
+          `_Empty complete manuscript: zero batches, coverage 100%. Checkpoint persisted at \`${checkpointRelPath}\`. ${coverageDisclaimer}_\n`,
+      )
     } else {
       parts.push(
-        `## First exhaustive batch\n\n` +
-          `_Empty complete manuscript: zero batches, coverage 100%._\n`,
+        `## Checkpoint coverage complete\n\n` +
+          `_All ${checkpoint.totalBatches} batches completed in the checkpoint; coverage ${checkpoint.coveragePercent}%. Checkpoint persisted at \`${checkpointRelPath}\`. No next batch. ${coverageDisclaimer}_\n`,
       )
     }
 
