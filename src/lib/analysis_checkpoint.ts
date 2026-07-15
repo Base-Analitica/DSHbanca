@@ -18,8 +18,12 @@ import type {
   ExhaustiveAnalysisPlan,
 } from "./analysis_coverage"
 
-/** Wire version of the checkpoint document. Bump only with a breaking change. */
-export const ANALYSIS_CHECKPOINT_VERSION = "analysis-checkpoint-v1" as const
+/**
+ * Wire version of the checkpoint document and plan-identity framing prefix.
+ * Bumped to v2 when plan identity started binding ordered chunk provenance
+ * (file, lines, span, offsets, text digest) — old planIds must not collide.
+ */
+export const ANALYSIS_CHECKPOINT_VERSION = "analysis-checkpoint-v2" as const
 
 export type AnalysisCheckpointState =
   | "blocked"
@@ -176,6 +180,7 @@ function assertPlanShape(plan: ExhaustiveAnalysisPlan): void {
 
   const seenBatchIds = new Set<string>()
   let plannedSum = 0
+  // Pass 1: batch headers, uniqueness, character totals (before chunk payloads).
   for (let i = 0; i < plan.batches.length; i++) {
     const batch = plan.batches[i]
     if (
@@ -186,7 +191,8 @@ function assertPlanShape(plan: ExhaustiveAnalysisPlan): void {
       typeof batch.characters !== "number" ||
       !Number.isInteger(batch.characters) ||
       batch.characters <= 0 ||
-      batch.index !== i
+      batch.index !== i ||
+      !Array.isArray(batch.chunks)
     ) {
       throw new AnalysisCheckpointError(
         "invalid_plan",
@@ -246,10 +252,128 @@ function assertPlanShape(plan: ExhaustiveAnalysisPlan): void {
       "complete plan requires coveragePercent === 100",
     )
   }
+
+  // Pass 2: ordered chunk provenance (binds identity; empty chunk lists invalid).
+  let globalChunkIndex = 0
+  for (let i = 0; i < plan.batches.length; i++) {
+    const batch = plan.batches[i]
+    if (batch.chunks.length === 0) {
+      throw new AnalysisCheckpointError(
+        "invalid_plan",
+        `plan.batches[${i}] is malformed`,
+      )
+    }
+    let batchTextSum = 0
+    for (let j = 0; j < batch.chunks.length; j++) {
+      assertChunkShape(batch.chunks[j], i, j, globalChunkIndex)
+      batchTextSum += batch.chunks[j].text.length
+      globalChunkIndex += 1
+    }
+    if (batchTextSum !== batch.characters) {
+      throw new AnalysisCheckpointError(
+        "invalid_plan",
+        `plan.batches[${i}].characters must equal sum of chunk text lengths`,
+      )
+    }
+  }
 }
 
 /**
- * Deterministic plan identity over stable plan fields + ordered batchIds.
+ * Fail-closed shape for one exhaustive chunk used by identity and resume.
+ * Requires non-empty text and coherent source offsets.
+ */
+function assertChunkShape(
+  chunk: ExhaustiveAnalysisBatch["chunks"][number] | unknown,
+  batchIndex: number,
+  chunkIndexInBatch: number,
+  expectedGlobalIndex: number,
+): asserts chunk is ExhaustiveAnalysisBatch["chunks"][number] {
+  const label = `plan.batches[${batchIndex}].chunks[${chunkIndexInBatch}]`
+  if (chunk == null || typeof chunk !== "object") {
+    throw new AnalysisCheckpointError("invalid_plan", `${label} is malformed`)
+  }
+  const c = chunk as Record<string, unknown>
+  if (
+    typeof c.index !== "number" ||
+    !Number.isInteger(c.index) ||
+    c.index !== expectedGlobalIndex
+  ) {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}.index must equal global sequential index ${expectedGlobalIndex}`,
+    )
+  }
+  if (typeof c.text !== "string" || c.text.length === 0) {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}.text must be a non-empty string`,
+    )
+  }
+  const source = c.source
+  if (source == null || typeof source !== "object") {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}.source is malformed`,
+    )
+  }
+  const s = source as Record<string, unknown>
+  if (typeof s.file !== "string" || s.file.length === 0) {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}.source.file must be a non-empty string`,
+    )
+  }
+  if (
+    typeof s.startLine !== "number" ||
+    !Number.isInteger(s.startLine) ||
+    s.startLine < 1 ||
+    typeof s.endLine !== "number" ||
+    !Number.isInteger(s.endLine) ||
+    s.endLine < s.startLine
+  ) {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}.source line range is malformed`,
+    )
+  }
+  if (
+    typeof s.sourceSpanIndex !== "number" ||
+    !Number.isInteger(s.sourceSpanIndex) ||
+    s.sourceSpanIndex < 0
+  ) {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}.source.sourceSpanIndex must be an integer >= 0`,
+    )
+  }
+  if (
+    typeof s.startOffset !== "number" ||
+    !Number.isInteger(s.startOffset) ||
+    s.startOffset < 0 ||
+    typeof s.endOffset !== "number" ||
+    !Number.isInteger(s.endOffset) ||
+    s.endOffset <= s.startOffset
+  ) {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}.source offsets must be integers with endOffset > startOffset >= 0`,
+    )
+  }
+  if (s.endOffset - s.startOffset !== (c.text as string).length) {
+    throw new AnalysisCheckpointError(
+      "invalid_plan",
+      `${label}: endOffset - startOffset must equal text.length`,
+    )
+  }
+}
+
+function chunkTextDigest(text: string): string {
+  return createHash("sha256").update(utf8(text)).digest("hex")
+}
+
+/**
+ * Deterministic plan identity over stable plan fields, ordered batchIds, and
+ * ordered chunk provenance (file, lines, span, offsets, text length + SHA-256).
  * Null fingerprint is framed as the empty string (blocked plans only).
  * Fail-closed: validates plan shape before hashing.
  */
@@ -267,6 +391,19 @@ export function computePlanIdentity(plan: ExhaustiveAnalysisPlan): string {
   appendFramed(parts, String(plan.coverage.batchCount))
   for (const batch of plan.batches) {
     appendFramed(parts, batch.batchId)
+    appendFramed(parts, String(batch.characters))
+    for (const chunk of batch.chunks) {
+      appendFramed(parts, String(chunk.index))
+      appendFramed(parts, chunk.source.file)
+      appendFramed(parts, String(chunk.source.startLine))
+      appendFramed(parts, String(chunk.source.endLine))
+      appendFramed(parts, String(chunk.source.sourceSpanIndex))
+      appendFramed(parts, String(chunk.source.startOffset))
+      appendFramed(parts, String(chunk.source.endOffset))
+      appendFramed(parts, String(chunk.text.length))
+      // Content digest (not raw text) keeps framing compact while binding payload.
+      appendFramed(parts, chunkTextDigest(chunk.text))
+    }
   }
   return createHash("sha256").update(Buffer.concat(parts)).digest("hex")
 }
