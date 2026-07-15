@@ -22,6 +22,25 @@ import type {
 /** Wire version of the analysis finding document. Bump only with a breaking change. */
 export const ANALYSIS_FINDING_VERSION = "analysis-finding-v1" as const
 
+/** Exact key set for analysis-finding-v1 stored findings (no extras, no missing). */
+const ANALYSIS_FINDING_V1_KEYS = [
+  "version",
+  "findingId",
+  "planId",
+  "category",
+  "severity",
+  "claim",
+  "evidence",
+  "file",
+  "startLine",
+  "endLine",
+  "sectionId",
+  "manuscriptFingerprint",
+  "batchId",
+] as const
+
+const ANALYSIS_FINDING_V1_KEY_SET = new Set<string>(ANALYSIS_FINDING_V1_KEYS)
+
 /**
  * Caller-supplied fields for a finding produced against one plan batch.
  * Text fields are trimmed on create; `file` must match a public/POSIX path in the batch.
@@ -162,7 +181,7 @@ function requirePositiveIntegerLine(
 }
 
 /**
- * Stored finding fields must be non-empty strings (reject whitespace-only).
+ * Stored non-normalized strings: non-empty after type check (whitespace-only rejected).
  * Values are used as stored for identity — not re-trimmed.
  */
 function requireStoredNonEmptyString(
@@ -174,6 +193,30 @@ function requireStoredNonEmptyString(
     throw new AnalysisFindingError(
       "invalid_finding",
       `${label} finding.${field} must be a non-empty string`,
+    )
+  }
+  return value
+}
+
+/**
+ * Canonical text fields on the wire must already be trimmed (create trims).
+ * Reject padding even when findingId was computed over the padded value.
+ */
+function requireStoredCanonicalText(
+  value: unknown,
+  field: string,
+  label: string,
+): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new AnalysisFindingError(
+      "invalid_finding",
+      `${label} finding.${field} must be a non-empty string`,
+    )
+  }
+  if (value !== value.trim()) {
+    throw new AnalysisFindingError(
+      "invalid_finding",
+      `${label} finding.${field} must be canonical (no leading/trailing whitespace)`,
     )
   }
   return value
@@ -197,21 +240,51 @@ function requireStoredPositiveIntegerLine(
   return value
 }
 
+function assertExactFindingKeys(
+  finding: object,
+  label: string,
+): void {
+  const keys = Object.keys(finding)
+  if (keys.length !== ANALYSIS_FINDING_V1_KEY_SET.size) {
+    throw new AnalysisFindingError(
+      "invalid_finding",
+      `${label} finding must have exactly ${ANALYSIS_FINDING_V1_KEY_SET.size} keys for ${ANALYSIS_FINDING_VERSION}`,
+    )
+  }
+  for (const key of keys) {
+    if (!ANALYSIS_FINDING_V1_KEY_SET.has(key)) {
+      throw new AnalysisFindingError(
+        "invalid_finding",
+        `${label} finding has unknown key: ${key}`,
+      )
+    }
+  }
+  for (const required of ANALYSIS_FINDING_V1_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(finding, required)) {
+      throw new AnalysisFindingError(
+        "invalid_finding",
+        `${label} finding is missing required key: ${required}`,
+      )
+    }
+  }
+}
+
 /**
- * Fail-closed structural validation of a stored AnalysisFinding, including
- * recomputed findingId over the validated payload (no re-trim for identity).
+ * Fail-closed structural validation of a stored AnalysisFinding:
+ * exact key set, canonical trimmed text fields, recomputed findingId.
  */
 function assertValidStoredFinding(
   finding: unknown,
   label: string,
 ): AnalysisFinding {
-  if (finding == null || typeof finding !== "object") {
+  if (finding == null || typeof finding !== "object" || Array.isArray(finding)) {
     throw new AnalysisFindingError(
       "invalid_finding",
       `${label} contains a non-object finding`,
     )
   }
 
+  assertExactFindingKeys(finding, label)
   const f = finding as Record<string, unknown>
 
   if (f.version !== ANALYSIS_FINDING_VERSION) {
@@ -223,11 +296,11 @@ function assertValidStoredFinding(
 
   const findingId = requireStoredNonEmptyString(f.findingId, "findingId", label)
   const planId = requireStoredNonEmptyString(f.planId, "planId", label)
-  const category = requireStoredNonEmptyString(f.category, "category", label)
-  const severity = requireStoredNonEmptyString(f.severity, "severity", label)
-  const claim = requireStoredNonEmptyString(f.claim, "claim", label)
-  const evidence = requireStoredNonEmptyString(f.evidence, "evidence", label)
-  const sectionId = requireStoredNonEmptyString(f.sectionId, "sectionId", label)
+  const category = requireStoredCanonicalText(f.category, "category", label)
+  const severity = requireStoredCanonicalText(f.severity, "severity", label)
+  const claim = requireStoredCanonicalText(f.claim, "claim", label)
+  const evidence = requireStoredCanonicalText(f.evidence, "evidence", label)
+  const sectionId = requireStoredCanonicalText(f.sectionId, "sectionId", label)
   const file = requireStoredNonEmptyString(f.file, "file", label)
   const manuscriptFingerprint = requireStoredNonEmptyString(
     f.manuscriptFingerprint,
@@ -287,6 +360,149 @@ function assertValidStoredFinding(
 }
 
 /**
+ * Fail-closed validation of every batch chunk (not covered by computePlanIdentity).
+ * Global chunk indices must be sequential from 0 across batches in order.
+ * batch.characters must equal sum of chunk.text.length.
+ */
+function assertPlanChunkProvenance(plan: ExhaustiveAnalysisPlan): void {
+  if (!Array.isArray(plan.batches)) {
+    throw new AnalysisFindingError(
+      "invalid_plan",
+      "plan.batches must be an array",
+    )
+  }
+
+  let expectedChunkIndex = 0
+  for (let bi = 0; bi < plan.batches.length; bi++) {
+    const batch = plan.batches[bi]
+    if (batch == null || typeof batch !== "object") {
+      throw new AnalysisFindingError(
+        "invalid_plan",
+        `plan.batches[${bi}] is malformed`,
+      )
+    }
+    if (batch.index !== bi) {
+      throw new AnalysisFindingError(
+        "invalid_plan",
+        `plan.batches[${bi}].index must equal ${bi}`,
+      )
+    }
+    if (typeof batch.batchId !== "string" || batch.batchId.length === 0) {
+      throw new AnalysisFindingError(
+        "invalid_plan",
+        `plan.batches[${bi}].batchId must be a non-empty string`,
+      )
+    }
+    if (!Array.isArray(batch.chunks)) {
+      throw new AnalysisFindingError(
+        "invalid_plan",
+        `plan.batches[${bi}].chunks must be an array`,
+      )
+    }
+
+    let textSum = 0
+    for (let ci = 0; ci < batch.chunks.length; ci++) {
+      const chunk = batch.chunks[ci]
+      const path = `plan.batches[${bi}].chunks[${ci}]`
+      if (chunk == null || typeof chunk !== "object") {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path} is malformed`,
+        )
+      }
+      if (
+        typeof chunk.index !== "number" ||
+        !Number.isInteger(chunk.index) ||
+        chunk.index !== expectedChunkIndex
+      ) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.index must be sequential global index ${expectedChunkIndex}`,
+        )
+      }
+      if (typeof chunk.text !== "string") {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.text must be a string`,
+        )
+      }
+      const source = chunk.source
+      if (source == null || typeof source !== "object") {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.source is malformed`,
+        )
+      }
+      if (typeof source.file !== "string" || source.file.length === 0) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.source.file must be a non-empty string`,
+        )
+      }
+      const s = source.startLine
+      const e = source.endLine
+      if (
+        typeof s !== "number" ||
+        typeof e !== "number" ||
+        !Number.isInteger(s) ||
+        !Number.isInteger(e) ||
+        s < 1 ||
+        e < s
+      ) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.source line range is malformed`,
+        )
+      }
+      if (
+        typeof source.sourceSpanIndex !== "number" ||
+        !Number.isInteger(source.sourceSpanIndex) ||
+        source.sourceSpanIndex < 0
+      ) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.source.sourceSpanIndex must be an integer >= 0`,
+        )
+      }
+      const startOffset = source.startOffset
+      const endOffset = source.endOffset
+      if (
+        typeof startOffset !== "number" ||
+        typeof endOffset !== "number" ||
+        !Number.isInteger(startOffset) ||
+        !Number.isInteger(endOffset) ||
+        startOffset < 0 ||
+        endOffset < startOffset
+      ) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}.source offsets are malformed (require 0 <= startOffset <= endOffset)`,
+        )
+      }
+      if (endOffset - startOffset !== chunk.text.length) {
+        throw new AnalysisFindingError(
+          "invalid_plan",
+          `${path}: endOffset - startOffset must equal text.length`,
+        )
+      }
+      textSum += chunk.text.length
+      expectedChunkIndex += 1
+    }
+
+    if (
+      typeof batch.characters !== "number" ||
+      !Number.isInteger(batch.characters) ||
+      batch.characters !== textSum
+    ) {
+      throw new AnalysisFindingError(
+        "invalid_plan",
+        `plan.batches[${bi}].characters must equal sum of chunk.text.length (${textSum})`,
+      )
+    }
+  }
+}
+
+/**
  * Merge half-open line intervals [start, end] inclusive into sorted disjoint ranges.
  */
 function mergeLineIntervals(
@@ -302,7 +518,6 @@ function mergeLineIntervals(
   for (let i = 1; i < sorted.length; i++) {
     const cur = sorted[i]
     const last = merged[merged.length - 1]
-    // Adjacent intervals touch when cur.start <= last.end + 1
     if (cur.start <= last.end + 1) {
       if (cur.end > last.end) last.end = cur.end
     } else {
@@ -313,59 +528,19 @@ function mergeLineIntervals(
 }
 
 /**
- * Collect inclusive line intervals for `file` from batch chunks.
- * Fail-closed: any malformed chunk in the batch → invalid_plan.
+ * Collect inclusive line intervals for `file` from a fully validated batch.
  */
 function lineIntervalsForFileInBatch(
   batch: ExhaustiveAnalysisBatch,
   file: string,
 ): Array<{ start: number; end: number }> {
-  if (!Array.isArray(batch.chunks)) {
-    throw new AnalysisFindingError(
-      "invalid_plan",
-      "batch.chunks must be an array",
-    )
-  }
-
   const intervals: Array<{ start: number; end: number }> = []
-  for (let i = 0; i < batch.chunks.length; i++) {
-    const chunk = batch.chunks[i]
-    if (chunk == null || typeof chunk !== "object") {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `batch.chunks[${i}] is malformed`,
-      )
-    }
-    const source = chunk.source
-    if (source == null || typeof source !== "object") {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `batch.chunks[${i}].source is malformed`,
-      )
-    }
-    if (typeof source.file !== "string" || source.file.length === 0) {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `batch.chunks[${i}].source.file must be a non-empty string`,
-      )
-    }
-    const s = source.startLine
-    const e = source.endLine
-    if (
-      typeof s !== "number" ||
-      typeof e !== "number" ||
-      !Number.isInteger(s) ||
-      !Number.isInteger(e) ||
-      s < 1 ||
-      e < s
-    ) {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `batch.chunks[${i}].source line range is malformed`,
-      )
-    }
-    if (source.file === file) {
-      intervals.push({ start: s, end: e })
+  for (const chunk of batch.chunks) {
+    if (chunk.source.file === file) {
+      intervals.push({
+        start: chunk.source.startLine,
+        end: chunk.source.endLine,
+      })
     }
   }
   return intervals
@@ -399,34 +574,8 @@ function batchHasFile(
   batch: ExhaustiveAnalysisBatch,
   file: string,
 ): boolean {
-  if (!Array.isArray(batch.chunks)) {
-    throw new AnalysisFindingError(
-      "invalid_plan",
-      "batch.chunks must be an array",
-    )
-  }
-  for (let i = 0; i < batch.chunks.length; i++) {
-    const chunk = batch.chunks[i]
-    if (chunk == null || typeof chunk !== "object") {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `batch.chunks[${i}] is malformed`,
-      )
-    }
-    const source = chunk.source
-    if (source == null || typeof source !== "object") {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `batch.chunks[${i}].source is malformed`,
-      )
-    }
-    if (typeof source.file !== "string" || source.file.length === 0) {
-      throw new AnalysisFindingError(
-        "invalid_plan",
-        `batch.chunks[${i}].source.file must be a non-empty string`,
-      )
-    }
-    if (source.file === file) return true
+  for (const chunk of batch.chunks) {
+    if (chunk.source.file === file) return true
   }
   return false
 }
@@ -477,6 +626,8 @@ export function createAnalysisFinding(
 ): AnalysisFinding {
   // Canonical plan shape + identity (fail-closed via AnalysisCheckpointError map).
   const planId = resolvePlanId(plan)
+  // Chunk/batch provenance is outside computePlanIdentity — validate fully here.
+  assertPlanChunkProvenance(plan)
 
   if (plan.status === "blocked") {
     throw new AnalysisFindingError(
@@ -596,7 +747,8 @@ export function createAnalysisFinding(
 /**
  * Exact, pure, idempotent merge of findings.
  *
- * - Structurally validates every finding (version, fields, findingId identity).
+ * - Structurally validates every finding (exact keys, version, canonical text,
+ *   fields, findingId identity).
  * - Preserves first-occurrence order.
  * - Drops only records with identical findingId and full payload.
  * - Rejects same findingId with a different payload (collision).

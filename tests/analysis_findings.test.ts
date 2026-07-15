@@ -398,27 +398,123 @@ describe("createAnalysisFinding — rejection", () => {
     }
   })
 
-  test("rejects malformed chunk source with invalid_plan (fail-closed)", () => {
+  test("rejects malformed chunk provenance with invalid_plan (fail-closed)", () => {
     const plan = threeBatchPlan()
-    const tampered = deepCloneJson(plan) as ExhaustiveAnalysisPlan
-    // Keep coverage/batch invariants so resolvePlanId succeeds; break chunk.source.
-    const chunk = tampered.batches[0].chunks[0]
-    ;(chunk as { source: { startLine: number } }).source.startLine = 0
+    const input = baseInput(plan)
 
-    try {
-      createAnalysisFinding(
-        tampered,
-        baseInput(tampered, {
-          file: chunk.source.file,
-          startLine: 1,
-          endLine: 1,
-        }),
-      )
-      expect.unreachable("expected invalid_plan")
-    } catch (e) {
-      expect(e).toBeInstanceOf(AnalysisFindingError)
-      expect((e as AnalysisFindingError).code).toBe("invalid_plan")
+    const expectInvalidPlan = (mutator: (p: ExhaustiveAnalysisPlan) => void) => {
+      const tampered = deepCloneJson(plan) as ExhaustiveAnalysisPlan
+      mutator(tampered)
+      try {
+        createAnalysisFinding(tampered, input)
+        expect.unreachable("expected invalid_plan")
+      } catch (e) {
+        expect(e).toBeInstanceOf(AnalysisFindingError)
+        expect((e as AnalysisFindingError).code).toBe("invalid_plan")
+      }
     }
+
+    // Bad line range on source
+    expectInvalidPlan((p) => {
+      p.batches[0].chunks[0].source.startLine = 0
+    })
+
+    // Missing text
+    expectInvalidPlan((p) => {
+      delete (p.batches[0].chunks[0] as { text?: string }).text
+    })
+
+    // Wrong endOffset vs text.length
+    expectInvalidPlan((p) => {
+      const c = p.batches[0].chunks[0]
+      c.source.endOffset = c.source.startOffset + c.text.length + 1
+    })
+
+    // Wrong global chunk.index
+    expectInvalidPlan((p) => {
+      p.batches[0].chunks[0].index = 99
+    })
+
+    // batch.characters != sum of text lengths
+    expectInvalidPlan((p) => {
+      p.batches[0].characters = p.batches[0].characters + 1
+    })
+
+    // Invalid sourceSpanIndex
+    expectInvalidPlan((p) => {
+      p.batches[0].chunks[0].source.sourceSpanIndex = -1
+    })
+
+    // Invalid offsets (startOffset > endOffset)
+    expectInvalidPlan((p) => {
+      const c = p.batches[0].chunks[0]
+      c.source.startOffset = 5
+      c.source.endOffset = 2
+      // keep characters consistent enough that only offset shape fails first
+    })
+
+    // Non-integer offsets
+    expectInvalidPlan((p) => {
+      p.batches[0].chunks[0].source.startOffset = 0.5 as unknown as number
+    })
+  })
+})
+
+describe("mid-line split provenance", () => {
+  test("same physical line across batches allows findings on each fragment batch", () => {
+    // Single line, 10 chars, budget 4 → three batches on the same line numbers.
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("line.tex", "0123456789", 1, 1)]),
+      4,
+    )
+    expect(plan.status).toBe("complete")
+    expect(plan.batches.length).toBe(3)
+
+    const b0 = plan.batches[0]
+    const b1 = plan.batches[1]
+    const c0 = b0.chunks[0]
+    const c1 = b1.chunks[0]
+
+    // Same line provenance, different character slices
+    expect(c0.source.startLine).toBe(1)
+    expect(c0.source.endLine).toBe(1)
+    expect(c1.source.startLine).toBe(1)
+    expect(c1.source.endLine).toBe(1)
+    expect(c0.source.startOffset).toBe(0)
+    expect(c0.source.endOffset).toBe(4)
+    expect(c1.source.startOffset).toBe(4)
+    expect(c1.source.endOffset).toBe(8)
+    expect(c0.text).toBe("0123")
+    expect(c1.text).toBe("4567")
+    expect(c0.index).toBe(0)
+    expect(c1.index).toBe(1)
+
+    const onBatch0 = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: b0.batchId,
+        file: "line.tex",
+        startLine: 1,
+        endLine: 1,
+        claim: "finding on first mid-line fragment",
+      }),
+    )
+    const onBatch1 = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: b1.batchId,
+        file: "line.tex",
+        startLine: 1,
+        endLine: 1,
+        claim: "finding on second mid-line fragment",
+      }),
+    )
+
+    expect(onBatch0.batchId).toBe(b0.batchId)
+    expect(onBatch1.batchId).toBe(b1.batchId)
+    expect(onBatch0.startLine).toBe(1)
+    expect(onBatch1.startLine).toBe(1)
+    expect(onBatch0.findingId).not.toBe(onBatch1.findingId)
   })
 })
 
@@ -955,6 +1051,69 @@ describe("mergeAnalysisFindings", () => {
     try {
       mergeAnalysisFindings([wrongVersion as AnalysisFinding], [])
       expect.unreachable("expected invalid_finding for wrong version")
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("invalid_finding")
+    }
+  })
+
+  test("rejects padded claim even when findingId is recomputed over padded value", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+    const paddedClaim = " A "
+    const padded: AnalysisFinding = {
+      ...a,
+      claim: paddedClaim,
+      findingId: computeFindingIdentity({
+        version: a.version,
+        planId: a.planId,
+        manuscriptFingerprint: a.manuscriptFingerprint,
+        batchId: a.batchId,
+        category: a.category,
+        severity: a.severity,
+        claim: paddedClaim,
+        evidence: a.evidence,
+        file: a.file,
+        startLine: a.startLine,
+        endLine: a.endLine,
+        sectionId: a.sectionId,
+      }),
+    }
+
+    try {
+      mergeAnalysisFindings([padded], [])
+      expect.unreachable("expected invalid_finding for padded claim")
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("invalid_finding")
+    }
+
+    // create still trims; resulting canonical finding merges
+    const fromCreate = createAnalysisFinding(
+      plan,
+      baseInput(plan, { claim: "  padded-create  " }),
+    )
+    expect(fromCreate.claim).toBe("padded-create")
+    const merged = mergeAnalysisFindings([fromCreate], [fromCreate])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].claim).toBe("padded-create")
+  })
+
+  test("rejects unknown extra property even if findingId matches core fields", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+    const withExtra = { ...a, extra: 1 }
+
+    try {
+      mergeAnalysisFindings([withExtra as AnalysisFinding], [])
+      expect.unreachable("expected invalid_finding for extra key")
+    } catch (e) {
+      expect((e as AnalysisFindingError).code).toBe("invalid_finding")
+    }
+
+    // Missing key also rejected
+    const { evidence: _drop, ...missing } = a
+    try {
+      mergeAnalysisFindings([missing as AnalysisFinding], [])
+      expect.unreachable("expected invalid_finding for missing key")
     } catch (e) {
       expect((e as AnalysisFindingError).code).toBe("invalid_finding")
     }
