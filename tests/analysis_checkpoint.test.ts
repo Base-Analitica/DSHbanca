@@ -666,6 +666,95 @@ describe("plan identity determinism", () => {
     expect(computePlanIdentity(plan2)).toBe(a)
     expect(createAnalysisCheckpoint(plan2).planId).toBe(a)
   })
+
+  test("wire version is analysis-checkpoint-v2 after chunk-bound identity", () => {
+    expect(ANALYSIS_CHECKPOINT_VERSION).toBe("analysis-checkpoint-v2")
+    const plan = threeBatchPlan()
+    expect(createAnalysisCheckpoint(plan).version).toBe(
+      "analysis-checkpoint-v2",
+    )
+  })
+
+  test("two-chunk batch content tamper changes planId (same characters sum)", () => {
+    // Budget large enough that two short spans land in one batch.
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript([span("a.tex", "abc"), span("b.tex", "def")]),
+      100,
+    )
+    expect(plan.status).toBe("complete")
+    expect(plan.batches).toHaveLength(1)
+    expect(plan.batches[0].chunks.length).toBeGreaterThanOrEqual(2)
+
+    const originalId = computePlanIdentity(plan)
+
+    const tampered = deepCloneJson(plan)
+    const batch = tampered.batches[0]
+    const c0 = batch.chunks[0]
+    const c1 = batch.chunks[1]
+    // Shorten first chunk (3 → 1), lengthen second (3 → 5) keeping batch sum.
+    c0.text = "a"
+    c0.source.endOffset = c0.source.startOffset + 1
+    c1.text = "XXXXX"
+    c1.source.file = "forged.tex"
+    c1.source.startLine = 99
+    c1.source.endLine = 99
+    c1.source.startOffset = 0
+    c1.source.endOffset = 5
+    batch.characters = c0.text.length + c1.text.length
+    // Keep coverage totals consistent with batch sum (complete plan contract).
+    tampered.coverage.plannedCharacters = batch.characters
+    tampered.coverage.totalCharacters = batch.characters
+
+    expect(batch.characters).toBe(plan.batches[0].characters)
+    expect(computePlanIdentity(tampered)).not.toBe(originalId)
+  })
+
+  test("batchId-only change still changes identity", () => {
+    const plan = threeBatchPlan()
+    const base = computePlanIdentity(plan)
+    const mutated = deepCloneJson(plan)
+    mutated.batches[0].batchId = `${plan.batches[0].batchId}:mutated`
+    expect(computePlanIdentity(mutated)).not.toBe(base)
+  })
+
+  test("blocked and empty complete plans still get deterministic identities", () => {
+    const empty = planExhaustiveAnalysisBatches(manuscript([]), 1)
+    expect(empty.status).toBe("complete")
+    expect(empty.batches).toEqual([])
+    const emptyId = computePlanIdentity(empty)
+    expect(emptyId).toBe(computePlanIdentity(empty))
+    expect(emptyId).toMatch(/^[0-9a-f]{64}$/)
+
+    const blocked = planExhaustiveAnalysisBatches(
+      manuscript([span("main.tex", "partial")], {
+        complete: false,
+        fingerprint: null,
+        diagnostics: [
+          {
+            code: "include_not_found",
+            severity: "error",
+            message: "missing",
+          },
+        ],
+      }),
+      4,
+    )
+    expect(blocked.status).toBe("blocked")
+    const blockedId = computePlanIdentity(blocked)
+    expect(blockedId).toBe(computePlanIdentity(blocked))
+    expect(blockedId).toMatch(/^[0-9a-f]{64}$/)
+    expect(blockedId).not.toBe(emptyId)
+  })
+
+  test("malformed chunk fails closed for identity", () => {
+    const plan = threeBatchPlan()
+    const bad = deepCloneJson(plan)
+    bad.batches[0].chunks[0].text = ""
+    bad.batches[0].chunks[0].source.endOffset =
+      bad.batches[0].chunks[0].source.startOffset
+    expect(() => computePlanIdentity(bad)).toThrow(AnalysisCheckpointError)
+    expect(() => computePlanIdentity(bad)).toThrow(/invalid_plan|text/)
+  })
 })
 
 describe("immutability", () => {
