@@ -96,18 +96,62 @@ describe("Integration — audit", () => {
   beforeEach(() => { testRoot = join(tmpBase, `audit-${Date.now()}`); mkdirSync(join(testRoot, "capitulos"), { recursive: true }); mkdirSync(join(testRoot, ".banca"), { recursive: true }) })
   afterEach(() => { rmSync(tmpBase, { recursive: true, force: true }) })
 
-  test("audit returns 4 axes + final score", async () => {
+  test("audit validates batch findings and returns structured receipt (no global score)", async () => {
     mockProjectJson()
     mockMainTex()
     writeFileSync(join(testRoot, "refs.bib"), "@article{autor2020, author={A}, title={T}, year={2020}}")
-    const { bancaAuditar } = await import("../src/tools/banca_auditar")
-    const result = await bancaAuditar.execute({ projectRoot: testRoot }, {} as any)
-    expect(result).toContain("AUDIT RESULT")
-    expect(result).toContain("ABNT:")
-    expect(result).toContain("Citações:")
-    expect(result).toContain("Conteúdo:")
-    expect(result).toContain("Estilo:")
-    expect(result).toContain("Final:")
+
+    const { loadConfig } = await import("../src/lib/config")
+    const { loadCanonicalLatexManuscript } = await import("../src/lib/latex_loader")
+    const { planExhaustiveAnalysisBatches } = await import("../src/lib/analysis_coverage")
+    const { bancaAuditar, AUDIT_RECEIPT_KIND, AUDIT_RECEIPT_DISCLAIMER } = await import(
+      "../src/tools/banca_auditar"
+    )
+
+    const config = loadConfig(testRoot)
+    const manuscript = loadCanonicalLatexManuscript(testRoot, config)
+    const plan = planExhaustiveAnalysisBatches(
+      manuscript,
+      config.analysis.maxCharactersPerBatch,
+    )
+    expect(plan.status).toBe("complete")
+    expect(plan.batches.length).toBeGreaterThan(0)
+
+    const batch = plan.batches[0]
+    const chunk = batch.chunks[0]
+    const result = String(
+      await bancaAuditar.execute(
+        {
+          projectRoot: testRoot,
+          manuscriptFingerprint: plan.fingerprint!,
+          batchId: batch.batchId,
+          findings: [
+            {
+              category: "structure",
+              severity: "warning",
+              claim: "Integration claim",
+              evidence: "Integration evidence",
+              file: chunk.source.file,
+              startLine: chunk.source.startLine,
+              endLine: chunk.source.endLine,
+              sectionId: "sec:integration",
+            },
+          ],
+        },
+        { directory: testRoot } as any,
+      ),
+    )
+
+    const receipt = JSON.parse(result)
+    expect(receipt.kind).toBe(AUDIT_RECEIPT_KIND)
+    expect(receipt.acceptedCount).toBe(1)
+    expect(receipt.findings).toHaveLength(1)
+    expect(receipt.findings[0].findingId).toMatch(/^[0-9a-f]{64}$/)
+    expect(receipt.disclaimer).toBe(AUDIT_RECEIPT_DISCLAIMER)
+    expect(result).not.toContain("AUDIT RESULT")
+    expect(result).not.toMatch(/\bAPROVADO\b/)
+    expect(result).not.toMatch(/\bREPROVADO\b/)
+    expect(result).not.toMatch(/\bFinal:\s*\d/)
   })
 })
 
