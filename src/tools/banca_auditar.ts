@@ -1,10 +1,12 @@
 /**
- * Adapter: validate findings for one exhaustive canonical analysis batch.
+ * Adapter: validate and persist findings for one exhaustive canonical analysis batch.
  *
  * Loads the canonical manuscript + exhaustive plan, checks fingerprint and
- * batchId against the live plan, and validates each finding exclusively via
- * `createAnalysisFinding`. Returns a structured receipt; never persists
- * findings, mutates project state/checkpoint, scores, or runs a model.
+ * batchId against the live plan, validates each finding exclusively via
+ * `createAnalysisFinding`, merges with the plan-scoped store via
+ * `mergeAnalysisFindings`, and persists under `.banca/analysis/findings/<planId>.json`.
+ *
+ * Never advances checkpoint, scores, synthesizes the manuscript, or runs a model.
  *
  * Error text is fixed or taken from shared contracts. This tool does not
  * re-sanitize diagnostics or publish raw exception messages.
@@ -18,22 +20,31 @@ import { computePlanIdentity } from "../lib/analysis_checkpoint"
 import {
   AnalysisFindingError,
   createAnalysisFinding,
+  mergeAnalysisFindings,
   type AnalysisFinding,
 } from "../lib/analysis_findings"
+import {
+  ANALYSIS_FINDINGS_STORE_VERSION,
+  AnalysisFindingsStoreError,
+  getAnalysisFindingsRelativePath,
+  loadAnalysisFindings,
+  saveAnalysisFindings,
+  type AnalysisFindingsStoreV1,
+} from "../lib/state"
 
 const z = tool.schema
 
-/** Stable receipt kind/version for successful batch finding validation. */
-export const AUDIT_RECEIPT_KIND = "openbanca-audit-receipt-v1" as const
+/** Stable receipt kind/version for successful batch finding validation + persistence. */
+export const AUDIT_RECEIPT_KIND = "openbanca-audit-receipt-v2" as const
 
 /**
- * Explicit disclaimer: structural validation is not academic proof.
+ * Explicit disclaimer: structural validation + persistence is not academic proof.
  * Included on every successful receipt (including zero findings).
  */
 export const AUDIT_RECEIPT_DISCLAIMER =
-  "Validation only checks structural provenance of findings against one " +
-  "canonical exhaustive plan batch. It does not prove model execution, " +
-  "completed manuscript coverage, persistence of findings, or academic quality."
+  "Persistence stores validated findings for one canonical exhaustive plan batch. " +
+  "It does not prove model execution, advance checkpoint, prove completed " +
+  "manuscript coverage, or represent a grade, approval, or academic quality."
 
 export interface AuditFindingArg {
   category: string
@@ -46,6 +57,15 @@ export interface AuditFindingArg {
   sectionId: string
 }
 
+export interface AuditReceiptPersistence {
+  version: typeof ANALYSIS_FINDINGS_STORE_VERSION
+  path: string
+  previousCount: number
+  addedCount: number
+  duplicateCount: number
+  totalCount: number
+}
+
 export interface AuditReceipt {
   kind: typeof AUDIT_RECEIPT_KIND
   planId: string
@@ -54,6 +74,7 @@ export interface AuditReceipt {
   batchIndex: number
   acceptedCount: number
   findings: AnalysisFinding[]
+  persistence: AuditReceiptPersistence
   disclaimer: typeof AUDIT_RECEIPT_DISCLAIMER
 }
 
@@ -78,8 +99,8 @@ function formatError(code: string, message: string): string {
 
 export const bancaAuditar = tool({
   description:
-    "Validate findings for one exhaustive canonical analysis batch. " +
-    "Returns a structured receipt; does not score, persist, or advance checkpoint.",
+    "Validate and persist findings for one exhaustive canonical analysis batch. " +
+    "Returns a structured receipt; does not score, advance checkpoint, or run a model.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
     manuscriptFingerprint: z
@@ -172,7 +193,7 @@ export const bancaAuditar = tool({
       )
     }
 
-    // Atomic validation: any single invalid item fails the whole call.
+    // Atomic validation: any single invalid item fails the whole call (no write).
     const validated: AnalysisFinding[] = []
     for (let i = 0; i < args.findings.length; i++) {
       const item = args.findings[i] as AuditFindingArg
@@ -201,14 +222,158 @@ export const bancaAuditar = tool({
       }
     }
 
+    // Load existing store (or empty in memory). Fail closed without overwrite.
+    let existingFindings: AnalysisFinding[] = []
+    let previousCount = 0
+    let relativePath: string
+    try {
+      relativePath = getAnalysisFindingsRelativePath(planId)
+    } catch (err) {
+      if (err instanceof AnalysisFindingsStoreError) {
+        return formatError(err.code, err.message)
+      }
+      return formatError(
+        "unexpected",
+        "an unexpected findings storage path error occurred",
+      )
+    }
+
+    try {
+      const loaded = loadAnalysisFindings(root, planId)
+      if (loaded !== null) {
+        if (loaded.manuscriptFingerprint !== plan.fingerprint) {
+          return formatError(
+            "incompatible_fingerprint",
+            "existing findings store manuscriptFingerprint does not match the current plan fingerprint",
+          )
+        }
+        if (loaded.planId !== planId) {
+          return formatError(
+            "incompatible_plan",
+            "existing findings store planId does not match the current plan identity",
+          )
+        }
+
+        // Revalidate every stored finding against the LIVE plan before merge.
+        // Structural load is not sufficient: batch/file/line coverage can diverge
+        // while findingId still matches the stored payload identity.
+        for (let i = 0; i < loaded.findings.length; i++) {
+          const stored = loaded.findings[i]
+          let recomputed: AnalysisFinding
+          try {
+            recomputed = createAnalysisFinding(plan, {
+              category: stored.category,
+              severity: stored.severity,
+              claim: stored.claim,
+              evidence: stored.evidence,
+              file: stored.file,
+              startLine: stored.startLine,
+              endLine: stored.endLine,
+              sectionId: stored.sectionId,
+              manuscriptFingerprint: stored.manuscriptFingerprint,
+              batchId: stored.batchId,
+            })
+          } catch {
+            // Controlled message only — do not surface AnalysisFindingError text
+            // or mutate the store file.
+            return formatError(
+              "invalid_stored_finding",
+              "existing findings store is not valid against the current plan",
+            )
+          }
+
+          const fields: Array<keyof AnalysisFinding> = [
+            "version",
+            "findingId",
+            "planId",
+            "manuscriptFingerprint",
+            "batchId",
+            "file",
+            "startLine",
+            "endLine",
+            "sectionId",
+            "category",
+            "severity",
+            "claim",
+            "evidence",
+          ]
+          for (const field of fields) {
+            if (recomputed[field] !== stored[field]) {
+              return formatError(
+                "invalid_stored_finding",
+                "existing findings store is not valid against the current plan",
+              )
+            }
+          }
+        }
+
+        existingFindings = loaded.findings
+        previousCount = loaded.findings.length
+      }
+    } catch (err) {
+      if (err instanceof AnalysisFindingsStoreError) {
+        return formatError(err.code, err.message)
+      }
+      return formatError(
+        "unexpected",
+        "an unexpected findings store load error occurred",
+      )
+    }
+
+    // Exact merge: first-occurrence order, drop only identical duplicates.
+    let merged: AnalysisFinding[]
+    try {
+      merged = mergeAnalysisFindings(existingFindings, validated)
+    } catch (err) {
+      if (err instanceof AnalysisFindingError) {
+        return formatError(err.code, err.message)
+      }
+      return formatError(
+        "unexpected",
+        "an unexpected findings merge error occurred",
+      )
+    }
+
+    const acceptedCount = validated.length
+    const totalCount = merged.length
+    const addedCount = totalCount - previousCount
+    const duplicateCount = acceptedCount - addedCount
+
+    const store: AnalysisFindingsStoreV1 = {
+      version: ANALYSIS_FINDINGS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint as string,
+      findings: merged,
+    }
+
+    try {
+      saveAnalysisFindings(root, store)
+    } catch (err) {
+      if (err instanceof AnalysisFindingsStoreError) {
+        return formatError(err.code, err.message)
+      }
+      return formatError(
+        "unexpected",
+        "an unexpected findings store save error occurred",
+      )
+    }
+
     const receipt: AuditReceipt = {
       kind: AUDIT_RECEIPT_KIND,
       planId,
       manuscriptFingerprint: plan.fingerprint as string,
       batchId: batch.batchId,
       batchIndex: batch.index,
-      acceptedCount: validated.length,
+      acceptedCount,
       findings: validated,
+      persistence: {
+        version: ANALYSIS_FINDINGS_STORE_VERSION,
+        path: relativePath,
+        previousCount,
+        addedCount,
+        duplicateCount,
+        totalCount,
+      },
       disclaimer: AUDIT_RECEIPT_DISCLAIMER,
     }
 

@@ -270,6 +270,7 @@ describe("banca_auditar — canonical batch finding validation", () => {
 
     const receipt = parseReceipt(result)
     expect(receipt.kind).toBe(AUDIT_RECEIPT_KIND)
+    expect(receipt.kind).toBe("openbanca-audit-receipt-v2")
     expect(receipt.planId).toBe(expectedPlanId)
     expect(receipt.manuscriptFingerprint).toBe(plan.fingerprint)
     expect(receipt.batchId).toBe(batch.batchId)
@@ -279,9 +280,17 @@ describe("banca_auditar — canonical batch finding validation", () => {
     expect(receipt.findings[0]).toEqual(expected)
     expect(receipt.findings[0].findingId).toBe(expected.findingId)
     expect(receipt.findings[0].findingId).toMatch(/^[0-9a-f]{64}$/)
+    expect(receipt.persistence.version).toBe("analysis-findings-store-v1")
+    expect(receipt.persistence.path).toBe(
+      `.banca/analysis/findings/${expectedPlanId}.json`,
+    )
+    expect(receipt.persistence.previousCount).toBe(0)
+    expect(receipt.persistence.addedCount).toBe(1)
+    expect(receipt.persistence.duplicateCount).toBe(0)
+    expect(receipt.persistence.totalCount).toBe(1)
     expect(receipt.disclaimer).toBe(AUDIT_RECEIPT_DISCLAIMER)
     expect(receipt.disclaimer).toMatch(/does not prove model execution/i)
-    expect(receipt.disclaimer).toMatch(/persistence/i)
+    expect(receipt.disclaimer).toMatch(/checkpoint/i)
     expect(receipt.disclaimer).toMatch(/academic quality/i)
   })
 
@@ -354,7 +363,7 @@ describe("banca_auditar — canonical batch finding validation", () => {
     assertNoAbsoluteProjectPath(badLines, projectRoot)
   })
 
-  test("6) mixed valid+invalid list is atomic (no partial receipt)", async () => {
+  test("6) mixed valid+invalid list is atomic (no partial receipt or store write)", async () => {
     writeNestedManuscript(projectRoot)
     const { plan } = planOracle(projectRoot)
     const batch = plan.batches[0]
@@ -393,6 +402,10 @@ describe("banca_auditar — canonical batch finding validation", () => {
     expect(result.startsWith("{")).toBe(false)
     expect(result).not.toContain("acceptedCount")
     assertNoAbsoluteProjectPath(result, projectRoot)
+    // No findings store written on atomic validation failure.
+    expect(
+      existsSync(join(projectRoot, ".banca", "analysis", "findings")),
+    ).toBe(false)
   })
 
   test("7) empty findings array returns receipt with zero findings + disclaimer", async () => {
@@ -415,6 +428,13 @@ describe("banca_auditar — canonical batch finding validation", () => {
     expect(receipt.batchIndex).toBe(batch.index)
     expect(receipt.acceptedCount).toBe(0)
     expect(receipt.findings).toEqual([])
+    expect(receipt.persistence.previousCount).toBe(0)
+    expect(receipt.persistence.addedCount).toBe(0)
+    expect(receipt.persistence.duplicateCount).toBe(0)
+    expect(receipt.persistence.totalCount).toBe(0)
+    expect(receipt.persistence.path).toBe(
+      `.banca/analysis/findings/${expectedPlanId}.json`,
+    )
     expect(receipt.disclaimer).toBe(AUDIT_RECEIPT_DISCLAIMER)
     expect(receipt.disclaimer.length).toBeGreaterThan(20)
     assertNoAbsoluteProjectPath(result, projectRoot)
@@ -610,9 +630,14 @@ describe("banca_auditar — canonical batch finding validation", () => {
       "utf-8",
     )
     expect(src).toContain("createAnalysisFinding")
+    expect(src).toContain("mergeAnalysisFindings")
+    expect(src).toContain("loadAnalysisFindings")
+    expect(src).toContain("saveAnalysisFindings")
+    expect(src).toContain("getAnalysisFindingsRelativePath")
     expect(src).toContain("computePlanIdentity")
     expect(src).toContain("loadCanonicalLatexManuscript")
     expect(src).toContain("planExhaustiveAnalysisBatches")
+    expect(src).toContain("openbanca-audit-receipt-v2")
     expect(src).not.toContain("sanitizeDiagnosticText")
     expect(src).not.toContain('import { resolve } from "node:path"')
     expect(src).not.toContain("String(err)")
@@ -627,6 +652,8 @@ describe("banca_auditar — canonical batch finding validation", () => {
     expect(src).not.toContain("readFileSync")
     expect(src).not.toContain("writeFileSync")
     expect(src).not.toContain("loadState")
+    expect(src).not.toContain("AnalysisCheckpointError")
+    expect(src).not.toContain("saveAnalysisCheckpoint")
     expect(src).not.toMatch(/\bAPROVADO\b/)
     expect(src).not.toMatch(/\bREPROVADO\b/)
     expect(src).not.toContain("auditFichamento")
