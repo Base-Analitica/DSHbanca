@@ -21,6 +21,7 @@ import {
   AnalysisFindingError,
   createAnalysisFinding,
   mergeAnalysisFindings,
+  validateAnalysisFindingsForPlan,
   type AnalysisFinding,
 } from "../lib/analysis_findings"
 import {
@@ -257,57 +258,19 @@ export const bancaAuditar = tool({
         // Revalidate every stored finding against the LIVE plan before merge.
         // Structural load is not sufficient: batch/file/line coverage can diverge
         // while findingId still matches the stored payload identity.
-        for (let i = 0; i < loaded.findings.length; i++) {
-          const stored = loaded.findings[i]
-          let recomputed: AnalysisFinding
-          try {
-            recomputed = createAnalysisFinding(plan, {
-              category: stored.category,
-              severity: stored.severity,
-              claim: stored.claim,
-              evidence: stored.evidence,
-              file: stored.file,
-              startLine: stored.startLine,
-              endLine: stored.endLine,
-              sectionId: stored.sectionId,
-              manuscriptFingerprint: stored.manuscriptFingerprint,
-              batchId: stored.batchId,
-            })
-          } catch {
-            // Controlled message only — do not surface AnalysisFindingError text
-            // or mutate the store file.
-            return formatError(
-              "invalid_stored_finding",
-              "existing findings store is not valid against the current plan",
-            )
-          }
-
-          const fields: Array<keyof AnalysisFinding> = [
-            "version",
-            "findingId",
-            "planId",
-            "manuscriptFingerprint",
-            "batchId",
-            "file",
-            "startLine",
-            "endLine",
-            "sectionId",
-            "category",
-            "severity",
-            "claim",
-            "evidence",
-          ]
-          for (const field of fields) {
-            if (recomputed[field] !== stored[field]) {
-              return formatError(
-                "invalid_stored_finding",
-                "existing findings store is not valid against the current plan",
-              )
-            }
-          }
+        try {
+          existingFindings = validateAnalysisFindingsForPlan(
+            plan,
+            loaded.findings,
+          )
+        } catch {
+          // Controlled message only — do not surface AnalysisFindingError text
+          // or mutate the store file.
+          return formatError(
+            "invalid_stored_finding",
+            "existing findings store is not valid against the current plan",
+          )
         }
-
-        existingFindings = loaded.findings
         previousCount = loaded.findings.length
       }
     } catch (err) {

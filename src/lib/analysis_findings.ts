@@ -539,29 +539,42 @@ export function computeFindingIdentity(finding: {
   return createHash("sha256").update(Buffer.concat(parts)).digest("hex")
 }
 
-/**
- * Validate input against plan provenance and return a versioned finding.
- * Never mutates `plan` or `input`. Fail-closed on blocked/malformed plans,
- * fingerprint/batch mismatch, empty text, invalid lines, or out-of-coverage spans.
- */
-export function createAnalysisFinding(
-  plan: ExhaustiveAnalysisPlan,
-  input: AnalysisFindingInput,
-): AnalysisFinding {
-  // Canonical plan shape + identity (checkpoint v2; maps to invalid_plan).
-  const planId = resolvePlanId(plan)
-  // Continuity only: shape/content already validated by resolvePlanId.
-  assertPlanSourceSpanContinuity(plan)
+/** Local one-shot plan prep for create/revalidate (never cached by identity). */
+type PlanFindingContext = {
+  planId: string
+  fingerprint: string
+  batchesById: ReadonlyMap<string, ExhaustiveAnalysisBatch>
+}
 
+function preparePlanFindingContext(
+  plan: ExhaustiveAnalysisPlan,
+): PlanFindingContext {
+  const planId = resolvePlanId(plan)
+  assertPlanSourceSpanContinuity(plan)
   if (plan.status === "blocked") {
     throw new AnalysisFindingError(
       "blocked_plan",
       "cannot create findings for a blocked ExhaustiveAnalysisPlan",
     )
   }
+  const fingerprint = plan.fingerprint as string
+  const batchesById = new Map<string, ExhaustiveAnalysisBatch>()
+  for (const batch of plan.batches) {
+    batchesById.set(batch.batchId, batch)
+  }
+  return { planId, fingerprint, batchesById }
+}
 
-  // Complete plans are guaranteed a non-empty fingerprint by resolvePlanId.
-  const planFingerprint = plan.fingerprint as string
+/**
+ * Finding-level validation against an already-prepared plan context.
+ * Not exported — callers must not supply a forged context to skip plan gates.
+ */
+function createAnalysisFindingWithContext(
+  ctx: PlanFindingContext,
+  input: AnalysisFindingInput,
+): AnalysisFinding {
+  const planId = ctx.planId
+  const planFingerprint = ctx.fingerprint
 
   if (input == null || typeof input !== "object") {
     throw new AnalysisFindingError(
@@ -590,7 +603,7 @@ export function createAnalysisFinding(
     )
   }
 
-  const batch = plan.batches.find((b) => b.batchId === input.batchId)
+  const batch = ctx.batchesById.get(input.batchId)
   if (batch == null) {
     throw new AnalysisFindingError(
       "unknown_batch",
@@ -669,6 +682,23 @@ export function createAnalysisFinding(
 }
 
 /**
+ * Validate input against plan provenance and return a versioned finding.
+ * Public contract is exactly `(plan, input)`. Always prepares and validates
+ * plan identity, continuity, and blocked status — never accepts caller context.
+ * Never mutates `plan` or `input`. Fail-closed on blocked/malformed plans,
+ * fingerprint/batch mismatch, empty text, invalid lines, or out-of-coverage spans.
+ */
+export function createAnalysisFinding(
+  plan: ExhaustiveAnalysisPlan,
+  input: AnalysisFindingInput,
+): AnalysisFinding {
+  return createAnalysisFindingWithContext(
+    preparePlanFindingContext(plan),
+    input,
+  )
+}
+
+/**
  * Exact, pure, idempotent merge of findings.
  *
  * - Structurally validates every finding (exact keys, version, canonical text,
@@ -717,5 +747,67 @@ export function mergeAnalysisFindings(
     pushUnique(incoming[i], `incoming[${i}]`)
   }
 
+  return result
+}
+
+/** Revalidate findings vs live plan once-per-call; order/dedup/clones; no mutation. */
+export function validateAnalysisFindingsForPlan(
+  plan: ExhaustiveAnalysisPlan,
+  findings: readonly AnalysisFinding[],
+): AnalysisFinding[] {
+  if (!Array.isArray(findings)) {
+    throw new AnalysisFindingError(
+      "invalid_merge_input",
+      "findings must be an array of AnalysisFinding",
+    )
+  }
+  // Once-per-call plan prep; finding revalidation uses internal helper only.
+  const prepared = preparePlanFindingContext(plan)
+  const result: AnalysisFinding[] = []
+  const byId = new Map<string, AnalysisFinding>()
+  for (let i = 0; i < findings.length; i++) {
+    const label = `findings[${i}]`
+    const stored = assertValidStoredFinding(findings[i], label)
+    let reconstituted: AnalysisFinding
+    try {
+      reconstituted = createAnalysisFindingWithContext(prepared, {
+        category: stored.category,
+        severity: stored.severity,
+        claim: stored.claim,
+        evidence: stored.evidence,
+        file: stored.file,
+        startLine: stored.startLine,
+        endLine: stored.endLine,
+        sectionId: stored.sectionId,
+        manuscriptFingerprint: stored.manuscriptFingerprint,
+        batchId: stored.batchId,
+      })
+    } catch (err) {
+      if (err instanceof AnalysisFindingError) {
+        throw new AnalysisFindingError(
+          err.code,
+          `${label}: finding is incompatible with the live plan`,
+        )
+      }
+      throw err
+    }
+    if (!findingsEqual(stored, reconstituted)) {
+      throw new AnalysisFindingError(
+        "finding_plan_mismatch",
+        `${label}: finding payload does not match the live plan reconstitution`,
+      )
+    }
+    const prior = byId.get(reconstituted.findingId)
+    if (prior == null) {
+      const clone = cloneFinding(reconstituted)
+      byId.set(clone.findingId, clone)
+      result.push(clone)
+    } else if (!findingsEqual(prior, reconstituted)) {
+      throw new AnalysisFindingError(
+        "finding_id_collision",
+        `same findingId associated with different payloads: ${reconstituted.findingId}`,
+      )
+    }
+  }
   return result
 }

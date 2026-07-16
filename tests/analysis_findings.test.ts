@@ -6,6 +6,7 @@ import {
   computeFindingIdentity,
   createAnalysisFinding,
   mergeAnalysisFindings,
+  validateAnalysisFindingsForPlan,
   type AnalysisFinding,
   type AnalysisFindingInput,
 } from "../src/lib/analysis_findings"
@@ -291,6 +292,118 @@ describe("createAnalysisFinding — rejection", () => {
     } catch (e) {
       expect((e as AnalysisFindingError).code).toBe("blocked_plan")
     }
+  })
+
+  test("public createAnalysisFinding ignores forged third-arg context at runtime", async () => {
+    // Runtime attackers (JS / cast) must not skip plan prep by passing a third arg.
+    const blocked = planExhaustiveAnalysisBatches(
+      manuscript([span("main.tex", "partial")], {
+        complete: false,
+        fingerprint: null,
+        diagnostics: [
+          {
+            code: "include_not_found",
+            severity: "error",
+            message: "missing",
+          },
+        ],
+      }),
+      4,
+    )
+    expect(blocked.status).toBe("blocked")
+
+    const forgedCtx = {
+      planId: "f".repeat(64),
+      fingerprint: "a".repeat(64),
+      batchesById: new Map([
+        [
+          "forged-batch",
+          {
+            batchId: "forged-batch",
+            index: 0,
+            characters: 1,
+            chunks: [
+              {
+                text: "x",
+                source: {
+                  file: "main.tex",
+                  startLine: 1,
+                  endLine: 1,
+                  startOffset: 0,
+                  endOffset: 1,
+                  sourceSpanIndex: 0,
+                },
+              },
+            ],
+          },
+        ],
+      ]),
+    }
+
+    const input = {
+      category: "x",
+      severity: "y",
+      claim: "c",
+      evidence: "e",
+      file: "main.tex",
+      startLine: 1,
+      endLine: 1,
+      sectionId: "s",
+      manuscriptFingerprint: "a".repeat(64),
+      batchId: "forged-batch",
+    }
+
+    // Extra arg must not bypass blocked_plan (or any other plan gate).
+    try {
+      ;(createAnalysisFinding as (...args: unknown[]) => unknown)(
+        blocked,
+        input,
+        forgedCtx,
+      )
+      expect.unreachable("forged context must not authorize a blocked plan")
+    } catch (e) {
+      expect(e).toBeInstanceOf(AnalysisFindingError)
+      expect((e as AnalysisFindingError).code).toBe("blocked_plan")
+    }
+
+    // Tampered complete plan still fails even with a forged complete context.
+    const live = threeBatchPlan()
+    const tampered = deepCloneJson(live)
+    if (tampered.batches[0]?.chunks[0]?.source) {
+      tampered.batches[0].chunks[0].source.startOffset = 99
+    }
+    const liveInput = baseInput(live)
+    try {
+      ;(createAnalysisFinding as (...args: unknown[]) => unknown)(
+        tampered,
+        liveInput,
+        {
+          planId: computePlanIdentity(live),
+          fingerprint: live.fingerprint,
+          batchesById: new Map(live.batches.map((b) => [b.batchId, b])),
+        },
+      )
+      expect.unreachable("forged context must not authorize a tampered plan")
+    } catch (e) {
+      expect(e).toBeInstanceOf(AnalysisFindingError)
+      expect((e as AnalysisFindingError).code).toBe("invalid_plan")
+    }
+
+    // Exported symbol stays a strict two-parameter public surface.
+    expect(createAnalysisFinding.length).toBe(2)
+    const source = await Bun.file(
+      new URL("../src/lib/analysis_findings.ts", import.meta.url),
+    ).text()
+    expect(source).toMatch(
+      /export function createAnalysisFinding\(\s*plan: ExhaustiveAnalysisPlan,\s*input: AnalysisFindingInput,\s*\):/,
+    )
+    expect(source).toMatch(/function createAnalysisFindingWithContext\(/)
+    expect(source).not.toMatch(
+      /export function createAnalysisFindingWithContext/,
+    )
+    expect(source).not.toMatch(
+      /export function createAnalysisFinding\([\s\S]*prepared\?/,
+    )
   })
 
   test("rejects malformed plan via canonical assertPlanShape", () => {
@@ -1269,5 +1382,158 @@ describe("mergeAnalysisFindings", () => {
     } catch (e) {
       expect((e as AnalysisFindingError).code).toBe("invalid_finding")
     }
+  })
+})
+
+describe("validateAnalysisFindingsForPlan", () => {
+  test("revalidates multi-batch findings and preserves first-occurrence order", () => {
+    const plan = threeBatchPlan()
+    expect(plan.batches.length).toBe(3)
+
+    const f0 = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: plan.batches[0].batchId,
+        file: plan.batches[0].chunks[0].source.file,
+        startLine: plan.batches[0].chunks[0].source.startLine,
+        endLine: plan.batches[0].chunks[0].source.endLine,
+        claim: "first",
+      }),
+    )
+    const f1 = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: plan.batches[1].batchId,
+        file: plan.batches[1].chunks[0].source.file,
+        startLine: plan.batches[1].chunks[0].source.startLine,
+        endLine: plan.batches[1].chunks[0].source.endLine,
+        claim: "middle",
+      }),
+    )
+    const f2 = createAnalysisFinding(
+      plan,
+      baseInput(plan, {
+        batchId: plan.batches[2].batchId,
+        file: plan.batches[2].chunks[0].source.file,
+        startLine: plan.batches[2].chunks[0].source.startLine,
+        endLine: plan.batches[2].chunks[0].source.endLine,
+        claim: "last",
+      }),
+    )
+
+    const validated = validateAnalysisFindingsForPlan(plan, [f1, f0, f2, f1])
+    expect(validated.map((f) => f.claim)).toEqual(["middle", "first", "last"])
+    expect(validated[0]).not.toBe(f1)
+    expect(validated[0]).toEqual(f1)
+  })
+
+  test("allows empty findings list", () => {
+    const plan = threeBatchPlan()
+    expect(validateAnalysisFindingsForPlan(plan, [])).toEqual([])
+  })
+
+  test("rejects planId mismatch against live plan", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+    const bad: AnalysisFinding = {
+      ...a,
+      planId: "d".repeat(64),
+      findingId: computeFindingIdentity({
+        version: a.version,
+        planId: "d".repeat(64),
+        manuscriptFingerprint: a.manuscriptFingerprint,
+        batchId: a.batchId,
+        category: a.category,
+        severity: a.severity,
+        claim: a.claim,
+        evidence: a.evidence,
+        file: a.file,
+        startLine: a.startLine,
+        endLine: a.endLine,
+        sectionId: a.sectionId,
+      }),
+    }
+
+    try {
+      validateAnalysisFindingsForPlan(plan, [bad])
+      expect.unreachable("expected finding_plan_mismatch or related")
+    } catch (e) {
+      expect(e).toBeInstanceOf(AnalysisFindingError)
+      expect(["finding_plan_mismatch", "fingerprint_mismatch"].includes(
+        (e as AnalysisFindingError).code,
+      ) || (e as AnalysisFindingError).code.length > 0).toBe(true)
+      expect((e as AnalysisFindingError).code).toBe("finding_plan_mismatch")
+    }
+  })
+
+  test("rejects extra keys and does not mutate inputs", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+    const planSnap = deepCloneJson(plan)
+    const findingsSnap = deepCloneJson([a])
+
+    expect(() =>
+      validateAnalysisFindingsForPlan(plan, [
+        { ...a, extra: true } as AnalysisFinding,
+      ]),
+    ).toThrow(AnalysisFindingError)
+
+    expect(plan).toEqual(planSnap)
+    expect([a]).toEqual(findingsSnap)
+  })
+
+  test("full plan validation does not grow linearly with finding count", async () => {
+    // Structural counter: plan.coverage is read by computePlanIdentity /
+    // assertPlanShape, not by per-finding batch/line checks after prep.
+    const base = threeBatchPlan()
+    let coverageAccesses = 0
+    const instrumented = {
+      ...base,
+      get coverage() {
+        coverageAccesses++
+        return base.coverage
+      },
+    } as ExhaustiveAnalysisPlan
+
+    const findings: AnalysisFinding[] = []
+    for (let i = 0; i < 25; i++) {
+      findings.push(
+        createAnalysisFinding(base, baseInput(base, { claim: `claim-${i}` })),
+      )
+    }
+
+    coverageAccesses = 0
+    const one = validateAnalysisFindingsForPlan(instrumented, findings.slice(0, 1))
+    const accessesForOne = coverageAccesses
+    expect(one).toHaveLength(1)
+    expect(accessesForOne).toBeGreaterThan(0)
+
+    coverageAccesses = 0
+    const many = validateAnalysisFindingsForPlan(instrumented, findings)
+    const accessesForMany = coverageAccesses
+    expect(many).toHaveLength(25)
+
+    // Once-per-call prep: access count independent of finding count.
+    expect(accessesForMany).toBe(accessesForOne)
+
+    // No persistent object-identity plan cache in the shipped source.
+    const source = await Bun.file(
+      new URL("../src/lib/analysis_findings.ts", import.meta.url),
+    ).text()
+    expect(source).not.toMatch(/\bnew\s+WeakMap\b|\bWeakMap\s*</)
+  })
+
+  test("rejects tampered plan during multi-finding revalidation", () => {
+    const plan = threeBatchPlan()
+    const a = createAnalysisFinding(plan, baseInput(plan, { claim: "A" }))
+    const b = createAnalysisFinding(plan, baseInput(plan, { claim: "B" }))
+    const tampered = deepCloneJson(plan)
+    // Break span continuity after findings were created against the live plan.
+    if (tampered.batches[0]?.chunks[0]?.source) {
+      tampered.batches[0].chunks[0].source.startOffset = 99
+    }
+    expect(() => validateAnalysisFindingsForPlan(tampered, [a, b])).toThrow(
+      AnalysisFindingError,
+    )
   })
 })
