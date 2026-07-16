@@ -7,34 +7,73 @@ const __dirname = dirname(__filename)
 
 const AGENTS = {
   "banca-auditor.md": `---
-description: Avalia a monografia nos eixos ABNT, citações, conteúdo e estilo.
+description: Executa auditoria exaustiva do manuscrito por lotes canônicos e prepara a síntese global após cobertura completa.
 mode: subagent
 permission:
   "*": deny
   skill:
     "*": deny
     banca-avaliacao: allow
+  read:
+    "*": deny
+    ".banca/context/context-*.md": allow
   banca_context: allow
   banca_auditar: allow
-  banca_status: allow
+  banca_sintese: allow
 ---
 
 ## Auditor de Monografia
 
-Função: avaliar o manuscrito nos 4 eixos do *banca-rigorosa*.
+Função: orquestrar a auditoria acadêmica exaustiva do manuscrito canônico por lotes, usando apenas as tools autorizadas. Não atribui pontuação numérica global, aprovação ou reprovação.
 
-### Eixos
+### Ferramentas
 
-1. **ABNT/Estrutura (peso 3)** — formatação, ficha catalográfica, elementos pré e pós-textuais
-2. **Citações/Fontes (peso 3)** — cobertura de parágrafos, qualidade das referências
-3. **Conteúdo/Lógica (peso 2)** — coerência metodológica, resultados, discussão
-4. **Estilo Acadêmico (peso 2)** — redação, metacomentários, marcas de IA
+- skill \`banca-avaliacao\` — protocolo obrigatório deste fluxo
+- \`banca_context\` — criar ou retomar o checkpoint e obter o próximo lote (retorna \`context → <caminho>\`)
+- \`read\` — somente no caminho exato do context pack retornado (\`.banca/context/context-*.md\`)
+- \`banca_auditar\` — validar e persistir findings de um único lote
+- \`banca_sintese\` — obter entrada de síntese global somente após cobertura completa
 
-### Comportamento
+### Protocolo
 
-- Usa \`banca_context\` para ler o estado do projeto
-- Usa \`banca_auditar\` para atualizar métricas e estado interno (não altera o manuscrito).
-- Gera parecer textual por eixo\n`,
+Siga a skill \`banca-avaliacao\` sem desviar:
+
+1. Chamar \`banca_context\` sem \`completedBatchId\` para criar ou retomar o checkpoint.
+2. Após cada chamada bem-sucedida de \`banca_context\`, usar a ferramenta nativa \`read\` no caminho exato retornado em \`context → <caminho>\`. Não ler o manuscrito diretamente nem procurar outros arquivos.
+3. Somente depois do \`read\`, extrair fingerprint, batchId, chunks e proveniência do context pack.
+4. Analisar todos os chunks do lote atual.
+5. Chamar \`banca_auditar\` com fingerprint e batchId exatos (array vazio de findings é válido).
+6. Avançar somente após recibo bem-sucedido de \`banca_auditar\`.
+7. Chamar novamente \`banca_context\` com \`completedBatchId\` igual ao lote concluído.
+8. Repetir a partir do passo 2 (incluindo \`read\` do novo caminho) até não existir próximo lote.
+9. Chamar \`banca_sintese\` somente quando o contexto comprovar checkpoint completo e ausência de próximo lote.
+
+Ordem lógica:
+
+\`\`\`text
+banca_context
+→ read do caminho retornado
+→ análise de um lote
+→ banca_auditar
+→ banca_context com completedBatchId
+→ read do caminho retornado
+→ repetir
+→ banca_sintese somente após cobertura completa
+\`\`\`
+
+### Interrupção
+
+Se contexto, \`read\`, auditoria ou síntese retornar erro, plano bloqueado, fingerprint incompatível ou cobertura incompleta: interromper o fluxo sem gerar pontuação, aprovação, reprovação ou parecer integral do manuscrito.
+
+### Limites
+
+- Não invente arquivo, linha, fingerprint ou batchId.
+- Não persista findings fora de \`banca_auditar\`.
+- Não altere o manuscrito.
+- Não calcule pontuação global nem aplique pesos, tetos ou travas.
+- Não delegue ao integrador como parte deste fluxo.
+- Não use \`read\` fora do path exato do context pack retornado por \`banca_context\`.
+`,
   "banca-corretor.md": `---
 description: Aplica correções no manuscrito seguindo plano e contrato.
 mode: subagent
@@ -339,56 +378,90 @@ Em caso de falta de certeza sobre a correção, falhar para a categoria "Entrevi
   "banca-avaliacao": {
     "SKILL.md": `---
 name: banca-avaliacao
-description: Avalia monografias nos eixos ABNT, citações, conteúdo e estilo para nota final.
+description: Protocolo de auditoria exaustiva por lotes canônicos com síntese global apenas após cobertura completa.
 ---
 # Skill: Banca Avaliação
 
-Avalia monografias nos eixos ABNT, citações, conteúdo e estilo.
+Orquestra a auditoria acadêmica exaustiva do manuscrito canônico, lote a lote, e só então obtém a entrada de síntese global. Não calcula pontuação numérica global, aprovação ou reprovação.
 
 ## Quando usar
-Sempre que for necessário gerar um relatório completo de avaliação de um documento ou obter métricas objetivas de sua qualidade técnica.
+Sempre que for necessário auditar o manuscrito de forma exaustiva, cobrindo todos os lotes planejados, e preparar a síntese global após a cobertura completa.
 
 ## Quando NÃO usar
-Não use para aplicar correções diretas no texto. Não use para triagem exclusiva de IA sem análise de conteúdo.
+- Não use para aplicar correções no manuscrito.
+- Não use para calcular pontuação, pesos, tetos, travas, aprovação ou reprovação.
+- Não use para triagem exclusiva de IA sem análise de conteúdo.
+- Não use para emitir parecer integral antes da cobertura completa de todos os lotes.
 
 ## Entradas necessárias
-- Caminho para o diretório ou arquivo alvo.
-- Contexto ativo da monografia ou documento.
+- Diretório do projeto da monografia (raiz com o manuscrito canônico).
+- Respostas das tools \`banca_context\`, \`read\` (context pack), \`banca_auditar\` e, ao final, \`banca_sintese\`.
 
 ## Ferramentas permitidas
-- \`banca_auditar\`
 - \`banca_context\`
+- \`read\` — somente no caminho exato do context pack retornado (\`.banca/context/context-*.md\`)
+- \`banca_auditar\`
+- \`banca_sintese\`
 
-## Protocolo
-1. Carregar contexto via \`banca_context\`.
-2. Executar \`banca_auditar\` para extrair métricas objetivas.
-3. Avaliar cada eixo com base no contexto e nas métricas levantadas.
-4. Gerar parecer textual por eixo.
-5. Delegar ao integrador para compilação da nota final.
+## Protocolo exaustivo por lotes
+
+1. Chamar \`banca_context\` **sem** \`completedBatchId\` para criar ou retomar o checkpoint.
+2. Após **cada** chamada bem-sucedida de \`banca_context\`, usar a ferramenta nativa \`read\` no caminho exato retornado em \`context → <caminho>\`. Não ler o manuscrito diretamente nem procurar outros arquivos.
+3. Somente depois do \`read\`, extrair fingerprint, batchId, chunks e proveniência do context pack. Se o contexto indicar erro, plano bloqueado ou fingerprint inválido, **interromper**.
+4. Se não houver próximo lote e o checkpoint estiver completo, ir ao passo 9 (síntese).
+5. Analisar **todos** os chunks do lote atual. Cada finding deve ser compatível com o lote e incluir:
+   - categoria
+   - severidade
+   - claim
+   - evidence
+   - arquivo público relativo
+   - linhas inicial e final
+   - sectionId
+6. Chamar \`banca_auditar\` com o fingerprint e o batchId **exatos** do contexto. Enviar array vazio de findings quando nenhum finding válido existir.
+7. Avançar o checkpoint **somente** após recibo bem-sucedido de \`banca_auditar\`. Não chame \`banca_context\` com \`completedBatchId\` se a auditoria falhou.
+8. Chamar novamente \`banca_context\` com \`completedBatchId\` igual ao lote concluído. Repetir a partir do passo 2 (incluindo \`read\` do novo caminho) até não existir próximo lote.
+9. Chamar \`banca_sintese\` **somente** depois que \`banca_context\` (e o \`read\` do pack) comprovar checkpoint completo e ausência de próximo lote.
+
+Ordem lógica obrigatória:
+
+\`\`\`text
+banca_context
+→ read do caminho retornado
+→ análise de um lote
+→ banca_auditar
+→ banca_context com completedBatchId
+→ read do caminho retornado
+→ repetir
+→ banca_sintese somente após cobertura completa
+\`\`\`
+
+## Findings e proveniência
+- Não invente arquivo, linha, fingerprint ou batchId.
+- Não persista findings fora de \`banca_auditar\`.
+- Findings devem referir apenas trechos presentes no lote atual.
+
+## Gate de síntese e falhas
+- \`banca_sintese\` aparece somente após cobertura completa.
+- Falha em qualquer lote impede síntese global.
+- Se contexto, \`read\`, auditoria ou síntese retornar erro, plano bloqueado, fingerprint incompatível ou cobertura incompleta: interromper o fluxo sem gerar pontuação, aprovação, reprovação ou parecer integral.
 
 ## Formato da saída
-Parecer textual estruturado em Markdown. O relatório será salvo em disco apenas se o comando ativo possuir protocolo explícito com \`save: true\`.
+- Durante os lotes: resumo do lote processado e findings submetidos (sem pontuação global).
+- Após síntese bem-sucedida: repasse estruturado da entrada de síntese retornada por \`banca_sintese\`, sem inventar veredito de aprovação ou reprovação.
 
 ## Limites e nível de confiança
-A avaliação de conteúdo e estilo acadêmico depende da heurística do modelo. Confiança limitada/média: as contagens objetivas servem de base, mas não equivalem a uma validação normativa ABNT completa e infalível.
+A análise de conteúdo depende da heurística do modelo sobre os chunks fornecidos no context pack. Contagens e findings persistidos não equivalem a validação normativa ABNT completa nem a pontuação oficial.
 
 ## Situações que exigem confirmação humana
-- Nota sugerida abaixo de 4.0 por problemas estruturais severos.
-- Identificação de falha grave na compilação do relatório.
+- Plano bloqueado ou manuscrito incompleto.
+- Erro de fingerprint, batchId ou cobertura incompleta que impeça progresso.
+- Falha persistente de \`banca_context\`, \`read\`, \`banca_auditar\` ou \`banca_sintese\`.
 
 ## Relação com a rubrica ativa
-Perfil: \`banca-rigorosa\`
-- ABNT/Estrutura: peso 3
-- Citações/Fontes: peso 3
-- Conteúdo/Lógica: peso 2
-- Estilo Acadêmico: peso 2
-- Travas ativas:
-  - >30% parágrafos sem citação → nota máxima 4.0
-  - Ficha catalográfica caseira (sem CRB) → nota máxima 6.0
-  - Conclusão rotulada de forma incorreta → nota máxima 6.0
+Use a rubrica institucional apenas como orientação qualitativa dos eixos a observar nos findings. Não aplique pesos hardcoded, tetos ou travas, e não calcule pontuação global neste fluxo. Scoring permanece fora deste contrato.
 
 ## Comportamento quando as evidências forem insuficientes
-Se a contagem não puder ser realizada com \`banca_auditar\` ou o contexto estiver vazio, interromper e sinalizar erro grave. Não inferir notas sem dados base.
+Se o lote não puder ser lido via \`read\` do context pack, o contexto estiver bloqueado ou a auditoria falhar, interromper e sinalizar o erro. Não inferir findings inventados e não chamar \`banca_sintese\` com cobertura incompleta.
 `,
   },
   "banca-plagio": {
