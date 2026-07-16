@@ -10,6 +10,7 @@ const plugin: Plugin = async () => {
   const { bancaStatus } = await import("./tools/banca_status")
   const { bancaContext } = await import("./tools/banca_context")
   const { bancaAuditar } = await import("./tools/banca_auditar")
+  const { bancaSintese } = await import("./tools/banca_sintese")
   const { bancaCorrigir } = await import("./tools/banca_corrigir")
   const { bancaRefs } = await import("./tools/banca_refs")
   const { bancaIa } = await import("./tools/banca_ia")
@@ -28,6 +29,7 @@ const plugin: Plugin = async () => {
       banca_status: bancaStatus,
       banca_context: bancaContext,
       banca_auditar: bancaAuditar,
+      banca_sintese: bancaSintese,
       banca_corrigir: bancaCorrigir,
       banca_refs: bancaRefs,
       banca_ia: bancaIa,
