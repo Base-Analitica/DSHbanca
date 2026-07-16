@@ -9,6 +9,16 @@ import {
   verifySkills,
   verifyInitEvents,
   verifyProtocolEvents,
+  verifyExhaustiveProtocol,
+  extractContextPackPath,
+  isSinteseErrorOutput,
+  isSinteseSuccessOutput,
+  isIncompleteCoverageRejection,
+  extractSinteseErrorCode,
+  isMinimalAnalysisFindingShape,
+  pathsMatchForRead,
+  writeSyntheticMultiBatchProject,
+  inspectExhaustiveProjectState,
   sanitizeOutput,
   createPathSanitizer,
   classifyInitPhase,
@@ -39,6 +49,8 @@ import {
   resolveBinary,
   hasStructuredProtocolFailure,
   type ProcessLike,
+  type ProtocolEval,
+  type ExhaustiveProjectState,
 } from "../scripts/e2e-opencode";
 import { spawnSync } from "node:child_process";
 
@@ -87,7 +99,7 @@ const perfectInitEval = {
   skillMdCount: 8,
 };
 
-const perfectProtocolEval = {
+const perfectProtocolEval: ProtocolEval = {
   skillArgsCorrect: true,
   skillEvidence: true,
   skillSucceeded: true,
@@ -96,7 +108,61 @@ const perfectProtocolEval = {
   correctOrder: true,
   hashesMatch: true,
   claimedSubagentWithoutEvidence: false,
+  minBatchesMet: true,
+  batchesCompleted: 3,
+  multiBatchOrderCorrect: true,
+  readsSucceeded: true,
+  sameFingerprint: true,
+  fingerprint: "fp-test",
+  batchIds: ["b0", "b1", "b2"],
+  sourceCoverageOk: true,
+  sourcesObserved: ["first.tex", "middle.tex", "last.tex"],
+  prematureSinteseAttempted: true,
+  prematureSinteseRejected: true,
+  finalSinteseSucceeded: true,
+  findingsPersisted: true,
+  findingsCount: 1,
+  findingsNotDuplicatedOnResume: true,
+  resumeAcrossProcesses: true,
+  phase1Interrupted: true,
 };
+
+/** Partial protocol eval for FAIL-path classification tests (legacy fields only + exhaustive false). */
+function protocolEvalFromPartial(
+  partial: Partial<ProtocolEval> &
+    Pick<
+      ProtocolEval,
+      | "skillArgsCorrect"
+      | "skillEvidence"
+      | "skillSucceeded"
+      | "contextCalled"
+      | "auditarCalled"
+      | "correctOrder"
+      | "hashesMatch"
+      | "claimedSubagentWithoutEvidence"
+    >
+): ProtocolEval {
+  return {
+    minBatchesMet: false,
+    batchesCompleted: 0,
+    multiBatchOrderCorrect: false,
+    readsSucceeded: false,
+    sameFingerprint: false,
+    fingerprint: null,
+    batchIds: [],
+    sourceCoverageOk: false,
+    sourcesObserved: [],
+    prematureSinteseAttempted: false,
+    prematureSinteseRejected: false,
+    finalSinteseSucceeded: false,
+    findingsPersisted: false,
+    findingsCount: 0,
+    findingsNotDuplicatedOnResume: true,
+    resumeAcrossProcesses: false,
+    phase1Interrupted: false,
+    ...partial,
+  };
+}
 
 /** Real OpenCode 1.17.18 tool_use envelope. */
 function ocTool(
@@ -318,7 +384,7 @@ banca-unexpected-agent (subagent)
       hasAuthAndModel: true,
       initPassed: true,
       result: okResult("{}"),
-      evaluation: {
+      evaluation: protocolEvalFromPartial({
         skillArgsCorrect: r.skillArgsCorrect,
         skillEvidence: r.skillEvidence,
         skillSucceeded: r.skillSucceeded,
@@ -327,7 +393,7 @@ banca-unexpected-agent (subagent)
         correctOrder: r.correctOrder,
         hashesMatch: true,
         claimedSubagentWithoutEvidence: false,
-      },
+      }),
     });
     expect(classified.outcome).toBe("FAIL");
     expect(classified.passed).toBe(false);
@@ -379,7 +445,7 @@ banca-unexpected-agent (subagent)
       hasAuthAndModel: true,
       initPassed: true,
       result: okResult("{}"),
-      evaluation: {
+      evaluation: protocolEvalFromPartial({
         skillArgsCorrect: true,
         skillEvidence: true,
         skillSucceeded: true,
@@ -388,7 +454,7 @@ banca-unexpected-agent (subagent)
         correctOrder: true,
         hashesMatch: true,
         claimedSubagentWithoutEvidence: false,
-      },
+      }),
     });
     expect(classified.outcome).toBe("FAIL");
   });
@@ -668,7 +734,7 @@ describe("OpenCode 1.17 nested part events", () => {
       hasAuthAndModel: true,
       initPassed: true,
       result: okResult(stdout),
-      evaluation: {
+      evaluation: protocolEvalFromPartial({
         skillArgsCorrect: true,
         skillEvidence: true,
         skillSucceeded: true,
@@ -677,7 +743,7 @@ describe("OpenCode 1.17 nested part events", () => {
         correctOrder: true,
         hashesMatch: true,
         claimedSubagentWithoutEvidence: false,
-      },
+      }),
       structuredFailureCategories: diag.categories,
     });
     expect(classified.outcome).toBe("FAIL");
@@ -716,14 +782,7 @@ describe("OpenCode 1.17 nested part events", () => {
       result: okResult(stdout),
       evaluation: {
         // Even if evaluation were incorrectly perfect, structured categories must fail closed.
-        skillArgsCorrect: true,
-        skillEvidence: true,
-        skillSucceeded: true,
-        contextCalled: true,
-        auditarCalled: true,
-        correctOrder: true,
-        hashesMatch: true,
-        claimedSubagentWithoutEvidence: false,
+        ...perfectProtocolEval,
       },
       structuredFailureCategories: diag.categories,
     });
@@ -1594,13 +1653,14 @@ export default async () => ({});
           model: process.env.OPENCODE_E2E_MODEL || "opencode/mimo-v2.5-free",
           command: "banca-init",
         });
-        const res = runSafe(bin, args, project, 90000, env);
+        const res = runSafe(bin, args, project, 240000, env);
 
         // Global contaminant must never run.
         expect(existsSync(marker)).toBe(false);
 
         // Full behavioral proof is required when OpenCode is available in the environment.
         // Soft-passing on non-zero status is not allowed: that overstated isolation confidence.
+        // Timeout (status null) is environmental FAIL, not a soft pass.
         expect(res.status).toBe(0);
         const { foundTool, foundSuccess } = verifyInitEvents(parseJsonEvents(res.stdout || ""));
         expect(foundTool).toBe(true);
@@ -1614,7 +1674,761 @@ export default async () => ({});
         rmSync(fakeHostConfig, { recursive: true, force: true });
       }
     },
-    { timeout: 180000 }
+    { timeout: 300000 }
   );
   // If OpenCode is absent, the contamination proof above is skipped (not counted as PASS).
+});
+
+describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
+  function oc(
+    tool: string,
+    opts: {
+      id?: string;
+      status?: string;
+      input?: unknown;
+      output?: unknown;
+      error?: unknown;
+    } = {}
+  ) {
+    return ocTool(tool, {
+      callID: opts.id || `call_${tool}`,
+      status: opts.status || "completed",
+      input: opts.input ?? {},
+      output: opts.output,
+      error: opts.error,
+    });
+  }
+
+  const projectRoot = resolve("/tmp/e2e-exhaustive-proj");
+  const pack1 = join(projectRoot, ".banca/context/context-1.md");
+  const pack2 = join(projectRoot, ".banca/context/context-2.md");
+  const pack3 = join(projectRoot, ".banca/context/context-3.md");
+  const packDone = join(projectRoot, ".banca/context/context-done.md");
+  const fp = "fingerprint-abc";
+  const b0 = "batch-0";
+  const b1 = "batch-1";
+  const b2 = "batch-2";
+
+  function fullSinteseJson(overrides: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      version: "global-analysis-synthesis-input-v1",
+      planId: "p1",
+      manuscriptFingerprint: fp,
+      coverage: {
+        state: "complete",
+        totalBatches: 3,
+        completedBatches: 3,
+        totalCharacters: 300,
+        completedCharacters: 300,
+        coveragePercent: 100,
+        orderedBatchIds: [b0, b1, b2],
+      },
+      findings: [],
+      ...overrides,
+    });
+  }
+
+  const skillEvt = () =>
+    oc("skill", {
+      id: "s1",
+      input: { name: "banca-avaliacao" },
+      output: "# Skill: Banca Avaliação\nloaded",
+    });
+
+  function happyPhase1() {
+    return [
+      skillEvt(),
+      oc("banca_context", { id: "c1", output: `context → ${pack1}` }),
+      oc("read", { id: "r1", input: { filePath: pack1 }, output: "SECTION_FIRST" }),
+      oc("banca_auditar", {
+        id: "a1",
+        input: {
+          manuscriptFingerprint: fp,
+          batchId: b0,
+          findings: [{ file: "first.tex", category: "clarity", severity: "low" }],
+        },
+        output: JSON.stringify({ kind: "openbanca-audit-receipt-v2", acceptedCount: 1 }),
+      }),
+      oc("banca_context", {
+        id: "c2",
+        input: { completedBatchId: b0 },
+        output: `context → ${pack2}`,
+      }),
+    ];
+  }
+
+  function happyPartial() {
+    return [
+      oc("banca_sintese", {
+        id: "syn1",
+        output:
+          "synthesis input error\ncode=incomplete_coverage\nmessage=coverage incomplete",
+      }),
+    ];
+  }
+
+  function happyPhase2() {
+    return [
+      oc("skill", {
+        id: "s2",
+        input: { name: "banca-avaliacao" },
+        output: "# Skill: Banca Avaliação\nloaded",
+      }),
+      oc("banca_context", { id: "c3", output: `context → ${pack2}` }),
+      oc("read", { id: "r2", input: { filePath: pack2 }, output: "SECTION_MIDDLE" }),
+      oc("banca_auditar", {
+        id: "a2",
+        input: { manuscriptFingerprint: fp, batchId: b1, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c4",
+        input: { completedBatchId: b1 },
+        output: `context → ${pack3}`,
+      }),
+      oc("read", { id: "r3", input: { filePath: pack3 }, output: "SECTION_LAST" }),
+      oc("banca_auditar", {
+        id: "a3",
+        input: { manuscriptFingerprint: fp, batchId: b2, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c5",
+        input: { completedBatchId: b2 },
+        output: `context → ${packDone}`,
+      }),
+      oc("read", { id: "r4", input: { filePath: packDone }, output: "complete" }),
+      oc("banca_sintese", {
+        id: "syn2",
+        output: fullSinteseJson(),
+      }),
+    ];
+  }
+
+  function stateRunning(): ExhaustiveProjectState {
+    return {
+      findingsCount: 1,
+      findingIds: ["fid-phase1"],
+      findingsFingerprints: [fp],
+      planIds: ["p1"],
+      completedBatches: 1,
+      totalBatches: 3,
+      checkpointState: "running",
+      manuscriptFingerprint: fp,
+      contextPackPaths: [".banca/context/context-1.md"],
+      sourcesInContextPacks: ["first.tex"],
+      markersInContextPacks: { first: true, middle: false, last: false },
+      inspectErrors: [],
+    };
+  }
+
+  function stateComplete(): ExhaustiveProjectState {
+    return {
+      ...stateRunning(),
+      completedBatches: 3,
+      checkpointState: "complete",
+      findingIds: ["fid-phase1"],
+      sourcesInContextPacks: ["first.tex", "middle.tex", "last.tex"],
+      markersInContextPacks: { first: true, middle: true, last: true },
+      contextPackPaths: [
+        ".banca/context/context-1.md",
+        ".banca/context/context-2.md",
+        ".banca/context/context-3.md",
+      ],
+      inspectErrors: [],
+    };
+  }
+
+  function evalOpts(partial: Parameters<typeof verifyExhaustiveProtocol>[0]) {
+    return verifyExhaustiveProtocol({
+      projectRoot,
+      ...partial,
+    });
+  }
+
+  test("extractContextPackPath and pathsMatchForRead require canonical context path", () => {
+    expect(extractContextPackPath(`context → ${pack1}`)).toBe(pack1);
+    // Exact absolute paths under projectRoot/.banca/context/
+    expect(pathsMatchForRead(pack1, pack1, projectRoot)).toBe(true);
+    expect(pathsMatchForRead(pack1, join(projectRoot, ".banca/context/context-1.md"), projectRoot)).toBe(
+      true
+    );
+    // Same basename in a different directory must FAIL
+    expect(
+      pathsMatchForRead(pack1, "/other/place/.banca/context/context-1.md", projectRoot)
+    ).toBe(false);
+    // Basename-only / ambiguous suffix must FAIL
+    expect(pathsMatchForRead(pack1, "context-1.md", projectRoot)).toBe(false);
+    expect(pathsMatchForRead(pack1, "banca/context/context-1.md", projectRoot)).toBe(false);
+    expect(pathsMatchForRead(pack1, pack2, projectRoot)).toBe(false);
+  });
+
+  test("isIncompleteCoverageRejection is strict; success needs full V1 contract", () => {
+    const incomplete =
+      "synthesis input error\ncode=incomplete_coverage\nmessage=coverage incomplete";
+    expect(isIncompleteCoverageRejection(incomplete, "completed")).toBe(true);
+    expect(isIncompleteCoverageRejection(incomplete, "error")).toBe(false);
+    expect(
+      isIncompleteCoverageRejection(
+        "synthesis input error\ncode=missing_findings\nmessage=x",
+        "completed"
+      )
+    ).toBe(false);
+    expect(extractSinteseErrorCode(incomplete)).toBe("incomplete_coverage");
+    expect(isSinteseErrorOutput(incomplete, null)).toBe(true);
+    expect(isSinteseSuccessOutput(fullSinteseJson())).toBe(true);
+    // version + planId alone is NOT enough
+    expect(
+      isSinteseSuccessOutput(
+        JSON.stringify({
+          version: "global-analysis-synthesis-input-v1",
+          planId: "p",
+          manuscriptFingerprint: "f",
+        })
+      )
+    ).toBe(false);
+    // incomplete coverage in coverage block
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          coverage: {
+            state: "running",
+            totalBatches: 3,
+            completedBatches: 1,
+            totalCharacters: 300,
+            completedCharacters: 100,
+            coveragePercent: 33,
+            orderedBatchIds: [b0],
+          },
+        })
+      )
+    ).toBe(false);
+  });
+
+  test("isSinteseSuccessOutput rejects coveragePercent 100 with incomplete characters", () => {
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          coverage: {
+            state: "complete",
+            totalBatches: 3,
+            completedBatches: 3,
+            totalCharacters: 300,
+            completedCharacters: 299,
+            coveragePercent: 100,
+            orderedBatchIds: [b0, b1, b2],
+          },
+        })
+      )
+    ).toBe(false);
+  });
+
+  test("isSinteseSuccessOutput rejects invalid AnalysisFinding shapes", () => {
+    const validFinding = {
+      version: "analysis-finding-v1",
+      findingId: "fid-1",
+      planId: "p1",
+      category: "clarity",
+      severity: "low",
+      claim: "claim text",
+      evidence: "evidence text",
+      file: "first.tex",
+      startLine: 1,
+      endLine: 2,
+      sectionId: "sec-1",
+      manuscriptFingerprint: fp,
+      batchId: b0,
+    };
+    expect(
+      isMinimalAnalysisFindingShape(validFinding, {
+        planId: "p1",
+        manuscriptFingerprint: fp,
+      })
+    ).toBe(true);
+    expect(isSinteseSuccessOutput(fullSinteseJson({ findings: [validFinding] }))).toBe(true);
+
+    // missing version
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          findings: [{ ...validFinding, version: undefined }],
+        })
+      )
+    ).toBe(false);
+    // planId mismatch vs envelope
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          findings: [{ ...validFinding, planId: "other-plan" }],
+        })
+      )
+    ).toBe(false);
+    // fingerprint mismatch
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          findings: [{ ...validFinding, manuscriptFingerprint: "other-fp" }],
+        })
+      )
+    ).toBe(false);
+    // endLine < startLine
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          findings: [{ ...validFinding, startLine: 5, endLine: 2 }],
+        })
+      )
+    ).toBe(false);
+    // empty claim
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          findings: [{ ...validFinding, claim: "   " }],
+        })
+      )
+    ).toBe(false);
+    // non-positive line
+    expect(
+      isSinteseSuccessOutput(
+        fullSinteseJson({
+          findings: [{ ...validFinding, startLine: 0, endLine: 1 }],
+        })
+      )
+    ).toBe(false);
+  });
+
+  test("writeSyntheticMultiBatchProject creates first/middle/last sources and config", () => {
+    const root = mkdtempSync(join(tmpdir(), "e2e-multi-proj-"));
+    try {
+      const meta = writeSyntheticMultiBatchProject(root);
+      expect(meta.maxCharactersPerBatch).toBeGreaterThan(0);
+      expect(existsSync(join(root, "main.tex"))).toBe(true);
+      expect(existsSync(join(root, "first.tex"))).toBe(true);
+      expect(existsSync(join(root, "middle.tex"))).toBe(true);
+      expect(existsSync(join(root, "last.tex"))).toBe(true);
+      expect(existsSync(join(root, "referencias.bib"))).toBe(true);
+      const cfg = JSON.parse(readFileSync(join(root, ".banca", "project.json"), "utf8"));
+      expect(cfg.analysis.maxCharactersPerBatch).toBe(meta.maxCharactersPerBatch);
+      expect(readFileSync(join(root, "first.tex"), "utf8")).toContain("SECTION_FIRST");
+      expect(readFileSync(join(root, "middle.tex"), "utf8")).toContain("SECTION_MIDDLE");
+      expect(readFileSync(join(root, "last.tex"), "utf8")).toContain("SECTION_LAST");
+      const empty = inspectExhaustiveProjectState(root);
+      expect(empty.findingsCount).toBe(0);
+      expect(empty.completedBatches).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("valid multi-batch order with interrupt, resume, and synthesis gates PASSes", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2();
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      minBatches: 3,
+      hashesMatch: true,
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.skillSucceeded).toBe(true);
+    expect(evaluation.multiBatchOrderCorrect).toBe(true);
+    expect(evaluation.readsSucceeded).toBe(true);
+    expect(evaluation.minBatchesMet).toBe(true);
+    expect(evaluation.batchesCompleted).toBeGreaterThanOrEqual(3);
+    expect(evaluation.sameFingerprint).toBe(true);
+    expect(evaluation.sourceCoverageOk).toBe(true);
+    expect(evaluation.prematureSinteseAttempted).toBe(true);
+    expect(evaluation.prematureSinteseRejected).toBe(true);
+    expect(evaluation.finalSinteseSucceeded).toBe(true);
+    expect(evaluation.findingsPersisted).toBe(true);
+    expect(evaluation.findingsNotDuplicatedOnResume).toBe(true);
+    expect(evaluation.phase1Interrupted).toBe(true);
+    expect(evaluation.resumeAcrossProcesses).toBe(true);
+
+    const classified = classifyProtocolPhase({
+      hasAuthAndModel: true,
+      initPassed: true,
+      result: okResult("{}"),
+      evaluation,
+    });
+    expect(classified.outcome).toBe("PASS");
+    expect(classified.passed).toBe(true);
+  });
+
+  test("wrong tool order fails multi-batch order", () => {
+    const events = [
+      skillEvt(),
+      oc("banca_auditar", {
+        id: "a1",
+        input: { manuscriptFingerprint: fp, batchId: b0, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", { id: "c1", output: `context → ${pack1}` }),
+    ];
+    const evaluation = evalOpts({
+      events,
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.multiBatchOrderCorrect).toBe(false);
+    expect(evaluation.readsSucceeded).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).outcome
+    ).toBe("FAIL");
+  });
+
+  test("missing read of context pack path fails", () => {
+    const events = [
+      skillEvt(),
+      oc("banca_context", { id: "c1", output: `context → ${pack1}` }),
+      oc("banca_auditar", {
+        id: "a1",
+        input: { manuscriptFingerprint: fp, batchId: b0, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c2",
+        input: { completedBatchId: b0 },
+        output: `context → ${pack2}`,
+      }),
+    ];
+    const evaluation = evalOpts({
+      events,
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.readsSucceeded).toBe(false);
+    expect(evaluation.multiBatchOrderCorrect).toBe(false);
+  });
+
+  test("premature successful banca_sintese is not rejected and fails classification", () => {
+    const phase1 = happyPhase1();
+    const partial = [
+      oc("banca_sintese", {
+        id: "syn-early",
+        output: fullSinteseJson(),
+      }),
+    ];
+    const phase2 = happyPhase2();
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.prematureSinteseAttempted).toBe(true);
+    expect(evaluation.prematureSinteseRejected).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("premature_sintese_not_rejected");
+  });
+
+  test("partial synthesis tool_error status does not count as incomplete_coverage gate", () => {
+    const phase1 = happyPhase1();
+    const partial = [
+      oc("banca_sintese", {
+        id: "syn-err",
+        status: "error",
+        error: "tool failed",
+        output: "synthesis input error\ncode=incomplete_coverage\nmessage=x",
+      }),
+    ];
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...happyPhase2()],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: happyPhase2(),
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.prematureSinteseAttempted).toBe(true);
+    expect(evaluation.prematureSinteseRejected).toBe(false);
+  });
+
+  test("partial synthesis with code other than incomplete_coverage fails gate", () => {
+    const phase1 = happyPhase1();
+    const partial = [
+      oc("banca_sintese", {
+        id: "syn-miss",
+        output: "synthesis input error\ncode=missing_findings\nmessage=no store",
+      }),
+    ];
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...happyPhase2()],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: happyPhase2(),
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.prematureSinteseAttempted).toBe(true);
+    expect(evaluation.prematureSinteseRejected).toBe(false);
+  });
+
+  test("phase2 re-audit of phase1 batchId fails multi-batch order", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    // Phase2 re-audits b0 (already completed in phase1) then continues
+    const phase2 = [
+      oc("skill", {
+        id: "s2",
+        input: { name: "banca-avaliacao" },
+        output: "# Skill: Banca Avaliação\nloaded",
+      }),
+      oc("banca_context", { id: "c3", output: `context → ${pack1}` }),
+      oc("read", { id: "r2", input: { filePath: pack1 }, output: "SECTION_FIRST" }),
+      oc("banca_auditar", {
+        id: "a-re",
+        input: { manuscriptFingerprint: fp, batchId: b0, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c4",
+        input: { completedBatchId: b0 },
+        output: `context → ${pack2}`,
+      }),
+      oc("read", { id: "r3", input: { filePath: pack2 }, output: "SECTION_MIDDLE" }),
+      oc("banca_auditar", {
+        id: "a2",
+        input: { manuscriptFingerprint: fp, batchId: b1, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c5",
+        input: { completedBatchId: b1 },
+        output: `context → ${pack3}`,
+      }),
+      oc("read", { id: "r4", input: { filePath: pack3 }, output: "SECTION_LAST" }),
+      oc("banca_auditar", {
+        id: "a3",
+        input: { manuscriptFingerprint: fp, batchId: b2, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c6",
+        input: { completedBatchId: b2 },
+        output: `context → ${packDone}`,
+      }),
+      oc("read", { id: "r5", input: { filePath: packDone }, output: "complete" }),
+      oc("banca_sintese", { id: "syn2", output: fullSinteseJson() }),
+    ];
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.multiBatchOrderCorrect).toBe(false);
+  });
+
+  test("missing final successful banca_sintese fails", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2().filter((e) => {
+      const n = normalizeToolEvent(e);
+      return n?.tool !== "banca_sintese";
+    });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.finalSinteseSucceeded).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("final_sintese_missing");
+  });
+
+  test("divergent fingerprint across batches fails", () => {
+    const events = [
+      skillEvt(),
+      oc("banca_context", { id: "c1", output: `context → ${pack1}` }),
+      oc("read", { id: "r1", input: { filePath: pack1 }, output: "x" }),
+      oc("banca_auditar", {
+        id: "a1",
+        input: { manuscriptFingerprint: "fp-one", batchId: b0, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c2",
+        input: { completedBatchId: b0 },
+        output: `context → ${pack2}`,
+      }),
+      oc("read", { id: "r2", input: { filePath: pack2 }, output: "y" }),
+      oc("banca_auditar", {
+        id: "a2",
+        input: { manuscriptFingerprint: "fp-two", batchId: b1, findings: [] },
+        output: "{}",
+      }),
+      oc("banca_context", {
+        id: "c3",
+        input: { completedBatchId: b1 },
+        output: `context → ${pack3}`,
+      }),
+    ];
+    const evaluation = evalOpts({
+      events,
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.sameFingerprint).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("fingerprint_divergent");
+  });
+
+  test("resume duplication of findings is detected via repeated findingIds", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2();
+    // Realistic resume: completedBatches advanced 1→3, but store listed the same
+    // phase1 findingId twice (merge failed) → must FAIL dedup.
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: {
+        ...stateRunning(),
+        findingsCount: 1,
+        findingIds: ["fid-phase1"],
+        completedBatches: 1,
+      },
+      stateAfterPhase2: {
+        ...stateComplete(),
+        findingsCount: 2,
+        findingIds: ["fid-phase1", "fid-phase1"],
+        completedBatches: 3,
+      },
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.findingsNotDuplicatedOnResume).toBe(false);
+  });
+
+  test("disk-complete with skipped mid/last audit cycles must FAIL", () => {
+    // Only batch-0 has full context→read→auditar→completedBatchId.
+    // Batches 1 and 2 are "advanced" only via completedBatchId (no read/auditar).
+    // Disk claims complete + final sintese succeeds — must still FAIL classification.
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2Skipped = [
+      oc("skill", {
+        id: "s2",
+        input: { name: "banca-avaliacao" },
+        output: "# Skill: Banca Avaliação\nloaded",
+      }),
+      // Illicit: mark batch-1 and batch-2 complete without auditing them
+      oc("banca_context", {
+        id: "c-skip-1",
+        input: { completedBatchId: b1 },
+        output: `context → ${pack3}`,
+      }),
+      oc("banca_context", {
+        id: "c-skip-2",
+        input: { completedBatchId: b2 },
+        output: `context → ${packDone}`,
+      }),
+      oc("read", { id: "r-done", input: { filePath: packDone }, output: "complete" }),
+      oc("banca_sintese", {
+        id: "syn2",
+        output: fullSinteseJson(),
+      }),
+    ];
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2Skipped],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2Skipped,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: {
+        ...stateComplete(),
+        completedBatches: 3,
+        totalBatches: 3,
+        checkpointState: "complete",
+      },
+      minBatches: 3,
+      hashesMatch: true,
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.multiBatchOrderCorrect).toBe(false);
+    expect(evaluation.minBatchesMet).toBe(false);
+    expect(evaluation.batchesCompleted).toBe(1);
+    expect(evaluation.finalSinteseSucceeded).toBe(false);
+
+    const classified = classifyProtocolPhase({
+      hasAuthAndModel: true,
+      initPassed: true,
+      result: okResult("{}"),
+      evaluation,
+    });
+    expect(classified.outcome).toBe("FAIL");
+    expect(classified.passed).toBe(false);
+    expect(classified.classification).toMatch(
+      /multi_batch_order_incorrect|min_batches_not_met|final_sintese_missing/
+    );
+  });
+
+  test("pending or error tool status is never treated as success in tracks", () => {
+    const events = [
+      skillEvt(),
+      oc("banca_context", {
+        id: "c1",
+        status: "running",
+        output: `context → ${pack1}`,
+      }),
+      oc("read", { id: "r1", input: { filePath: pack1 }, output: "x" }),
+      oc("banca_auditar", {
+        id: "a1",
+        status: "error",
+        error: "boom",
+        input: { manuscriptFingerprint: fp, batchId: b0, findings: [] },
+        output: "partial",
+      }),
+    ];
+    const evaluation = evalOpts({
+      events,
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.contextCalled).toBe(false);
+    expect(evaluation.auditarCalled).toBe(false);
+    expect(evaluation.multiBatchOrderCorrect).toBe(false);
+  });
 });

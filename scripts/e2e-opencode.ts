@@ -81,6 +81,80 @@ export type ProtocolEval = {
   correctOrder: boolean;
   hashesMatch: boolean;
   claimedSubagentWithoutEvidence: boolean;
+  /** Exhaustive multi-batch protocol (issue #88). Required for PASS. */
+  minBatchesMet: boolean;
+  batchesCompleted: number;
+  multiBatchOrderCorrect: boolean;
+  readsSucceeded: boolean;
+  sameFingerprint: boolean;
+  fingerprint: string | null;
+  batchIds: string[];
+  sourceCoverageOk: boolean;
+  sourcesObserved: string[];
+  prematureSinteseAttempted: boolean;
+  prematureSinteseRejected: boolean;
+  finalSinteseSucceeded: boolean;
+  findingsPersisted: boolean;
+  findingsCount: number;
+  findingsNotDuplicatedOnResume: boolean;
+  resumeAcrossProcesses: boolean;
+  phase1Interrupted: boolean;
+};
+
+/** Markers embedded in the synthetic multi-section manuscript for source coverage. */
+export const E2E_SOURCE_MARKERS = {
+  first: "SECTION_FIRST",
+  middle: "SECTION_MIDDLE",
+  last: "SECTION_LAST",
+} as const;
+
+export const E2E_SOURCE_FILES = {
+  first: "first.tex",
+  middle: "middle.tex",
+  last: "last.tex",
+} as const;
+
+/** Default maxCharactersPerBatch that forces ≥3 batches on the synthetic project. */
+export const E2E_MAX_CHARACTERS_PER_BATCH = 150;
+
+export type ExhaustiveProjectState = {
+  findingsCount: number;
+  /** findingId values as stored (length may exceed unique set if store duplicated). */
+  findingIds: string[];
+  findingsFingerprints: string[];
+  planIds: string[];
+  completedBatches: number;
+  totalBatches: number;
+  checkpointState: string | null;
+  manuscriptFingerprint: string | null;
+  contextPackPaths: string[];
+  sourcesInContextPacks: string[];
+  markersInContextPacks: { first: boolean; middle: boolean; last: boolean };
+  /** Non-empty when findings/checkpoint files existed but could not be read/parsed. */
+  inspectErrors: string[];
+};
+
+export type ExhaustiveEvalOptions = {
+  /** Combined tool events from all protocol processes (or a single stream). */
+  events: any[];
+  /** Events from the interrupt phase only (for premature synthesis + interrupt checks). */
+  phase1Events?: any[];
+  /** Events from the controlled partial-synthesis attempt. */
+  partialSinteseEvents?: any[];
+  /** Events from the resume/final phase. */
+  phase2Events?: any[];
+  /** Disk state after phase 1 (interrupt). */
+  stateAfterPhase1?: ExhaustiveProjectState | null;
+  /** Disk state after partial synthesis attempt (coverage still partial). */
+  stateAfterPartial?: ExhaustiveProjectState | null;
+  /** Disk state after resume/final. */
+  stateAfterPhase2?: ExhaustiveProjectState | null;
+  /** Absolute project root for canonical context-pack path correlation. */
+  projectRoot?: string;
+  minBatches?: number;
+  hashesMatch?: boolean;
+  claimedSubagentWithoutEvidence?: boolean;
+  resumeAcrossProcesses?: boolean;
 };
 
 /** FAIL always wins over BLOCKED; only all-PASS yields PASS. */
@@ -593,6 +667,961 @@ export function verifyProtocolEvents(events: any[]) {
     contextCalled: context.succeeded,
     auditarCalled: auditar.succeeded,
     correctOrder,
+  };
+}
+
+function inputRecord(input: unknown): Record<string, unknown> | null {
+  if (!input || typeof input !== "object") return null;
+  return input as Record<string, unknown>;
+}
+
+export function inputStringField(input: unknown, keys: string[]): string | undefined {
+  const rec = inputRecord(input);
+  if (!rec) return undefined;
+  for (const k of keys) {
+    const v = rec[k];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+/** Extract `context → <path>` from banca_context tool output. */
+export function extractContextPackPath(output: unknown): string | null {
+  const text = outputText(output);
+  const m = text.match(/context\s*→\s*(\S+)/);
+  if (!m) return null;
+  return m[1];
+}
+
+/**
+ * Extract controlled `code=` from banca_sintese error body (if present).
+ * Returns null when no code field is present.
+ */
+export function extractSinteseErrorCode(output: unknown): string | null {
+  const text = outputText(output);
+  const m = text.match(/\bcode=([a-z0-9_]+)\b/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * True only for the controlled partial-coverage gate:
+ * a recognized banca_sintese result body with code=incomplete_coverage and
+ * non-error/non-failed status (infrastructure tool_error must not count as the gate).
+ */
+export function isIncompleteCoverageRejection(
+  output: unknown,
+  status?: string
+): boolean {
+  const s = (status || "").toLowerCase();
+  if (s === "error" || s === "failed") return false;
+  const code = extractSinteseErrorCode(output);
+  if (code !== "incomplete_coverage") return false;
+  // Controlled tool body always uses the fixed prefix.
+  return /synthesis input error/i.test(outputText(output));
+}
+
+/**
+ * Any non-success synthesis body (used to deny final success claims).
+ * Does not by itself prove the partial-coverage gate.
+ */
+export function isSinteseErrorOutput(output: unknown, error: unknown): boolean {
+  if (error !== undefined && error !== null && error !== false && error !== "") return true;
+  const text = outputText(output);
+  if (!text) return false;
+  if (/synthesis input error/i.test(text)) return true;
+  if (extractSinteseErrorCode(output)) return true;
+  return false;
+}
+
+/**
+ * Correlate read path to the exact path returned by banca_context.
+ * Both paths are resolved against projectRoot; identity must be canonical under
+ * `<projectRoot>/.banca/context/context-*.md`. Basename-only and ambiguous
+ * suffix matches are rejected.
+ */
+export function pathsMatchForRead(
+  expected: string,
+  observed: string,
+  projectRoot?: string
+): boolean {
+  if (!expected || !observed) return false;
+  const norm = (p: string) => p.replace(/\\/g, "/");
+
+  if (!projectRoot || projectRoot.trim().length === 0) {
+    // Without a project root, only exact normalized string equality is safe.
+    return norm(expected) === norm(observed);
+  }
+
+  const root = resolve(projectRoot);
+  const ctxDir = resolve(root, ".banca", "context");
+
+  const toAbs = (p: string): string | null => {
+    try {
+      const abs = isAbsolute(p) ? resolve(p) : resolve(root, p);
+      return abs;
+    } catch {
+      return null;
+    }
+  };
+
+  const a = toAbs(expected);
+  const b = toAbs(observed);
+  if (!a || !b) return false;
+  if (a !== b) return false;
+
+  // Must live under project .banca/context/ as a single context-*.md segment.
+  const ctxPrefix = ctxDir.endsWith("/") || ctxDir.endsWith("\\") ? ctxDir : ctxDir + "/";
+  const aNorm = norm(a);
+  const ctxNorm = norm(ctxPrefix);
+  if (!aNorm.startsWith(ctxNorm)) return false;
+  const rel = aNorm.slice(ctxNorm.length);
+  if (!rel || rel.includes("/")) return false;
+  if (!rel.startsWith("context-") || !rel.endsWith(".md")) return false;
+  // Reject path escape / relative segments in the basename
+  if (rel.includes("..") || rel.includes("\\")) return false;
+  return true;
+}
+
+/** Wire version of AnalysisFinding (must match src/lib/analysis_findings.ts). */
+export const E2E_ANALYSIS_FINDING_VERSION = "analysis-finding-v1" as const;
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function isPositiveInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v > 0;
+}
+
+/**
+ * Minimal structural shape of AnalysisFinding for synthesis envelope validation.
+ * Does not re-run production createAnalysisFinding (no plan access here).
+ */
+export function isMinimalAnalysisFindingShape(
+  finding: unknown,
+  envelope: { planId: string; manuscriptFingerprint: string }
+): boolean {
+  if (!finding || typeof finding !== "object" || Array.isArray(finding)) return false;
+  const f = finding as Record<string, unknown>;
+  if (f.version !== E2E_ANALYSIS_FINDING_VERSION) return false;
+  if (!isNonEmptyString(f.findingId)) return false;
+  if (!isNonEmptyString(f.planId)) return false;
+  if (!isNonEmptyString(f.category)) return false;
+  if (!isNonEmptyString(f.severity)) return false;
+  if (!isNonEmptyString(f.claim)) return false;
+  if (!isNonEmptyString(f.evidence)) return false;
+  if (!isNonEmptyString(f.file)) return false;
+  if (!isNonEmptyString(f.sectionId)) return false;
+  if (!isNonEmptyString(f.manuscriptFingerprint)) return false;
+  if (!isNonEmptyString(f.batchId)) return false;
+  if (!isPositiveInt(f.startLine)) return false;
+  if (!isPositiveInt(f.endLine)) return false;
+  if (f.endLine < f.startLine) return false;
+  // Coherent with synthesis envelope
+  if (f.planId !== envelope.planId) return false;
+  if (f.manuscriptFingerprint !== envelope.manuscriptFingerprint) return false;
+  return true;
+}
+
+/**
+ * Validate full GlobalAnalysisSynthesisInputV1 contract (not a partial JSON shape).
+ */
+export function isSinteseSuccessOutput(output: unknown): boolean {
+  const text = outputText(output).trim();
+  if (!text || isSinteseErrorOutput(output, null)) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const p = parsed as Record<string, unknown>;
+  if (p.version !== "global-analysis-synthesis-input-v1") return false;
+  if (!isNonEmptyString(p.planId)) return false;
+  if (!isNonEmptyString(p.manuscriptFingerprint)) return false;
+  if (!Array.isArray(p.findings)) return false;
+  const coverage = p.coverage;
+  if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) return false;
+  const c = coverage as Record<string, unknown>;
+  if (c.state !== "complete") return false;
+  if (c.coveragePercent !== 100) return false;
+  if (typeof c.totalBatches !== "number" || !Number.isFinite(c.totalBatches) || c.totalBatches < 0) {
+    return false;
+  }
+  if (
+    typeof c.completedBatches !== "number" ||
+    !Number.isFinite(c.completedBatches) ||
+    c.completedBatches < 0
+  ) {
+    return false;
+  }
+  if (c.completedBatches !== c.totalBatches) return false;
+  if (typeof c.totalCharacters !== "number" || !Number.isFinite(c.totalCharacters) || c.totalCharacters < 0) {
+    return false;
+  }
+  if (
+    typeof c.completedCharacters !== "number" ||
+    !Number.isFinite(c.completedCharacters) ||
+    c.completedCharacters < 0
+  ) {
+    return false;
+  }
+  // Full coverage must report complete character progress.
+  if (c.coveragePercent === 100 && c.completedCharacters !== c.totalCharacters) {
+    return false;
+  }
+  if (!Array.isArray(c.orderedBatchIds)) return false;
+  if (c.orderedBatchIds.length !== c.totalBatches) return false;
+  if (!c.orderedBatchIds.every((id) => typeof id === "string" && id.length > 0)) return false;
+
+  const envelope = {
+    planId: p.planId as string,
+    manuscriptFingerprint: p.manuscriptFingerprint as string,
+  };
+  for (const finding of p.findings) {
+    if (!isMinimalAnalysisFindingShape(finding, envelope)) return false;
+  }
+  return true;
+}
+
+export function readInputPath(input: unknown): string | undefined {
+  return inputStringField(input, ["filePath", "path", "file", "target", "filepath", "file_path"]);
+}
+
+/**
+ * Inspect on-disk analysis artifacts under a temporary project (no absolute paths returned).
+ */
+export function inspectExhaustiveProjectState(projectRoot: string): ExhaustiveProjectState {
+  const findingsDir = join(projectRoot, ".banca", "analysis", "findings");
+  const checkpointDir = join(projectRoot, ".banca", "analysis", "checkpoints");
+  const contextDir = join(projectRoot, ".banca", "context");
+
+  let findingsCount = 0;
+  const findingIds: string[] = [];
+  const findingsFingerprints: string[] = [];
+  const planIds: string[] = [];
+  let manuscriptFingerprint: string | null = null;
+  const inspectErrors: string[] = [];
+
+  if (existsSync(findingsDir)) {
+    for (const name of readdirSync(findingsDir).filter((n) => n.endsWith(".json") && !n.startsWith("."))) {
+      try {
+        const raw = JSON.parse(readFileSync(join(findingsDir, name), "utf8"));
+        if (raw && typeof raw === "object") {
+          if (typeof raw.planId === "string") planIds.push(raw.planId);
+          if (typeof raw.manuscriptFingerprint === "string") {
+            findingsFingerprints.push(raw.manuscriptFingerprint);
+            manuscriptFingerprint = raw.manuscriptFingerprint;
+          }
+          if (Array.isArray(raw.findings)) {
+            findingsCount += raw.findings.length;
+            for (const f of raw.findings) {
+              if (f && typeof f === "object" && typeof (f as { findingId?: unknown }).findingId === "string") {
+                findingIds.push((f as { findingId: string }).findingId);
+              }
+            }
+          }
+        } else {
+          inspectErrors.push(`findings/${name}:not_object`);
+        }
+      } catch {
+        // Relevant read/JSON failure must not be silent for protocol evidence.
+        inspectErrors.push(`findings/${name}:read_or_parse_failed`);
+      }
+    }
+  }
+
+  let completedBatches = 0;
+  let totalBatches = 0;
+  let checkpointState: string | null = null;
+  if (existsSync(checkpointDir)) {
+    for (const name of readdirSync(checkpointDir).filter((n) => n.endsWith(".json") && !n.startsWith("."))) {
+      try {
+        const raw = JSON.parse(readFileSync(join(checkpointDir, name), "utf8"));
+        if (raw && typeof raw === "object") {
+          if (typeof raw.completedBatches === "number") completedBatches = Math.max(completedBatches, raw.completedBatches);
+          if (typeof raw.totalBatches === "number") totalBatches = Math.max(totalBatches, raw.totalBatches);
+          if (typeof raw.state === "string") checkpointState = raw.state;
+          if (typeof raw.planId === "string" && !planIds.includes(raw.planId)) planIds.push(raw.planId);
+        } else {
+          inspectErrors.push(`checkpoints/${name}:not_object`);
+        }
+      } catch {
+        inspectErrors.push(`checkpoints/${name}:read_or_parse_failed`);
+      }
+    }
+  }
+
+  const contextPackPaths: string[] = [];
+  const sourcesInContextPacks: string[] = [];
+  const markers = { first: false, middle: false, last: false };
+  if (existsSync(contextDir)) {
+    for (const name of readdirSync(contextDir).filter((n) => n.startsWith("context-") && n.endsWith(".md"))) {
+      const rel = `.banca/context/${name}`;
+      contextPackPaths.push(rel);
+      try {
+        const body = readFileSync(join(contextDir, name), "utf8");
+        if (body.includes(E2E_SOURCE_MARKERS.first) || body.includes(E2E_SOURCE_FILES.first)) {
+          markers.first = true;
+          if (!sourcesInContextPacks.includes(E2E_SOURCE_FILES.first)) sourcesInContextPacks.push(E2E_SOURCE_FILES.first);
+        }
+        if (body.includes(E2E_SOURCE_MARKERS.middle) || body.includes(E2E_SOURCE_FILES.middle)) {
+          markers.middle = true;
+          if (!sourcesInContextPacks.includes(E2E_SOURCE_FILES.middle)) sourcesInContextPacks.push(E2E_SOURCE_FILES.middle);
+        }
+        if (body.includes(E2E_SOURCE_MARKERS.last) || body.includes(E2E_SOURCE_FILES.last)) {
+          markers.last = true;
+          if (!sourcesInContextPacks.includes(E2E_SOURCE_FILES.last)) sourcesInContextPacks.push(E2E_SOURCE_FILES.last);
+        }
+        // Also collect file names from pack metadata/chunk headers
+        for (const f of [E2E_SOURCE_FILES.first, E2E_SOURCE_FILES.middle, E2E_SOURCE_FILES.last, "main.tex"]) {
+          if (body.includes(`"file": "${f}"`) || body.includes(`— ${f}`) || body.includes(` ${f} L`)) {
+            if (!sourcesInContextPacks.includes(f)) sourcesInContextPacks.push(f);
+          }
+        }
+      } catch {
+        inspectErrors.push(`context/${name}:read_failed`);
+      }
+    }
+  }
+
+  return {
+    findingsCount,
+    findingIds,
+    findingsFingerprints,
+    planIds,
+    completedBatches,
+    totalBatches,
+    checkpointState,
+    manuscriptFingerprint,
+    contextPackPaths,
+    sourcesInContextPacks,
+    markersInContextPacks: markers,
+    inspectErrors,
+  };
+}
+
+/**
+ * Write the synthetic multi-section manuscript (no .banca/project.json).
+ * Do not pre-create project.json — banca_init skips when it already exists.
+ */
+export function writeSyntheticMultiBatchManuscript(projectRoot: string): {
+  files: string[];
+  markers: typeof E2E_SOURCE_MARKERS;
+} {
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(
+    join(projectRoot, "main.tex"),
+    [
+      "\\documentclass{article}",
+      "\\begin{document}",
+      "\\title{Synthetic Exhaustive Audit}",
+      "\\maketitle",
+      "\\input{first}",
+      "\\input{middle}",
+      "\\input{last}",
+      "\\bibliographystyle{plain}",
+      "\\bibliography{referencias}",
+      "\\end{document}",
+      "",
+    ].join("\n")
+  );
+  writeFileSync(
+    join(projectRoot, "first.tex"),
+    `\\section{First Section}\n${E2E_SOURCE_MARKERS.first}\nThis is the opening section of the synthetic manuscript.\n${"Alpha content. ".repeat(8)}\n\\cite{test2024}\n`
+  );
+  writeFileSync(
+    join(projectRoot, "middle.tex"),
+    `\\section{Middle Section}\n${E2E_SOURCE_MARKERS.middle}\nThis is the intermediate section of the synthetic manuscript.\n${"Bravo content. ".repeat(8)}\n`
+  );
+  writeFileSync(
+    join(projectRoot, "last.tex"),
+    `\\section{Last Section}\n${E2E_SOURCE_MARKERS.last}\nThis is the final section of the synthetic manuscript.\n${"Charlie content. ".repeat(8)}\n`
+  );
+  writeFileSync(
+    join(projectRoot, "referencias.bib"),
+    "@article{test2024,\n  title={Synthetic Paper},\n  author={Author, A.},\n  year={2024}\n}\n"
+  );
+  return {
+    files: ["main.tex", "first.tex", "middle.tex", "last.tex", "referencias.bib"],
+    markers: E2E_SOURCE_MARKERS,
+  };
+}
+
+/**
+ * After banca_init, force exhaustive multi-batch analysis config and clear chapters
+ * so the synthetic main+includes manuscript is the sole plan input.
+ */
+export function applyExhaustiveBatchProjectConfig(
+  projectRoot: string,
+  maxCharactersPerBatch: number = E2E_MAX_CHARACTERS_PER_BATCH
+): { maxCharactersPerBatch: number; patched: boolean } {
+  const cfgPath = join(projectRoot, ".banca", "project.json");
+  if (!existsSync(cfgPath)) {
+    return { maxCharactersPerBatch, patched: false };
+  }
+  try {
+    const raw = JSON.parse(readFileSync(cfgPath, "utf8"));
+    if (!raw || typeof raw !== "object") return { maxCharactersPerBatch, patched: false };
+    raw.analysis = {
+      coverageMode: "exhaustive",
+      maxCharactersPerBatch,
+    };
+    if (raw.manuscript && typeof raw.manuscript === "object") {
+      raw.manuscript.main = raw.manuscript.main || "main.tex";
+      raw.manuscript.bib = raw.manuscript.bib || "referencias.bib";
+      // Empty chapters: use main.tex includes only (first/middle/last).
+      raw.manuscript.chapters = [];
+    }
+    writeFileSync(cfgPath, JSON.stringify(raw, null, 2) + "\n");
+    return { maxCharactersPerBatch, patched: true };
+  } catch {
+    return { maxCharactersPerBatch, patched: false };
+  }
+}
+
+/**
+ * Full synthetic project for unit tests (manuscript + config).
+ * Runner must use manuscript-only + applyExhaustiveBatchProjectConfig after init.
+ */
+export function writeSyntheticMultiBatchProject(projectRoot: string): {
+  files: string[];
+  maxCharactersPerBatch: number;
+  markers: typeof E2E_SOURCE_MARKERS;
+} {
+  const maxCharactersPerBatch = E2E_MAX_CHARACTERS_PER_BATCH;
+  const manuscript = writeSyntheticMultiBatchManuscript(projectRoot);
+  mkdirSync(join(projectRoot, ".banca"), { recursive: true });
+  writeFileSync(
+    join(projectRoot, ".banca", "project.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        manuscript: {
+          format: "latex",
+          root: ".",
+          main: "main.tex",
+          bib: "referencias.bib",
+          chapters: [],
+          outputDir: "trabalhos",
+        },
+        compile: { enabled: false, command: [] },
+        allowedPaths: ["**/*.tex", "**/*.bib", "**/*.md"],
+        protectedPaths: ["dados/**", ".banca/snapshots/**", ".git/**"],
+        immutableFacts: [],
+        externalDependencies: [],
+        rubricProfile: "banca-rigorosa",
+        targetScore: 9.0,
+        mcp: { crossrefAcademicEnabled: false },
+        analysis: {
+          coverageMode: "exhaustive",
+          maxCharactersPerBatch,
+        },
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  return {
+    files: [...manuscript.files, ".banca/project.json"],
+    maxCharactersPerBatch,
+    markers: E2E_SOURCE_MARKERS,
+  };
+}
+
+type ToolCallTrack = {
+  tool: string;
+  callId?: string;
+  index: number;
+  success: boolean;
+  input?: unknown;
+  output?: unknown;
+  error?: unknown;
+};
+
+/**
+ * Collapse normalized events into successful call tracks (first success per callId).
+ * Pending/error/missing-status calls are never treated as success.
+ */
+export function collectSuccessfulToolTracks(events: any[]): ToolCallTrack[] {
+  const normalized = normalizeAllToolEvents(events);
+  const byCall = new Map<string, ToolCallTrack>();
+  const anonymous: ToolCallTrack[] = [];
+
+  for (const n of normalized) {
+    if (!n || n.malformed || !n.tool) continue;
+    const isCallLike = n.rawType !== "tool_result";
+    const key = n.callId || (isCallLike ? `anon-${n.tool}-${n.index}` : "");
+    if (!key) continue;
+
+    let track = byCall.get(key);
+    if (!track && isCallLike) {
+      track = {
+        tool: n.tool,
+        callId: n.callId,
+        index: n.index ?? -1,
+        success: false,
+        input: n.input,
+        output: n.output,
+        error: n.error,
+      };
+      byCall.set(key, track);
+    }
+    if (!track) continue;
+
+    if (n.input !== undefined) track.input = n.input;
+    if (n.output !== undefined) track.output = n.output;
+    if (n.error !== undefined) track.error = n.error;
+
+    if (isExplicitToolFailure(n)) {
+      track.success = false;
+      continue;
+    }
+    if (isToolSuccess(n)) {
+      track.success = true;
+      // Keep earliest success index
+      if (track.index < 0) track.index = n.index ?? track.index;
+    }
+  }
+
+  const tracks = Array.from(byCall.values()).filter((t) => t.success);
+  tracks.sort((a, b) => a.index - b.index);
+  return tracks.concat(anonymous).sort((a, b) => a.index - b.index);
+}
+
+/**
+ * Verify multi-batch exhaustive protocol over combined event streams + disk snapshots.
+ * Order required per batch: banca_context → read(path) → banca_auditar → banca_context(completedBatchId).
+ */
+export function verifyExhaustiveProtocol(opts: ExhaustiveEvalOptions): ProtocolEval {
+  const minBatches = opts.minBatches ?? 3;
+  const allEvents = opts.events || [];
+  const phase1Events = opts.phase1Events || [];
+  const partialEvents = opts.partialSinteseEvents || [];
+  const phase2Events = opts.phase2Events || [];
+
+  // Skill verification uses the legacy single-call tracker on the full stream (or phase1+phase2).
+  const skillProto = verifyProtocolEvents(
+    allEvents.length > 0 ? allEvents : [...phase1Events, ...phase2Events]
+  );
+
+  const mergedEvents =
+    allEvents.length > 0 ? allEvents : [...phase1Events, ...partialEvents, ...phase2Events];
+  const tracks = collectSuccessfulToolTracks(mergedEvents);
+  const phase1Tracks = collectSuccessfulToolTracks(phase1Events);
+  const partialTracks = collectSuccessfulToolTracks(partialEvents);
+  const phase2Tracks = collectSuccessfulToolTracks(phase2Events);
+
+  const batchIds: string[] = [];
+  const cycledBatchIds: string[] = [];
+  const fingerprints = new Set<string>();
+  let multiBatchOrderCorrect = true;
+  let readsSucceeded = true;
+  let cyclesOk = 0;
+
+  /**
+   * Full cycle per batch (required for every plan batch):
+   * banca_context → read(path from that context) → banca_auditar(batchId) →
+   * banca_context(completedBatchId === batchId).
+   * Disk checkpoint completeness alone never proves multi-batch order.
+   */
+  const auditars = tracks.filter((t) => t.tool === "banca_auditar");
+  const contexts = tracks.filter((t) => t.tool === "banca_context");
+  const reads = tracks.filter((t) => t.tool === "read");
+
+  for (const auditar of auditars) {
+    const fp = inputStringField(auditar.input, ["manuscriptFingerprint", "fingerprint"]);
+    const bid = inputStringField(auditar.input, ["batchId"]);
+    if (fp) fingerprints.add(fp);
+    if (bid) {
+      if (!batchIds.includes(bid)) batchIds.push(bid);
+    } else {
+      multiBatchOrderCorrect = false;
+      continue;
+    }
+
+    // Nearest successful context before this auditar
+    const priorContexts = contexts.filter((c) => c.index < auditar.index);
+    const context = priorContexts.length > 0 ? priorContexts[priorContexts.length - 1] : undefined;
+    if (!context) {
+      multiBatchOrderCorrect = false;
+      readsSucceeded = false;
+      continue;
+    }
+
+    const ctxPath = extractContextPackPath(context.output);
+    const readBetween = reads.find(
+      (r) =>
+        r.index > context.index &&
+        r.index < auditar.index &&
+        ctxPath != null &&
+        pathsMatchForRead(ctxPath, readInputPath(r.input) || "", opts.projectRoot)
+    );
+    if (!readBetween) {
+      multiBatchOrderCorrect = false;
+      readsSucceeded = false;
+      continue;
+    }
+
+    // Completion: context with completedBatchId after auditar (any later process)
+    const completeLater = contexts.find((c) => {
+      if (c.index <= auditar.index) return false;
+      const completed = inputStringField(c.input, ["completedBatchId"]);
+      return completed === bid;
+    });
+    if (!completeLater) {
+      multiBatchOrderCorrect = false;
+      continue;
+    }
+    cyclesOk++;
+    if (!cycledBatchIds.includes(bid)) cycledBatchIds.push(bid);
+  }
+
+  // completedBatchId advances without a prior full audit cycle for that batchId → FAIL
+  for (const c of contexts) {
+    const completed = inputStringField(c.input, ["completedBatchId"]);
+    if (!completed) continue;
+    if (!cycledBatchIds.includes(completed)) {
+      // May still be mid-stream before auditar is counted; only fail if no auditar cycle exists at all
+      const hasCycle = cycledBatchIds.includes(completed);
+      if (!hasCycle) {
+        // Check whether any auditar for this batch had full cycle (already in cycledBatchIds)
+        multiBatchOrderCorrect = false;
+      }
+    }
+  }
+
+  // Skill must precede the first context in the combined stream
+  const firstSkill = tracks.find((t) => t.tool === "skill");
+  const firstContext = contexts[0];
+  if (firstSkill && firstContext && firstSkill.index > firstContext.index) {
+    multiBatchOrderCorrect = false;
+  }
+  if (!firstSkill && !skillProto.skillSucceeded) {
+    multiBatchOrderCorrect = false;
+  }
+
+  if (firstSkill && auditars[0] && auditars[0].index < firstSkill.index) {
+    multiBatchOrderCorrect = false;
+  }
+
+  if (auditars.length === 0) {
+    multiBatchOrderCorrect = false;
+    readsSucceeded = false;
+  }
+
+  // Plan size from disk (when known). Event cycles must cover every batch — not only minBatches.
+  const planTotalBatches = Math.max(
+    opts.stateAfterPhase2?.totalBatches ?? 0,
+    opts.stateAfterPhase1?.totalBatches ?? 0
+  );
+  const uniqueCycled = cycledBatchIds.length;
+  // batchesCompleted is event-proven full cycles only (never inflate from disk alone).
+  const batchesCompleted = uniqueCycled;
+
+  if (uniqueCycled < minBatches) {
+    multiBatchOrderCorrect = false;
+  }
+  if (planTotalBatches > 0 && uniqueCycled < planTotalBatches) {
+    multiBatchOrderCorrect = false;
+  }
+  // Every completedBatchId in the stream must correspond to a full cycle.
+  for (const c of contexts) {
+    const completed = inputStringField(c.input, ["completedBatchId"]);
+    if (completed && !cycledBatchIds.includes(completed)) {
+      multiBatchOrderCorrect = false;
+    }
+  }
+
+  const sameFingerprint = fingerprints.size === 1;
+  const fingerprint = sameFingerprint ? Array.from(fingerprints)[0] : null;
+
+  // Source coverage: disk packs preferred, else auditar findings file fields
+  const finalState = opts.stateAfterPhase2 || opts.stateAfterPhase1 || null;
+  let sourceCoverageOk = false;
+  const sourcesObserved: string[] = [];
+  if (finalState) {
+    if (finalState.markersInContextPacks.first) sourcesObserved.push(E2E_SOURCE_FILES.first);
+    if (finalState.markersInContextPacks.middle) sourcesObserved.push(E2E_SOURCE_FILES.middle);
+    if (finalState.markersInContextPacks.last) sourcesObserved.push(E2E_SOURCE_FILES.last);
+    sourceCoverageOk =
+      finalState.markersInContextPacks.first &&
+      finalState.markersInContextPacks.middle &&
+      finalState.markersInContextPacks.last;
+  }
+  if (!sourceCoverageOk) {
+    // Fall back to auditar finding file fields / chunk provenance in inputs
+    for (const t of tracks.filter((x) => x.tool === "banca_auditar")) {
+      const rec = inputRecord(t.input);
+      const findings = rec && Array.isArray(rec.findings) ? rec.findings : [];
+      for (const f of findings) {
+        if (f && typeof f === "object" && typeof (f as any).file === "string") {
+          const file = (f as any).file as string;
+          if (!sourcesObserved.includes(file)) sourcesObserved.push(file);
+        }
+      }
+    }
+    sourceCoverageOk =
+      sourcesObserved.some((s) => s.includes("first")) &&
+      sourcesObserved.some((s) => s.includes("middle")) &&
+      sourcesObserved.some((s) => s.includes("last"));
+  }
+
+  /**
+   * Premature synthesis gate: only a real banca_sintese call whose body carries
+   * the controlled code=incomplete_coverage (and non-error status) counts as
+   * correct rejection. tool_error / missing_checkpoint / missing_findings /
+   * schema failures / other codes → attempted but NOT correctly rejected.
+   */
+  const examineSinteseAttempt = (
+    events: any[]
+  ): {
+    attempted: boolean;
+    incompleteCoverageRejected: boolean;
+    succeeded: boolean;
+    otherError: boolean;
+  } => {
+    const normalized = normalizeAllToolEvents(events);
+    let attempted = false;
+    let incompleteCoverageRejected = false;
+    let succeeded = false;
+    let otherError = false;
+    for (const n of normalized) {
+      if (!n || n.tool !== "banca_sintese") continue;
+      attempted = true;
+      if (isToolSuccess(n) && isSinteseSuccessOutput(n.output)) {
+        succeeded = true;
+        continue;
+      }
+      if (isIncompleteCoverageRejection(n.output, n.status)) {
+        incompleteCoverageRejected = true;
+        continue;
+      }
+      // Explicit tool failure, other controlled codes, or non-success body
+      if (
+        isExplicitToolFailure(n) ||
+        isSinteseErrorOutput(n.output, n.error) ||
+        !isToolSuccess(n)
+      ) {
+        otherError = true;
+      }
+    }
+    return { attempted, incompleteCoverageRejected, succeeded, otherError };
+  };
+
+  const partialExam = examineSinteseAttempt(
+    partialEvents.length > 0 ? partialEvents : phase1Events
+  );
+  let prematureSinteseAttempted = partialExam.attempted;
+  // Only incomplete_coverage is the correct gate; other errors must FAIL.
+  let prematureSinteseRejected =
+    partialExam.incompleteCoverageRejected &&
+    !partialExam.succeeded &&
+    !partialExam.otherError;
+
+  const phase2Exam = examineSinteseAttempt(phase2Events.length > 0 ? phase2Events : allEvents);
+  let finalSinteseSucceeded = false;
+  const sinteseSuccessTracks = (phase2Tracks.length > 0 ? phase2Tracks : tracks).filter(
+    (t) => t.tool === "banca_sintese" && isSinteseSuccessOutput(t.output)
+  );
+  if (sinteseSuccessTracks.length > 0) {
+    finalSinteseSucceeded = true;
+  } else if (phase2Exam.succeeded) {
+    finalSinteseSucceeded = true;
+  }
+
+  // Phase1 must not have successful synthesis while incomplete
+  const phase1SinteseOk = examineSinteseAttempt(phase1Events);
+  if (phase1SinteseOk.succeeded && (opts.stateAfterPhase1?.completedBatches ?? 0) < minBatches) {
+    prematureSinteseRejected = false;
+    finalSinteseSucceeded = false;
+  }
+
+  // Phase1 completed batchIds must not be re-audited in phase2
+  const phase1Cycled = new Set<string>();
+  {
+    const p1Tracks = collectSuccessfulToolTracks(phase1Events);
+    const p1Auditars = p1Tracks.filter((t) => t.tool === "banca_auditar");
+    const p1Contexts = p1Tracks.filter((t) => t.tool === "banca_context");
+    const p1Reads = p1Tracks.filter((t) => t.tool === "read");
+    for (const auditar of p1Auditars) {
+      const bid = inputStringField(auditar.input, ["batchId"]);
+      if (!bid) continue;
+      const priorContexts = p1Contexts.filter((c) => c.index < auditar.index);
+      const context = priorContexts.length > 0 ? priorContexts[priorContexts.length - 1] : undefined;
+      if (!context) continue;
+      const ctxPath = extractContextPackPath(context.output);
+      const readBetween = p1Reads.find(
+        (r) =>
+          r.index > context.index &&
+          r.index < auditar.index &&
+          ctxPath != null &&
+          pathsMatchForRead(ctxPath, readInputPath(r.input) || "", opts.projectRoot)
+      );
+      if (!readBetween) continue;
+      const completeLater = p1Contexts.find((c) => {
+        if (c.index <= auditar.index) return false;
+        return inputStringField(c.input, ["completedBatchId"]) === bid;
+      });
+      if (completeLater) phase1Cycled.add(bid);
+    }
+  }
+  const phase2AuditBatchIds: string[] = [];
+  for (const t of phase2Tracks.filter((x) => x.tool === "banca_auditar")) {
+    const bid = inputStringField(t.input, ["batchId"]);
+    if (bid) phase2AuditBatchIds.push(bid);
+  }
+  for (const bid of phase2AuditBatchIds) {
+    if (phase1Cycled.has(bid)) {
+      multiBatchOrderCorrect = false;
+    }
+  }
+
+  const state1 = opts.stateAfterPhase1;
+  const state2 = opts.stateAfterPhase2;
+  const findingsCount = state2?.findingsCount ?? state1?.findingsCount ?? 0;
+  const inspectBroken =
+    (state1?.inspectErrors?.length ?? 0) > 0 || (state2?.inspectErrors?.length ?? 0) > 0;
+  // Parse/read failures on findings/checkpoints make persistence evidence untrustworthy.
+  const findingsPersisted = findingsCount >= 1 && !inspectBroken;
+
+  /**
+   * Dedup on resume via findingIds (not naive 2× count with frozen completedBatches).
+   * FAIL when:
+   * - any findingId appears more than once in the final store array
+   * - phase1 findingIds are not a subset of phase2 (wiped / replaced incorrectly)
+   * - phase2 findingsCount !== unique findingId set size
+   * - phase2 re-persists only phase1 identities but count still grows without new ids
+   *   (count > unique, already covered) OR phase2 unique set equals phase1 set but
+   *   findingsCount > phase1 while store listed dups (covered by unique vs length)
+   */
+  let findingsNotDuplicatedOnResume = true;
+  if (state1 && state2) {
+    const ids1 = state1.findingIds || [];
+    const ids2 = state2.findingIds || [];
+    const unique2 = new Set(ids2);
+    const unique1 = new Set(ids1);
+
+    if (state1.findingsCount > 0 && state2.findingsCount < state1.findingsCount) {
+      findingsNotDuplicatedOnResume = false;
+    }
+    // Duplicate rows in store (merge failed to collapse identical findingId)
+    if (ids2.length !== unique2.size) {
+      findingsNotDuplicatedOnResume = false;
+    }
+    if (state2.findingsCount !== unique2.size && state2.findingsCount > 0) {
+      findingsNotDuplicatedOnResume = false;
+    }
+    // Phase1 identities must survive resume
+    for (const id of unique1) {
+      if (!unique2.has(id)) {
+        findingsNotDuplicatedOnResume = false;
+        break;
+      }
+    }
+    // Collect findingIds observed on successful auditar receipts (phase2) for new work
+    const receiptIdsPhase2 = new Set<string>();
+    for (const t of phase2Tracks.filter((x) => x.tool === "banca_auditar")) {
+      const out = outputText(t.output);
+      try {
+        const parsed = JSON.parse(out);
+        const list = Array.isArray(parsed?.findings) ? parsed.findings : [];
+        for (const f of list) {
+          if (f && typeof f.findingId === "string") receiptIdsPhase2.add(f.findingId);
+        }
+      } catch {
+        // ignore non-JSON receipts
+      }
+    }
+    // If final store grew beyond phase1 + genuinely new receipt ids, flag duplication/inflation
+    if (unique1.size > 0) {
+      const allowed = new Set<string>([...unique1, ...receiptIdsPhase2]);
+      for (const id of unique2) {
+        // Unknown ids can appear from empty-findings batches via prior phase1 only;
+        // new ids not in phase1 and not in phase2 receipts are still OK if model
+        // returned them only in input merge — accept ids from phase2 auditar inputs too.
+        void id;
+      }
+      // Input-side findings don't have findingIds until receipt; use count bound:
+      // final unique count must be <= phase1 unique + sum of accepted/non-empty phase2 submissions
+      // without requiring receipt parse. If store unique equals phase1 unique but findingsCount
+      // is larger, already failed above. If store has dups of phase1 ids only:
+      if (ids2.length > unique2.size) {
+        findingsNotDuplicatedOnResume = false;
+      }
+      // Explicit: phase1 ids re-listed as extra rows
+      const phase1ReappearExtra = ids2.filter((id) => unique1.has(id)).length - unique1.size;
+      if (phase1ReappearExtra > 0) {
+        findingsNotDuplicatedOnResume = false;
+      }
+      void allowed;
+    }
+  }
+
+  const phase1Interrupted = Boolean(
+    state1 &&
+      state1.completedBatches >= 1 &&
+      (state1.totalBatches === 0 || state1.completedBatches < state1.totalBatches) &&
+      state1.checkpointState !== "complete"
+  );
+
+  // phase1 must not have successful synthesis when interrupted
+  const phase1NoSuccessfulSintese = !phase1SinteseOk.succeeded;
+
+  // minBatchesMet requires event-proven full cycles — never disk-only completeness.
+  const planHasMinBatches = planTotalBatches >= minBatches || uniqueCycled >= minBatches;
+  const coverageComplete =
+    state2?.checkpointState === "complete" ||
+    (state2 != null && state2.totalBatches > 0 && state2.completedBatches >= state2.totalBatches);
+  const eventCoverageComplete =
+    planTotalBatches > 0 ? uniqueCycled >= planTotalBatches : uniqueCycled >= minBatches;
+  const minBatchesMet =
+    uniqueCycled >= minBatches &&
+    (planTotalBatches === 0 || uniqueCycled >= planTotalBatches) &&
+    (planHasMinBatches || uniqueCycled >= minBatches) &&
+    // Disk may confirm complete, but events must match
+    (coverageComplete ? eventCoverageComplete : uniqueCycled >= minBatches);
+
+  const contextCalled = skillProto.contextCalled || tracks.some((t) => t.tool === "banca_context");
+  const auditarCalled = skillProto.auditarCalled || tracks.some((t) => t.tool === "banca_auditar");
+
+  // Overall correctOrder: skill before first context, multi-batch order, and reads
+  const correctOrder =
+    skillProto.skillSucceeded &&
+    multiBatchOrderCorrect &&
+    readsSucceeded &&
+    contextCalled &&
+    auditarCalled;
+
+  return {
+    skillArgsCorrect: skillProto.skillArgsCorrect,
+    skillEvidence: skillProto.skillEvidence,
+    skillSucceeded: skillProto.skillSucceeded,
+    contextCalled,
+    auditarCalled,
+    correctOrder,
+    hashesMatch: opts.hashesMatch !== false,
+    claimedSubagentWithoutEvidence: Boolean(opts.claimedSubagentWithoutEvidence),
+    // Event-proven only — never inflate from disk checkpoint completeness.
+    minBatchesMet,
+    batchesCompleted,
+    multiBatchOrderCorrect,
+    readsSucceeded,
+    sameFingerprint: sameFingerprint && fingerprints.size === 1,
+    fingerprint,
+    batchIds,
+    sourceCoverageOk,
+    sourcesObserved,
+    prematureSinteseAttempted,
+    prematureSinteseRejected,
+    // Final synthesis only counts when event-proven full cycles cover the plan.
+    finalSinteseSucceeded: finalSinteseSucceeded && coverageComplete && eventCoverageComplete,
+    findingsPersisted,
+    findingsCount,
+    findingsNotDuplicatedOnResume,
+    resumeAcrossProcesses: Boolean(opts.resumeAcrossProcesses),
+    phase1Interrupted: phase1Interrupted && phase1NoSuccessfulSintese,
   };
 }
 
@@ -1524,7 +2553,19 @@ export function classifyProtocolPhase(params: {
     e.contextCalled &&
     e.auditarCalled &&
     e.correctOrder &&
-    e.hashesMatch;
+    e.hashesMatch &&
+    e.minBatchesMet &&
+    e.multiBatchOrderCorrect &&
+    e.readsSucceeded &&
+    e.sameFingerprint &&
+    e.sourceCoverageOk &&
+    e.prematureSinteseAttempted &&
+    e.prematureSinteseRejected &&
+    e.finalSinteseSucceeded &&
+    e.findingsPersisted &&
+    e.findingsNotDuplicatedOnResume &&
+    e.resumeAcrossProcesses &&
+    e.phase1Interrupted;
 
   if (perfectProto) {
     return {
@@ -1542,6 +2583,18 @@ export function classifyProtocolPhase(params: {
   if (!e.auditarCalled) missing.push("banca_auditar_not_succeeded");
   if (!e.correctOrder) missing.push("tool_order_incorrect");
   if (!e.hashesMatch) missing.push("manuscript_modified");
+  if (!e.minBatchesMet) missing.push("min_batches_not_met");
+  if (!e.multiBatchOrderCorrect) missing.push("multi_batch_order_incorrect");
+  if (!e.readsSucceeded) missing.push("context_pack_read_missing");
+  if (!e.sameFingerprint) missing.push("fingerprint_divergent");
+  if (!e.sourceCoverageOk) missing.push("source_coverage_incomplete");
+  if (!e.prematureSinteseAttempted) missing.push("premature_sintese_not_attempted");
+  if (!e.prematureSinteseRejected) missing.push("premature_sintese_not_rejected");
+  if (!e.finalSinteseSucceeded) missing.push("final_sintese_missing");
+  if (!e.findingsPersisted) missing.push("findings_not_persisted");
+  if (!e.findingsNotDuplicatedOnResume) missing.push("findings_duplicated_on_resume");
+  if (!e.resumeAcrossProcesses) missing.push("resume_across_processes_missing");
+  if (!e.phase1Interrupted) missing.push("phase1_interrupt_missing");
 
   return {
     classification: formatClassification(
@@ -1611,7 +2664,9 @@ async function run() {
   const TIMEOUT_DIAGNOSTICS = parseTo(process.env.TIMEOUT_DIAGNOSTICS, 45000, 120000);
   const TIMEOUT_DISCOVERY = parseTo(process.env.TIMEOUT_DISCOVERY, 30000, 120000);
   const TIMEOUT_INIT = parseTo(process.env.TIMEOUT_INIT, 90000, 300000);
-  const TIMEOUT_PROTOCOL = parseTo(process.env.TIMEOUT_PROTOCOL, 120000, 600000);
+  // Multi-batch interrupt + resume + synthesis needs a longer budget than single-cycle protocol.
+  const TIMEOUT_PROTOCOL = parseTo(process.env.TIMEOUT_PROTOCOL, 180000, 900000);
+  const TIMEOUT_PROTOCOL_PHASE = parseTo(process.env.TIMEOUT_PROTOCOL_PHASE, 180000, 900000);
 
   const bin = resolveBinary();
 
@@ -1770,20 +2825,32 @@ async function run() {
     installAssets(tmpProjectDisc, true, join(repositoryRoot, "assets"));
 
     spawnSync("git", ["init"], { cwd: tmpProjectInit });
-    writeFileSync(
-      join(tmpProjectInit, "main.tex"),
-      "\\documentclass{article}\n\\begin{document}\n\\title{Synthetic}\n\\maketitle\n\\section{Intro}\nThis is a synthetic document.\n\\cite{test2024}\n\\end{document}\n"
+    // Manuscript only — never pre-create .banca/project.json (banca_init skips if present).
+    const multiBatchMeta = writeSyntheticMultiBatchManuscript(tmpProjectInit);
+    report.push(
+      `Synthetic multi-batch manuscript: sources=${multiBatchMeta.files.filter((f) => f.endsWith(".tex")).join(",")} (project.json applied after banca_init)`
     );
-    writeFileSync(
-      join(tmpProjectInit, "referencias.bib"),
-      "@article{test2024,\n  title={Synthetic Paper},\n  author={Author, A.},\n  year={2024}\n}\n"
+    report.push(
+      `Source markers: first=${multiBatchMeta.markers.first} middle=${multiBatchMeta.markers.middle} last=${multiBatchMeta.markers.last}`
     );
+    report.push(`Planned maxCharactersPerBatch after init: ${E2E_MAX_CHARACTERS_PER_BATCH}`);
 
     function hashFile(p: string) {
       return createHash("sha256").update(readFileSync(p)).digest("hex");
     }
-    const preHashTex = hashFile(join(tmpProjectInit, "main.tex"));
-    const preHashBib = hashFile(join(tmpProjectInit, "referencias.bib"));
+    const manuscriptHashTargets = [
+      "main.tex",
+      "first.tex",
+      "middle.tex",
+      "last.tex",
+      "referencias.bib",
+    ];
+    const preHashes = new Map<string, string>();
+    for (const rel of manuscriptHashTargets) {
+      preHashes.set(rel, hashFile(join(tmpProjectInit, rel)));
+    }
+    const preHashTex = preHashes.get("main.tex")!;
+    const preHashBib = preHashes.get("referencias.bib")!;
 
     const commandsDir = join(tmpProjectInit, ".opencode", "commands");
     mkdirSync(commandsDir, { recursive: true });
@@ -1972,6 +3039,17 @@ async function run() {
           exactSkills: foundSuccess && exactSkills,
           skillMdCount: foundSuccess ? skillMdCount : 0,
         };
+
+        // After a real successful init, force multi-batch analysis config for the exhaustive E2E.
+        if (foundSuccess && hasProjectJson) {
+          const patched = applyExhaustiveBatchProjectConfig(
+            tmpProjectInit,
+            E2E_MAX_CHARACTERS_PER_BATCH
+          );
+          report.push(
+            `Exhaustive batch config patched: ${patched.patched} maxCharactersPerBatch=${patched.maxCharactersPerBatch}`
+          );
+        }
       }
 
       report.push(`Command: opencode ${formatCliArgsForReport(initCmdArgs, SF)}`);
@@ -2007,9 +3085,9 @@ async function run() {
       report.push(`Classification: ${SF(initDecision.classification, 500)}`);
     }
 
-    report.push("\n## Native skill protocol\n");
-    // banca-auditor is mode:subagent — do NOT pass --agent banca-auditor (CLI falls back).
-    // Prove protocol via native tool events from the primary agent.
+    report.push("\n## Exhaustive multi-batch protocol (interrupt + resume)\n");
+    // Scope of this E2E: primary agent + skill banca-avaliacao + tools.
+    // banca-auditor is mode:subagent and is NOT invoked here — subagent execution remains pending.
     const agentAttr = detectAgentAttribution({
       requestedAgent: null,
       stderr: "",
@@ -2018,20 +3096,57 @@ async function run() {
     report.push(`Agent requested: (none — primary default)`);
     report.push(`Agent observed: ${agentAttr.observed}`);
     report.push(`Agent attribution: ${agentAttr.reason}`);
-    report.push(`Note: banca-auditor is mode:subagent and cannot be selected via opencode run --agent`);
+    report.push(
+      `Evidence scope: primary agent + skill banca-avaliacao + tools (banca_context/read/banca_auditar/banca_sintese)`
+    );
+    report.push(
+      `Subagent banca-auditor: NOT proven in this E2E (mode:subagent; cannot be selected via opencode run --agent; child session attribution pending)`
+    );
 
     let protocolPassed = false;
     let protocolResult: ProcessLike | undefined;
     let protocolEval: ProtocolEval | undefined;
 
-    const prompt =
-      "Load banca-avaliacao using the native skill tool with name banca-avaliacao. Follow its protocol on this synthetic project. Call banca_context before banca_auditar. Do not modify manuscript source files. Do not claim to be banca-auditor unless a child subagent session is actually created.";
+    const promptPhase1 =
+      "Load banca-avaliacao using the native skill tool with name banca-avaliacao. " +
+      "Follow its exhaustive batch protocol on this synthetic project for ONLY the first batch: " +
+      "banca_context (no completedBatchId) → read the exact context pack path returned → " +
+      "banca_auditar with the exact fingerprint and batchId from the pack → " +
+      "banca_context with completedBatchId for that batch. " +
+      "Submit at least one valid finding in banca_auditar (category, severity, claim, evidence, file, startLine, endLine, sectionId from the pack). " +
+      "Then STOP. Do NOT process further batches. Do NOT call banca_sintese. " +
+      "Do not modify manuscript source files. Do not claim to be banca-auditor unless a child subagent session is actually created.";
+
+    const promptPartialSintese =
+      "Call the tool banca_sintese exactly once on this project and report its result. " +
+      "Do not call banca_context, banca_auditar, or skill. Do not modify any files.";
+
+    const promptPhase2 =
+      "Load banca-avaliacao using the native skill tool with name banca-avaliacao if needed. " +
+      "Resume the exhaustive audit from the existing checkpoint on this synthetic project. " +
+      "Do not re-audit batches already completed. For each remaining batch follow: " +
+      "banca_context → read the exact context pack path → banca_auditar (empty findings valid) → " +
+      "banca_context with completedBatchId. " +
+      "After all batches are complete and the context pack shows no next batch, call banca_sintese once. " +
+      "Do not modify manuscript source files. Do not claim to be banca-auditor unless a child subagent session is actually created.";
+
     // Same absolute dir + isolated env as init (no host global plugins).
-    const protoArgs = buildOpencodeRunArgs({
+    const protoArgsPhase1 = buildOpencodeRunArgs({
       projectDir: initProjectAbs,
       model: typeof model === "string" && model.length > 0 ? model : undefined,
-      prompt,
+      prompt: promptPhase1,
     });
+    const protoArgsPartial = buildOpencodeRunArgs({
+      projectDir: initProjectAbs,
+      model: typeof model === "string" && model.length > 0 ? model : undefined,
+      prompt: promptPartialSintese,
+    });
+    const protoArgsPhase2 = buildOpencodeRunArgs({
+      projectDir: initProjectAbs,
+      model: typeof model === "string" && model.length > 0 ? model : undefined,
+      prompt: promptPhase2,
+    });
+
     report.push(`Protocol cwd/PWD/--dir: ${SF(initProjectAbs, 300)} (same isolation as init)`);
     report.push(
       `Protocol PWD_aligned: ${isPwdAlignedWithCwd(projectRunEnv, initProjectAbs) ? "true" : "false"}`
@@ -2041,69 +3156,232 @@ async function run() {
     );
 
     let protocolStructuredCategories: string[] | undefined;
+    let phase1Events: any[] = [];
+    let partialEvents: any[] = [];
+    let phase2Events: any[] = [];
+    let stateAfterPhase1: ExhaustiveProjectState | null = null;
+    let stateAfterPartial: ExhaustiveProjectState | null = null;
+    let stateAfterPhase2: ExhaustiveProjectState | null = null;
+    let phase1Result: ProcessLike | undefined;
+    let partialResult: ProcessLike | undefined;
+    let phase2Result: ProcessLike | undefined;
+    let anyPhaseTimedOut = false;
+    let anyPhaseNonZero = false;
 
     if (hasAuthAndModel && initPassed && bundleOutcome === "PASS" && typeof model === "string") {
-      protocolResult = runSafe(bin, protoArgs, initProjectAbs, TIMEOUT_PROTOCOL, projectRunEnv);
+      // --- Phase 1: interrupt after ≥1 batch, no successful synthesis ---
+      report.push("\n### Phase 1 — interrupt (independent process)\n");
+      phase1Result = runSafe(bin, protoArgsPhase1, initProjectAbs, TIMEOUT_PROTOCOL_PHASE, projectRunEnv);
+      if (isTimedOut(phase1Result)) anyPhaseTimedOut = true;
+      if (phase1Result.status !== 0) anyPhaseNonZero = true;
+      phase1Events = parseJsonEvents(phase1Result.stdout || "");
+      stateAfterPhase1 = inspectExhaustiveProjectState(tmpProjectInit);
+      const phase1Diag = diagnoseOpencodeOutput(phase1Result.stdout || "", phase1Result.stderr || "");
+      const phase1Tools = normalizeAllToolEvents(phase1Events).filter((t) =>
+        ["skill", "banca_context", "read", "banca_auditar", "banca_sintese"].includes(t.tool || "")
+      );
+      report.push(`Phase1 exit: ${phase1Result.status}`);
+      report.push(
+        `Phase1 tools: ${phase1Tools.map((t) => `${t.tool}:${t.status || "?"}`).join(" → ") || "none"}`
+      );
+      report.push(
+        `Phase1 checkpoint: completed=${stateAfterPhase1.completedBatches}/${stateAfterPhase1.totalBatches} state=${stateAfterPhase1.checkpointState || "n/a"} findings=${stateAfterPhase1.findingsCount}`
+      );
+      report.push(`Command: opencode ${formatCliArgsForReport(protoArgsPhase1, SF)}`);
+      report.push(`stdout:\n${SF(phase1Result.stdout || "", 500)}`);
+      if (phase1Result.stderr) report.push(`stderr:\n${SF(phase1Result.stderr, 500)}`);
+
+      // --- Controlled partial synthesis while coverage incomplete ---
+      report.push("\n### Partial synthesis attempt (coverage incomplete)\n");
+      partialResult = runSafe(bin, protoArgsPartial, initProjectAbs, TIMEOUT_PROTOCOL_PHASE, projectRunEnv);
+      if (isTimedOut(partialResult)) anyPhaseTimedOut = true;
+      // Non-zero exit on expected tool rejection is not automatically FAIL; evaluate body.
+      partialEvents = parseJsonEvents(partialResult.stdout || "");
+      stateAfterPartial = inspectExhaustiveProjectState(tmpProjectInit);
+      const partialTools = normalizeAllToolEvents(partialEvents).filter((t) => t.tool === "banca_sintese");
+      report.push(`Partial-sintese exit: ${partialResult.status}`);
+      report.push(
+        `Partial-sintese tools: ${partialTools.map((t) => `${t.tool}:${t.status || "?"}`).join(" → ") || "none"}`
+      );
+      report.push(`Command: opencode ${formatCliArgsForReport(protoArgsPartial, SF)}`);
+      report.push(`stdout:\n${SF(partialResult.stdout || "", 400)}`);
+      if (partialResult.stderr) report.push(`stderr:\n${SF(partialResult.stderr, 400)}`);
+
+      // --- Phase 2: independent process resume + final synthesis ---
+      report.push("\n### Phase 2 — resume (independent process)\n");
+      phase2Result = runSafe(bin, protoArgsPhase2, initProjectAbs, TIMEOUT_PROTOCOL_PHASE, projectRunEnv);
+      if (isTimedOut(phase2Result)) anyPhaseTimedOut = true;
+      if (phase2Result.status !== 0) anyPhaseNonZero = true;
+      phase2Events = parseJsonEvents(phase2Result.stdout || "");
+      stateAfterPhase2 = inspectExhaustiveProjectState(tmpProjectInit);
+      const phase2Diag = diagnoseOpencodeOutput(phase2Result.stdout || "", phase2Result.stderr || "");
+      const phase2Tools = normalizeAllToolEvents(phase2Events).filter((t) =>
+        ["skill", "banca_context", "read", "banca_auditar", "banca_sintese"].includes(t.tool || "")
+      );
+      report.push(`Phase2 exit: ${phase2Result.status}`);
+      report.push(
+        `Phase2 tools: ${phase2Tools.map((t) => `${t.tool}:${t.status || "?"}`).join(" → ") || "none"}`
+      );
+      report.push(
+        `Phase2 checkpoint: completed=${stateAfterPhase2.completedBatches}/${stateAfterPhase2.totalBatches} state=${stateAfterPhase2.checkpointState || "n/a"} findings=${stateAfterPhase2.findingsCount}`
+      );
+      report.push(
+        `Source coverage in packs: first=${stateAfterPhase2.markersInContextPacks.first} middle=${stateAfterPhase2.markersInContextPacks.middle} last=${stateAfterPhase2.markersInContextPacks.last}`
+      );
+      report.push(`Command: opencode ${formatCliArgsForReport(protoArgsPhase2, SF)}`);
+      report.push(`stdout:\n${SF(phase2Result.stdout || "", 500)}`);
+      if (phase2Result.stderr) report.push(`stderr:\n${SF(phase2Result.stderr, 500)}`);
 
       const attrAfter = detectAgentAttribution({
         requestedAgent: null,
-        stderr: protocolResult.stderr || "",
-        stdout: protocolResult.stdout || "",
+        stderr: `${phase1Result.stderr || ""}\n${phase2Result.stderr || ""}`,
+        stdout: `${phase1Result.stdout || ""}\n${phase2Result.stdout || ""}`,
       });
-      report.push(`Session attribution after run: ${attrAfter.observed} (${attrAfter.reason})`);
+      report.push(`Session attribution after runs: ${attrAfter.observed} (${attrAfter.reason})`);
 
-      const protoEvents = parseJsonEvents(protocolResult.stdout || "");
-      const protoDiag = diagnoseOpencodeOutput(
-        protocolResult.stdout || "",
-        protocolResult.stderr || ""
+      const combinedEvents = [...phase1Events, ...partialEvents, ...phase2Events];
+      const combinedStdout = [phase1Result.stdout, partialResult.stdout, phase2Result.stdout]
+        .filter(Boolean)
+        .join("\n");
+      const combinedStderr = [phase1Result.stderr, partialResult.stderr, phase2Result.stderr]
+        .filter(Boolean)
+        .join("\n");
+      const protoDiag = diagnoseOpencodeOutput(combinedStdout, combinedStderr);
+      // Fail closed on structured session/tool errors. Controlled partial-synthesis
+      // rejection is status=completed with body code=incomplete_coverage (not tool_error).
+      // Do not strip tool_error categories generically.
+      protocolStructuredCategories = protoDiag.categories.filter(
+        (c) =>
+          c === "opencode_error_event" ||
+          c === "opencode_internal_error" ||
+          c === "tool_error" ||
+          c.startsWith("tool_error:")
       );
-      protocolStructuredCategories = protoDiag.categories;
-      const tools = normalizeAllToolEvents(protoEvents).filter((t) =>
-        ["skill", "banca_context", "banca_auditar"].includes(t.tool || "")
+      // Exception: if the only tool_error is banca_sintese AND that call body is the
+      // controlled incomplete_coverage rejection with non-error status, drop that
+      // category so the gate can PASS. Infrastructure tool_error stays FAIL.
+      const partialNormalized = normalizeAllToolEvents(partialEvents);
+      const onlyControlledPartial =
+        partialNormalized.some(
+          (n) =>
+            n.tool === "banca_sintese" && isIncompleteCoverageRejection(n.output, n.status)
+        ) &&
+        !partialNormalized.some(
+          (n) =>
+            n.tool === "banca_sintese" &&
+            ((n.status || "").toLowerCase() === "error" ||
+              (n.status || "").toLowerCase() === "failed")
+        );
+      if (onlyControlledPartial) {
+        protocolStructuredCategories = protocolStructuredCategories.filter(
+          (c) => c !== "tool_error:banca_sintese"
+        );
+        // Drop bare tool_error only when no other tool_error:* remains
+        const stillHasSpecific = protocolStructuredCategories.some((c) =>
+          c.startsWith("tool_error:")
+        );
+        if (!stillHasSpecific) {
+          protocolStructuredCategories = protocolStructuredCategories.filter(
+            (c) => c !== "tool_error"
+          );
+        }
+      }
+      const tools = normalizeAllToolEvents(combinedEvents).filter((t) =>
+        ["skill", "banca_context", "read", "banca_auditar", "banca_sintese"].includes(t.tool || "")
       );
       report.push(
-        `Normalized protocol tools: ${tools.map((t) => `${t.tool}:${t.status || "?"}`).join(" → ") || "none"}`
+        `Normalized combined tools: ${tools.map((t) => `${t.tool}:${t.status || "?"}`).join(" → ") || "none"}`
       );
-      // Always report structured failure categories when present (including exit 0 + tool_error).
       if (protoDiag.categories.length > 0) {
         report.push(`Protocol diagnosis: ${SF(protoDiag.summary, 400)}`);
       } else {
         report.push(`Protocol diagnosis: no structured failure category`);
       }
 
-      if (!isTimedOut(protocolResult)) {
-        // Evaluate tools even when status is non-zero for evidence; classification uses both.
-        const {
-          skillArgsCorrect,
-          skillEvidence,
-          skillSucceeded,
-          contextCalled,
-          auditarCalled,
-          correctOrder,
-        } = verifyProtocolEvents(protoEvents);
+      // Synthetic combined process result for classifyProtocolPhase exit/timeout gates.
+      protocolResult = {
+        status: anyPhaseTimedOut ? null : anyPhaseNonZero ? 1 : 0,
+        signal: anyPhaseTimedOut ? "SIGTERM" : null,
+        error: anyPhaseTimedOut
+          ? Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" })
+          : null,
+        stdout: combinedStdout,
+        stderr: combinedStderr,
+      };
 
-        const postHashTex = hashFile(join(tmpProjectInit, "main.tex"));
-        const postHashBib = hashFile(join(tmpProjectInit, "referencias.bib"));
-        const hashesMatch = preHashTex === postHashTex && preHashBib === postHashBib;
+      // Manuscript integrity across all phases
+      let hashesMatch = true;
+      for (const rel of manuscriptHashTargets) {
+        if (preHashes.get(rel) !== hashFile(join(tmpProjectInit, rel))) {
+          hashesMatch = false;
+        }
+      }
+      // Keep legacy pair for report clarity
+      const postHashTex = hashFile(join(tmpProjectInit, "main.tex"));
+      const postHashBib = hashFile(join(tmpProjectInit, "referencias.bib"));
+      if (preHashTex !== postHashTex || preHashBib !== postHashBib) hashesMatch = false;
+      report.push(`Manuscript hashes unchanged: ${hashesMatch}`);
 
-        protocolEval = {
-          skillArgsCorrect,
-          skillEvidence,
-          skillSucceeded,
-          contextCalled,
-          auditarCalled,
-          correctOrder,
+      if (!anyPhaseTimedOut) {
+        protocolEval = verifyExhaustiveProtocol({
+          events: combinedEvents,
+          phase1Events,
+          partialSinteseEvents: partialEvents,
+          phase2Events,
+          stateAfterPhase1,
+          stateAfterPartial,
+          stateAfterPhase2,
+          projectRoot: initProjectAbs,
+          minBatches: 3,
           hashesMatch,
           claimedSubagentWithoutEvidence: false,
-        };
+          resumeAcrossProcesses: true,
+        });
+        const phase1Ids = (phase1Events.length
+          ? collectSuccessfulToolTracks(phase1Events)
+              .filter((t) => t.tool === "banca_auditar")
+              .map((t) => inputStringField(t.input, ["batchId"]))
+              .filter((x): x is string => Boolean(x))
+          : []) as string[];
+        report.push(
+          `Exhaustive eval: batches=${protocolEval.batchesCompleted} fingerprint=${protocolEval.fingerprint ? protocolEval.fingerprint.slice(0, 16) + "…" : "none"} batchIds=${protocolEval.batchIds.length} readsOk=${protocolEval.readsSucceeded} prematureRejected=${protocolEval.prematureSinteseRejected} finalSintese=${protocolEval.finalSinteseSucceeded} findings=${protocolEval.findingsCount} phase1Interrupted=${protocolEval.phase1Interrupted}`
+        );
+        report.push(
+          `Phase1 auditar batchIds: ${phase1Ids.length ? phase1Ids.join(",") : "none"}`
+        );
+        report.push(
+          `Evidence scope reminder: primary agent only; banca-auditor subagent not attributed`
+        );
+        if (stateAfterPhase1?.inspectErrors?.length || stateAfterPhase2?.inspectErrors?.length) {
+          report.push(
+            `State inspect errors: ${[...(stateAfterPhase1?.inspectErrors || []), ...(stateAfterPhase2?.inspectErrors || [])].join("; ")}`
+          );
+        }
       }
-
-      report.push(`Command: opencode ${formatCliArgsForReport(protoArgs, SF)}`);
-      report.push(`Exit code: ${protocolResult.status}`);
-      report.push(`stdout:\n${SF(protocolResult.stdout || "", 500)}`);
-      if (protocolResult.stderr) report.push(`stderr:\n${SF(protocolResult.stderr, 500)}`);
     } else {
-      report.push(`Command: opencode ${formatCliArgsForReport(protoArgs, SF)}`);
+      report.push(`Command (phase1): opencode ${formatCliArgsForReport(protoArgsPhase1, SF)}`);
+      report.push(`Command (partial): opencode ${formatCliArgsForReport(protoArgsPartial, SF)}`);
+      report.push(`Command (phase2): opencode ${formatCliArgsForReport(protoArgsPhase2, SF)}`);
+    }
+
+    // For protocol classification: non-zero OpenCode exit during intentional partial
+    // synthesis rejection must not auto-FAIL when structured opencode errors are absent
+    // and the exhaustive evaluator has real evidence. Use exit 0 when only tool-level
+    // rejections occurred and evaluator is present.
+    let classificationResult = protocolResult;
+    if (
+      protocolResult &&
+      protocolEval &&
+      !anyPhaseTimedOut &&
+      protocolResult.status !== 0 &&
+      !(protocolStructuredCategories && protocolStructuredCategories.length > 0)
+    ) {
+      // Re-check: if phase1 and phase2 both exited 0, allow evaluation-driven classification
+      const p1ok = phase1Result && phase1Result.status === 0 && !isTimedOut(phase1Result);
+      const p2ok = phase2Result && phase2Result.status === 0 && !isTimedOut(phase2Result);
+      if (p1ok && p2ok) {
+        classificationResult = { ...protocolResult, status: 0, signal: null, error: null };
+      }
     }
 
     const protocolDecision = classifyProtocolPhase({
@@ -2113,16 +3391,15 @@ async function run() {
         bundleOutcome === "FAIL"
           ? "bundle missing/stale"
           : SF(authBlockedReason || "no model/auth", 200),
-      result: protocolResult,
+      result: classificationResult,
       evaluation: protocolEval,
-      // Structured errors force FAIL even when exit code is 0 (effective, not a no-op).
       structuredFailureCategories: protocolStructuredCategories,
     });
     protocolPassed = protocolDecision.passed;
     protocolOutcome = protocolDecision.outcome;
     report.push(`Classification: ${SF(protocolDecision.classification, 500)}`);
 
-    report.push("\n## Issue #21\n");
+    report.push("\n## Issue #21 / #88 exhaustive audit\n");
 
     function p(passed: boolean, blocked: boolean) {
       if (blocked) return "BLOCKED";
@@ -2135,6 +3412,9 @@ async function run() {
     report.push(`Eight skills discovered: ${p(skillPassed, false)}`);
     report.push(`banca-avaliacao loaded: ${p(protocolPassed, modelDependentBlocked)}`);
     report.push(`Real protocol executed: ${p(protocolPassed, modelDependentBlocked)}`);
+    report.push(
+      `Exhaustive multi-batch (≥3) with interrupt/resume: ${p(protocolPassed, modelDependentBlocked)}`
+    );
     report.push(
       `Portable initialization: ${p(initPassed, modelDependentBlocked && !initPassed)}`
     );
