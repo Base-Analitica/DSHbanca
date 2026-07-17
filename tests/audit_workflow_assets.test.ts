@@ -1,6 +1,7 @@
 /**
- * Deterministic checks for issue #86: banca-auditor + banca-avaliacao
- * exhaustive batch workflow contracts (versioned assets vs install fallback).
+ * Deterministic checks for audit workflow assets:
+ * - #86: banca-auditor + banca-avaliacao exhaustive batch workflow
+ * - #90: post-banca_sintese global academic synthesis protocol
  */
 import { expect, test, describe, afterEach } from "bun:test"
 import {
@@ -34,6 +35,17 @@ const PROTOCOL_ORDER_BLOCK = [
   "banca_context com completedBatchId",
   "read do caminho retornado",
   "banca_sintese",
+  "síntese acadêmica global",
+] as const
+
+/** Six mandatory global synthesis section titles (skill + agent). */
+const GLOBAL_SECTIONS = [
+  "Síntese global do manuscrito",
+  "Contradições ou tensões entre seções",
+  "Coerência entre objetivos, método, resultados e conclusão",
+  "Lacunas globais de argumentação ou evidência",
+  "Redundâncias e inconsistências recorrentes",
+  "Prioridades de revisão",
 ] as const
 
 function normalize(content: string): string {
@@ -113,7 +125,7 @@ function assertAgentPermissions(frontmatter: string) {
   }
 }
 
-describe("audit workflow assets (#86)", () => {
+describe("audit workflow assets (#86 / #90)", () => {
   const roots: string[] = []
 
   afterEach(() => {
@@ -216,6 +228,21 @@ describe("audit workflow assets (#86)", () => {
     expect(skill).toMatch(
       /após recibo bem-sucedido|somente.*banca_auditar|banca_auditar[\s\S]{0,200}avanç/i,
     )
+
+    // banca_sintese remains after full batch completion (gate before global synthesis)
+    const sinteseIdxSkill = skill.indexOf("banca_sintese somente após cobertura completa")
+    const globalIdxSkill = skill.indexOf(
+      "síntese acadêmica global após retorno bem-sucedido de banca_sintese",
+    )
+    expect(sinteseIdxSkill).toBeGreaterThanOrEqual(0)
+    expect(globalIdxSkill).toBeGreaterThan(sinteseIdxSkill)
+
+    const sinteseIdxAgent = agent.indexOf("banca_sintese somente após cobertura completa")
+    const globalIdxAgent = agent.indexOf(
+      "síntese acadêmica global após retorno bem-sucedido de banca_sintese",
+    )
+    expect(sinteseIdxAgent).toBeGreaterThanOrEqual(0)
+    expect(globalIdxAgent).toBeGreaterThan(sinteseIdxAgent)
   })
 
   test("findings provenance fields are required by the skill contract", () => {
@@ -270,5 +297,166 @@ describe("audit workflow assets (#86)", () => {
       expect(content).toMatch(/fingerprint/i)
       expect(content).toMatch(/plano bloqueado|cobertura incompleta/i)
     }
+  })
+
+  test("global synthesis requires six sections after successful banca_sintese", () => {
+    const root = tempProject("audit-wf-global-sections-")
+    installAssets(root, true)
+    const skill = readInstalled(root, SKILL_REL)
+    const agent = readInstalled(root, AGENT_REL)
+
+    for (const content of [skill, agent]) {
+      let cursor = 0
+      for (const section of GLOBAL_SECTIONS) {
+        const idx = content.indexOf(section, cursor)
+        expect(
+          idx,
+          `missing or out-of-order global section "${section}"`,
+        ).toBeGreaterThanOrEqual(0)
+        cursor = idx + section.length
+      }
+    }
+
+    // Explicit post-success synthesis step (not mere tool return)
+    expect(skill).toMatch(
+      /após `banca_sintese` retornar com sucesso|após o retorno bem-sucedido de `banca_sintese`/i,
+    )
+    expect(agent).toMatch(
+      /após `banca_sintese` retornar com sucesso|após o retorno bem-sucedido de `banca_sintese`/i,
+    )
+    expect(skill).toMatch(/relacionando findings de lotes diferentes/i)
+    expect(agent).toMatch(/relacionando findings de lotes diferentes/i)
+  })
+
+  test("global conclusions require findingId and provenance", () => {
+    const root = tempProject("audit-wf-global-prov-")
+    installAssets(root, true)
+    const skill = readInstalled(root, SKILL_REL)
+    const agent = readInstalled(root, AGENT_REL)
+
+    for (const content of [skill, agent]) {
+      expect(content).toContain("findingId")
+      expect(content).toMatch(/arquivo/i)
+      expect(content).toMatch(/linhas/i)
+      expect(content).toMatch(/seção|secao/i)
+      expect(content).toMatch(/claim ou evidence/i)
+      expect(content).toMatch(
+        /dois ou mais findings|múltiplos findings|multiplos findings/i,
+      )
+    }
+  })
+
+  test("global observations are not presented as persisted findings", () => {
+    const root = tempProject("audit-wf-global-obs-")
+    installAssets(root, true)
+    const skill = readInstalled(root, SKILL_REL)
+    const agent = readInstalled(root, AGENT_REL)
+
+    for (const content of [skill, agent]) {
+      expect(content).toMatch(
+        /\*{0,2}não\*{0,2}\s+cria silenciosamente novos findings persistidos/i,
+      )
+      expect(content).toMatch(/observação global que requer revisão humana/i)
+      expect(content).toMatch(
+        /Findings locais são criados e persistidos.*banca_auditar|criados e persistidos.*somente.*banca_auditar/i,
+      )
+    }
+  })
+
+  test("score, approval and rejection remain prohibited in synthesis path", () => {
+    const root = tempProject("audit-wf-no-score-")
+    installAssets(root, true)
+    const skill = readInstalled(root, SKILL_REL)
+    const agent = readInstalled(root, AGENT_REL)
+
+    for (const content of [skill, agent]) {
+      // Prohibition language must remain (terms appear only in bans)
+      expect(content).toMatch(/não.*pontua|sem.*pontua|Não calcula pontuação/i)
+      expect(content).toMatch(/aprovação/i)
+      expect(content).toMatch(/reprovação/i)
+      // No positive scoring/approval framing as product outcome
+      expect(content).not.toMatch(/calcule a nota|emitir nota|nota de 0 a 10/i)
+      expect(content).not.toMatch(/\bAPROVADO\b/)
+      expect(content).not.toMatch(/\bREPROVADO\b/)
+      expect(content).toMatch(/previsão de banca|nota acadêmica/i)
+    }
+  })
+
+  test("error or incomplete coverage blocks integral synthesis", () => {
+    const root = tempProject("audit-wf-fail-closed-")
+    installAssets(root, true)
+    const skill = readInstalled(root, SKILL_REL)
+    const agent = readInstalled(root, AGENT_REL)
+
+    for (const content of [skill, agent]) {
+      expect(content).toMatch(/cobertura incompleta/i)
+      expect(content).toMatch(
+        /contrato inválido|dados insuficientes|fingerprint incompatível/i,
+      )
+      expect(content).toMatch(/parecer integral/i)
+      expect(content).toMatch(/interromper/i)
+      expect(content).toMatch(
+        /não.*síntese integral|sem.*parecer integral|sem gerar.*parecer integral/i,
+      )
+    }
+
+    // Skill explicitly blocks integral synthesis on banca_sintese failure
+    expect(skill).toMatch(
+      /Se `banca_sintese` retornar erro|falha de `banca_sintese`|Em falha de `banca_sintese`/i,
+    )
+    expect(skill).toMatch(/síntese integral/i)
+  })
+
+  test("agent permissions remain unchanged and restricted (no new tools)", () => {
+    const root = tempProject("audit-wf-perm-stable-")
+    installAssets(root, true)
+    const fm = parseFrontmatter(readInstalled(root, AGENT_REL))
+    assertAgentPermissions(fm)
+
+    // mode: subagent preserved
+    expect(fm).toMatch(/mode:\s*subagent/)
+
+    // Only the known academic tools + skill + restricted read
+    const allowedToolLines = fm
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /:\s*allow\s*$/.test(l))
+    const allowed = allowedToolLines.map((l) => l.replace(/:\s*allow\s*$/, ""))
+    expect(allowed.sort()).toEqual(
+      [
+        "banca-avaliacao",
+        '".banca/context/context-*.md"',
+        "banca_context",
+        "banca_auditar",
+        "banca_sintese",
+      ].sort(),
+    )
+  })
+
+  test("mere structured pass-through of banca_sintese is not sufficient final behavior", () => {
+    const root = tempProject("audit-wf-no-pass-through-")
+    installAssets(root, true)
+    const skill = readInstalled(root, SKILL_REL)
+    const agent = readInstalled(root, AGENT_REL)
+
+    // Old final behavior wording must not remain as the complete post-success instruction
+    expect(skill).not.toContain(
+      "Após síntese bem-sucedida: repasse estruturado da entrada de síntese retornada por `banca_sintese`",
+    )
+
+    // Explicit negative: pass-through alone is insufficient (exact contract phrases)
+    for (const content of [skill, agent]) {
+      const lower = content.toLowerCase()
+      expect(lower).toContain("mero repasse estruturado")
+      expect(content).toContain("**não** é comportamento final suficiente")
+    }
+    // Skill-only complementary wording
+    expect(skill.toLowerCase()).toContain("não basta repassar")
+
+    // Positive: relational analysis is required (exact phrases from assets)
+    expect(skill).toContain("análise relacional")
+    expect(skill).toContain("relaciona findings já validados")
+    expect(agent).toContain("relacionar os findings validados")
+    expect(agent).toContain("relacionando findings")
   })
 })
