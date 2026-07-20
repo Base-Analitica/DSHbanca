@@ -17,7 +17,8 @@ describe("Command Assets Validation", () => {
 
       const expectedCommands = [
         "banca-init.md",
-        "banca.md"
+        "banca.md",
+        "banca-auditar.md",
       ];
 
       const versionedDir = join(process.cwd(), "assets", "opencode", "commands");

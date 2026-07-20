@@ -214,6 +214,23 @@ description: Initialize banca
 ---
 
 Please execute the \`banca_init\` tool to initialize the project structure. Do not run any terminal commands.\n`,
+  "banca-auditar.md": `---
+description: Executa a auditoria acadêmica exaustiva do manuscrito
+agent: banca-auditor
+subtask: true
+---
+
+Execute a auditoria acadêmica exaustiva do projeto atual.
+
+Siga integralmente a skill \`banca-avaliacao\` e o workflow acadêmico do subagent \`banca-auditor\`. Não duplique nem redefina o protocolo aqui.
+
+Limites obrigatórios:
+
+- Não altere o manuscrito.
+- Não execute shell.
+- Não calcule score, pontuação global, pesos, tetos ou travas.
+- Não produza parecer integral, síntese global completa ou conclusão de cobertura quando checkpoint, findings, cobertura ou síntese estiverem incompletos ou bloqueados.
+`,
   "banca.md": `---
 name: banca
 description: Comandos do sistema de banca acadêmica
@@ -221,17 +238,19 @@ description: Comandos do sistema de banca acadêmica
 
 # Comandos do OpenBanca
 
-## Comando Registrado
+## Comandos Registrados
 
 ### \`/banca-init\`
 Inicializa a estrutura \`.banca/\` no projeto utilizando a ferramenta \`banca_init\` registrada no plugin.
+
+### \`/banca-auditar\`
+Executa a auditoria acadêmica exaustiva do manuscrito invocando o subagent \`banca-auditor\` (skill \`banca-avaliacao\`). Não altera o manuscrito e não emite veredito institucional nem pontuação global.
 
 ## Funcionalidades Futuras Planejadas
 
 Estes comandos ainda não possuem arquivos de comando registrados no OpenCode, mas suas funcionalidades poderão ser acessadas delegando tarefas para os agentes ou futuramente por comandos diretos:
 
 - \`/banca:status\` — Exibir estado atual do projeto.
-- \`/banca:auditar\` — Executar painel de avaliação (4 avaliadores + integrador).
 - \`/banca:corrigir\` — Aplicar correções com snapshot automático.
 - \`/banca:refs\` — Gerar certidão de referências.
 - \`/banca:ia\` — Executar triagem de risco de IA.
@@ -239,7 +258,8 @@ Estes comandos ainda não possuem arquivos de comando registrados no OpenCode, m
 - \`/banca:loop\` — Executar etapa assistida de preparação do loop.
 - \`/banca:checklist\` — Verificar checklist de entrega.
 - \`/banca:snapshot\` — Criar snapshot manual.
-- \`/banca:compile\` — Compilar manuscrito LaTeX.\n`,
+- \`/banca:compile\` — Compilar manuscrito LaTeX.
+`,
 }
 
 const SKILLS: Record<string, Record<string, string>> = {
