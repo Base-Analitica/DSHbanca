@@ -59,6 +59,8 @@ export type NormalizedToolEvent = {
   malformed?: boolean;
   /** Index in original event list for ordering checks. */
   index?: number;
+  /** OpenCode session id when present on the JSON event (for same-session correlation). */
+  sessionId?: string | null;
 };
 
 export type InitEval = {
@@ -99,6 +101,79 @@ export type ProtocolEval = {
   findingsNotDuplicatedOnResume: boolean;
   resumeAcrossProcesses: boolean;
   phase1Interrupted: boolean;
+  /**
+   * Post-`banca_sintese` global academic synthesis (issue #92).
+   * Composite fail-closed gate: assistant text after successful final sintese,
+   * six ordered sections, cross-batch finding relation, allowlisted IDs only,
+   * no forbidden score/approval language, not mere JSON pass-through.
+   */
+  globalSynthesisOk: boolean;
+  globalReplyPresent: boolean;
+  globalReplyAfterSintese: boolean;
+  globalSectionsOrdered: boolean;
+  globalCrossBatchRelation: boolean;
+  globalFindingIdsAllowlisted: boolean;
+  globalForbiddenLanguageAbsent: boolean;
+  globalNotJsonPassthrough: boolean;
+  /** Event index of the successful final banca_sintese (merged stream), or null. */
+  globalSinteseEventIndex: number | null;
+  /** Event index of the chosen global assistant reply, or null. */
+  globalReplyEventIndex: number | null;
+  globalSectionsFound: string[];
+  globalCitedFindingIds: string[];
+  globalCitedBatchIds: string[];
+  globalForbiddenTermsFound: string[];
+};
+
+/** Six mandatory global-synthesis section titles from skill `banca-avaliacao` (order fixed). */
+export const GLOBAL_SYNTHESIS_SECTIONS = [
+  "Síntese global do manuscrito",
+  "Contradições ou tensões entre seções",
+  "Coerência entre objetivos, método, resultados e conclusão",
+  "Lacunas globais de argumentação ou evidência",
+  "Redundâncias e inconsistências recorrentes",
+  "Prioridades de revisão",
+] as const;
+
+/** Allowlisted finding shape taken from a successful `banca_sintese` payload. */
+export type SinteseAllowlistFinding = {
+  findingId: string;
+  batchId: string;
+  file: string;
+  startLine: number;
+  endLine: number;
+  sectionId: string;
+  claim: string;
+  evidence: string;
+};
+
+/** Completed assistant text event from OpenCode `run --format json`. */
+export type NormalizedTextEvent = {
+  text: string;
+  index: number;
+  rawType?: string;
+  malformed?: boolean;
+  /** OpenCode session id when present on the JSON event (for same-session correlation). */
+  sessionId?: string | null;
+};
+
+export type GlobalSynthesisEval = {
+  globalSynthesisOk: boolean;
+  globalReplyPresent: boolean;
+  globalReplyAfterSintese: boolean;
+  globalSectionsOrdered: boolean;
+  globalCrossBatchRelation: boolean;
+  globalFindingIdsAllowlisted: boolean;
+  globalForbiddenLanguageAbsent: boolean;
+  globalNotJsonPassthrough: boolean;
+  globalSinteseEventIndex: number | null;
+  globalReplyEventIndex: number | null;
+  globalSectionsFound: string[];
+  globalCitedFindingIds: string[];
+  globalCitedBatchIds: string[];
+  globalForbiddenTermsFound: string[];
+  /** Successful final sintese findings used as allowlist (empty when tool failed). */
+  allowlistFindings: SinteseAllowlistFinding[];
 };
 
 /** Markers embedded in the synthetic multi-section manuscript for source coverage. */
@@ -193,6 +268,19 @@ export function parseJsonEvents(raw: string): any[] {
   return events;
 }
 
+/** Extract observable session identity from an OpenCode JSON event when present. */
+export function extractEventSessionId(event: any): string | null {
+  if (!event || typeof event !== "object") return null;
+  if (typeof event.sessionID === "string" && event.sessionID.length > 0) return event.sessionID;
+  if (typeof event.sessionId === "string" && event.sessionId.length > 0) return event.sessionId;
+  const part = event.part;
+  if (part && typeof part === "object") {
+    if (typeof part.sessionID === "string" && part.sessionID.length > 0) return part.sessionID;
+    if (typeof part.sessionId === "string" && part.sessionId.length > 0) return part.sessionId;
+  }
+  return null;
+}
+
 /**
  * Normalize OpenCode 1.17 `run --format json` tool events and legacy flat fixtures.
  *
@@ -206,6 +294,8 @@ export function normalizeToolEvent(event: any, index?: number): NormalizedToolEv
   if (typeof event !== "object") {
     return { malformed: true, index };
   }
+
+  const sessionId = extractEventSessionId(event);
 
   // Nested OpenCode part format
   if (event.part && typeof event.part === "object") {
@@ -227,6 +317,7 @@ export function normalizeToolEvent(event: any, index?: number): NormalizedToolEv
       error: state.error ?? part.error ?? event.error,
       rawType: event.type,
       index,
+      sessionId,
     };
   }
 
@@ -236,6 +327,7 @@ export function normalizeToolEvent(event: any, index?: number): NormalizedToolEv
       tool: event.toolName || event.tool || event.name,
       callId: event.id || event.call_id || event.callID,
       status: event.state || event.status,
+      sessionId,
       input: event.args || event.arguments || event.input,
       output: event.result || event.output,
       error: event.error,
@@ -258,6 +350,7 @@ export function normalizeToolEvent(event: any, index?: number): NormalizedToolEv
     error: event.error,
     rawType: event.type,
     index,
+    sessionId,
   };
 }
 
@@ -885,6 +978,800 @@ export function isSinteseSuccessOutput(output: unknown): boolean {
   return true;
 }
 
+/**
+ * Parse allowlisted findings from a successful `banca_sintese` body.
+ * Returns null when the body is not a full V1 success contract.
+ */
+export function parseSinteseAllowlistFindings(output: unknown): SinteseAllowlistFinding[] | null {
+  if (!isSinteseSuccessOutput(output)) return null;
+  const text = outputText(output).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const findings = (parsed as Record<string, unknown>).findings;
+  if (!Array.isArray(findings)) return null;
+  const out: SinteseAllowlistFinding[] = [];
+  for (const f of findings) {
+    if (!f || typeof f !== "object" || Array.isArray(f)) continue;
+    const rec = f as Record<string, unknown>;
+    if (
+      !isNonEmptyString(rec.findingId) ||
+      !isNonEmptyString(rec.batchId) ||
+      !isNonEmptyString(rec.file) ||
+      !isNonEmptyString(rec.sectionId) ||
+      !isPositiveInt(rec.startLine) ||
+      !isPositiveInt(rec.endLine)
+    ) {
+      continue;
+    }
+    out.push({
+      findingId: rec.findingId as string,
+      batchId: rec.batchId as string,
+      file: rec.file as string,
+      startLine: rec.startLine as number,
+      endLine: rec.endLine as number,
+      sectionId: rec.sectionId as string,
+      claim: isNonEmptyString(rec.claim) ? (rec.claim as string) : "",
+      evidence: isNonEmptyString(rec.evidence) ? (rec.evidence as string) : "",
+    });
+  }
+  return out;
+}
+
+/**
+ * Normalize OpenCode 1.17 `run --format json` assistant text events.
+ *
+ * Real emit path (packages/opencode/src/cli/cmd/run.ts):
+ * `{ type: "text", timestamp, sessionID, part: { type: "text", text, time: { start?, end } } }`
+ * Only completed parts (`part.time.end`) are written to the JSON stream.
+ *
+ * Fail-closed: requires truthy `part.time.end` always (missing `part.time` is not complete).
+ * Rejects tool/reasoning parts, missing text, incomplete streams, and non-object events.
+ */
+export function normalizeTextEvent(event: any, index?: number): NormalizedTextEvent | null {
+  if (event === null || event === undefined) {
+    return { text: "", index: index ?? -1, malformed: true };
+  }
+  if (typeof event !== "object") {
+    return { text: "", index: index ?? -1, malformed: true };
+  }
+
+  const sessionId = extractEventSessionId(event);
+
+  // OpenCode JSON stream: type === "text" with nested part
+  if (event.type === "text") {
+    const part = event.part;
+    if (!part || typeof part !== "object") {
+      return { text: "", index: index ?? -1, rawType: "text", malformed: true, sessionId };
+    }
+    // Must be a text part (not tool / step / reasoning)
+    if (part.type !== undefined && part.type !== "text") {
+      return null;
+    }
+    if (typeof part.text !== "string") {
+      return { text: "", index: index ?? -1, rawType: "text", malformed: true, sessionId };
+    }
+    // Completed envelope required: part.time.end must be present and truthy.
+    // Missing part.time is incomplete (not accepted as a final assistant reply).
+    if (
+      !part.time ||
+      typeof part.time !== "object" ||
+      part.time === null ||
+      !part.time.end
+    ) {
+      return null;
+    }
+    return {
+      text: part.text,
+      index: index ?? -1,
+      rawType: "text",
+      sessionId,
+    };
+  }
+
+  // Explicit non-text event types known from OpenCode stream — not assistant text.
+  if (
+    event.type === "tool_use" ||
+    event.type === "step_start" ||
+    event.type === "step_finish" ||
+    event.type === "reasoning" ||
+    event.type === "error" ||
+    event.type === "tool_result"
+  ) {
+    return null;
+  }
+
+  // Nested part without outer type:text is not attributed as assistant text.
+  if (event.part && typeof event.part === "object") {
+    return null;
+  }
+
+  return null;
+}
+
+export function normalizeAllTextEvents(events: any[]): NormalizedTextEvent[] {
+  const out: NormalizedTextEvent[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const n = normalizeTextEvent(events[i], i);
+    if (n && !n.malformed) out.push(n);
+  }
+  return out;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when a single physical line is exactly one mandatory global section title.
+ * Uses only horizontal whitespace so adjacent headings on consecutive lines
+ * (including `\r\n`) are counted as distinct occurrences — not merged by a
+ * shared newline delimiter in a multi-line regex.
+ *
+ * Supports: `#`–`######` headings, optional numbering, bold (`**`/`__`),
+ * optional trailing `:`.
+ */
+function isGlobalSectionTitleLine(line: string, title: string): boolean {
+  // CRLF → drop trailing CR after split on "\n"
+  const L = line.replace(/\r$/, "");
+  const re = new RegExp(
+    `^[ \\t]*(?:#{1,6}[ \\t]*)?(?:\\d+\\.[ \\t]*)?(?:\\*\\*|__)?${escapeRegExp(title)}(?:\\*\\*|__)?[ \\t]*:?[ \\t]*$`,
+    "i"
+  );
+  return re.test(L);
+}
+
+/**
+ * Locate the six mandatory section titles in order, each exactly once.
+ * Titles may appear with optional markdown bold or leading list numbers.
+ * Missing, reordered, duplicated, or irrecognizable titles fail.
+ *
+ * Detection is line-oriented so two identical headings on consecutive lines
+ * are two occurrences (uniqueOk=false), not one false-positive unique match.
+ */
+export function validateGlobalSectionOrder(text: string): {
+  ok: boolean;
+  found: string[];
+  missing: string[];
+  orderOk: boolean;
+  uniqueOk: boolean;
+  positions: number[];
+} {
+  if (!text || !text.trim()) {
+    return {
+      ok: false,
+      found: [],
+      missing: [...GLOBAL_SYNTHESIS_SECTIONS],
+      orderOk: false,
+      uniqueOk: false,
+      positions: [],
+    };
+  }
+
+  // Split on \n so both \n and \r\n work; each line is matched independently.
+  const lines = text.split("\n");
+  const lineStarts: number[] = [];
+  {
+    let offset = 0;
+    for (let i = 0; i < lines.length; i++) {
+      lineStarts.push(offset);
+      // Account for the separator that was removed by split, except after last chunk.
+      offset += lines[i].length + (i < lines.length - 1 ? 1 : 0);
+    }
+  }
+
+  const occurrences = new Map<string, number[]>();
+  for (const title of GLOBAL_SYNTHESIS_SECTIONS) {
+    occurrences.set(title, []);
+  }
+  for (let i = 0; i < lines.length; i++) {
+    for (const title of GLOBAL_SYNTHESIS_SECTIONS) {
+      if (isGlobalSectionTitleLine(lines[i], title)) {
+        occurrences.get(title)!.push(lineStarts[i]);
+      }
+    }
+  }
+
+  const found: string[] = [];
+  const missing: string[] = [];
+  const positions: number[] = [];
+  let searchFrom = 0;
+  let uniqueOk = true;
+  for (const title of GLOBAL_SYNTHESIS_SECTIONS) {
+    const all = occurrences.get(title) ?? [];
+    if (all.length > 1) uniqueOk = false;
+    if (all.length === 0) {
+      missing.push(title);
+      positions.push(-1);
+      continue;
+    }
+    // Ordered pass: next occurrence at or after previous title's end.
+    const next = all.find((p) => p >= searchFrom);
+    if (next === undefined) {
+      missing.push(title);
+      positions.push(-1);
+      continue;
+    }
+    found.push(title);
+    positions.push(next);
+    const lineIdx = lineStarts.indexOf(next);
+    const lineLen = lineIdx >= 0 ? lines[lineIdx].length : 0;
+    searchFrom = next + lineLen + 1;
+  }
+  const orderOk =
+    missing.length === 0 &&
+    positions.every((p, i) => p >= 0 && (i === 0 || p > positions[i - 1]));
+  const ok = orderOk && uniqueOk;
+  return {
+    ok,
+    found,
+    missing,
+    orderOk,
+    uniqueOk,
+    positions,
+  };
+}
+
+/** Forbidden score / institutional approval language (skill + issue #92). */
+const FORBIDDEN_LANGUAGE_PATTERNS: Array<{ term: string; re: RegExp }> = [
+  { term: "nota", re: /\bnotas?\b/i },
+  { term: "score", re: /\bscores?\b/i },
+  { term: "pontuação", re: /\bpontua[cç][aã]o\b/i },
+  { term: "aprovação", re: /\baprova[cç][aã]o\b/i },
+  { term: "reprovação", re: /\breprova[cç][aã]o\b/i },
+  { term: "aprovado", re: /\baprovad[oa]s?\b/i },
+  { term: "reprovado", re: /\breprovad[oa]s?\b/i },
+  { term: "conceito", re: /\bconceito\s+(final|global|geral)\b/i },
+  { term: "média", re: /\bm[eé]dia\s+(final|global|geral|ponderada)\b/i },
+];
+
+export function findForbiddenSynthesisLanguage(text: string): string[] {
+  if (!text) return [];
+  const found: string[] = [];
+  for (const p of FORBIDDEN_LANGUAGE_PATTERNS) {
+    if (p.re.test(text) && !found.includes(p.term)) found.push(p.term);
+  }
+  return found;
+}
+
+/**
+ * True when the assistant reply is essentially a structured pass-through of the
+ * `banca_sintese` JSON (or equivalent) without relational synthesis.
+ */
+export function isJsonPassthroughReply(text: string, sinteseOutput?: unknown): boolean {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return true;
+  // Direct JSON body of the synthesis input contract
+  if (isSinteseSuccessOutput(trimmed)) return true;
+  // Fenced JSON only
+  const fence = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```\s*$/i);
+  if (fence && isSinteseSuccessOutput(fence[1].trim())) return true;
+  // Substantially equal to tool output with negligible extra prose
+  if (sinteseOutput !== undefined) {
+    const toolText = outputText(sinteseOutput).trim();
+    if (toolText && (trimmed === toolText || trimmed.includes(toolText))) {
+      const withoutTool = trimmed.replace(toolText, "").trim();
+      // Only whitespace, fences, or trivial words left → pass-through
+      if (withoutTool.length < 40 || /^```[\s\S]*```$/.test(trimmed)) {
+        return true;
+      }
+      // If none of the six section titles appear, treat as pass-through dump
+      if (!validateGlobalSectionOrder(trimmed).ok && /"version"\s*:\s*"global-analysis-synthesis-input-v1"/.test(trimmed)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Extract cited allowlisted findingIds from assistant text (literal ID match;
+ * SHA-256 hex compared case-insensitively).
+ */
+export function extractCitedFindingIds(
+  text: string,
+  allowlist: SinteseAllowlistFinding[]
+): string[] {
+  if (!text || allowlist.length === 0) return [];
+  const cited: string[] = [];
+  for (const f of allowlist) {
+    if (!f.findingId) continue;
+    const flags = /^[a-f0-9]{64}$/i.test(f.findingId) ? "i" : "";
+    const re = new RegExp(
+      `(?:^|[^A-Za-z0-9_-])${escapeRegExp(f.findingId)}(?:[^A-Za-z0-9_-]|$)`,
+      flags
+    );
+    if (re.test(text) && !cited.includes(f.findingId)) cited.push(f.findingId);
+  }
+  return cited;
+}
+
+/** SHA-256 hex token as used by real AnalysisFinding findingIds. */
+const SHA256_HEX_RE = /\b[a-f0-9]{64}\b/gi;
+
+function isAllowlistedFindingId(id: string, allowed: Set<string>): boolean {
+  if (allowed.has(id)) return true;
+  // Hex findingIds are case-insensitive.
+  if (/^[a-f0-9]{64}$/i.test(id) && allowed.has(id.toLowerCase())) return true;
+  return false;
+}
+
+function buildAllowedIdSet(ids: Iterable<string>): Set<string> {
+  const allowed = new Set<string>();
+  for (const id of ids) {
+    if (!id) continue;
+    allowed.add(id);
+    if (/^[a-f0-9]{64}$/i.test(id)) allowed.add(id.toLowerCase());
+  }
+  return allowed;
+}
+
+/**
+ * Detect invented findingId-like tokens that are not in the allowlist.
+ * Covers: explicit `findingId=` labels, fid-prefixed tokens, and bare SHA-256 hex
+ * (64 hex chars) whether labeled or not — real findings use SHA-256 ids.
+ *
+ * Labeled `findingId=…` values are validated **only** against finding allowlist
+ * (fingerprint/planId must not masquerade as a finding). Bare hex may also match
+ * `extraAllowedIds` (envelope fingerprint) so non-finding payload hex is not
+ * false-invented when unlabelled.
+ */
+export function extractInventedFindingIds(
+  text: string,
+  allowlist: SinteseAllowlistFinding[],
+  extraAllowedIds: string[] = []
+): string[] {
+  if (!text) return [];
+  const findingAllowed = buildAllowedIdSet(allowlist.map((f) => f.findingId).filter(Boolean));
+  const bareAllowed = buildAllowedIdSet([
+    ...findingAllowed,
+    ...extraAllowedIds.filter(Boolean),
+  ]);
+  const invented: string[] = [];
+  const push = (id: string, allowed: Set<string>) => {
+    if (!id || isAllowlistedFindingId(id, allowed)) return;
+    if (!invented.includes(id)) invented.push(id);
+  };
+
+  // Explicit findingId labels: only real findings may appear here.
+  const labeled = text.matchAll(/\bfindingId\s*[=:]\s*[`"']?([A-Za-z0-9_.-]+)/gi);
+  for (const m of labeled) push(m[1], findingAllowed);
+
+  // Backtick tokens that look like finding ids (same strict finding allowlist)
+  const tick = text.matchAll(/`([A-Za-z0-9_.-]{6,})`/g);
+  for (const m of tick) {
+    const id = m[1];
+    if (/^fid[-_]|finding|find[-_]/i.test(id) || /^[a-f0-9]{64}$/i.test(id)) {
+      push(id, findingAllowed);
+    }
+  }
+
+  // Bare SHA-256 hex: allow envelope fingerprint/planId extras as non-finding noise
+  for (const m of text.matchAll(SHA256_HEX_RE)) {
+    push(m[0].toLowerCase(), bareAllowed);
+  }
+  return invented;
+}
+
+/** Known non-finding hex ids from a successful banca_sintese envelope (fingerprint). */
+export function extractSinteseEnvelopeAllowedIds(output: unknown): string[] {
+  if (!isSinteseSuccessOutput(output)) return [];
+  try {
+    const p = JSON.parse(outputText(output).trim()) as Record<string, unknown>;
+    const out: string[] = [];
+    if (typeof p.manuscriptFingerprint === "string") out.push(p.manuscriptFingerprint);
+    if (typeof p.planId === "string") out.push(p.planId);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Line numbers must appear in a local window around the findingId with line-like
+ * context. Multi-line findings require both endpoints (range or dual citation);
+ * a lone `startLine=<start>` is not enough when endLine > startLine.
+ * Global digit coincidence from headers/dates elsewhere does not count.
+ */
+export function linesCitedInFindingWindow(
+  window: string,
+  startLine: number,
+  endLine: number
+): boolean {
+  if (!window) return false;
+  if (
+    typeof startLine !== "number" ||
+    typeof endLine !== "number" ||
+    !Number.isFinite(startLine) ||
+    !Number.isFinite(endLine) ||
+    endLine < startLine
+  ) {
+    return false;
+  }
+  const s = String(startLine);
+  const e = String(endLine);
+  const singleLine = startLine === endLine;
+
+  // Explicit range forms covering both endpoints: 2-4, 2–4, 2:4
+  if (new RegExp(`(?:^|[^0-9a-fA-F])${s}\\s*[-–—:]\\s*${e}(?:[^0-9a-fA-F]|$)`).test(window)) {
+    return true;
+  }
+  // "linhas N-M" / "linhas N a M" (both ends required when multi-line)
+  if (
+    new RegExp(`linhas?\\s+${s}\\s*[-–—aà]\\s*${e}`, "i").test(window)
+  ) {
+    return true;
+  }
+  // Single-line finding: "linha N" or startLine=N alone is enough
+  if (singleLine) {
+    if (new RegExp(`linhas?\\s+${s}\\b`, "i").test(window)) return true;
+    if (new RegExp(`(?:startLine|endLine|lines?)\\s*[=:]\\s*${s}\\b`, "i").test(window)) {
+      return true;
+    }
+  } else {
+    // Multi-line: labeled startLine AND endLine both present
+    const hasStartLabel = new RegExp(
+      `(?:startLine|lines?)\\s*[=:]\\s*${s}\\b`,
+      "i"
+    ).test(window);
+    const hasEndLabel = new RegExp(`endLine\\s*[=:]\\s*${e}\\b`, "i").test(window);
+    if (hasStartLabel && hasEndLabel) return true;
+    // Or both labeled as startLine=X endLine=Y in either order with line keywords
+    if (
+      new RegExp(`startLine\\s*[=:]\\s*${s}\\b`, "i").test(window) &&
+      new RegExp(`endLine\\s*[=:]\\s*${e}\\b`, "i").test(window)
+    ) {
+      return true;
+    }
+  }
+  // Both endpoints as standalone numbers (not inside hex) AND a line keyword
+  const digitBoundary = (n: string) =>
+    new RegExp(`(?:^|[^0-9a-fA-F])${n}(?:[^0-9a-fA-F]|$)`).test(window);
+  if (
+    digitBoundary(s) &&
+    (singleLine || digitBoundary(e)) &&
+    /\blinhas?\b|\blines?\b|startLine|endLine/i.test(window)
+  ) {
+    // Multi-line still needs both endpoints present
+    if (!singleLine && !digitBoundary(e)) return false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Exact sectionId as a full token/field in the local window.
+ * Rejects prefix/suffix collisions: sec-1 does not match sec-10 or prefix-sec-1.
+ */
+export function sectionIdCitedInWindow(window: string, sectionId: string): boolean {
+  if (!window || !isNonEmptyString(sectionId)) return false;
+  const esc = escapeRegExp(sectionId);
+  // Token boundaries: no id/path-ish char immediately before or after.
+  return new RegExp(`(?<![A-Za-z0-9_-])${esc}(?![A-Za-z0-9_-])`).test(window);
+}
+
+/**
+ * Exact relative file path in the local window (full path only).
+ * Rejects basename-only and same-basename paths in other directories
+ * (e.g. chapters/method.tex vs appendix/method.tex or old-chapters/method.tex).
+ */
+export function filePathCitedInWindow(window: string, file: string): boolean {
+  if (!window || !isNonEmptyString(file)) return false;
+  const esc = escapeRegExp(file);
+  // Path boundaries so a longer path (old-chapters/method.tex) cannot satisfy
+  // a shorter expected relative path (chapters/method.tex) via substring.
+  return new RegExp(`(?<![A-Za-z0-9_./\\\\-])${esc}(?![A-Za-z0-9_./\\\\-])`).test(window);
+}
+
+/**
+ * Traceability for a cited findingId: file, line range, and exact sectionId must
+ * appear in a bounded window around that findingId (not whole-reply coincidence).
+ * sectionId is an exact token; file must be the full relative path (no basename fallback).
+ */
+export function findingTraceableInText(text: string, f: SinteseAllowlistFinding): boolean {
+  if (!f.findingId || !text.includes(f.findingId)) return false;
+  if (!isNonEmptyString(f.sectionId)) return false;
+  const idx = text.indexOf(f.findingId);
+  if (idx < 0) return false;
+  // Bounded block around the findingId for safe correlation.
+  const window = text.slice(Math.max(0, idx - 220), idx + f.findingId.length + 300);
+  if (!sectionIdCitedInWindow(window, f.sectionId)) return false;
+  if (!filePathCitedInWindow(window, f.file)) return false;
+  return linesCitedInFindingWindow(window, f.startLine, f.endLine);
+}
+
+/**
+ * Blank mandatory global section titles so title vocabulary cannot satisfy
+ * relational-language checks by itself.
+ */
+export function stripGlobalSectionTitles(text: string): string {
+  if (!text) return "";
+  let body = text;
+  for (const title of GLOBAL_SYNTHESIS_SECTIONS) {
+    const re = new RegExp(
+      `(?:^|[\\n\\r])\\s*(?:#{1,6}\\s*)?(?:\\d+\\.\\s*)?(?:\\*\\*|__)?${escapeRegExp(title)}(?:\\*\\*|__)?\\s*(?::)?`,
+      "gi"
+    );
+    body = body.replace(re, "\n");
+  }
+  return body;
+}
+
+/**
+ * Relational vocabulary that must appear in body prose (after titles are stripped),
+ * not only inside the six mandatory headers.
+ */
+const RELATIONAL_BODY_RE =
+  /\b(?:tens[aã]o|tens[oõ]es|contradi[cç][aã]o|contradi[cç][oõ]es|incoer[eê]ncia|inconsist[eê]ncia|relaciona(?:m|ndo|r)?|rela[cç][aã]o\s+entre|conflito(?:\s+entre)?|incompat|contrasta|op[oõ]e|diverge|refuta|nega(?:\s+o)?|entre\s+(?:os\s+)?(?:dois\s+)?findings|entre\s+(?:esses|estes)\s+)/i;
+
+/**
+ * True when body prose (titles stripped) states a relation between ≥2 allowlisted
+ * findingIds from different batches — not a bare ID/file/line dump under the headers.
+ */
+export function hasRelationalConclusion(
+  text: string,
+  crossBatchCited: Array<{ findingId: string; batchId: string }>
+): boolean {
+  if (crossBatchCited.length < 2) return false;
+  const body = stripGlobalSectionTitles(text);
+  if (!body.trim()) return false;
+
+  // Paragraph-level: same block mentions ≥2 batches' findings + relational claim.
+  for (const para of body.split(/\n\s*\n/)) {
+    const inPara = crossBatchCited.filter((c) => para.includes(c.findingId));
+    const batches = new Set(inPara.map((c) => c.batchId));
+    if (batches.size >= 2 && RELATIONAL_BODY_RE.test(para)) return true;
+  }
+
+  // Pair windows: two cross-batch IDs close together with relational language nearby.
+  for (let i = 0; i < crossBatchCited.length; i++) {
+    for (let j = i + 1; j < crossBatchCited.length; j++) {
+      const a = crossBatchCited[i];
+      const b = crossBatchCited[j];
+      if (a.batchId === b.batchId) continue;
+      const ia = body.indexOf(a.findingId);
+      const ib = body.indexOf(b.findingId);
+      if (ia < 0 || ib < 0) continue;
+      const start = Math.min(ia, ib);
+      const end = Math.max(ia + a.findingId.length, ib + b.findingId.length);
+      if (end - start > 900) continue;
+      const span = body.slice(Math.max(0, start - 100), Math.min(body.length, end + 100));
+      if (RELATIONAL_BODY_RE.test(span)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Cross-batch relational check: ≥2 allowlisted findingIds from distinct batchIds,
+ * each with file/line/sectionId traceability, and a relational conclusion in body
+ * prose (not mere listing under the six section titles).
+ */
+export function validateCrossBatchRelation(
+  text: string,
+  allowlist: SinteseAllowlistFinding[]
+): {
+  ok: boolean;
+  citedFindingIds: string[];
+  citedBatchIds: string[];
+  reason: string;
+} {
+  const cited = extractCitedFindingIds(text, allowlist);
+  if (cited.length < 2) {
+    return {
+      ok: false,
+      citedFindingIds: cited,
+      citedBatchIds: [],
+      reason: "fewer_than_two_allowlisted_finding_ids",
+    };
+  }
+  const byId = new Map(allowlist.map((f) => [f.findingId, f]));
+  const batches = new Set<string>();
+  const traceable: string[] = [];
+  for (const id of cited) {
+    const f = byId.get(id);
+    if (!f) continue;
+    batches.add(f.batchId);
+    if (findingTraceableInText(text, f)) traceable.push(id);
+  }
+  const batchIds = Array.from(batches);
+  if (batchIds.length < 2) {
+    return {
+      ok: false,
+      citedFindingIds: cited,
+      citedBatchIds: batchIds,
+      reason: "same_batch_only",
+    };
+  }
+  // Need at least one pair across batches that are both traceable
+  const crossTraceable = traceable.filter((id) => {
+    const f = byId.get(id)!;
+    return batchIds.includes(f.batchId);
+  });
+  const crossBatches = new Set(crossTraceable.map((id) => byId.get(id)!.batchId));
+  if (crossBatches.size < 2) {
+    return {
+      ok: false,
+      citedFindingIds: cited,
+      citedBatchIds: batchIds,
+      reason: "missing_file_line_section_traceability",
+    };
+  }
+
+  const crossBatchCited = crossTraceable.map((id) => ({
+    findingId: id,
+    batchId: byId.get(id)!.batchId,
+  }));
+  if (!hasRelationalConclusion(text, crossBatchCited)) {
+    return {
+      ok: false,
+      citedFindingIds: cited,
+      citedBatchIds: batchIds,
+      reason: "no_relational_conclusion",
+    };
+  }
+  return {
+    ok: true,
+    citedFindingIds: cited,
+    citedBatchIds: batchIds,
+    reason: "ok",
+  };
+}
+
+/**
+ * Same-session correlation (fail-closed): both tool and text must expose a
+ * non-empty session id and they must be equal. Missing either side does not
+ * prove the same observable session.
+ */
+export function sessionsCorrelate(
+  toolSessionId: string | null | undefined,
+  textSessionId: string | null | undefined
+): boolean {
+  const a = toolSessionId && toolSessionId.length > 0 ? toolSessionId : null;
+  const b = textSessionId && textSessionId.length > 0 ? textSessionId : null;
+  if (!a || !b) return false;
+  return a === b;
+}
+
+/**
+ * Locate successful final `banca_sintese` (last success in stream) and evaluate
+ * the first substantial completed assistant text event strictly after it in the
+ * same observable session (both sides must expose matching session ids).
+ */
+export function evaluateGlobalSynthesis(events: any[]): GlobalSynthesisEval {
+  const empty: GlobalSynthesisEval = {
+    globalSynthesisOk: false,
+    globalReplyPresent: false,
+    globalReplyAfterSintese: false,
+    globalSectionsOrdered: false,
+    globalCrossBatchRelation: false,
+    globalFindingIdsAllowlisted: false,
+    globalForbiddenLanguageAbsent: false,
+    globalNotJsonPassthrough: false,
+    globalSinteseEventIndex: null,
+    globalReplyEventIndex: null,
+    globalSectionsFound: [],
+    globalCitedFindingIds: [],
+    globalCitedBatchIds: [],
+    globalForbiddenTermsFound: [],
+    allowlistFindings: [],
+  };
+
+  if (!Array.isArray(events) || events.length === 0) return empty;
+
+  const tools = normalizeAllToolEvents(events);
+  let sinteseIndex: number | null = null;
+  let sinteseOutput: unknown = undefined;
+  let sinteseSessionId: string | null = null;
+  let allowlist: SinteseAllowlistFinding[] = [];
+  for (const t of tools) {
+    if (t.malformed || t.tool !== "banca_sintese") continue;
+    if (typeof t.index !== "number") continue;
+    if (isToolSuccess(t) && isSinteseSuccessOutput(t.output)) {
+      sinteseIndex = t.index;
+      sinteseOutput = t.output;
+      sinteseSessionId = t.sessionId ?? null;
+      allowlist = parseSinteseAllowlistFindings(t.output) || [];
+    }
+  }
+  if (sinteseIndex === null) {
+    return { ...empty, allowlistFindings: allowlist };
+  }
+
+  const texts = normalizeAllTextEvents(events).filter(
+    (t) =>
+      t.index > sinteseIndex! &&
+      sessionsCorrelate(sinteseSessionId, t.sessionId)
+  );
+  // Prefer the last non-empty completed assistant text after the tool (final reply).
+  const candidates = texts.filter((t) => t.text.trim().length > 0);
+  if (candidates.length === 0) {
+    // Distinguish: text exists after tool but only wrong session → still no reply.
+    return {
+      ...empty,
+      globalSinteseEventIndex: sinteseIndex,
+      allowlistFindings: allowlist,
+      globalReplyAfterSintese: false,
+      globalReplyPresent: false,
+    };
+  }
+  const reply = candidates[candidates.length - 1];
+  const text = reply.text;
+
+  // Fail-closed: if both sides expose session ids, they must match (already filtered);
+  // double-check here for the chosen reply.
+  if (!sessionsCorrelate(sinteseSessionId, reply.sessionId)) {
+    return {
+      ...empty,
+      globalSinteseEventIndex: sinteseIndex,
+      allowlistFindings: allowlist,
+      globalReplyPresent: false,
+      globalReplyAfterSintese: false,
+    };
+  }
+
+  const sections = validateGlobalSectionOrder(text);
+  const forbidden = findForbiddenSynthesisLanguage(text);
+  const passthrough = isJsonPassthroughReply(text, sinteseOutput);
+  const invented = extractInventedFindingIds(
+    text,
+    allowlist,
+    extractSinteseEnvelopeAllowedIds(sinteseOutput)
+  );
+  const cross = validateCrossBatchRelation(text, allowlist);
+  const allowlistedOk =
+    invented.length === 0 &&
+    cross.citedFindingIds.every((id) =>
+      allowlist.some(
+        (f) => f.findingId === id || f.findingId.toLowerCase() === id.toLowerCase()
+      )
+    );
+
+  const globalReplyPresent = text.trim().length > 0;
+  const globalReplyAfterSintese = reply.index > sinteseIndex;
+  const globalSectionsOrdered = sections.ok;
+  const globalCrossBatchRelation = cross.ok;
+  const globalFindingIdsAllowlisted = allowlistedOk && invented.length === 0;
+  const globalForbiddenLanguageAbsent = forbidden.length === 0;
+  const globalNotJsonPassthrough = !passthrough;
+
+  const globalSynthesisOk =
+    globalReplyPresent &&
+    globalReplyAfterSintese &&
+    globalSectionsOrdered &&
+    globalCrossBatchRelation &&
+    globalFindingIdsAllowlisted &&
+    globalForbiddenLanguageAbsent &&
+    globalNotJsonPassthrough &&
+    allowlist.length >= 2;
+
+  return {
+    globalSynthesisOk,
+    globalReplyPresent,
+    globalReplyAfterSintese,
+    globalSectionsOrdered,
+    globalCrossBatchRelation,
+    globalFindingIdsAllowlisted,
+    globalForbiddenLanguageAbsent,
+    globalNotJsonPassthrough,
+    globalSinteseEventIndex: sinteseIndex,
+    globalReplyEventIndex: reply.index,
+    globalSectionsFound: sections.found,
+    globalCitedFindingIds: cross.citedFindingIds,
+    globalCitedBatchIds: cross.citedBatchIds,
+    globalForbiddenTermsFound: forbidden,
+    allowlistFindings: allowlist,
+  };
+}
+
+export function emptyGlobalSynthesisEval(): GlobalSynthesisEval {
+  return evaluateGlobalSynthesis([]);
+}
+
 export function readInputPath(input: unknown): string | undefined {
   return inputStringField(input, ["filePath", "path", "file", "target", "filepath", "file_path"]);
 }
@@ -1027,17 +1914,41 @@ export function writeSyntheticMultiBatchManuscript(projectRoot: string): {
       "",
     ].join("\n")
   );
+  // Controlled objective ↔ conclusion tension for cross-batch relational synthesis (#92).
+  // Phase1 (early batch) can flag the objective claim; a later batch can flag the
+  // contradictory conclusion — distinct batchIds enable global relation checks.
   writeFileSync(
     join(projectRoot, "first.tex"),
-    `\\section{First Section}\n${E2E_SOURCE_MARKERS.first}\nThis is the opening section of the synthetic manuscript.\n${"Alpha content. ".repeat(8)}\n\\cite{test2024}\n`
+    [
+      "\\section{Objetivos}",
+      E2E_SOURCE_MARKERS.first,
+      "O objetivo principal deste trabalho e demonstrar que o metodo Alpha melhora significativamente o desempenho do sistema em relacao a baseline.",
+      "Especificamente, espera-se um ganho mensuravel e consistente apos a aplicacao de Alpha.",
+      "Alpha content. ".repeat(6),
+      "\\cite{test2024}",
+      "",
+    ].join("\n")
   );
   writeFileSync(
     join(projectRoot, "middle.tex"),
-    `\\section{Middle Section}\n${E2E_SOURCE_MARKERS.middle}\nThis is the intermediate section of the synthetic manuscript.\n${"Bravo content. ".repeat(8)}\n`
+    [
+      "\\section{Metodo}",
+      E2E_SOURCE_MARKERS.middle,
+      "O metodo utiliza amostragem controlada e metricas de latencia e acuracia.",
+      "Bravo content. ".repeat(8),
+      "",
+    ].join("\n")
   );
   writeFileSync(
     join(projectRoot, "last.tex"),
-    `\\section{Last Section}\n${E2E_SOURCE_MARKERS.last}\nThis is the final section of the synthetic manuscript.\n${"Charlie content. ".repeat(8)}\n`
+    [
+      "\\section{Conclusao}",
+      E2E_SOURCE_MARKERS.last,
+      "Conclui-se que o metodo Alpha nao produz qualquer melhoria mensuravel em relacao a baseline e que os resultados refutam a hipotese de ganho.",
+      "Portanto, Alpha deve ser descartado como abordagem eficaz.",
+      "Charlie content. ".repeat(6),
+      "",
+    ].join("\n")
   );
   writeFileSync(
     join(projectRoot, "referencias.bib"),
@@ -1594,6 +2505,18 @@ export function verifyExhaustiveProtocol(opts: ExhaustiveEvalOptions): ProtocolE
     contextCalled &&
     auditarCalled;
 
+  // Final synthesis only counts when event-proven full cycles cover the plan.
+  const finalSinteseOk =
+    finalSinteseSucceeded && coverageComplete && eventCoverageComplete;
+
+  // Issue #92: post-tool global relational synthesis from real assistant text events.
+  // Prefer phase2 stream when present (independent process); fall back to merged.
+  const globalSourceEvents =
+    phase2Events.length > 0 ? phase2Events : mergedEvents;
+  const globalEval = finalSinteseOk
+    ? evaluateGlobalSynthesis(globalSourceEvents)
+    : emptyGlobalSynthesisEval();
+
   return {
     skillArgsCorrect: skillProto.skillArgsCorrect,
     skillEvidence: skillProto.skillEvidence,
@@ -1615,13 +2538,26 @@ export function verifyExhaustiveProtocol(opts: ExhaustiveEvalOptions): ProtocolE
     sourcesObserved,
     prematureSinteseAttempted,
     prematureSinteseRejected,
-    // Final synthesis only counts when event-proven full cycles cover the plan.
-    finalSinteseSucceeded: finalSinteseSucceeded && coverageComplete && eventCoverageComplete,
+    finalSinteseSucceeded: finalSinteseOk,
     findingsPersisted,
     findingsCount,
     findingsNotDuplicatedOnResume,
     resumeAcrossProcesses: Boolean(opts.resumeAcrossProcesses),
     phase1Interrupted: phase1Interrupted && phase1NoSuccessfulSintese,
+    globalSynthesisOk: Boolean(finalSinteseOk && globalEval.globalSynthesisOk),
+    globalReplyPresent: globalEval.globalReplyPresent,
+    globalReplyAfterSintese: globalEval.globalReplyAfterSintese,
+    globalSectionsOrdered: globalEval.globalSectionsOrdered,
+    globalCrossBatchRelation: globalEval.globalCrossBatchRelation,
+    globalFindingIdsAllowlisted: globalEval.globalFindingIdsAllowlisted,
+    globalForbiddenLanguageAbsent: globalEval.globalForbiddenLanguageAbsent,
+    globalNotJsonPassthrough: globalEval.globalNotJsonPassthrough,
+    globalSinteseEventIndex: globalEval.globalSinteseEventIndex,
+    globalReplyEventIndex: globalEval.globalReplyEventIndex,
+    globalSectionsFound: globalEval.globalSectionsFound,
+    globalCitedFindingIds: globalEval.globalCitedFindingIds,
+    globalCitedBatchIds: globalEval.globalCitedBatchIds,
+    globalForbiddenTermsFound: globalEval.globalForbiddenTermsFound,
   };
 }
 
@@ -2565,7 +3501,8 @@ export function classifyProtocolPhase(params: {
     e.findingsPersisted &&
     e.findingsNotDuplicatedOnResume &&
     e.resumeAcrossProcesses &&
-    e.phase1Interrupted;
+    e.phase1Interrupted &&
+    e.globalSynthesisOk;
 
   if (perfectProto) {
     return {
@@ -2595,6 +3532,28 @@ export function classifyProtocolPhase(params: {
   if (!e.findingsNotDuplicatedOnResume) missing.push("findings_duplicated_on_resume");
   if (!e.resumeAcrossProcesses) missing.push("resume_across_processes_missing");
   if (!e.phase1Interrupted) missing.push("phase1_interrupt_missing");
+  // Issue #92 global synthesis gates (fail-closed after tool success)
+  if (!e.globalSynthesisOk) {
+    if (!e.globalReplyPresent) missing.push("global_reply_missing");
+    else if (!e.globalReplyAfterSintese) missing.push("global_reply_before_sintese");
+    if (!e.globalSectionsOrdered) missing.push("global_sections_missing_or_unordered");
+    if (!e.globalCrossBatchRelation) missing.push("global_cross_batch_relation_missing");
+    if (!e.globalFindingIdsAllowlisted) missing.push("global_finding_ids_not_allowlisted");
+    if (!e.globalForbiddenLanguageAbsent) missing.push("global_forbidden_language");
+    if (!e.globalNotJsonPassthrough) missing.push("global_json_passthrough_only");
+    if (
+      e.globalReplyPresent &&
+      e.globalReplyAfterSintese &&
+      e.globalSectionsOrdered &&
+      e.globalCrossBatchRelation &&
+      e.globalFindingIdsAllowlisted &&
+      e.globalForbiddenLanguageAbsent &&
+      e.globalNotJsonPassthrough
+    ) {
+      // Composite false for another reason (e.g. allowlist too small)
+      missing.push("global_synthesis_incomplete");
+    }
+  }
 
   return {
     classification: formatClassification(
@@ -3113,7 +4072,8 @@ async function run() {
       "banca_context (no completedBatchId) → read the exact context pack path returned → " +
       "banca_auditar with the exact fingerprint and batchId from the pack → " +
       "banca_context with completedBatchId for that batch. " +
-      "Submit at least one valid finding in banca_auditar (category, severity, claim, evidence, file, startLine, endLine, sectionId from the pack). " +
+      "Submit at least one valid finding in banca_auditar about the stated objective or hypothesis " +
+      "(category, severity, claim, evidence, file, startLine, endLine, sectionId from the pack). " +
       "Then STOP. Do NOT process further batches. Do NOT call banca_sintese. " +
       "Do not modify manuscript source files. Do not claim to be banca-auditor unless a child subagent session is actually created.";
 
@@ -3121,13 +4081,25 @@ async function run() {
       "Call the tool banca_sintese exactly once on this project and report its result. " +
       "Do not call banca_context, banca_auditar, or skill. Do not modify any files.";
 
+    // Skill must be reloaded; do NOT paste the six section titles or full skill policy here —
+    // structure must come from the installed banca-avaliacao asset (#92).
     const promptPhase2 =
-      "Load banca-avaliacao using the native skill tool with name banca-avaliacao if needed. " +
-      "Resume the exhaustive audit from the existing checkpoint on this synthetic project. " +
+      "Load banca-avaliacao using the native skill tool with name banca-avaliacao " +
+      "(reload it in this process even if it was used before). " +
+      "Follow its protocol completely for the remainder of this synthetic project. " +
+      "Resume the exhaustive audit from the existing checkpoint. " +
       "Do not re-audit batches already completed. For each remaining batch follow: " +
-      "banca_context → read the exact context pack path → banca_auditar (empty findings valid) → " +
+      "banca_context → read the exact context pack path → banca_auditar → " +
       "banca_context with completedBatchId. " +
+      "On at least one later batch that covers the conclusion (or a section that " +
+      "contrasts with the objective), submit at least one valid finding so that " +
+      "findings exist in more than one batchId. Empty findings remain valid for other batches. " +
       "After all batches are complete and the context pack shows no next batch, call banca_sintese once. " +
+      "After banca_sintese returns successfully, complete the remaining protocol steps from the skill " +
+      "(global academic synthesis relating validated findings across batches). " +
+      "When relating findings from different batches, quote the exact findingId values from the " +
+      "banca_sintese payload together with each finding's file, line range, and sectionId. " +
+      "Do not invent findingIds. Do not merely pass through the banca_sintese JSON. " +
       "Do not modify manuscript source files. Do not claim to be banca-auditor unless a child subagent session is actually created.";
 
     // Same absolute dir + isolated env as init (no host global plugins).
@@ -3348,6 +4320,24 @@ async function run() {
         );
         report.push(
           `Phase1 auditar batchIds: ${phase1Ids.length ? phase1Ids.join(",") : "none"}`
+        );
+        report.push(
+          `Global synthesis (#92): ok=${protocolEval.globalSynthesisOk} replyPresent=${protocolEval.globalReplyPresent} afterSintese=${protocolEval.globalReplyAfterSintese} sectionsOrdered=${protocolEval.globalSectionsOrdered} crossBatch=${protocolEval.globalCrossBatchRelation} idsAllowlisted=${protocolEval.globalFindingIdsAllowlisted} noForbidden=${protocolEval.globalForbiddenLanguageAbsent} notPassthrough=${protocolEval.globalNotJsonPassthrough}`
+        );
+        report.push(
+          `Global sinteseEventIndex=${protocolEval.globalSinteseEventIndex ?? "none"} replyEventIndex=${protocolEval.globalReplyEventIndex ?? "none"}`
+        );
+        report.push(
+          `Global sections found: ${protocolEval.globalSectionsFound.length ? protocolEval.globalSectionsFound.join(" | ") : "none"}`
+        );
+        report.push(
+          `Global cited findingIds: ${protocolEval.globalCitedFindingIds.length ? protocolEval.globalCitedFindingIds.join(",") : "none"}`
+        );
+        report.push(
+          `Global cited batchIds: ${protocolEval.globalCitedBatchIds.length ? protocolEval.globalCitedBatchIds.join(",") : "none"}`
+        );
+        report.push(
+          `Global forbidden terms: ${protocolEval.globalForbiddenTermsFound.length ? protocolEval.globalForbiddenTermsFound.join(",") : "none"}`
         );
         report.push(
           `Evidence scope reminder: primary agent only; banca-auditor subagent not attributed`

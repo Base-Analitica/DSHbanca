@@ -48,6 +48,25 @@ import {
   PRESERVED_ENV_KEYS,
   resolveBinary,
   hasStructuredProtocolFailure,
+  normalizeTextEvent,
+  normalizeAllTextEvents,
+  evaluateGlobalSynthesis,
+  validateGlobalSectionOrder,
+  validateCrossBatchRelation,
+  hasRelationalConclusion,
+  stripGlobalSectionTitles,
+  findForbiddenSynthesisLanguage,
+  isJsonPassthroughReply,
+  parseSinteseAllowlistFindings,
+  extractCitedFindingIds,
+  extractInventedFindingIds,
+  findingTraceableInText,
+  sectionIdCitedInWindow,
+  filePathCitedInWindow,
+  sessionsCorrelate,
+  linesCitedInFindingWindow,
+  extractSinteseEnvelopeAllowedIds,
+  GLOBAL_SYNTHESIS_SECTIONS,
   type ProcessLike,
   type ProtocolEval,
   type ExhaustiveProjectState,
@@ -125,6 +144,20 @@ const perfectProtocolEval: ProtocolEval = {
   findingsNotDuplicatedOnResume: true,
   resumeAcrossProcesses: true,
   phase1Interrupted: true,
+  globalSynthesisOk: true,
+  globalReplyPresent: true,
+  globalReplyAfterSintese: true,
+  globalSectionsOrdered: true,
+  globalCrossBatchRelation: true,
+  globalFindingIdsAllowlisted: true,
+  globalForbiddenLanguageAbsent: true,
+  globalNotJsonPassthrough: true,
+  globalSinteseEventIndex: 10,
+  globalReplyEventIndex: 11,
+  globalSectionsFound: [...GLOBAL_SYNTHESIS_SECTIONS],
+  globalCitedFindingIds: ["fid-a", "fid-b"],
+  globalCitedBatchIds: ["b0", "b2"],
+  globalForbiddenTermsFound: [],
 };
 
 /** Partial protocol eval for FAIL-path classification tests (legacy fields only + exhaustive false). */
@@ -160,6 +193,20 @@ function protocolEvalFromPartial(
     findingsNotDuplicatedOnResume: true,
     resumeAcrossProcesses: false,
     phase1Interrupted: false,
+    globalSynthesisOk: false,
+    globalReplyPresent: false,
+    globalReplyAfterSintese: false,
+    globalSectionsOrdered: false,
+    globalCrossBatchRelation: false,
+    globalFindingIdsAllowlisted: false,
+    globalForbiddenLanguageAbsent: false,
+    globalNotJsonPassthrough: false,
+    globalSinteseEventIndex: null,
+    globalReplyEventIndex: null,
+    globalSectionsFound: [],
+    globalCitedFindingIds: [],
+    globalCitedBatchIds: [],
+    globalForbiddenTermsFound: [],
     ...partial,
   };
 }
@@ -174,12 +221,13 @@ function ocTool(
     output?: unknown;
     error?: unknown;
     id?: string;
+    sessionID?: string;
   } = {}
 ) {
   return {
     type: "tool_use",
     timestamp: Date.now(),
-    sessionID: "ses_test",
+    sessionID: opts.sessionID ?? "ses_test",
     part: {
       id: opts.id || "prt_test",
       type: "tool",
@@ -192,6 +240,37 @@ function ocTool(
         error: opts.error,
       },
     },
+  };
+}
+
+/**
+ * Real OpenCode 1.17.18 completed assistant text event.
+ * Emit path only writes when part.time.end is set.
+ */
+function ocText(
+  text: string,
+  opts: {
+    id?: string;
+    end?: number;
+    sessionID?: string;
+    /** When true, omit part.time entirely (incomplete envelope). */
+    omitTime?: boolean;
+  } = {}
+) {
+  const end = opts.end ?? Date.now();
+  const part: Record<string, unknown> = {
+    id: opts.id || "prt_text",
+    type: "text",
+    text,
+  };
+  if (!opts.omitTime) {
+    part.time = { start: end - 5, end };
+  }
+  return {
+    type: "text",
+    timestamp: end,
+    sessionID: opts.sessionID ?? "ses_test",
+    part,
   };
 }
 
@@ -1709,6 +1788,38 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
   const b1 = "batch-1";
   const b2 = "batch-2";
 
+  const findingPhase1 = {
+    version: "analysis-finding-v1",
+    findingId: "fid-phase1",
+    planId: "p1",
+    category: "coherence",
+    severity: "medium",
+    claim: "O objetivo afirma ganho significativo com Alpha.",
+    evidence: "trecho do objetivo em first.tex",
+    file: "first.tex",
+    startLine: 2,
+    endLine: 4,
+    sectionId: "sec-objetivos",
+    manuscriptFingerprint: fp,
+    batchId: b0,
+  };
+
+  const findingPhase2 = {
+    version: "analysis-finding-v1",
+    findingId: "fid-phase2-last",
+    planId: "p1",
+    category: "coherence",
+    severity: "high",
+    claim: "A conclusao refuta qualquer melhoria de Alpha.",
+    evidence: "trecho da conclusao em last.tex",
+    file: "last.tex",
+    startLine: 2,
+    endLine: 5,
+    sectionId: "sec-conclusao",
+    manuscriptFingerprint: fp,
+    batchId: b2,
+  };
+
   function fullSinteseJson(overrides: Record<string, unknown> = {}) {
     return JSON.stringify({
       version: "global-analysis-synthesis-input-v1",
@@ -1723,9 +1834,53 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
         coveragePercent: 100,
         orderedBatchIds: [b0, b1, b2],
       },
-      findings: [],
+      findings: [findingPhase1, findingPhase2],
       ...overrides,
     });
+  }
+
+  /** Valid post-sintese global synthesis body (six sections + cross-batch relation). */
+  function validGlobalReplyText(
+    opts: {
+      idA?: string;
+      idB?: string;
+      fileA?: string;
+      fileB?: string;
+      lineA?: string;
+      lineB?: string;
+      secA?: string;
+      secB?: string;
+      extra?: string;
+    } = {}
+  ): string {
+    const idA = opts.idA ?? findingPhase1.findingId;
+    const idB = opts.idB ?? findingPhase2.findingId;
+    const fileA = opts.fileA ?? findingPhase1.file;
+    const fileB = opts.fileB ?? findingPhase2.file;
+    const lineA = opts.lineA ?? `${findingPhase1.startLine}-${findingPhase1.endLine}`;
+    const lineB = opts.lineB ?? `${findingPhase2.startLine}-${findingPhase2.endLine}`;
+    const secA = opts.secA ?? findingPhase1.sectionId;
+    const secB = opts.secB ?? findingPhase2.sectionId;
+    return [
+      "## Síntese global do manuscrito",
+      "O manuscrito sintético apresenta um arco objetivo–método–conclusão com tensão interna.",
+      "",
+      "## Contradições ou tensões entre seções",
+      `Há tensão entre o objetivo e a conclusão: findingId=${idA} em ${fileA} linhas ${lineA} seção ${secA} afirma ganho de Alpha, enquanto findingId=${idB} em ${fileB} linhas ${lineB} seção ${secB} conclui ausência de melhoria. A relação entre esses findings de lotes distintos evidencia contradição argumentativa.`,
+      "",
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "A coerência global é frágil porque a conclusão nega o objetivo declarado, sem reconciliar o método.",
+      "",
+      "## Lacunas globais de argumentação ou evidência",
+      "Nenhum problema global comprovável adicional de lacuna foi identificado além da tensão já citada.",
+      "",
+      "## Redundâncias e inconsistências recorrentes",
+      "Nenhuma redundância global comprovável foi identificada.",
+      "",
+      "## Prioridades de revisão",
+      "Revisar a articulação entre objetivo e conclusão para eliminar a contradição.",
+      opts.extra ?? "",
+    ].join("\n");
   }
 
   const skillEvt = () =>
@@ -1767,8 +1922,8 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
     ];
   }
 
-  function happyPhase2() {
-    return [
+  function happyPhase2(opts: { globalReply?: string | null; sinteseOutput?: string } = {}) {
+    const events: any[] = [
       oc("skill", {
         id: "s2",
         input: { name: "banca-avaliacao" },
@@ -1789,8 +1944,12 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
       oc("read", { id: "r3", input: { filePath: pack3 }, output: "SECTION_LAST" }),
       oc("banca_auditar", {
         id: "a3",
-        input: { manuscriptFingerprint: fp, batchId: b2, findings: [] },
-        output: "{}",
+        input: {
+          manuscriptFingerprint: fp,
+          batchId: b2,
+          findings: [{ file: "last.tex", category: "coherence", severity: "high" }],
+        },
+        output: JSON.stringify({ kind: "openbanca-audit-receipt-v2", acceptedCount: 1 }),
       }),
       oc("banca_context", {
         id: "c5",
@@ -1800,9 +1959,13 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
       oc("read", { id: "r4", input: { filePath: packDone }, output: "complete" }),
       oc("banca_sintese", {
         id: "syn2",
-        output: fullSinteseJson(),
+        output: opts.sinteseOutput ?? fullSinteseJson(),
       }),
     ];
+    if (opts.globalReply !== null) {
+      events.push(ocText(opts.globalReply ?? validGlobalReplyText()));
+    }
+    return events;
   }
 
   function stateRunning(): ExhaustiveProjectState {
@@ -1827,7 +1990,8 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
       ...stateRunning(),
       completedBatches: 3,
       checkpointState: "complete",
-      findingIds: ["fid-phase1"],
+      findingsCount: 2,
+      findingIds: ["fid-phase1", "fid-phase2-last"],
       sourcesInContextPacks: ["first.tex", "middle.tex", "last.tex"],
       markersInContextPacks: { first: true, middle: true, last: true },
       contextPackPaths: [
@@ -2020,7 +2184,7 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
     }
   });
 
-  test("valid multi-batch order with interrupt, resume, and synthesis gates PASSes", () => {
+  test("valid multi-batch order with interrupt, resume, synthesis and global reply PASSes", () => {
     const phase1 = happyPhase1();
     const partial = happyPartial();
     const phase2 = happyPhase2();
@@ -2049,6 +2213,15 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
     expect(evaluation.findingsNotDuplicatedOnResume).toBe(true);
     expect(evaluation.phase1Interrupted).toBe(true);
     expect(evaluation.resumeAcrossProcesses).toBe(true);
+    expect(evaluation.globalSynthesisOk).toBe(true);
+    expect(evaluation.globalReplyPresent).toBe(true);
+    expect(evaluation.globalReplyAfterSintese).toBe(true);
+    expect(evaluation.globalSectionsOrdered).toBe(true);
+    expect(evaluation.globalCrossBatchRelation).toBe(true);
+    expect(evaluation.globalFindingIdsAllowlisted).toBe(true);
+    expect(evaluation.globalForbiddenLanguageAbsent).toBe(true);
+    expect(evaluation.globalNotJsonPassthrough).toBe(true);
+    expect(evaluation.globalCitedBatchIds.length).toBeGreaterThanOrEqual(2);
 
     const classified = classifyProtocolPhase({
       hasAuthAndModel: true,
@@ -2058,6 +2231,7 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
     });
     expect(classified.outcome).toBe("PASS");
     expect(classified.passed).toBe(true);
+    expect(classified.classification).toBe("MODEL_PROTOCOL_PASSED");
   });
 
   test("wrong tool order fails multi-batch order", () => {
@@ -2430,5 +2604,1274 @@ describe("Exhaustive multi-batch protocol evaluators (issue #88)", () => {
     expect(evaluation.contextCalled).toBe(false);
     expect(evaluation.auditarCalled).toBe(false);
     expect(evaluation.multiBatchOrderCorrect).toBe(false);
+  });
+
+  test("synthetic manuscript embeds objective vs conclusion tension", () => {
+    const root = mkdtempSync(join(tmpdir(), "e2e-tension-"));
+    try {
+      writeSyntheticMultiBatchProject(root);
+      const first = readFileSync(join(root, "first.tex"), "utf8");
+      const last = readFileSync(join(root, "last.tex"), "utf8");
+      expect(first).toContain("objetivo");
+      expect(first.toLowerCase()).toMatch(/melhora|ganho/);
+      expect(last.toLowerCase()).toMatch(/n[aã]o produz|refut|descart/);
+      expect(first).toContain("SECTION_FIRST");
+      expect(last).toContain("SECTION_LAST");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // --- Issue #92: global synthesis after full coverage ---
+
+  test("normalizeTextEvent accepts completed OpenCode text parts only", () => {
+    const good = ocText("hello assistant");
+    const n = normalizeTextEvent(good, 3);
+    expect(n).not.toBeNull();
+    expect(n!.text).toBe("hello assistant");
+    expect(n!.index).toBe(3);
+    expect(n!.malformed).toBeUndefined();
+    expect(n!.sessionId).toBe("ses_test");
+
+    // Incomplete stream (time without end) is not a final assistant reply
+    expect(
+      normalizeTextEvent({
+        type: "text",
+        sessionID: "ses_test",
+        part: { type: "text", text: "partial", time: { start: 1 } },
+      })
+    ).toBeNull();
+
+    // Missing part.time entirely is also incomplete (audit #93)
+    expect(
+      normalizeTextEvent({
+        type: "text",
+        sessionID: "ses_test",
+        part: { type: "text", text: "no time object" },
+      })
+    ).toBeNull();
+    expect(normalizeTextEvent(ocText("x", { omitTime: true }))).toBeNull();
+
+    // Malformed: text event without part
+    const mal = normalizeTextEvent({ type: "text" }, 0);
+    expect(mal?.malformed).toBe(true);
+
+    // Tool events are not text
+    expect(normalizeTextEvent(oc("banca_sintese", { output: "{}" }))).toBeNull();
+
+    // Non-assistant envelope
+    expect(normalizeTextEvent({ type: "step_start", part: { type: "step-start" } })).toBeNull();
+    expect(normalizeTextEvent(null)?.malformed).toBe(true);
+    expect(normalizeAllTextEvents([good, oc("read", { output: "x" })]).length).toBe(1);
+  });
+
+  test("global reply missing after successful banca_sintese fails", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: null });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.finalSinteseSucceeded).toBe(true);
+    expect(evaluation.globalReplyPresent).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    const classified = classifyProtocolPhase({
+      hasAuthAndModel: true,
+      initPassed: true,
+      result: okResult("{}"),
+      evaluation,
+    });
+    expect(classified.outcome).toBe("FAIL");
+    expect(classified.classification).toContain("global_reply_missing");
+  });
+
+  test("global reply produced before banca_sintese fails", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    // Prepend global-looking text before tools; no text after sintese
+    const phase2 = [
+      ocText(validGlobalReplyText()),
+      ...happyPhase2({ globalReply: null }),
+    ];
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.finalSinteseSucceeded).toBe(true);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(evaluation.globalReplyPresent).toBe(false);
+    const classified = classifyProtocolPhase({
+      hasAuthAndModel: true,
+      initPassed: true,
+      result: okResult("{}"),
+      evaluation,
+    });
+    expect(classified.outcome).toBe("FAIL");
+    expect(classified.classification).toMatch(/global_reply_missing|global_reply_before_sintese/);
+  });
+
+  test("missing or out-of-order global section fails", () => {
+    const missingSection = validGlobalReplyText().replace(
+      "## Coerência entre objetivos, método, resultados e conclusão\nA coerência global é frágil porque a conclusão nega o objetivo declarado, sem reconciliar o método.\n\n",
+      ""
+    );
+    const reordered = [
+      "## Prioridades de revisão",
+      "x",
+      "## Síntese global do manuscrito",
+      "y",
+      "## Contradições ou tensões entre seções",
+      `tensão findingId=${findingPhase1.findingId} ${findingPhase1.file} ${findingPhase1.startLine}-${findingPhase1.endLine} ${findingPhase1.sectionId} e findingId=${findingPhase2.findingId} ${findingPhase2.file} ${findingPhase2.startLine}-${findingPhase2.endLine} ${findingPhase2.sectionId}`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "z",
+      "## Lacunas globais de argumentação ou evidência",
+      "n",
+      "## Redundâncias e inconsistências recorrentes",
+      "n",
+    ].join("\n");
+
+    expect(validateGlobalSectionOrder(missingSection).ok).toBe(false);
+    expect(validateGlobalSectionOrder(reordered).ok).toBe(false);
+    expect(validateGlobalSectionOrder(validGlobalReplyText()).ok).toBe(true);
+
+    for (const bad of [missingSection, reordered]) {
+      const phase1 = happyPhase1();
+      const partial = happyPartial();
+      const phase2 = happyPhase2({ globalReply: bad });
+      const evaluation = evalOpts({
+        events: [...phase1, ...partial, ...phase2],
+        phase1Events: phase1,
+        partialSinteseEvents: partial,
+        phase2Events: phase2,
+        stateAfterPhase1: stateRunning(),
+        stateAfterPhase2: stateComplete(),
+        resumeAcrossProcesses: true,
+      });
+      expect(evaluation.globalSectionsOrdered).toBe(false);
+      expect(evaluation.globalSynthesisOk).toBe(false);
+      expect(
+        classifyProtocolPhase({
+          hasAuthAndModel: true,
+          initPassed: true,
+          result: okResult("{}"),
+          evaluation,
+        }).classification
+      ).toContain("global_sections_missing_or_unordered");
+    }
+  });
+
+  test("invented findingId fails allowlist gate", () => {
+    const bad = validGlobalReplyText({ idB: "fid-invented-xyz" });
+    // Allowlist still has real ids; inventing an extra labeled id
+    const withLabel =
+      bad + "\nfindingId=fid-totally-fake-999 also cited without allowlist entry.\n";
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: withLabel });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalFindingIdsAllowlisted).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_finding_ids_not_allowlisted");
+  });
+
+  test("mere ID listing under six titles without relational conclusion fails", () => {
+    // Six ordered headers + allowlisted IDs with full file/line/sectionId but no
+    // relational body prose → must FAIL (not accept bare listing).
+    const bareList = [
+      "## Síntese global do manuscrito",
+      "x",
+      "## Contradições ou tensões entre seções",
+      `findingId=${findingPhase1.findingId} ${findingPhase1.file} ${findingPhase1.startLine}-${findingPhase1.endLine} ${findingPhase1.sectionId}`,
+      `findingId=${findingPhase2.findingId} ${findingPhase2.file} ${findingPhase2.startLine}-${findingPhase2.endLine} ${findingPhase2.sectionId}`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "x",
+      "## Lacunas globais de argumentação ou evidência",
+      "x",
+      "## Redundâncias e inconsistências recorrentes",
+      "x",
+      "## Prioridades de revisão",
+      "x",
+    ].join("\n");
+
+    // Title vocabulary alone must not count as relational conclusion.
+    const stripped = stripGlobalSectionTitles(bareList);
+    expect(stripped).not.toMatch(/Contradições ou tensões/i);
+    expect(
+      hasRelationalConclusion(bareList, [
+        { findingId: findingPhase1.findingId, batchId: findingPhase1.batchId },
+        { findingId: findingPhase2.findingId, batchId: findingPhase2.batchId },
+      ])
+    ).toBe(false);
+
+    const allow = parseSinteseAllowlistFindings(fullSinteseJson())!;
+    const cross = validateCrossBatchRelation(bareList, allow);
+    expect(cross.ok).toBe(false);
+    expect(cross.reason).toBe("no_relational_conclusion");
+    // IDs and batches are present; failure is specifically the missing conclusion.
+    expect(cross.citedFindingIds.length).toBeGreaterThanOrEqual(2);
+    expect(cross.citedBatchIds.length).toBeGreaterThanOrEqual(2);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: bareList });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalSectionsOrdered).toBe(true);
+    expect(evaluation.globalCrossBatchRelation).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_cross_batch_relation_missing");
+  });
+
+  test("same-batch-only findingIds fail cross-batch relation", () => {
+    const sameBatchSintese = fullSinteseJson({
+      findings: [
+        findingPhase1,
+        {
+          ...findingPhase2,
+          findingId: "fid-same-batch",
+          batchId: b0,
+          file: "first.tex",
+          sectionId: "sec-objetivos",
+        },
+      ],
+    });
+    const reply = validGlobalReplyText({
+      idB: "fid-same-batch",
+      fileB: "first.tex",
+      secB: "sec-objetivos",
+      lineB: "2-5",
+    });
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: reply, sinteseOutput: sameBatchSintese });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalCrossBatchRelation).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_cross_batch_relation_missing");
+  });
+
+  test("forbidden score/approval language fails", () => {
+    const bad = validGlobalReplyText({
+      extra: "\nA nota final seria 7 e a aprovação institucional é recomendada.\n",
+    });
+    expect(findForbiddenSynthesisLanguage(bad).length).toBeGreaterThan(0);
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: bad });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalForbiddenLanguageAbsent).toBe(false);
+    expect(evaluation.globalForbiddenTermsFound.length).toBeGreaterThan(0);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_forbidden_language");
+  });
+
+  test("successful tool followed only by JSON pass-through fails", () => {
+    const body = fullSinteseJson();
+    expect(isJsonPassthroughReply(body)).toBe(true);
+    expect(isJsonPassthroughReply("```json\n" + body + "\n```")).toBe(true);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: body });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalNotJsonPassthrough).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toMatch(/global_json_passthrough_only|global_sections_missing/);
+  });
+
+  test("malformed or non-assistant text events do not count as global reply", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2Base = happyPhase2({ globalReply: null });
+    const phase2 = [
+      ...phase2Base,
+      // malformed text event
+      { type: "text", part: { type: "text" } },
+      // tool_use mislabeled
+      {
+        type: "text",
+        part: {
+          type: "tool",
+          tool: "banca_sintese",
+          state: { status: "completed", output: "nope" },
+        },
+      },
+      // reasoning is not assistant final reply
+      {
+        type: "reasoning",
+        part: { type: "reasoning", text: validGlobalReplyText(), time: { end: 1 } },
+      },
+      // plain string / null
+      null,
+      "not-an-event",
+    ];
+    const g = evaluateGlobalSynthesis(phase2);
+    expect(g.globalReplyPresent).toBe(false);
+    expect(g.globalSynthesisOk).toBe(false);
+
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).outcome
+    ).toBe("FAIL");
+  });
+
+  test("evaluateGlobalSynthesis and allowlist helpers on pure fixtures", () => {
+    const sinteseOut = fullSinteseJson();
+    const allow = parseSinteseAllowlistFindings(sinteseOut);
+    expect(allow).not.toBeNull();
+    expect(allow!.length).toBe(2);
+    expect(extractCitedFindingIds(validGlobalReplyText(), allow!).sort()).toEqual(
+      ["fid-phase1", "fid-phase2-last"].sort()
+    );
+    expect(extractInventedFindingIds("findingId=fid-nope", allow!).length).toBe(1);
+    const cross = validateCrossBatchRelation(validGlobalReplyText(), allow!);
+    expect(cross.ok).toBe(true);
+    expect(cross.citedBatchIds.sort()).toEqual([b0, b2].sort());
+
+    const events = [
+      oc("banca_sintese", { id: "s", output: sinteseOut }),
+      ocText(validGlobalReplyText()),
+    ];
+    const g = evaluateGlobalSynthesis(events);
+    expect(g.globalSynthesisOk).toBe(true);
+    expect(g.globalSinteseEventIndex).toBe(0);
+    expect(g.globalReplyEventIndex).toBe(1);
+    expect(g.globalSectionsFound.length).toBe(6);
+  });
+
+  test("phase-final prompt reloads skill without pasting six section titles", () => {
+    // Evaluator may list titles for validation; the phase-final *prompt* must not paste them.
+    const phase2PromptBlock = runnerSource.match(
+      /const promptPhase2\s*=\s*([\s\S]*?);[\r\n]/
+    );
+    expect(phase2PromptBlock).not.toBeNull();
+    const promptSrc = phase2PromptBlock![0];
+    for (const title of GLOBAL_SYNTHESIS_SECTIONS) {
+      expect(promptSrc.includes(title)).toBe(false);
+    }
+    expect(promptSrc).toContain("banca-avaliacao");
+    expect(promptSrc).toMatch(/reload it in this process/i);
+    expect(promptSrc).toMatch(/global academic synthesis/i);
+    expect(promptSrc).toMatch(/Do not merely pass through/i);
+  });
+
+  // --- Issue #93: fail-closed false-positive hardenings ---
+
+  test("text envelope without part.time.end is rejected as global reply", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2Base = happyPhase2({ globalReply: null });
+    // Incomplete text after successful sintese (no part.time at all)
+    const incomplete = {
+      type: "text",
+      sessionID: "ses_test",
+      part: { type: "text", text: validGlobalReplyText() },
+    };
+    const phase2 = [...phase2Base, incomplete];
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.finalSinteseSucceeded).toBe(true);
+    expect(evaluation.globalReplyPresent).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_reply_missing");
+  });
+
+  test("duplicated section title fails uniqueness even if ordered subsequence exists", () => {
+    const withDup = [
+      "## Síntese global do manuscrito",
+      "intro",
+      // Extra early copy of a later title — ordered pass can still find six in order later
+      "## Prioridades de revisão",
+      "premature priorities",
+      "## Contradições ou tensões entre seções",
+      `Há tensão: findingId=${findingPhase1.findingId} em ${findingPhase1.file} linhas ${findingPhase1.startLine}-${findingPhase1.endLine} seção ${findingPhase1.sectionId} e findingId=${findingPhase2.findingId} em ${findingPhase2.file} linhas ${findingPhase2.startLine}-${findingPhase2.endLine} seção ${findingPhase2.sectionId}.`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "coerência frágil",
+      "## Lacunas globais de argumentação ou evidência",
+      "nenhuma",
+      "## Redundâncias e inconsistências recorrentes",
+      "nenhuma",
+      "## Prioridades de revisão",
+      "revisar objetivo vs conclusão",
+    ].join("\n");
+    const sections = validateGlobalSectionOrder(withDup);
+    expect(sections.orderOk).toBe(true);
+    expect(sections.uniqueOk).toBe(false);
+    expect(sections.ok).toBe(false);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: withDup });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalSectionsOrdered).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_sections_missing_or_unordered");
+  });
+
+  test("bare non-allowlist SHA-256 hex findingId fails invent scan", () => {
+    const realA = "a".repeat(64);
+    const realB = "b".repeat(64);
+    const inventedHex = "c".repeat(64);
+    const allowFindings = [
+      { ...findingPhase1, findingId: realA },
+      { ...findingPhase2, findingId: realB },
+    ];
+    const sinteseOut = fullSinteseJson({ findings: allowFindings });
+    // Body cites allowlisted IDs with provenance + a bare invented SHA-256 (no label)
+    const reply = [
+      "## Síntese global do manuscrito",
+      "síntese",
+      "## Contradições ou tensões entre seções",
+      `Há tensão entre findings: findingId=${realA} em first.tex linhas 2-4 seção sec-objetivos e findingId=${realB} em last.tex linhas 2-5 seção sec-conclusao. Também ${inventedHex} aparece no texto.`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "coerência",
+      "## Lacunas globais de argumentação ou evidência",
+      "nenhuma",
+      "## Redundâncias e inconsistências recorrentes",
+      "nenhuma",
+      "## Prioridades de revisão",
+      "revisar",
+    ].join("\n");
+
+    const invented = extractInventedFindingIds(
+      reply,
+      parseSinteseAllowlistFindings(sinteseOut)!
+    );
+    expect(invented).toContain(inventedHex);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: reply, sinteseOutput: sinteseOut });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: {
+        ...stateComplete(),
+        findingIds: [realA, realB],
+      },
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalFindingIdsAllowlisted).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_finding_ids_not_allowlisted");
+  });
+
+  test("line digits only outside the finding window fail provenance", () => {
+    // Section numbers "2." and "4." elsewhere must not satisfy line provenance for the finding.
+    const f = {
+      findingId: "fid-window-a",
+      batchId: b0,
+      file: "first.tex",
+      startLine: 2,
+      endLine: 4,
+      sectionId: "sec-objetivos",
+      claim: "c",
+      evidence: "e",
+    };
+    const g = {
+      findingId: "fid-window-b",
+      batchId: b2,
+      file: "last.tex",
+      startLine: 2,
+      endLine: 5,
+      sectionId: "sec-conclusao",
+      claim: "c",
+      evidence: "e",
+    };
+    // Digits 2 and 4 appear only as markdown headers far from the findingId blocks
+    const text = [
+      "2. Header two",
+      "4. Header four",
+      "some date 2024",
+      `findingId=${f.findingId} file=${f.file} sectionId=${f.sectionId}`,
+      // no line range near this finding
+      `findingId=${g.findingId} file=${g.file} sectionId=${g.sectionId}`,
+    ].join("\n");
+    expect(findingTraceableInText(text, f)).toBe(false);
+    expect(findingTraceableInText(text, g)).toBe(false);
+    // Windowed line helper: digits alone without line keyword fail
+    expect(linesCitedInFindingWindow("2. Header\n4. other", 2, 4)).toBe(false);
+    expect(linesCitedInFindingWindow("linhas 2-4", 2, 4)).toBe(true);
+
+    const allow = [
+      { ...f },
+      { ...g },
+    ];
+    const cross = validateCrossBatchRelation(
+      [
+        "## Síntese global do manuscrito",
+        "x",
+        "## Contradições ou tensões entre seções",
+        `Há tensão entre findingId=${f.findingId} ${f.file} ${f.sectionId} e findingId=${g.findingId} ${g.file} ${g.sectionId}`,
+        // line digits only as section numbers above, not near findings
+        "## Coerência entre objetivos, método, resultados e conclusão",
+        "x",
+        "## Lacunas globais de argumentação ou evidência",
+        "x",
+        "## Redundâncias e inconsistências recorrentes",
+        "x",
+        "## Prioridades de revisão",
+        "x",
+      ].join("\n"),
+      allow
+    );
+    expect(cross.ok).toBe(false);
+    expect(cross.reason).toBe("missing_file_line_section_traceability");
+  });
+
+  test("cross-session text after banca_sintese does not count as global reply", () => {
+    expect(sessionsCorrelate("ses_a", "ses_b")).toBe(false);
+    expect(sessionsCorrelate("ses_a", "ses_a")).toBe(true);
+    // Missing either side does not prove same session (fail-closed)
+    expect(sessionsCorrelate(null, "ses_a")).toBe(false);
+    expect(sessionsCorrelate("ses_a", null)).toBe(false);
+    expect(sessionsCorrelate(null, null)).toBe(false);
+    expect(sessionsCorrelate("", "ses_a")).toBe(false);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    // phase2 tools on ses_A; global text on ses_B
+    const phase2Tools = happyPhase2({ globalReply: null }).map((e) => {
+      if (e && typeof e === "object") {
+        return { ...e, sessionID: "ses_A" };
+      }
+      return e;
+    });
+    const foreignText = ocText(validGlobalReplyText(), { sessionID: "ses_B" });
+    const phase2 = [...phase2Tools, foreignText];
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.finalSinteseSucceeded).toBe(true);
+    expect(evaluation.globalReplyPresent).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    // Pure evaluateGlobalSynthesis on mixed-session stream
+    const g = evaluateGlobalSynthesis(phase2);
+    expect(g.globalSynthesisOk).toBe(false);
+    expect(g.globalReplyPresent).toBe(false);
+  });
+
+  test("missing sessionId on tool or text fails same-session correlation", () => {
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    // Tools with session; text without sessionID field
+    const phase2Tools = happyPhase2({ globalReply: null });
+    const textNoSession = {
+      type: "text",
+      timestamp: Date.now(),
+      // no sessionID
+      part: {
+        id: "prt_nosess",
+        type: "text",
+        text: validGlobalReplyText(),
+        time: { start: 1, end: 2 },
+      },
+    };
+    const phase2 = [...phase2Tools, textNoSession];
+    const g = evaluateGlobalSynthesis(phase2);
+    expect(g.globalReplyPresent).toBe(false);
+    expect(g.globalSynthesisOk).toBe(false);
+
+    // Tool without session, text with session
+    const sinteseNoSess = {
+      type: "tool_use",
+      // no sessionID
+      part: {
+        type: "tool",
+        tool: "banca_sintese",
+        callID: "syn_nosess",
+        state: { status: "completed", input: {}, output: fullSinteseJson() },
+      },
+    };
+    const g2 = evaluateGlobalSynthesis([
+      sinteseNoSess,
+      ocText(validGlobalReplyText(), { sessionID: "ses_only_text" }),
+    ]);
+    expect(g2.globalReplyPresent).toBe(false);
+    expect(g2.globalSynthesisOk).toBe(false);
+
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_reply_missing");
+  });
+
+  test("lone startLine label does not prove multi-line finding range", () => {
+    // Finding spans lines 2-4; only startLine=2 must FAIL
+    expect(linesCitedInFindingWindow("startLine=2", 2, 4)).toBe(false);
+    expect(linesCitedInFindingWindow("startLine=2 endLine=4", 2, 4)).toBe(true);
+    expect(linesCitedInFindingWindow("linhas 2-4", 2, 4)).toBe(true);
+    expect(linesCitedInFindingWindow("linha 2", 2, 2)).toBe(true);
+    expect(linesCitedInFindingWindow("startLine=2", 2, 2)).toBe(true);
+
+    const f = {
+      findingId: "fid-range-a",
+      batchId: b0,
+      file: "first.tex",
+      startLine: 2,
+      endLine: 4,
+      sectionId: "sec-objetivos",
+      claim: "c",
+      evidence: "e",
+    };
+    const g = {
+      findingId: "fid-range-b",
+      batchId: b2,
+      file: "last.tex",
+      startLine: 2,
+      endLine: 5,
+      sectionId: "sec-conclusao",
+      claim: "c",
+      evidence: "e",
+    };
+    // Only startLine near each finding — not full range
+    const reply = [
+      "## Síntese global do manuscrito",
+      "síntese",
+      "## Contradições ou tensões entre seções",
+      `Há tensão entre findingId=${f.findingId} ${f.file} sectionId=${f.sectionId} startLine=${f.startLine} e findingId=${g.findingId} ${g.file} sectionId=${g.sectionId} startLine=${g.startLine}.`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "x",
+      "## Lacunas globais de argumentação ou evidência",
+      "x",
+      "## Redundâncias e inconsistências recorrentes",
+      "x",
+      "## Prioridades de revisão",
+      "x",
+    ].join("\n");
+    expect(findingTraceableInText(reply, f)).toBe(false);
+    expect(findingTraceableInText(reply, g)).toBe(false);
+    const cross = validateCrossBatchRelation(reply, [f, g]);
+    expect(cross.ok).toBe(false);
+    expect(cross.reason).toBe("missing_file_line_section_traceability");
+  });
+
+  test("labeled findingId=fingerprint is invented even if envelope allows bare fingerprint", () => {
+    const realA = "a".repeat(64);
+    const realB = "b".repeat(64);
+    const fingerprint = "d".repeat(64);
+    const allowFindings = [
+      {
+        ...findingPhase1,
+        findingId: realA,
+        manuscriptFingerprint: fingerprint,
+      },
+      {
+        ...findingPhase2,
+        findingId: realB,
+        manuscriptFingerprint: fingerprint,
+      },
+    ];
+    // Envelope with fingerprint as manuscriptFingerprint (valid V1)
+    const sinteseOut = fullSinteseJson({
+      manuscriptFingerprint: fingerprint,
+      findings: allowFindings.map((f) => ({
+        ...f,
+        manuscriptFingerprint: fingerprint,
+      })),
+    });
+    // Bare fingerprint may be noise; labeled findingId=<fingerprint> must FAIL
+    const reply = [
+      "## Síntese global do manuscrito",
+      "síntese",
+      "## Contradições ou tensões entre seções",
+      `Há tensão: findingId=${realA} em first.tex linhas 2-4 seção sec-objetivos e findingId=${realB} em last.tex linhas 2-5 seção sec-conclusao. Mas findingId=${fingerprint} não é um finding.`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "coerência",
+      "## Lacunas globais de argumentação ou evidência",
+      "nenhuma",
+      "## Redundâncias e inconsistências recorrentes",
+      "nenhuma",
+      "## Prioridades de revisão",
+      "revisar",
+    ].join("\n");
+
+    const allow = parseSinteseAllowlistFindings(sinteseOut)!;
+    const extras = extractSinteseEnvelopeAllowedIds(sinteseOut);
+    expect(extras).toContain(fingerprint);
+    // Bare fingerprint alone would be allowed via extras; labeled is not
+    expect(
+      extractInventedFindingIds(`noise ${fingerprint} only`, allow, extras)
+    ).toEqual([]);
+    const invented = extractInventedFindingIds(reply, allow, extras);
+    expect(invented).toContain(fingerprint);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2({ globalReply: reply, sinteseOutput: sinteseOut });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: {
+        ...stateComplete(),
+        findingIds: [realA, realB],
+        manuscriptFingerprint: fingerprint,
+      },
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalFindingIdsAllowlisted).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    expect(
+      classifyProtocolPhase({
+        hasAuthAndModel: true,
+        initPassed: true,
+        result: okResult("{}"),
+        evaluation,
+      }).classification
+    ).toContain("global_finding_ids_not_allowlisted");
+  });
+
+  // --- Issue #93 residual: adjacent title uniqueness + exact provenance ---
+
+  /** Six mandatory titles in order (optionally with a prefix line duplicated). */
+  function sixTitlesBody(opts: {
+    lines: string[];
+    joinWith?: string;
+  }): string {
+    return opts.lines.join(opts.joinWith ?? "\n");
+  }
+
+  function assertAdjacentDupRejected(body: string) {
+    const sections = validateGlobalSectionOrder(body);
+    expect(sections.uniqueOk).toBe(false);
+    expect(sections.ok).toBe(false);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    // Keep relational prose valid so failure is specifically uniqueness
+    const withRelation = body.includes("findingId=")
+      ? body
+      : body.replace(
+          /Prioridades de revisão/,
+          `Prioridades de revisão\nHá tensão entre findingId=${findingPhase1.findingId} em ${findingPhase1.file} linhas ${findingPhase1.startLine}-${findingPhase1.endLine} seção ${findingPhase1.sectionId} e findingId=${findingPhase2.findingId} em ${findingPhase2.file} linhas ${findingPhase2.startLine}-${findingPhase2.endLine} seção ${findingPhase2.sectionId}.`
+        );
+    const phase2 = happyPhase2({ globalReply: withRelation });
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalSectionsOrdered).toBe(false);
+    expect(evaluation.globalSynthesisOk).toBe(false);
+    const classified = classifyProtocolPhase({
+      hasAuthAndModel: true,
+      initPassed: true,
+      result: okResult("{}"),
+      evaluation,
+    });
+    expect(classified.outcome).toBe("FAIL");
+    expect(classified.classification).toContain("global_sections_missing_or_unordered");
+  }
+
+  test("adjacent duplicate first title fails uniqueness", () => {
+    const body = sixTitlesBody({
+      lines: [
+        "## Síntese global do manuscrito",
+        "## Síntese global do manuscrito",
+        "## Contradições ou tensões entre seções",
+        "## Coerência entre objetivos, método, resultados e conclusão",
+        "## Lacunas globais de argumentação ou evidência",
+        "## Redundâncias e inconsistências recorrentes",
+        "## Prioridades de revisão",
+      ],
+    });
+    const sections = validateGlobalSectionOrder(body);
+    expect(sections.uniqueOk).toBe(false);
+    expect(sections.ok).toBe(false);
+    assertAdjacentDupRejected(body);
+  });
+
+  test("adjacent duplicate intermediate title fails uniqueness", () => {
+    const body = sixTitlesBody({
+      lines: [
+        "## Síntese global do manuscrito",
+        "## Contradições ou tensões entre seções",
+        "## Coerência entre objetivos, método, resultados e conclusão",
+        "## Coerência entre objetivos, método, resultados e conclusão",
+        "## Lacunas globais de argumentação ou evidência",
+        "## Redundâncias e inconsistências recorrentes",
+        "## Prioridades de revisão",
+      ],
+    });
+    const sections = validateGlobalSectionOrder(body);
+    expect(sections.uniqueOk).toBe(false);
+    expect(sections.ok).toBe(false);
+    assertAdjacentDupRejected(body);
+  });
+
+  test("adjacent duplicate Markdown headings fail uniqueness", () => {
+    const body = sixTitlesBody({
+      lines: [
+        "### Síntese global do manuscrito",
+        "### Síntese global do manuscrito",
+        "#### Contradições ou tensões entre seções",
+        "##### Coerência entre objetivos, método, resultados e conclusão",
+        "###### Lacunas globais de argumentação ou evidência",
+        "# Redundâncias e inconsistências recorrentes",
+        "## Prioridades de revisão",
+      ],
+    });
+    expect(validateGlobalSectionOrder(body).uniqueOk).toBe(false);
+    expect(validateGlobalSectionOrder(body).ok).toBe(false);
+    assertAdjacentDupRejected(body);
+  });
+
+  test("adjacent duplicate bold titles fail uniqueness", () => {
+    const body = sixTitlesBody({
+      lines: [
+        "**Síntese global do manuscrito**",
+        "**Síntese global do manuscrito**",
+        "**Contradições ou tensões entre seções**",
+        "__Coerência entre objetivos, método, resultados e conclusão__",
+        "**Lacunas globais de argumentação ou evidência**",
+        "**Redundâncias e inconsistências recorrentes**",
+        "**Prioridades de revisão**",
+      ],
+    });
+    expect(validateGlobalSectionOrder(body).uniqueOk).toBe(false);
+    expect(validateGlobalSectionOrder(body).ok).toBe(false);
+    assertAdjacentDupRejected(body);
+  });
+
+  test("adjacent duplicate titles with CRLF line endings fail uniqueness", () => {
+    const body = sixTitlesBody({
+      lines: [
+        "## Síntese global do manuscrito",
+        "## Síntese global do manuscrito",
+        "## Contradições ou tensões entre seções",
+        "## Coerência entre objetivos, método, resultados e conclusão",
+        "## Lacunas globais de argumentação ou evidência",
+        "## Redundâncias e inconsistências recorrentes",
+        "## Prioridades de revisão",
+      ],
+      joinWith: "\r\n",
+    });
+    expect(body.includes("\r\n")).toBe(true);
+    const sections = validateGlobalSectionOrder(body);
+    expect(sections.uniqueOk).toBe(false);
+    expect(sections.ok).toBe(false);
+    assertAdjacentDupRejected(body);
+  });
+
+  test("sectionId partial match sec-10 does not satisfy expected sec-1", () => {
+    const f = {
+      findingId: "fid-sec-partial-a",
+      batchId: b0,
+      file: "chapters/intro.tex",
+      startLine: 2,
+      endLine: 4,
+      sectionId: "sec-1",
+      claim: "c",
+      evidence: "e",
+    };
+    const g = {
+      findingId: "fid-sec-partial-b",
+      batchId: b2,
+      file: "chapters/conclusion.tex",
+      startLine: 2,
+      endLine: 5,
+      sectionId: "sec-2",
+      claim: "c",
+      evidence: "e",
+    };
+    // Cites sec-10 / sec-20 which contain sec-1 / sec-2 as substrings
+    const text = [
+      `findingId=${f.findingId} file=${f.file} linhas ${f.startLine}-${f.endLine} sectionId=sec-10`,
+      `findingId=${g.findingId} file=${g.file} linhas ${g.startLine}-${g.endLine} sectionId=sec-20`,
+    ].join("\n");
+    expect(sectionIdCitedInWindow(text, "sec-1")).toBe(false);
+    expect(sectionIdCitedInWindow("sectionId=sec-10", "sec-1")).toBe(false);
+    expect(findingTraceableInText(text, f)).toBe(false);
+    expect(findingTraceableInText(text, g)).toBe(false);
+
+    const reply = [
+      "## Síntese global do manuscrito",
+      "síntese",
+      "## Contradições ou tensões entre seções",
+      `Há tensão entre findingId=${f.findingId} ${f.file} linhas ${f.startLine}-${f.endLine} sectionId=sec-10 e findingId=${g.findingId} ${g.file} linhas ${g.startLine}-${g.endLine} sectionId=sec-20.`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "x",
+      "## Lacunas globais de argumentação ou evidência",
+      "x",
+      "## Redundâncias e inconsistências recorrentes",
+      "x",
+      "## Prioridades de revisão",
+      "x",
+    ].join("\n");
+    const cross = validateCrossBatchRelation(reply, [f, g]);
+    expect(cross.ok).toBe(false);
+    expect(cross.reason).toBe("missing_file_line_section_traceability");
+    const gEval = evaluateGlobalSynthesis([
+      oc("banca_sintese", {
+        id: "s",
+        output: fullSinteseJson({ findings: [f, g] }),
+      }),
+      ocText(reply),
+    ]);
+    expect(gEval.globalCrossBatchRelation).toBe(false);
+    expect(gEval.globalSynthesisOk).toBe(false);
+  });
+
+  test("sectionId prefix-sec-1 does not satisfy expected sec-1", () => {
+    const f = {
+      findingId: "fid-sec-prefix-a",
+      batchId: b0,
+      file: "chapters/intro.tex",
+      startLine: 2,
+      endLine: 4,
+      sectionId: "sec-1",
+      claim: "c",
+      evidence: "e",
+    };
+    expect(sectionIdCitedInWindow("sectionId=prefix-sec-1", "sec-1")).toBe(false);
+    expect(
+      findingTraceableInText(
+        `findingId=${f.findingId} file=${f.file} linhas 2-4 sectionId=prefix-sec-1`,
+        f
+      )
+    ).toBe(false);
+    // Exact token still works
+    expect(sectionIdCitedInWindow("sectionId=sec-1", "sec-1")).toBe(true);
+    expect(sectionIdCitedInWindow("seção sec-1 ", "sec-1")).toBe(true);
+  });
+
+  test("same basename in different directory fails full-path provenance", () => {
+    const f = {
+      findingId: "fid-path-homonym-a",
+      batchId: b0,
+      file: "chapters/method.tex",
+      startLine: 2,
+      endLine: 4,
+      sectionId: "sec-method",
+      claim: "c",
+      evidence: "e",
+    };
+    const g = {
+      findingId: "fid-path-homonym-b",
+      batchId: b2,
+      file: "chapters/results.tex",
+      startLine: 2,
+      endLine: 5,
+      sectionId: "sec-results",
+      claim: "c",
+      evidence: "e",
+    };
+    // Wrong directories with same basenames
+    const text = [
+      `findingId=${f.findingId} appendix/method.tex linhas 2-4 sectionId=sec-method`,
+      `findingId=${g.findingId} appendix/results.tex linhas 2-5 sectionId=sec-results`,
+    ].join("\n");
+    expect(filePathCitedInWindow(text, "chapters/method.tex")).toBe(false);
+    expect(filePathCitedInWindow("appendix/method.tex", "chapters/method.tex")).toBe(false);
+    expect(filePathCitedInWindow("old-chapters/method.tex", "chapters/method.tex")).toBe(false);
+    expect(findingTraceableInText(text, f)).toBe(false);
+    expect(findingTraceableInText(text, g)).toBe(false);
+
+    const reply = [
+      "## Síntese global do manuscrito",
+      "síntese",
+      "## Contradições ou tensões entre seções",
+      `Há tensão entre findingId=${f.findingId} appendix/method.tex linhas 2-4 sectionId=sec-method e findingId=${g.findingId} appendix/results.tex linhas 2-5 sectionId=sec-results.`,
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "x",
+      "## Lacunas globais de argumentação ou evidência",
+      "x",
+      "## Redundâncias e inconsistências recorrentes",
+      "x",
+      "## Prioridades de revisão",
+      "x",
+    ].join("\n");
+    expect(validateCrossBatchRelation(reply, [f, g]).ok).toBe(false);
+    expect(validateCrossBatchRelation(reply, [f, g]).reason).toBe(
+      "missing_file_line_section_traceability"
+    );
+  });
+
+  test("basename-only citation fails when finding has directory path", () => {
+    const f = {
+      findingId: "fid-basename-only",
+      batchId: b0,
+      file: "chapters/method.tex",
+      startLine: 2,
+      endLine: 4,
+      sectionId: "sec-method",
+      claim: "c",
+      evidence: "e",
+    };
+    const window = `findingId=${f.findingId} method.tex linhas 2-4 sectionId=sec-method`;
+    expect(filePathCitedInWindow(window, "chapters/method.tex")).toBe(false);
+    expect(filePathCitedInWindow(window, "method.tex")).toBe(true); // basename alone matches itself
+    expect(findingTraceableInText(window, f)).toBe(false);
+  });
+
+  test("exact full path and exact sectionId still pass provenance", () => {
+    // Full AnalysisFinding V1 shapes so isSinteseSuccessOutput accepts the envelope.
+    const f = {
+      ...findingPhase1,
+      findingId: "fid-exact-path-a",
+      file: "chapters/method.tex",
+      sectionId: "sec-1",
+    };
+    const g = {
+      ...findingPhase2,
+      findingId: "fid-exact-path-b",
+      file: "chapters/conclusion.tex",
+      sectionId: "sec-2",
+    };
+    const allowShape = (x: typeof f) => ({
+      findingId: x.findingId,
+      batchId: x.batchId,
+      file: x.file,
+      startLine: x.startLine,
+      endLine: x.endLine,
+      sectionId: x.sectionId,
+      claim: x.claim,
+      evidence: x.evidence,
+    });
+    const windowA = `findingId=${f.findingId} chapters/method.tex linhas 2-4 sectionId=sec-1`;
+    const windowB = `findingId=${g.findingId} chapters/conclusion.tex linhas 2-5 sectionId=sec-2`;
+    expect(sectionIdCitedInWindow(windowA, "sec-1")).toBe(true);
+    expect(filePathCitedInWindow(windowA, "chapters/method.tex")).toBe(true);
+    expect(findingTraceableInText(windowA, allowShape(f))).toBe(true);
+    expect(findingTraceableInText(windowB, allowShape(g))).toBe(true);
+
+    const reply = [
+      "## Síntese global do manuscrito",
+      "O manuscrito apresenta tensão entre método e conclusão.",
+      "",
+      "## Contradições ou tensões entre seções",
+      `Há tensão entre findingId=${f.findingId} em chapters/method.tex linhas 2-4 seção sec-1 e findingId=${g.findingId} em chapters/conclusion.tex linhas 2-5 seção sec-2. A relação entre esses findings de lotes distintos evidencia contradição.`,
+      "",
+      "## Coerência entre objetivos, método, resultados e conclusão",
+      "coerência frágil",
+      "",
+      "## Lacunas globais de argumentação ou evidência",
+      "nenhuma",
+      "",
+      "## Redundâncias e inconsistências recorrentes",
+      "nenhuma",
+      "",
+      "## Prioridades de revisão",
+      "revisar método vs conclusão",
+    ].join("\n");
+    expect(validateGlobalSectionOrder(reply).ok).toBe(true);
+    const cross = validateCrossBatchRelation(reply, [allowShape(f), allowShape(g)]);
+    expect(cross.ok).toBe(true);
+    const gEval = evaluateGlobalSynthesis([
+      oc("banca_sintese", {
+        id: "s",
+        output: fullSinteseJson({ findings: [f, g] }),
+      }),
+      ocText(reply),
+    ]);
+    expect(gEval.globalSynthesisOk).toBe(true);
+    expect(gEval.globalSectionsOrdered).toBe(true);
+    expect(gEval.globalCrossBatchRelation).toBe(true);
+  });
+
+  test("existing valid E2E fixture still returns MODEL_PROTOCOL_PASSED", () => {
+    // Re-assert the composed happy path after provenance/title hardenings.
+    expect(validateGlobalSectionOrder(validGlobalReplyText()).ok).toBe(true);
+    expect(
+      findingTraceableInText(validGlobalReplyText(), {
+        findingId: findingPhase1.findingId,
+        batchId: findingPhase1.batchId,
+        file: findingPhase1.file,
+        startLine: findingPhase1.startLine,
+        endLine: findingPhase1.endLine,
+        sectionId: findingPhase1.sectionId,
+        claim: findingPhase1.claim,
+        evidence: findingPhase1.evidence,
+      })
+    ).toBe(true);
+
+    const phase1 = happyPhase1();
+    const partial = happyPartial();
+    const phase2 = happyPhase2();
+    const evaluation = evalOpts({
+      events: [...phase1, ...partial, ...phase2],
+      phase1Events: phase1,
+      partialSinteseEvents: partial,
+      phase2Events: phase2,
+      stateAfterPhase1: stateRunning(),
+      stateAfterPhase2: stateComplete(),
+      minBatches: 3,
+      hashesMatch: true,
+      resumeAcrossProcesses: true,
+    });
+    expect(evaluation.globalSynthesisOk).toBe(true);
+    const classified = classifyProtocolPhase({
+      hasAuthAndModel: true,
+      initPassed: true,
+      result: okResult("{}"),
+      evaluation,
+    });
+    expect(classified.outcome).toBe("PASS");
+    expect(classified.classification).toBe("MODEL_PROTOCOL_PASSED");
   });
 });
