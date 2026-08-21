@@ -1,10 +1,11 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, readFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
-import { loadState, saveState, addIteration, addSnapshot } from "../lib/state"
+import { loadState, addIteration, addSnapshot } from "../lib/state"
 import { generateReport, saveReport } from "../lib/reports"
+import { analyzeCitationDensity } from "../lib/citation"
 const z = tool.schema
 
 export const bancaLoop = tool({
@@ -36,25 +37,28 @@ export const bancaLoop = tool({
       }
     }
 
-    // circuit breaker: oscillation detected
-    if (lastN.length >= 2) {
+    // circuit breaker: oscillation detected (real A-B-A pattern across the
+    // last three loop iterations; equal consecutive scores are normal
+    // progress, not oscillation)
+    if (lastN.length >= 3) {
       const s0 = lastN[0].scoreAfter
       const s1 = lastN[1].scoreAfter
-      if (s0 !== null && s1 !== null && s0 === s1) {
+      const s2 = lastN[2].scoreAfter
+      if (
+        s0 !== null && s1 !== null && s2 !== null &&
+        s0 === s2 && s0 !== s1
+      ) {
         addIteration(root, "loop-oscillation", state.currentScore, state.currentScore, "rollback")
-        return `🔴 circuit breaker: score oscillation. Score ${s0} → ${s1}. Manual intervention required.`
+        return `🔴 circuit breaker: score oscillation. Score ${s0} → ${s1} → ${s2}. Manual intervention required.`
       }
     }
 
     const scoreBefore = state.currentScore
 
-    // Phase: audit
+    // Phase: audit (canonical citation-density heuristic)
     const content = readFileSync(paths.main, "utf-8")
-    const paragraphs = content.split(/\n\s*\n/).filter((p: string) => p.trim().length > 20)
-    const citeRe = /\\cite(?:online)?\{[^}]+\}/g
-    const withCit = paragraphs.filter((p: string) => { citeRe.lastIndex = 0; return citeRe.test(p) }).length
-    const pctSemCit = paragraphs.length > 0 ? ((paragraphs.length - withCit) / paragraphs.length) * 100 : 0
-    const currentScore = pctSemCit > 30 ? 4.0 : pctSemCit > 20 ? 6.0 : 8.0
+    const citation = analyzeCitationDensity(content)
+    const currentScore = citation.score
 
     // Phase: decide
     if (currentScore >= target) {
@@ -75,7 +79,7 @@ export const bancaLoop = tool({
       `Loop iteration`,
       `Score: ${scoreBefore ?? "—"} → target ${target}`,
       `Snapshot: ${snapLabel}`,
-      `Citations: ${withCit}/${paragraphs.length} (${(100 - pctSemCit).toFixed(1)}%)`,
+      `Citations: ${citation.citedParagraphs}/${citation.totalParagraphs} (${(100 - citation.percentWithoutCitation).toFixed(1)}%)`,
     ]
 
     if (currentScore < target) {
@@ -84,7 +88,7 @@ export const bancaLoop = tool({
 
     // save report
     const report = generateReport(`LOOP — ${snapLabel}`, [
-      { title: "Context", body: `Score before: ${scoreBefore ?? "—"}\nTarget: ${target}\nCitations: ${withCit}/${paragraphs.length}` },
+      { title: "Context", body: `Score before: ${scoreBefore ?? "—"}\nTarget: ${target}\nCitations: ${citation.citedParagraphs}/${citation.totalParagraphs}` },
       { title: "Next Steps", body: "Run /banca:auditar for detailed findings, then /banca:corrigir with specific corrections." },
     ])
     saveReport(root, `loop-${snapLabel}.md`, report)

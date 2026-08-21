@@ -186,6 +186,93 @@ describe("Integration — immutableFacts guard", () => {
     expect(result).not.toContain("blocked")
     expect(result).toContain("✓")
   })
+
+  test("rejects empty oldText instead of inserting at position 0", async () => {
+    mockProjectJson()
+    mockMainTex()
+    writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const result = await bancaCorrigir.execute({
+      projectRoot: testRoot,
+      corrections: [{ file: "main.tex", oldText: "", newText: "INSERTED" }],
+      skipSnapshot: true,
+    }, {} as any)
+    expect(result).toContain("empty oldText")
+    const content = readFileSync(join(testRoot, "main.tex"), "utf-8")
+    expect(content.startsWith("INSERTED")).toBe(false)
+    expect(content).toContain("Introduction paragraph")
+  })
+
+  test("replaces ALL occurrences, not just the first one", async () => {
+    mockProjectJson()
+    // Write content with a repeated pattern
+    writeFileSync(join(testRoot, "main.tex"), `\\documentclass{article}
+\\begin{document}
+Paragraph with FIXME marker.
+
+Another paragraph with FIXME marker.
+
+Third paragraph with FIXME marker too.
+\\end{document}`)
+    writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
+
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const result = await bancaCorrigir.execute({
+      projectRoot: testRoot,
+      corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE" }],
+      skipSnapshot: true,
+    }, {} as any)
+
+    expect(result).toContain("✓")
+    expect(result).toContain("3 replacement")
+
+    const content = readFileSync(join(testRoot, "main.tex"), "utf-8")
+    expect(content).not.toContain("FIXME")
+    expect((content.match(/DONE/g) || []).length).toBe(3)
+  })
+
+  test("warns when expectedOccurrences does not match actual", async () => {
+    mockProjectJson()
+    writeFileSync(join(testRoot, "main.tex"), `\\documentclass{article}
+\\begin{document}
+One FIXME here.
+\\end{document}`)
+    writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
+
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const result = await bancaCorrigir.execute({
+      projectRoot: testRoot,
+      corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE", expectedOccurrences: 5 }],
+      skipSnapshot: true,
+    }, {} as any)
+
+    // Should still apply the replacement (1 found) but warn about the mismatch
+    expect(result).toContain("⚠")
+    expect(result).toContain("expected 5")
+    expect(result).toContain("found 1")
+    const content = readFileSync(join(testRoot, "main.tex"), "utf-8")
+    expect(content).toContain("DONE")
+  })
+
+  test("does not warn when expectedOccurrences matches actual", async () => {
+    mockProjectJson()
+    writeFileSync(join(testRoot, "main.tex"), `\\documentclass{article}
+\\begin{document}
+One FIXME here.
+Another FIXME here.
+\\end{document}`)
+    writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
+
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const result = await bancaCorrigir.execute({
+      projectRoot: testRoot,
+      corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE", expectedOccurrences: 2 }],
+      skipSnapshot: true,
+    }, {} as any)
+
+    expect(result).not.toContain("⚠")
+    expect(result).toContain("2 replacement")
+  })
 })
 
 describe("Integration — IA regex fallback", () => {
@@ -218,6 +305,66 @@ describe("Integration — loop circuit breaker", () => {
     const { bancaLoop } = await import("../src/tools/banca_loop")
     const result = await bancaLoop.execute({ projectRoot: testRoot }, {} as any)
     expect(result).toContain("Loop iteration")
+  })
+
+  test("equal consecutive scores are normal progress, not oscillation", async () => {
+    mockProjectJson()
+    mockMainTex()
+    writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
+    writeFileSync(join(testRoot, ".banca", "state.json"), JSON.stringify({
+      currentScore: 6.0,
+      lastAudit: null,
+      lastLoop: null,
+      snapshots: [],
+      iterations: [
+        { date: new Date().toISOString(), action: "loop", scoreBefore: null, scoreAfter: 6.0, status: "ok" },
+        { date: new Date().toISOString(), action: "loop", scoreBefore: 6.0, scoreAfter: 6.0, status: "ok" },
+      ],
+    }), "utf-8")
+    const { bancaLoop } = await import("../src/tools/banca_loop")
+    const result = await bancaLoop.execute({ projectRoot: testRoot }, {} as any)
+    expect(result).not.toContain("oscillation")
+    expect(result).toContain("Loop iteration")
+  })
+
+  test("A-B-A score pattern triggers oscillation breaker", async () => {
+    mockProjectJson()
+    mockMainTex()
+    writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
+    writeFileSync(join(testRoot, ".banca", "state.json"), JSON.stringify({
+      currentScore: 4.0,
+      lastAudit: null,
+      lastLoop: null,
+      snapshots: [],
+      iterations: [
+        { date: new Date().toISOString(), action: "loop", scoreBefore: null, scoreAfter: 4.0, status: "ok" },
+        { date: new Date().toISOString(), action: "loop", scoreBefore: 4.0, scoreAfter: 6.0, status: "ok" },
+        { date: new Date().toISOString(), action: "loop", scoreBefore: 6.0, scoreAfter: 4.0, status: "ok" },
+      ],
+    }), "utf-8")
+    const { bancaLoop } = await import("../src/tools/banca_loop")
+    const result = await bancaLoop.execute({ projectRoot: testRoot }, {} as any)
+    expect(result).toContain("oscillation")
+  })
+
+  test("three identical scores still trigger the stagnation circuit breaker", async () => {
+    mockProjectJson()
+    mockMainTex()
+    writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
+    writeFileSync(join(testRoot, ".banca", "state.json"), JSON.stringify({
+      currentScore: 4.0,
+      lastAudit: null,
+      lastLoop: null,
+      snapshots: [],
+      iterations: [
+        { date: new Date().toISOString(), action: "loop", scoreBefore: null, scoreAfter: 4.0, status: "ok" },
+        { date: new Date().toISOString(), action: "loop", scoreBefore: 4.0, scoreAfter: 4.0, status: "ok" },
+        { date: new Date().toISOString(), action: "loop", scoreBefore: 4.0, scoreAfter: 4.0, status: "ok" },
+      ],
+    }), "utf-8")
+    const { bancaLoop } = await import("../src/tools/banca_loop")
+    const result = await bancaLoop.execute({ projectRoot: testRoot }, {} as any)
+    expect(result).toContain("circuit breaker")
   })
 })
 

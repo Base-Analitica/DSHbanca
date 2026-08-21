@@ -3,14 +3,20 @@ import { join, dirname } from "node:path"
 import { tool } from "@opencode-ai/plugin"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths, isPathProtected, isPathAllowed, globToRegex, toPosixPath } from "../lib/paths"
-import { resolveInsideRoot, relativeInsideRoot, PathTraversalError } from "../lib/safe_paths"
-import { loadState, saveState, addIteration } from "../lib/state"
+import { resolveInsideRoot, relativeInsideRoot } from "../lib/safe_paths"
+import { addIteration } from "../lib/state"
+import { checkScoreNotDecreased } from "../lib/guards"
+import { analyzeCitationDensity } from "../lib/citation"
 const z = tool.schema
 
 const CorrectionSchema = z.object({
   file: z.string(),
   oldText: z.string(),
   newText: z.string(),
+  /** Number of occurrences the caller expects to replace. If provided and the
+   * actual count differs, a warning is emitted so silent partial replacements
+   * are surfaced. */
+  expectedOccurrences: z.number().optional(),
 })
 
 export const bancaCorrigir = tool({
@@ -74,24 +80,58 @@ export const bancaCorrigir = tool({
       if (!isPathAllowed(canonizedRelPath, config)) { results.push(`✗ ${c.file}: not in allowed paths`); continue }
 
       const content = readFileSync(fp, "utf-8")
-      if (!content.includes(c.oldText)) { results.push(`✗ ${c.file}: oldText not found`); continue }
+      if (typeof c.oldText !== "string" || c.oldText.length === 0) {
+        // Empty oldText would match anywhere and insert text at position 0.
+        results.push(`✗ ${c.file}: empty oldText`)
+        continue
+      }
 
-      writeFileSync(fp, content.replace(c.oldText, c.newText), "utf-8")
-      results.push(`✓ ${c.file}`)
+      // Count actual occurrences so we can warn on mismatch.
+      let occurrenceCount = 0
+      let searchStart = 0
+      while (true) {
+        const idx = content.indexOf(c.oldText, searchStart)
+        if (idx === -1) break
+        occurrenceCount++
+        searchStart = idx + c.oldText.length
+      }
+
+      if (occurrenceCount === 0) {
+        results.push(`✗ ${c.file}: oldText not found`)
+        continue
+      }
+
+      // Check expectation before replacing, so a mismatch is surfaced even
+      // when the replacement succeeds for a subset.
+      if (
+        typeof c.expectedOccurrences === "number" &&
+        c.expectedOccurrences !== occurrenceCount
+      ) {
+        // Still apply the replacement — but warn so the caller knows the
+        // count was off (partial replacement risk).
+        results.push(
+          `⚠ ${c.file}: expected ${c.expectedOccurrences} occurrences, found ${occurrenceCount}`,
+        )
+      }
+
+      // Replace ALL occurrences (String.replace with string only replaces the
+      // first one, which silently drops repeated corrections).
+      const updated = content.replaceAll(c.oldText, c.newText)
+      writeFileSync(fp, updated, "utf-8")
+      results.push(
+        `✓ ${c.file} (${occurrenceCount} replacement${occurrenceCount > 1 ? "s" : ""})`,
+      )
     }
 
-    // regression score check
+    // regression score check (canonical citation-density heuristic)
     let curScore: number | null = null
     let regNote = ""
     if (args.previousScore !== undefined && existsSync(paths.main)) {
       const mainContent = readFileSync(paths.main, "utf-8")
-      const paragraphs = mainContent.split(/\n\s*\n/).filter((p: string) => p.trim().length > 20)
-      const citeRe = /\\cite(?:online)?\{[^}]+\}/g
-      const withCit = paragraphs.filter((p: string) => { citeRe.lastIndex = 0; return citeRe.test(p) }).length
-      const pct = paragraphs.length > 0 ? ((paragraphs.length - withCit) / paragraphs.length) * 100 : 0
-      curScore = pct > 30 ? 4.0 : 8.0
-      if (curScore < args.previousScore) {
-        regNote = `\n⚠ Score dropped: ${args.previousScore} → ${curScore}`
+      curScore = analyzeCitationDensity(mainContent).score
+      const violation = checkScoreNotDecreased(args.previousScore, curScore)
+      if (violation) {
+        regNote = `\n⚠ ${violation.message}`
       }
     }
 
@@ -100,8 +140,9 @@ export const bancaCorrigir = tool({
       results.push(`\nnote: ${config.externalDependencies.length} external dependencies — not counted as failures`)
     }
 
-    // state tracking
-    addIteration(root, "correction", args.previousScore ?? null, curScore, regNote ? "rollback" : "ok")
+    // state tracking. No actual rollback is performed here, so a regression
+    // is recorded as failed, never as rollback.
+    addIteration(root, "correction", args.previousScore ?? null, curScore, regNote ? "failed" : "ok")
 
     return results.join("\n") + regNote
   },

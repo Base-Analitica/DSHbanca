@@ -10,6 +10,53 @@ export interface ProviderResult {
   provider: string
 }
 
+// ---------------------------------------------------------------------------
+// Typed MCP result shapes (replaces untyped `any` parsing).
+// crossref-academic MCP returns nested JSON; these interfaces model the
+// fields we actually read. Unknown shapes fall through to "no results".
+// ---------------------------------------------------------------------------
+
+/** A single search result item from the MCP. */
+interface McpResultItem {
+  title?: string
+  authors?: unknown
+  year?: unknown
+  doi?: string
+  journal?: unknown
+}
+
+/** Paper details response (get_paper_details). */
+interface McpPaperDetails {
+  title?: string
+  authors?: unknown
+  year?: unknown
+  doi?: string
+  journal?: unknown
+}
+
+/** Top-level MCP response envelope (both endpoints). */
+interface McpResponse {
+  crossref?: {
+    title?: string
+    authors?: unknown
+    year?: unknown
+    doi?: string
+    journal?: unknown
+    results?: McpResultItem[]
+  }
+  openalex?: {
+    results?: McpResultItem[]
+  }
+  content?: Array<{ text?: string }>
+  // Some MCP servers return results at the top level
+  results?: McpResultItem[]
+  title?: string
+  authors?: unknown
+  year?: unknown
+  doi?: string
+  journal?: unknown
+}
+
 export async function resolveRef(
   ref: RefMetadata,
   projectRoot: string,
@@ -31,7 +78,7 @@ export async function resolveRef(
     try {
       await client.start()
 
-      let mcpResult: any
+      let mcpResult: unknown
       if (ref.doi) {
         mcpResult = await client.callTool("get_paper_details", { doi: ref.doi })
       } else if (ref.title) {
@@ -83,24 +130,54 @@ export async function resolveRef(
   }
 }
 
-function parseMcpResult(mcpResult: any, ref: RefMetadata): ValidationResult {
-  // crossref-academic MCP returns nested structures
-  const cr = mcpResult?.crossref || mcpResult?.content?.[0]?.text
-  let parsed: any
+/**
+ * Parse the MCP tool result into a ValidationResult.
+ * Accepts nested envelopes (crossref/openalex/content) and flat shapes.
+ * Unknown or malformed shapes return "nao_encontrada" — never throw.
+ */
+function parseMcpResult(mcpResult: unknown, ref: RefMetadata): ValidationResult {
+  // Unwrap content[] text if present (some MCP servers wrap JSON in text).
+  let parsed: McpResponse | null = null
 
-  if (typeof cr === "string") {
-    try { parsed = JSON.parse(cr) } catch { parsed = null }
-  } else {
-    parsed = cr
+  if (typeof mcpResult === "string") {
+    try {
+      parsed = JSON.parse(mcpResult) as McpResponse
+    } catch {
+      parsed = null
+    }
+  } else if (mcpResult !== null && typeof mcpResult === "object") {
+    const raw = mcpResult as McpResponse
+    // If content[].text holds JSON, unwrap it.
+    if (raw.content?.[0]?.text && typeof raw.content[0].text === "string") {
+      try {
+        parsed = JSON.parse(raw.content[0].text) as McpResponse
+      } catch {
+        parsed = raw
+      }
+    } else {
+      parsed = raw
+    }
   }
 
-  // MCP search_papers returns { crossref: { count, results }, openalex: { count, results } }
-  const items = parsed?.results || (parsed?.crossref?.results) || (parsed?.openalex?.results) || []
+  if (parsed === null) {
+    return {
+      key: ref.key,
+      found: false,
+      score: 0,
+      status: "nao_encontrada",
+      matchedBy: "none",
+      evidence: "MCP returned no parseable result",
+    }
+  }
 
-  // get_paper_details returns { crossref: { title, authors, ... }, semantic_scholar: {...} }
-  if (parsed?.title || parsed?.crossref?.title) {
-    const meta = parsed.crossref || parsed
-    const score = meta.doi?.toLowerCase() === ref.doi?.toLowerCase() ? 95 : 70
+  // get_paper_details: title present → direct match
+  const detailsSource: McpPaperDetails | null =
+    parsed.crossref?.title ? parsed.crossref :
+    parsed.title ? parsed :
+    null
+
+  if (detailsSource && detailsSource.title) {
+    const score = detailsSource.doi?.toLowerCase() === ref.doi?.toLowerCase() ? 95 : 70
     return {
       key: ref.key,
       found: true,
@@ -109,18 +186,21 @@ function parseMcpResult(mcpResult: any, ref: RefMetadata): ValidationResult {
       matchedBy: "doi",
       metadata: {
         key: ref.key,
-        title: meta.title,
-        authors: meta.authors,
-        year: meta.year,
-        doi: meta.doi,
-        journal: meta.journal,
+        title: detailsSource.title,
+        authors: asStringArray(detailsSource.authors),
+        year: asNumber(detailsSource.year),
+        doi: detailsSource.doi,
+        journal: asString(detailsSource.journal),
       },
-      evidence: `MCP matched → ${meta.title} (score ${score})`,
+      evidence: `MCP matched → ${detailsSource.title} (score ${score})`,
     }
   }
 
-  // search results
-  if (items.length > 0) {
+  // search_papers: list of results
+  const items: McpResultItem[] =
+    parsed.crossref?.results ?? parsed.openalex?.results ?? parsed.results ?? []
+
+  if (items.length > 0 && items[0].title) {
     const best = items[0]
     const score = 70
     return {
@@ -132,10 +212,10 @@ function parseMcpResult(mcpResult: any, ref: RefMetadata): ValidationResult {
       metadata: {
         key: ref.key,
         title: best.title,
-        authors: best.authors,
-        year: best.year,
+        authors: asStringArray(best.authors),
+        year: asNumber(best.year),
         doi: best.doi,
-        journal: best.journal,
+        journal: asString(best.journal),
       },
       evidence: `MCP search → "${best.title}" (score ${score})`,
     }
@@ -149,4 +229,23 @@ function parseMcpResult(mcpResult: any, ref: RefMetadata): ValidationResult {
     matchedBy: "none",
     evidence: "MCP returned no results",
   }
+}
+
+// ---------------------------------------------------------------------------
+// Safe coercion helpers: coerce unknown MCP fields to RefMetadata-compatible
+// types without crashing on unexpected shapes.
+// ---------------------------------------------------------------------------
+
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined
+}
+
+function asNumber(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined
+}
+
+function asStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined
+  const strs = v.filter((e): e is string => typeof e === "string")
+  return strs.length > 0 ? strs : undefined
 }

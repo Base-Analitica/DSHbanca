@@ -9,6 +9,12 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Corrigido
 
+- `banca_corrigir`: substituição agora usa `replaceAll` em vez de `replace` (string), que substituía apenas a primeira ocorrência — correções repetidas no manuscrito eram silenciosamente dropadas
+- `banca_corrigir`: adicionado campo opcional `expectedOccurrences` no schema de correção; quando o count real difere do esperado, um warning `⚠` é emitido no resultado
+- `banca_corrigir`: resultado agora reporta quantas substituições foram feitas por arquivo (`✓ file (N replacements)`)
+- `provider_chain.ts`: `parseMcpResult` não usa mais `any` — substituído por interfaces tipadas (`McpResponse`, `McpResultItem`, `McpPaperDetails`) com coercion segura via `asString`/`asNumber`/`asStringArray`
+- `provider_chain.ts`: `mcpResult` agora é `unknown` em vez de `any`; parsing de `content[]` text encapsulado em JSON é tratado explicitamente
+- `config.ts`: import de `mkdirSync` movido para o topo do arquivo (estava solto no meio, linha 187)
 - Documentação de instalação ajustada para refletir pacote ainda não publicado (`private: true`)
 - Matriz de validação alinhada com testes realmente executados (nada marcado como testado sem evidência)
 - Compilação LaTeX ajustada para evitar execução via shell string (`execSync` → `spawnSync` com args separados)

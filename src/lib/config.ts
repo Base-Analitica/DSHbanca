@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync } from "node:fs"
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 
 export interface ProjectConfig {
@@ -184,7 +184,6 @@ export function ensureBancaDir(projectRoot: string): void {
     if (!existsSync(p)) mkdirSync(p, { recursive: true })
   }
 }
-import { mkdirSync } from "node:fs"
 
 export function getMcpCommand(projectRoot: string): string[] | null {
   const config = loadConfig(projectRoot)

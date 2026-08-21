@@ -11,20 +11,28 @@ export interface ScoreCard {
   aprovado: boolean
 }
 
+/**
+ * Parse a numeric cap ("travas"/"tetos" entries). Non-finite or malformed
+ * values are ignored so a single bad entry cannot poison the final grade.
+ */
+function parseCap(raw: string): number {
+  const value = Number.parseFloat(raw)
+  return Number.isFinite(value) ? value : Number.NaN
+}
+
 export function calcularNotaFinal(scores: Omit<ScoreCard, "notaFinal" | "aprovado">): { notaFinal: number; aprovado: boolean } {
   const { abnt, citacoes, conteudo, estilo, travas, tetos } = scores
   const media = (abnt + citacoes + conteudo + estilo) / 4
 
-  const menorTrava = travas.length > 0
-    ? Math.min(...travas.map((t) => parseFloat(t)))
-    : 10
-
-  const notaFinal = Math.min(media, menorTrava)
-
-  for (const teto of tetos) {
-    const val = parseFloat(teto)
-    if (media < val) notaFinal < val ? null : null // teto buffer
+  // Both travas (hard locks) and tetos (ceilings) cap the final grade:
+  // notaFinal can never exceed the lowest applicable cap.
+  const caps: number[] = [media]
+  for (const raw of [...travas, ...tetos]) {
+    const value = parseCap(raw)
+    if (Number.isFinite(value)) caps.push(value)
   }
+
+  const notaFinal = Math.min(...caps)
 
   return { notaFinal, aprovado: notaFinal >= 9.0 }
 }
