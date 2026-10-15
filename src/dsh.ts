@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises"
 import { realpathSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { dirname, join, resolve, relative, isAbsolute } from "node:path"
+import { dirname, join, resolve, relative, isAbsolute, sep } from "node:path"
 import { z } from "zod"
 import { resolveInsideRoot, PathTraversalError } from "./lib/safe_paths.js"
 import { loadBancaTools } from "./lib/tools.js"
@@ -151,6 +151,19 @@ export async function apply(ctx: any) {
           try {
             directory = realpathSync(directory)
           } catch {
+            // ignore
+          }
+          if (!directory.startsWith(root + "/") && directory !== root) {
+            if (directory.endsWith(sep) || root.endsWith(sep)) {
+              // normalize
+            }
+            const resolvedRootNoSep = root.replace(/\/$/, "")
+            const dirNoSep = directory.replace(/\/$/, "")
+            if (dirNoSep !== resolvedRootNoSep && !dirNoSep.startsWith(resolvedRootNoSep + "/")) {
+              throw new PathTraversalError(
+                `tool "${toolName}" resolved path escapes workspace root: ${directory}`,
+              )
+            }
           }
         } else {
           directory = root
@@ -166,8 +179,9 @@ export async function apply(ctx: any) {
   }
 
   ctx.tools.guard((exec: any) => {
-    if (DESTRUCTIVE_TOOLS.has(exec?.tool?.name) && isAuditorAgent(exec)) {
-      return `DSHbanca guard: tool "${exec.tool.name}" is denied for auditor agents — read-only enforcement`
+    const toolName = exec?.name ?? exec?.tool?.name
+    if (DESTRUCTIVE_TOOLS.has(toolName) && isAuditorAgent(exec)) {
+      return `DSHbanca guard: tool "${toolName}" is denied for auditor agents — read-only enforcement`
     }
     return undefined
   })
