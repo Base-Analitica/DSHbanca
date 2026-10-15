@@ -148,23 +148,45 @@ export async function apply(ctx: any) {
           } else {
             directory = resolveInsideRoot(root, args.projectRoot)
           }
-          try {
-            directory = realpathSync(directory)
-          } catch {
-            // ignore
-          }
-          if (!directory.startsWith(root + "/") && directory !== root) {
-            if (directory.endsWith(sep) || root.endsWith(sep)) {
-              // normalize
+          const resolvedRoot = realpathSync(root)
+          const parts = directory
+            .replace(resolvedRoot, "")
+            .split(sep)
+            .filter((p) => p && p !== ".")
+          let canonical: string | null = null
+          for (let i = parts.length; i >= 0; i--) {
+            const ancestor =
+              i === 0 ? resolvedRoot : join(resolvedRoot, ...parts.slice(0, i))
+            try {
+              const rp = realpathSync(ancestor)
+              const relCheck = relative(resolvedRoot, rp)
+              if (relCheck.startsWith("..") || isAbsolute(relCheck)) {
+                throw new PathTraversalError(
+                  `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
+                )
+              }
+              canonical = join(rp, ...parts.slice(i))
+              break
+            } catch (e: any) {
+              if (e.code !== "ENOENT") {
+                throw new PathTraversalError(
+                  `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
+                )
+              }
             }
-            const resolvedRootNoSep = root.replace(/\/$/, "")
-            const dirNoSep = directory.replace(/\/$/, "")
-            if (dirNoSep !== resolvedRootNoSep && !dirNoSep.startsWith(resolvedRootNoSep + "/")) {
-              throw new PathTraversalError(
-                `tool "${toolName}" resolved path escapes workspace root: ${directory}`,
-              )
-            }
           }
+          if (canonical === null) {
+            throw new PathTraversalError(
+              `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
+            )
+          }
+          const relFinal = relative(resolvedRoot, canonical)
+          if (relFinal.startsWith("..") || isAbsolute(relFinal)) {
+            throw new PathTraversalError(
+              `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
+            )
+          }
+          directory = canonical
         } else {
           directory = root
         }
