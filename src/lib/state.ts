@@ -73,7 +73,13 @@ export function addIteration(
 
 export function addSnapshot(projectRoot: string, label: string, scoreBefore: number | null): string {
   const state = loadState(projectRoot)
-  const id = `snap-${Date.now()}`
+  // Recovery-point identity must stay unique even when several snapshots are
+  // registered within the same millisecond (frozen tests, fast internal
+  // producers). Never reuse an id already present in the registry.
+  const base = `snap-${Date.now()}`
+  let id = base
+  let n = 1
+  while (state.snapshots.some((s) => s.id === id)) id = `${base}-${++n}`
   state.snapshots.push({ id, label, createdAt: new Date().toISOString(), scoreBefore })
   saveState(projectRoot, state)
   return id

@@ -13,6 +13,18 @@
  *   tree). Duplicated logical keys are captured once; the first occurrence
  *   wins (main, then bib, then chapters).
  *
+ * Immutability policy (P1-B fix): {@link createSnapshot} is the single entry
+ * point that claims a label and writes a snapshot. A label is refused when it
+ * is already registered in `state.json`, when the snapshot directory exists
+ * (any type: directory, symlink, file) or when the manifest path exists. The
+ * claim is an exclusive non-recursive `mkdir`, capture runs behind a
+ * `.capture-incomplete` marker, captured files and the manifest are written
+ * with exclusive-create (`wx`) so nothing can be truncated, and any failure
+ * removes the half-written snapshot. Registration happens only after the
+ * manifest exists; on failure nothing is registered. Internal producers that
+ * cannot ask the user for another label (pre-correction snapshot, pre-restore
+ * backup, loop marker) use the `unique` policy: the first free `-N` suffix.
+ *
  * A manifest (`<label>.manifest.json`, sibling of the snapshot directory)
  * records the captured logical paths with sha256 hashes so restore can prove a
  * snapshot is complete and uncorrupted before touching the manuscript.
@@ -21,8 +33,9 @@
  * are never guessed at silently.
  */
 import { createHash } from "node:crypto"
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, relative, resolve } from "node:path"
+import { addSnapshot, loadState } from "./state"
 import {
   PathTraversalError,
   prepareRealPathForWrite,
@@ -34,6 +47,8 @@ import { isAbsoluteDriveOrUncForm, normalizePublicPath, toPosixPath } from "./pa
 
 export const SNAPSHOT_MANIFEST_VERSION = 1
 export const SNAPSHOT_MANIFEST_SUFFIX = ".manifest.json"
+/** Sibling marker written while a capture is in flight. */
+export const SNAPSHOT_INCOMPLETE_MARKER = ".capture-incomplete"
 
 export interface SnapshotFileEntry {
   /** Project-relative logical path (POSIX) — the manuscript identity. */
@@ -217,9 +232,10 @@ export function captureSnapshotFiles(input: {
     const bytes = readFileSync(source)
     const digest = sha256Of(bytes)
 
-    // The vault keeps the logical identity, never the canonical path.
+    // The vault keeps the logical identity, never the canonical path. Capture
+    // never overwrites: exclusive-create inside the freshly claimed directory.
     const dest = prepareRealPathForWrite(root, join(snapDir, candidate.logical))
-    writeFileSync(dest, bytes)
+    writeFileSync(dest, bytes, { flag: "wx" })
 
     const written = readFileSync(dest)
     if (written.length !== bytes.length || sha256Of(written) !== digest) {
@@ -240,9 +256,184 @@ export function captureSnapshotFiles(input: {
     root,
     join(input.snapshotsDir, `${label}${SNAPSHOT_MANIFEST_SUFFIX}`),
   )
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n")
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", { flag: "wx" })
 
   return { files, missing, skipped, manifestPath }
+}
+
+/** A snapshot label cannot be used because existing data occupies it. */
+export class SnapshotConflictError extends Error {
+  readonly reason: string
+
+  constructor(reason: string) {
+    super(`snapshot label is not available: ${reason}`)
+    this.name = "SnapshotConflictError"
+    this.reason = reason
+  }
+}
+
+/** The capture did not complete; nothing was registered and nothing remains. */
+export class SnapshotCaptureError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SnapshotCaptureError"
+  }
+}
+
+export type SnapshotLabelPolicy = "strict" | "unique"
+
+export interface CreatedSnapshot {
+  /** Final label (may carry a `-N` suffix under the `unique` policy). */
+  label: string
+  /** Claimed snapshot directory (canonical, inside the workspace). */
+  snapDir: string
+  /** Registry id, or null when the snapshot is intentionally unregistered. */
+  id: string | null
+  files: SnapshotFileEntry[]
+  missing: string[]
+  skipped: Array<{ logical: string; reason: string }>
+  manifestPath: string
+}
+
+/**
+ * Deterministic availability check for a snapshot label. Checked in a fixed
+ * order (state registry, then directory, then manifest) so the refusal reason
+ * is stable. A symlink or unexpected file type anywhere in the label namespace
+ * is a conflict, never something to write through.
+ */
+function labelConflictReason(root: string, snapshotsDir: string, label: string): string | null {
+  const state = loadState(root)
+  if (state.snapshots.some((s) => s.label === label)) return "already registered in state.json"
+
+  const dirStat = lstatOrNull(join(snapshotsDir, label))
+  if (dirStat !== null) {
+    if (dirStat.isSymbolicLink()) return "snapshot directory is a symbolic link"
+    if (!dirStat.isDirectory()) return "snapshot path exists and is not a directory"
+    return "snapshot directory already exists"
+  }
+
+  const manifestStat = lstatOrNull(join(snapshotsDir, `${label}${SNAPSHOT_MANIFEST_SUFFIX}`))
+  if (manifestStat !== null) {
+    if (manifestStat.isSymbolicLink()) return "snapshot manifest is a symbolic link"
+    if (!manifestStat.isFile()) return "snapshot manifest path is not a regular file"
+    return "snapshot manifest already exists"
+  }
+  return null
+}
+
+/**
+ * Create a snapshot with the full label-claim → capture → manifest →
+ * (optional) registration sequence. This is the single point that guarantees
+ * snapshot immutability: an existing snapshot is never truncated, a failed
+ * capture never leaves a partial vault or a dangling registry record, and the
+ * `.capture-incomplete` marker makes an interrupted capture detectable by
+ * restore.
+ */
+export function createSnapshot(input: {
+  root: string
+  snapshotsDir: string
+  label: string
+  candidates: SnapshotCandidate[]
+  labelPolicy: SnapshotLabelPolicy
+  register: boolean
+  scoreBefore?: number | null
+}): CreatedSnapshot {
+  const { root, snapshotsDir, candidates } = input
+  let label = input.label
+
+  if (input.labelPolicy === "unique") {
+    // Internal producers (pre-restore backup, pre-correction snapshot, loop
+    // marker) cannot invent a new user-facing label: pick the first free `-N`.
+    let available: string | null = null
+    for (let n = 1; n <= 1000; n++) {
+      const candidateLabel = n === 1 ? input.label : `${input.label}-${n}`
+      if (labelConflictReason(root, snapshotsDir, candidateLabel) === null) {
+        available = candidateLabel
+        break
+      }
+    }
+    if (available === null) throw new SnapshotConflictError("no unique snapshot label is available")
+    label = available
+  } else {
+    const reason = labelConflictReason(root, snapshotsDir, label)
+    if (reason !== null) throw new SnapshotConflictError(reason)
+  }
+
+  // Exclusive claim: non-recursive mkdir fails if anything occupies the path.
+  const snapDir = join(snapshotsDir, label)
+  try {
+    mkdirSync(snapDir, { recursive: false })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new SnapshotConflictError(
+        labelConflictReason(root, snapshotsDir, label) ?? "snapshot directory already exists",
+      )
+    }
+    throw new SnapshotCaptureError("could not create the snapshot directory")
+  }
+  const claimed = lstatOrNull(snapDir)
+  if (claimed === null || claimed.isSymbolicLink() || !claimed.isDirectory()) {
+    throw new SnapshotCaptureError("snapshot directory is not usable")
+  }
+
+  const markerPath = join(snapDir, SNAPSHOT_INCOMPLETE_MARKER)
+  let manifestPath = join(snapshotsDir, `${label}${SNAPSHOT_MANIFEST_SUFFIX}`)
+  let manifestCreated = false
+  try {
+    writeFileSync(markerPath, `${label}\n`, { encoding: "utf8" })
+    const captured = captureSnapshotFiles({ root, snapshotsDir, snapDir, label, candidates })
+    manifestPath = captured.manifestPath
+    manifestCreated = true
+    unlinkSync(markerPath)
+    const id = input.register ? addSnapshot(root, label, input.scoreBefore ?? null) : null
+    return {
+      label,
+      snapDir,
+      id,
+      files: captured.files,
+      missing: captured.missing,
+      skipped: captured.skipped,
+      manifestPath,
+    }
+  } catch (err) {
+    // Full cleanup on any failure: the marker, the manifest this call created
+    // and the claimed directory are removed, so no half snapshot survives.
+    // If registration itself failed after writing state.json, the vault is
+    // kept instead (state and vault stay consistent).
+    try {
+      if (existsSync(markerPath)) unlinkSync(markerPath)
+    } catch {
+      /* best-effort marker cleanup */
+    }
+    let registered = false
+    if (input.register) {
+      try {
+        registered = loadState(root).snapshots.some((s) => s.label === label)
+      } catch {
+        registered = false
+      }
+    }
+    if (!registered) {
+      try {
+        if (manifestCreated && existsSync(manifestPath)) unlinkSync(manifestPath)
+      } catch {
+        /* best-effort manifest cleanup */
+      }
+      try {
+        rmSync(snapDir, { recursive: true, force: true })
+      } catch {
+        /* best-effort directory cleanup */
+      }
+    }
+    if (
+      err instanceof PathTraversalError ||
+      err instanceof SnapshotConflictError ||
+      err instanceof SnapshotCaptureError
+    ) {
+      throw err
+    }
+    throw new SnapshotCaptureError("snapshot capture failed")
+  }
 }
 
 function validateManifest(raw: unknown): SnapshotManifest | null {

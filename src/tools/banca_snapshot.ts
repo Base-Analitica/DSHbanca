@@ -1,7 +1,6 @@
 import { join } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
-import { addSnapshot } from "../lib/state"
 import { loadConfig } from "../lib/config"
 import { ChapterDiscoveryError, resolveManuscriptPaths } from "../lib/paths"
 import {
@@ -11,7 +10,13 @@ import {
   resolveRealInsideRoot,
   sanitizeSnapshotLabel,
 } from "../lib/safe_paths"
-import { captureSnapshotFiles, logicalProjectRel, type SnapshotCaptureResult } from "../lib/snapshot"
+import {
+  createSnapshot,
+  logicalProjectRel,
+  SnapshotCaptureError,
+  SnapshotConflictError,
+  type CreatedSnapshot,
+} from "../lib/snapshot"
 
 export const bancaSnapshot = defineBancaTool({
   description: "Create targeted snapshot of manuscript files. Registers in state.json.",
@@ -53,33 +58,45 @@ export const bancaSnapshot = defineBancaTool({
     }
 
     // Logical identity: files are keyed by the configured project-relative
-    // path, never by the canonical path a symlink may resolve to.
-    let snapDir: string
-    let captured: SnapshotCaptureResult
+    // path, never by the canonical path a symlink may resolve to. The central
+    // createSnapshot refuses any label that already holds snapshot data and
+    // never truncates an existing snapshot, directory or manifest.
+    let created: CreatedSnapshot
     try {
       const candidates = [
         { logical: logicalProjectRel(root, paths.main), abs: paths.main },
         { logical: logicalProjectRel(root, paths.bib), abs: paths.bib },
         ...paths.chapters.map((ch) => ({ logical: logicalProjectRel(root, ch), abs: ch })),
       ]
-      snapDir = ensureRealDirInsideRoot(root, join(snapshotsDir, label))
-      captured = captureSnapshotFiles({ root, snapshotsDir, snapDir, label, candidates })
+      created = createSnapshot({
+        root,
+        snapshotsDir,
+        label,
+        candidates,
+        labelPolicy: "strict",
+        register: true,
+        scoreBefore: null,
+      })
     } catch (err) {
       if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
+      if (err instanceof SnapshotConflictError) {
+        return `blocked: snapshot label "${label}" is not available (${err.reason}) — existing snapshot data was left untouched`
+      }
+      if (err instanceof SnapshotCaptureError) {
+        return `blocked: snapshot capture failed — no snapshot was registered`
+      }
       throw err
     }
 
-    addSnapshot(root, label, null)
-
-    const lines = [`snapshot → ${snapDir}`, `Captured (content verified):`]
+    const lines = [`snapshot → ${created.snapDir}`, `Captured (content verified):`]
     lines.push(
-      ...(captured.files.length > 0
-        ? captured.files.map((f) => `- ${f.logical} (sha256: ${f.sha256.slice(0, 12)}…)`)
+      ...(created.files.length > 0
+        ? created.files.map((f) => `- ${f.logical} (sha256: ${f.sha256.slice(0, 12)}…)`)
         : ["None"]),
     )
     const notCaptured = [
-      ...captured.missing.map((m) => `${m} (not found)`),
-      ...captured.skipped.map((s) => `${s.logical} (${s.reason})`),
+      ...created.missing.map((m) => `${m} (not found)`),
+      ...created.skipped.map((s) => `${s.logical} (${s.reason})`),
     ]
     if (notCaptured.length > 0) {
       lines.push(`Not captured:`)

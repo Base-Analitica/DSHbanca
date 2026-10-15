@@ -10,7 +10,13 @@ import {
   realWorkspaceRoot,
   resolveRealInsideRoot,
 } from "../lib/safe_paths"
-import { captureSnapshotFiles, lexicalProjectPath, logicalProjectRel } from "../lib/snapshot"
+import {
+  createSnapshot,
+  lexicalProjectPath,
+  logicalProjectRel,
+  SnapshotCaptureError,
+  SnapshotConflictError,
+} from "../lib/snapshot"
 import { addIteration } from "../lib/state"
 import { checkScoreNotDecreased } from "../lib/guards"
 import { analyzeCitationDensity } from "../lib/citation"
@@ -79,16 +85,29 @@ export const bancaCorrigir = defineBancaTool({
       const snapLabel = `pre-${Date.now()}`
       try {
         const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
-        const snapDir = ensureRealDirInsideRoot(root, join(snapshotsDir, snapLabel))
         // Logical identity: the snapshot keys the correction target by its
         // project-declared path, not by the canonical path a symlink resolves to.
         const candidates = corrections.map((c) => {
           const lexical = lexicalProjectPath(root, c.file)
           return { logical: logicalProjectRel(root, lexical), abs: lexical }
         })
-        captureSnapshotFiles({ root, snapshotsDir, snapDir, label: snapLabel, candidates })
+        // Internal labels may collide within one millisecond: the central
+        // createSnapshot picks the first free `-N` suffix and never reuses an
+        // existing snapshot directory or manifest. Pre-correction snapshots
+        // stay unregistered (workspace-only recovery point, as before).
+        createSnapshot({
+          root,
+          snapshotsDir,
+          label: snapLabel,
+          candidates,
+          labelPolicy: "unique",
+          register: false,
+        })
       } catch (err) {
         if (err instanceof PathTraversalError) return `blocked: workspace state paths escape project root`
+        if (err instanceof SnapshotConflictError || err instanceof SnapshotCaptureError) {
+          return `blocked: pre-correction snapshot failed — no manuscript file was modified`
+        }
         throw err
       }
     }

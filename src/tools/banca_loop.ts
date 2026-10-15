@@ -4,7 +4,8 @@ import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
-import { loadState, addIteration, addSnapshot } from "../lib/state"
+import { loadState, addIteration } from "../lib/state"
+import { createSnapshot, SnapshotCaptureError, SnapshotConflictError } from "../lib/snapshot"
 import { generateReport, saveReport } from "../lib/reports"
 import { analyzeCitationDensity } from "../lib/citation"
 import { ensureRealDirInsideRoot, PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
@@ -69,22 +70,35 @@ export const bancaLoop = defineBancaTool({
       ].join("\n")
     }
 
-    // Phase: snapshot
+    // Phase: snapshot. The central createSnapshot claims a collision-free
+    // label (internal labels may collide within one millisecond) and registers
+    // the recovery point only after the marker/manifest were completed.
     const snapLabel = `loop-${Date.now()}`
+    let loopSnapshotLabel: string
     try {
       const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
-      ensureRealDirInsideRoot(root, join(snapshotsDir, snapLabel))
       resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
+      loopSnapshotLabel = createSnapshot({
+        root,
+        snapshotsDir,
+        label: snapLabel,
+        candidates: [],
+        labelPolicy: "unique",
+        register: true,
+        scoreBefore,
+      }).label
     } catch (err) {
       if (err instanceof PathTraversalError) return "blocked: workspace state paths escape project root"
+      if (err instanceof SnapshotConflictError || err instanceof SnapshotCaptureError) {
+        return "blocked: loop snapshot failed — iteration not recorded"
+      }
       throw err
     }
-    addSnapshot(root, snapLabel, scoreBefore)
 
     const results: string[] = [
       `Loop iteration`,
       `Score: ${scoreBefore ?? "—"} → target ${target}`,
-      `Snapshot: ${snapLabel}`,
+      `Snapshot: ${loopSnapshotLabel}`,
       `Citations: ${citation.citedParagraphs}/${citation.totalParagraphs} (${(100 - citation.percentWithoutCitation).toFixed(1)}%)`,
     ]
 
@@ -93,15 +107,15 @@ export const bancaLoop = defineBancaTool({
     }
 
     // save report
-    const report = generateReport(`LOOP — ${snapLabel}`, [
+    const report = generateReport(`LOOP — ${loopSnapshotLabel}`, [
       { title: "Context", body: `Score before: ${scoreBefore ?? "—"}\nTarget: ${target}\nCitations: ${citation.citedParagraphs}/${citation.totalParagraphs}` },
       { title: "Next Steps", body: "Run /banca:auditar for detailed findings, then /banca:corrigir with specific corrections." },
     ])
-    saveReport(root, `loop-${snapLabel}.md`, report)
+    saveReport(root, `loop-${loopSnapshotLabel}.md`, report)
 
     addIteration(root, "loop", scoreBefore, currentScore, "ok")
 
-    results.push(`Report: .banca/reports/loop-${snapLabel}.md`)
+    results.push(`Report: .banca/reports/loop-${loopSnapshotLabel}.md`)
 
     return results.join("\n")
   },

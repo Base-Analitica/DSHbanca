@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readFileSync, renameSync, rmSync, unlinkSync, wr
 import { dirname, isAbsolute, join, relative } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
-import { loadState, addSnapshot } from "../lib/state"
+import { loadState } from "../lib/state"
 import { loadConfig, type ProjectConfig } from "../lib/config"
 import {
   ensureRealDirInsideRoot,
@@ -15,11 +15,13 @@ import {
 } from "../lib/safe_paths"
 import { resolveManuscriptPaths, toPosixPath } from "../lib/paths"
 import {
-  captureSnapshotFiles,
+  createSnapshot,
   loadSnapshotManifest,
   logicalProjectRel,
   sha256Of,
+  SNAPSHOT_INCOMPLETE_MARKER,
   snapshotExclusionReason,
+  type CreatedSnapshot,
   type SnapshotFileEntry,
 } from "../lib/snapshot"
 
@@ -90,6 +92,71 @@ function readVaultFile(root: string, snapDir: string, rel: string): VaultRead {
     return "corrupted"
   }
   return { source, sha256: sha256Of(bytes), size: bytes.length }
+}
+
+type DestinationInspection =
+  | { ok: true; target: string; identityKey: string; canonicalRel: string }
+  | { ok: false; blocked: string }
+
+/**
+ * Resolve one planned restore destination to its canonical location and
+ * identify the physical file it will occupy (P1-A). Existing files are keyed
+ * by device+inode, so two distinct logical paths resolving to the same file
+ * are detectable before any write; missing destinations are keyed by their
+ * canonical project-relative path. Destinations resolving into a protected
+ * namespace (secrets, internal banca state, host/build dirs) are refused, so a
+ * planted internal symlink cannot redirect a restore into `.banca/state.json`
+ * or `.env`. Read-only: touches nothing.
+ */
+function inspectRestoreDestination(root: string, logical: string): DestinationInspection {
+  let target: string
+  try {
+    target = resolveRealInsideRoot(root, logical)
+  } catch {
+    return { ok: false, blocked: `blocked: restore path escapes project root: ${logical}` }
+  }
+  const canonicalRoot = realWorkspaceRoot(root)
+  const canonicalRel = toPosixPath(relative(canonicalRoot, target))
+  if (canonicalRel && canonicalRel !== ".." && !canonicalRel.startsWith("../")) {
+    const exclusion = snapshotExclusionReason(canonicalRel)
+    if (exclusion) {
+      return {
+        ok: false,
+        blocked: `blocked: restore destination for ${logical} resolves into a protected namespace (${exclusion})`,
+      }
+    }
+  }
+  let st
+  try {
+    st = lstatSync(target)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { ok: false, blocked: `blocked: destination for ${logical} is not accessible` }
+    }
+    return { ok: true, target, identityKey: `path:${canonicalRel}`, canonicalRel }
+  }
+  if (!st.isFile()) return { ok: false, blocked: `blocked: destination for ${logical} is not a regular file` }
+  return { ok: true, target, identityKey: `${st.dev}:${st.ino}`, canonicalRel }
+}
+
+/**
+ * Build the logical → physical identity map for every planned destination.
+ * Returns the colliding pair description when two logical paths would write to
+ * the same physical file; the check is order-independent (any collision refuses
+ * the whole restore, regardless of which path is processed first).
+ */
+function destinationPlanError(root: string, logicals: string[]): string | null {
+  const identities = new Map<string, string>()
+  for (const logical of logicals) {
+    const inspection = inspectRestoreDestination(root, logical)
+    if (!inspection.ok) return inspection.blocked
+    const existing = identities.get(inspection.identityKey)
+    if (existing !== undefined) {
+      return `blocked: restore destinations collide: ${existing}, ${logical} resolve to the same file (${inspection.canonicalRel})`
+    }
+    identities.set(inspection.identityKey, logical)
+  }
+  return null
 }
 
 /**
@@ -256,6 +323,20 @@ export const bancaRestore = defineBancaTool({
     }
     if (!existsSync(snapDir)) return `snapshot directory not found: ${snapDir}`
 
+    // A snapshot whose capture never finished is refused: its manifest may be
+    // missing or its files may be a partial copy, so it is not a recovery
+    // point (P1-B). Any entry at the marker path (even a symlink) blocks.
+    let captureIncomplete = false
+    try {
+      lstatSync(join(snapDir, SNAPSHOT_INCOMPLETE_MARKER))
+      captureIncomplete = true
+    } catch {
+      /* no marker: capture finished (or legacy snapshot without marker) */
+    }
+    if (captureIncomplete) {
+      return `blocked: snapshot is incomplete (capture did not finish) — refusing the restore`
+    }
+
     // ---------- Phase 2: read-only planning (no manuscript change) ----------
     let expectedMain: string
     try {
@@ -289,23 +370,16 @@ export const bancaRestore = defineBancaTool({
     }
 
     // ---------- Phase 3: validate every destination before any change ----------
-    for (const p of plan.planned) {
-      let target: string
-      try {
-        target = resolveRealInsideRoot(root, p.logical)
-      } catch {
-        return `blocked: restore path escapes project root: ${p.logical}`
-      }
-      if (existsSync(target)) {
-        let st
-        try {
-          st = lstatSync(target)
-        } catch {
-          return `blocked: destination for ${p.logical} is not accessible`
-        }
-        if (!st.isFile()) return `blocked: destination for ${p.logical} is not a regular file`
-      }
-    }
+    // Identity-level validation (P1-A): every planned logical destination is
+    // resolved to its canonical location and its physical identity (dev:inode
+    // for existing files) is mapped. Two logical paths resolving to the same
+    // physical file refuse the restore integrally — fail-closed even when the
+    // contents coincide, never a silent winner chosen by write order.
+    const planError = destinationPlanError(
+      root,
+      plan.planned.map((p) => p.logical),
+    )
+    if (planError) return planError
 
     // ---------- Phase 4: stage the verified vault content inside the workspace ----------
     const stagingLabel = `.restore-staging-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -340,21 +414,47 @@ export const bancaRestore = defineBancaTool({
       }
 
       // ---------- Phase 5: real backup of the pre-restore state ----------
-      const backupLabel = sanitizeSnapshotLabel(`pre-restore-${Date.now()}`)
-      let backupDir: string
+      // The backup is a full snapshot created through the central, immutable
+      // snapshot path: the label is unique, never overwrites an existing
+      // recovery point and is registered only after the manifest exists.
+      let backup: CreatedSnapshot
       try {
-        backupDir = ensureRealDirInsideRoot(root, join(snapshotsDir, backupLabel))
         const candidates = plan.planned.map((p) => ({
           logical: p.logical,
           abs: resolveInsideRoot(root, p.logical),
         }))
-        captureSnapshotFiles({ root, snapshotsDir, snapDir: backupDir, label: backupLabel, candidates })
-        addSnapshot(root, backupLabel, state.currentScore)
+        backup = createSnapshot({
+          root,
+          snapshotsDir,
+          label: sanitizeSnapshotLabel(`pre-restore-${Date.now()}`),
+          candidates,
+          labelPolicy: "unique",
+          register: true,
+          scoreBefore: state.currentScore,
+        })
       } catch (err) {
         if (err instanceof PathTraversalError) {
           return `blocked: pre-restore backup path escapes project root — no manuscript file was modified`
         }
         return `blocked: pre-restore backup failed — no manuscript file was modified (${(err as Error).message})`
+      }
+      const backupLabel = backup.label
+      const backupDir = backup.snapDir
+
+      // ---------- Phase 5b: revalidate the plan immediately before writing ----------
+      // The destination identities validated in phase 3 are re-checked after
+      // staging/backup, narrowing the window for a destination that changed
+      // (e.g. became a symlink) between planning and substitution. Any change
+      // aborts with zero manuscript writes; the safety backup is kept.
+      const revalidationError = destinationPlanError(
+        root,
+        plan.planned.map((p) => p.logical),
+      )
+      if (revalidationError) {
+        return [
+          `blocked: restore aborted before writing — ${revalidationError.replace(/^blocked: /, "")}`,
+          `Safety backup created: ${backupLabel}`,
+        ].join("\n")
       }
 
       // ---------- Phase 6: controlled replacement with rollback ----------
@@ -413,6 +513,29 @@ export const bancaRestore = defineBancaTool({
           }
           failure = { logical: p.logical, reason: (err as Error).message || "write failed" }
           break
+        }
+      }
+
+      // ---------- Phase 6b: verify the complete final inventory ----------
+      // Individual writes were verified while they happened, but a later
+      // substitution (or an external actor) can invalidate an earlier file.
+      // Success is only allowed when every planned logical path still resolves
+      // inside the workspace and carries exactly the snapshot content; any
+      // mismatch goes through the same rollback path as a write failure, so a
+      // false `restored from` is impossible.
+      if (!failure) {
+        for (const p of plan.planned) {
+          try {
+            const target = resolveRealInsideRoot(root, p.logical)
+            const bytes = readFileSync(target)
+            if (bytes.length !== p.size || sha256Of(bytes) !== p.sha256) {
+              failure = { logical: p.logical, reason: "final content verification failed" }
+              break
+            }
+          } catch {
+            failure = { logical: p.logical, reason: "final content verification failed" }
+            break
+          }
         }
       }
 

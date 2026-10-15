@@ -3,6 +3,9 @@
 Correção focalizada dos defeitos P1 identificados na revisão independente do
 DSHbanca (PR #1, branch `fix/dsh-native-tools`).
 
+> Rodada 3 (colisão de destinos físicos no restore e imutabilidade de labels de
+> snapshot): ver `docs/snapshot-collision-and-immutability.md`.
+
 ## Escopo e preflight
 
 - Branch: `fix/dsh-native-tools` (já existente; sem branch/PR duplicada).
