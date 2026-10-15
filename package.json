@@ -32,7 +32,7 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && bun build src/lib/tools.ts --target=node --packages=external --outfile=dist/lib/tools.js",
     "dev": "tsc --watch",
     "test": "bun test",
     "typecheck": "tsc --noEmit",

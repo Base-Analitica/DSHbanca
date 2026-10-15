@@ -9,6 +9,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Corrigido
 
+- Integração nativa DSH registra as 16 ferramentas `banca_*`, com schemas, validação e diretório da sessão; catálogo compartilhado com OpenCode e regressão do bundle compilado.
 - `banca_corrigir`: substituição agora usa `replaceAll` em vez de `replace` (string), que substituía apenas a primeira ocorrência — correções repetidas no manuscrito eram silenciosamente dropadas
 - `banca_corrigir`: adicionado campo opcional `expectedOccurrences` no schema de correção; quando o count real difere do esperado, um warning `⚠` é emitido no resultado
 - `banca_corrigir`: resultado agora reporta quantas substituições foram feitas por arquivo (`✓ file (N replacements)`)

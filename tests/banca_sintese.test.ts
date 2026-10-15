@@ -742,43 +742,18 @@ describe("banca_sintese — validated global synthesis input tool", () => {
     expect(readdirSync(join(analysisDir, "findings")).length).toBe(1)
   })
 
-  test("11) src/index.ts registers banca_sintese and preserves existing tools", async () => {
-    const indexSrc = readFileSync(
-      join(import.meta.dir, "../src/index.ts"),
-      "utf-8",
-    )
-    expect(indexSrc).toContain('banca_sintese: bancaSintese')
-    expect(indexSrc).toContain('import("./tools/banca_sintese")')
-    // Existing tools remain registered.
-    for (const key of [
-      "banca_init",
-      "banca_status",
-      "banca_context",
-      "banca_auditar",
-      "banca_corrigir",
-      "banca_refs",
-      "banca_ia",
-      "banca_plagio",
-      "banca_loop",
-      "banca_snapshot",
-      "banca_compile",
-      "banca_checklist",
-      "banca_restore",
-      "banca_validate",
-      "banca_contract",
-    ]) {
-      expect(indexSrc).toContain(`${key}:`)
-    }
-
-    const pluginMod = await import("../src/index")
-    const plugin = pluginMod.default
-    expect(typeof plugin).toBe("function")
+  test("11) OpenCode entry registers banca_sintese and preserves existing tools", async () => {
+    const { default: plugin } = await import("../src/index")
     const surface = await plugin({} as any)
-    expect(surface.tool).toBeDefined()
-    expect(surface.tool!.banca_sintese).toBeDefined()
-    expect(surface.tool!.banca_auditar).toBeDefined()
-    expect(surface.tool!.banca_context).toBeDefined()
-    expect(surface.tool!.banca_init).toBeDefined()
+    expect(Object.keys(surface.tool!).sort()).toEqual([
+      "banca_auditar", "banca_checklist", "banca_compile", "banca_context",
+      "banca_contract", "banca_corrigir", "banca_ia", "banca_init", "banca_loop",
+      "banca_plagio", "banca_refs", "banca_restore", "banca_sintese", "banca_snapshot",
+      "banca_status", "banca_validate",
+    ])
+    for (const definition of Object.values(surface.tool!)) {
+      expect(typeof definition.execute).toBe("function")
+    }
   })
 
   test("12) success payload is only the primitive contract", async () => {
