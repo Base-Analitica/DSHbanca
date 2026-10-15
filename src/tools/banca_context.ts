@@ -1,8 +1,9 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs"
+import { readFileSync, existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
+import { ensureRealDirInsideRoot, PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
 import { loadCanonicalLatexManuscript } from "../lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../lib/analysis_coverage"
 import {
@@ -252,10 +253,15 @@ export const bancaContext = defineBancaTool({
       parts.push(...optionalParts)
     }
 
-    const ctxDir = join(root, ".banca", "context")
-    mkdirSync(ctxDir, { recursive: true })
-    const out = join(ctxDir, `context-${Date.now()}.md`)
-    writeFileSync(out, parts.join("\n"), "utf-8")
+    let out = ""
+    try {
+      const ctxDir = ensureRealDirInsideRoot(root, join(root, ".banca", "context"))
+      out = resolveRealInsideRoot(root, join(ctxDir, `context-${Date.now()}.md`))
+      writeFileSync(out, parts.join("\n"), "utf-8")
+    } catch (err) {
+      if (err instanceof PathTraversalError) return "context blocked: context pack path escapes workspace root"
+      throw err
+    }
     return `context → ${out}`
   },
 })

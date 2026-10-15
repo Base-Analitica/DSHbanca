@@ -1,9 +1,9 @@
 import { readdir, readFile } from "node:fs/promises"
 import { realpathSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { dirname, join, resolve, relative, isAbsolute, sep } from "node:path"
+import { dirname, join } from "node:path"
 import { z } from "zod"
-import { resolveInsideRoot, PathTraversalError } from "./lib/safe_paths.js"
+import { PathTraversalError, resolveRealInsideRoot } from "./lib/safe_paths.js"
 import { loadBancaTools } from "./lib/tools.js"
 
 export const name = "dshbanca"
@@ -84,7 +84,8 @@ async function discoverCandidates(skillsRoot: string, signal?: AbortSignal) {
   return candidates
 }
 
-const DESTRUCTIVE_TOOLS = new Set([
+/** Workspace-mutating tools denied to verified auditor agents. */
+const AUDITOR_DENIED_TOOLS = new Set([
   "banca_init",
   "banca_corrigir",
   "banca_snapshot",
@@ -93,20 +94,80 @@ const DESTRUCTIVE_TOOLS = new Set([
   "banca_loop",
 ])
 
-const AUDITOR_PRESET_PREFIX = "banca-auditor"
+/** Tools that alter or revert the author's manuscript. */
+const MANUSCRIPT_MUTATING_TOOLS = new Set(["banca_corrigir", "banca_restore"])
 
-function isAuditorAgent(exec: any): boolean {
-  const preset: string | undefined = exec?.agent?.session?.header?.agentPreset
-  return preset !== undefined && preset.startsWith(AUDITOR_PRESET_PREFIX)
+const AUDITOR_PRESET_PREFIX = "banca-auditor"
+const CORRECTOR_PRESET_PREFIX = "banca-corretor"
+
+/**
+ * Live preset composition, when the host exposes it. `agentPreset` in the
+ * session header is a durable, creation-time value (delegated sessions inherit
+ * the parent's preset), while the live composition is authoritative at
+ * dispatch time. Both sources are deny-monotonic: any source that identifies
+ * an auditor denies.
+ */
+function liveComposedPreset(exec: any): string | undefined {
+  try {
+    const agentCtx = exec?.agent?.ctx
+    const presets = agentCtx?.get?.("agentPresets")
+    const id = presets?.composedPreset?.(agentCtx)
+    return typeof id === "string" ? id : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function presetCandidates(exec: any): string[] {
+  const header = exec?.agent?.session?.header
+  const candidates = [liveComposedPreset(exec), header?.agentPreset]
+  return candidates.filter((p): p is string => typeof p === "string")
+}
+
+/**
+ * Academic tool policy for the native guard (and the executor double-check):
+ *
+ * - verified auditor lineage (`banca-auditor*`): read-only; workspace-mutating
+ *   tools are denied.
+ * - delegated sessions (`origin: "subagent"`) without a verified
+ *   `banca-corretor*` preset: manuscript mutation is denied. The absence of a
+ *   verifiable identity never grants authorization.
+ * - top-level sessions are not gated here: the host sandbox/approval policy
+ *   remains authoritative.
+ *
+ * The guard is deny-only and total: it never throws and never force-allows.
+ */
+function guardDenyReason(toolName: string | undefined, exec: any): string | undefined {
+  if (typeof toolName !== "string") return undefined
+  const presets = presetCandidates(exec)
+  const origin = exec?.agent?.session?.header?.origin
+
+  if (presets.some((p) => p.startsWith(AUDITOR_PRESET_PREFIX))) {
+    if (AUDITOR_DENIED_TOOLS.has(toolName)) {
+      return `DSHbanca guard: tool "${toolName}" is denied for auditor agents — read-only enforcement`
+    }
+    return undefined
+  }
+
+  if (origin === "subagent" && !presets.some((p) => p.startsWith(CORRECTOR_PRESET_PREFIX))) {
+    if (MANUSCRIPT_MUTATING_TOOLS.has(toolName)) {
+      return `DSHbanca guard: tool "${toolName}" is denied for subagents without a verified banca-corretor preset — manuscript mutation requires the corrector role`
+    }
+  }
+
+  return undefined
 }
 
 function resolveWorkspaceRoot(exec: any): string {
   const cwd = exec?.agent?.session?.header?.cwd
-  if (cwd === undefined) {
-    throw new Error("DSHbanca requires a session workspace; no cwd in session header")
+  if (typeof cwd !== "string" || cwd === "") {
+    throw new PathTraversalError("DSHbanca requires a session workspace; no cwd in session header")
   }
-  const resolvedCwd = realpathSync(cwd)
-  return resolvedCwd
+  try {
+    return realpathSync(cwd)
+  } catch {
+    throw new PathTraversalError("session workspace is not accessible")
+  }
 }
 
 export async function apply(ctx: any) {
@@ -126,10 +187,9 @@ export async function apply(ctx: any) {
       async execute(input: unknown, exec: any) {
         exec.signal.throwIfAborted()
 
-        if (DESTRUCTIVE_TOOLS.has(toolName) && isAuditorAgent(exec)) {
-          throw new Error(
-            `DSHbanca guard: tool "${toolName}" is denied for auditor agents — read-only enforcement`,
-          )
+        const denied = guardDenyReason(toolName, exec)
+        if (denied) {
+          throw new Error(denied)
         }
 
         const args = schema.parse(input)
@@ -137,56 +197,16 @@ export async function apply(ctx: any) {
 
         let directory: string
         if (args.projectRoot !== undefined && args.projectRoot !== "") {
-          if (isAbsolute(args.projectRoot)) {
-            const rel = relative(root, args.projectRoot)
-            if (rel.startsWith("..") || isAbsolute(rel)) {
+          try {
+            directory = resolveRealInsideRoot(root, args.projectRoot)
+          } catch (err) {
+            if (err instanceof PathTraversalError) {
               throw new PathTraversalError(
-                `absolute path escapes workspace root: ${args.projectRoot}`,
+                `tool "${toolName}" rejected a projectRoot outside the workspace`,
               )
             }
-            directory = resolveInsideRoot(root, rel)
-          } else {
-            directory = resolveInsideRoot(root, args.projectRoot)
+            throw err
           }
-          const resolvedRoot = realpathSync(root)
-          const parts = directory
-            .replace(resolvedRoot, "")
-            .split(sep)
-            .filter((p) => p && p !== ".")
-          let canonical: string | null = null
-          for (let i = parts.length; i >= 0; i--) {
-            const ancestor =
-              i === 0 ? resolvedRoot : join(resolvedRoot, ...parts.slice(0, i))
-            try {
-              const rp = realpathSync(ancestor)
-              const relCheck = relative(resolvedRoot, rp)
-              if (relCheck.startsWith("..") || isAbsolute(relCheck)) {
-                throw new PathTraversalError(
-                  `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
-                )
-              }
-              canonical = join(rp, ...parts.slice(i))
-              break
-            } catch (e: any) {
-              if (e.code !== "ENOENT") {
-                throw new PathTraversalError(
-                  `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
-                )
-              }
-            }
-          }
-          if (canonical === null) {
-            throw new PathTraversalError(
-              `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
-            )
-          }
-          const relFinal = relative(resolvedRoot, canonical)
-          if (relFinal.startsWith("..") || isAbsolute(relFinal)) {
-            throw new PathTraversalError(
-              `tool "${toolName}" resolved path escapes workspace root: ${args.projectRoot}`,
-            )
-          }
-          directory = canonical
         } else {
           directory = root
         }
@@ -200,13 +220,7 @@ export async function apply(ctx: any) {
     })
   }
 
-  ctx.tools.guard((exec: any) => {
-    const toolName = exec?.name ?? exec?.tool?.name
-    if (DESTRUCTIVE_TOOLS.has(toolName) && isAuditorAgent(exec)) {
-      return `DSHbanca guard: tool "${toolName}" is denied for auditor agents — read-only enforcement`
-    }
-    return undefined
-  })
+  ctx.tools.guard((exec: any) => guardDenyReason(exec?.name ?? exec?.tool?.name, exec))
 
   const skillsRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "skills")
   if (ctx.skills?.registerProvider) {

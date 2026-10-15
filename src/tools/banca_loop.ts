@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, mkdirSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
@@ -7,6 +7,7 @@ import { resolveManuscriptPaths } from "../lib/paths"
 import { loadState, addIteration, addSnapshot } from "../lib/state"
 import { generateReport, saveReport } from "../lib/reports"
 import { analyzeCitationDensity } from "../lib/citation"
+import { ensureRealDirInsideRoot, PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
 export const bancaLoop = defineBancaTool({
   description: "Runs an assisted loop step (checks target, takes snapshot, audits citations, prepares next steps). Implementation is preparatory/assisted and does not run autonomous corrections.",
   args: {
@@ -70,8 +71,14 @@ export const bancaLoop = defineBancaTool({
 
     // Phase: snapshot
     const snapLabel = `loop-${Date.now()}`
-    const snapDir = join(root, ".banca", "snapshots", snapLabel)
-    mkdirSync(snapDir, { recursive: true })
+    try {
+      const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
+      ensureRealDirInsideRoot(root, join(snapshotsDir, snapLabel))
+      resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
+    } catch (err) {
+      if (err instanceof PathTraversalError) return "blocked: workspace state paths escape project root"
+      throw err
+    }
     addSnapshot(root, snapLabel, scoreBefore)
 
     const results: string[] = [

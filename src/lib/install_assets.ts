@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, cpSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, cpSync, readdirSync, writeFileSync } from "node:fs"
 import { join, dirname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
+import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -763,14 +764,12 @@ function getFilesRecursively(dir: string): string[] {
   return results
 }
 
-function copyDirectory(src: string, dest: string, force: boolean, installed: string[]) {
+function copyDirectory(projectRoot: string, src: string, dest: string, force: boolean, installed: string[]) {
   if (!existsSync(src)) return
   const files = getFilesRecursively(src)
   for (const file of files) {
     const rel = relative(src, file)
-    const destPath = join(dest, rel)
-    const destDir = dirname(destPath)
-    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
+    const destPath = prepareRealPathForWrite(projectRoot, join(dest, rel))
     if (!existsSync(destPath) || force) {
       cpSync(file, destPath)
       installed.push(destPath)
@@ -781,12 +780,17 @@ function copyDirectory(src: string, dest: string, force: boolean, installed: str
 export function installAssets(projectRoot: string, force: boolean, customAssetsDir?: string): string[] {
   const installed: string[] = []
 
+  // Preflight: the asset roots themselves must resolve inside the workspace
+  // before anything is written. A symlinked `.dsh`/`.banca` pointing outside
+  // blocks the whole installation with no partial external changes.
+  resolveRealInsideRoot(projectRoot, join(projectRoot, ".dsh"))
+  resolveRealInsideRoot(projectRoot, join(projectRoot, ".banca"))
+
   function write(path: string, content: string) {
-    const dir = dirname(path)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    if (!existsSync(path) || force) {
-      writeFileSync(path, content, "utf-8")
-      installed.push(path)
+    const target = prepareRealPathForWrite(projectRoot, path)
+    if (!existsSync(target) || force) {
+      writeFileSync(target, content, "utf-8")
+      installed.push(target)
     }
   }
 
@@ -794,16 +798,16 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
 
   if (existsSync(pluginAssetsDir)) {
     // Install versioned agents (DSH-native)
-    copyDirectory(join(pluginAssetsDir, "dsh", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
+    copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
 
     // Install versioned skills (DSH-native)
-    copyDirectory(join(pluginAssetsDir, "dsh", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
+    copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
 
     // Install versioned commands
-    copyDirectory(join(pluginAssetsDir, "dsh", "commands"), join(projectRoot, ".dsh", "commands"), force, installed)
+    copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "commands"), join(projectRoot, ".dsh", "commands"), force, installed)
 
     // Install versioned templates
-    copyDirectory(join(pluginAssetsDir, "templates"), join(projectRoot, ".banca"), force, installed)
+    copyDirectory(projectRoot, join(pluginAssetsDir, "templates"), join(projectRoot, ".banca"), force, installed)
   } else {
     // Fallback agents (DSH-native)
     for (const [name, content] of Object.entries(AGENTS)) {
@@ -825,7 +829,7 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
 
   // Ensure default templates exist (write them if not already copied from versioned folder)
   for (const [name, content] of Object.entries(TEMPLATES)) {
-    const destPath = join(projectRoot, ".banca", name)
+    const destPath = resolveRealInsideRoot(projectRoot, join(projectRoot, ".banca", name))
     // Check if it was already installed via versioned copy
     if (!installed.includes(destPath)) {
       write(destPath, content)

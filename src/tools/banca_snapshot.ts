@@ -1,16 +1,25 @@
-import { existsSync, mkdirSync, cpSync } from "node:fs"
-import { join, dirname, relative, isAbsolute } from "node:path"
+import { existsSync, cpSync } from "node:fs"
+import { join, relative, isAbsolute } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { addSnapshot } from "../lib/state"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
-import { sanitizeSnapshotLabel, resolveInsideRoot } from "../lib/safe_paths"
-function copyFileToSnapshot(srcPath: string, projectRoot: string, snapDir: string) {
+import {
+  ensureRealDirInsideRoot,
+  PathTraversalError,
+  prepareRealPathForWrite,
+  realWorkspaceRoot,
+  resolveRealInsideRoot,
+  sanitizeSnapshotLabel,
+} from "../lib/safe_paths"
+
+function copyFileToSnapshot(srcPath: string, root: string, canonicalRoot: string, snapDir: string) {
   if (!srcPath || !existsSync(srcPath)) return
-  const relPath = relative(projectRoot, srcPath)
+  const srcCanonical = resolveRealInsideRoot(root, srcPath)
+  const relPath = relative(canonicalRoot, srcCanonical)
   if (relPath.startsWith("..") || isAbsolute(relPath)) {
-    throw new Error(`File escapes project root: ${srcPath}`)
+    throw new PathTraversalError("file escapes workspace root")
   }
   const posixRel = relPath.replace(/[/\\]+/g, "/")
   if (
@@ -25,12 +34,8 @@ function copyFileToSnapshot(srcPath: string, projectRoot: string, snapDir: strin
   ) {
     return
   }
-  const destPath = resolveInsideRoot(snapDir, relPath)
-  const destParent = dirname(destPath)
-  if (!existsSync(destParent)) {
-    mkdirSync(destParent, { recursive: true })
-  }
-  cpSync(srcPath, destPath, { recursive: true })
+  const destPath = prepareRealPathForWrite(root, join(snapDir, relPath))
+  cpSync(srcCanonical, destPath, { recursive: true })
 }
 
 export const bancaSnapshot = defineBancaTool({
@@ -47,21 +52,33 @@ export const bancaSnapshot = defineBancaTool({
     }
     const label = sanitizeSnapshotLabel(rawLabel)
     const config = loadConfig(root)
-    const snapshotsDir = join(root, ".banca", "snapshots")
-    const snapDir = join(snapshotsDir, label)
-    try { resolveInsideRoot(snapshotsDir, label) } catch { return `blocked: snapshot path escapes project root` }
-    mkdirSync(snapDir, { recursive: true })
+
+    // Canonical preflight before any directory creation or copy: the state
+    // file, the snapshots root and the snapshot destination must all resolve
+    // inside the workspace.
+    let canonicalRoot: string
+    let snapDir: string
+    try {
+      canonicalRoot = realWorkspaceRoot(root)
+      resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
+      const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
+      snapDir = ensureRealDirInsideRoot(root, join(snapshotsDir, label))
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
+      throw err
+    }
 
     const paths = resolveManuscriptPaths(root, config)
 
     try {
-      copyFileToSnapshot(paths.main, root, snapDir)
-      copyFileToSnapshot(paths.bib, root, snapDir)
+      copyFileToSnapshot(paths.main, root, canonicalRoot, snapDir)
+      copyFileToSnapshot(paths.bib, root, canonicalRoot, snapDir)
       for (const ch of paths.chapters) {
-        copyFileToSnapshot(ch, root, snapDir)
+        copyFileToSnapshot(ch, root, canonicalRoot, snapDir)
       }
-    } catch (err: any) {
-      return `blocked: snapshot path escapes project root`
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
+      throw err
     }
 
     addSnapshot(root, label, null)
@@ -69,4 +86,3 @@ export const bancaSnapshot = defineBancaTool({
     return `snapshot → ${snapDir}`
   },
 })
-

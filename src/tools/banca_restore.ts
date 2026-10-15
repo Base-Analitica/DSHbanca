@@ -1,10 +1,18 @@
-import { existsSync, cpSync, rmSync, mkdirSync } from "node:fs"
+import { existsSync, cpSync, rmSync } from "node:fs"
 import { join, dirname, relative, isAbsolute } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadState, addSnapshot } from "../lib/state"
 import { loadConfig } from "../lib/config"
-import { resolveInsideRoot, sanitizeSnapshotLabel } from "../lib/safe_paths"
+import {
+  ensureRealDirInsideRoot,
+  PathTraversalError,
+  prepareRealPathForWrite,
+  realWorkspaceRoot,
+  resolveInsideRoot,
+  resolveRealInsideRoot,
+  sanitizeSnapshotLabel,
+} from "../lib/safe_paths"
 import { resolveManuscriptPaths } from "../lib/paths"
 export const bancaRestore = defineBancaTool({
   description: "Restore project from a snapshot safely.",
@@ -27,10 +35,16 @@ export const bancaRestore = defineBancaTool({
     const snap = state.snapshots.find((s) => s.id === args.snapshotId || s.label === args.snapshotId)
     if (!snap) return `snapshot not found: ${args.snapshotId}`
 
-    const snapshotsDir = join(root, ".banca", "snapshots")
-    const snapDir = join(snapshotsDir, snap.label)
+    // Canonical preflight: snapshots root, snapshot directory and every
+    // restore destination must resolve inside the workspace before any change.
+    let canonicalRoot: string
+    let snapshotsDir: string
+    let snapDir: string
     try {
-      resolveInsideRoot(snapshotsDir, snap.label)
+      canonicalRoot = realWorkspaceRoot(root)
+      snapshotsDir = resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))
+      const lexicalSnapDir = resolveInsideRoot(snapshotsDir, snap.label)
+      snapDir = resolveRealInsideRoot(root, lexicalSnapDir)
     } catch {
       return `blocked: snapshot path escapes project root`
     }
@@ -38,23 +52,34 @@ export const bancaRestore = defineBancaTool({
 
     // Resolve manuscript paths against snapshot directory
     const snapPaths = resolveManuscriptPaths(snapDir, config)
-    
+
     // Resolve manuscript paths against project root to check current files
     const currentPaths = resolveManuscriptPaths(root, config)
 
-    // Gather files to restore from snapshot
-    const filesToRestore: string[] = []
-    if (existsSync(snapPaths.main)) filesToRestore.push(snapPaths.main)
-    if (existsSync(snapPaths.bib)) filesToRestore.push(snapPaths.bib)
-    for (const ch of snapPaths.chapters) {
-      if (existsSync(ch)) filesToRestore.push(ch)
+    // Gather files to restore from snapshot with canonical containment
+    const restorePairs: Array<{ src: string; dst: string; rel: string }> = []
+    try {
+      const snapFiles: string[] = []
+      if (existsSync(snapPaths.main)) snapFiles.push(snapPaths.main)
+      if (existsSync(snapPaths.bib)) snapFiles.push(snapPaths.bib)
+      for (const ch of snapPaths.chapters) {
+        if (existsSync(ch)) snapFiles.push(ch)
+      }
+      for (const snapFile of snapFiles) {
+        const src = resolveRealInsideRoot(root, snapFile)
+        const rel = relative(snapDir, src)
+        if (rel.startsWith("..") || isAbsolute(rel)) {
+          throw new PathTraversalError("restore source escapes snapshot directory")
+        }
+        const dst = resolveRealInsideRoot(root, rel)
+        restorePairs.push({ src, dst, rel })
+      }
+      // state persistence must stay inside the workspace
+      resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: restore path escapes project root`
+      throw err
     }
-
-    const restorePairs = filesToRestore.map((snapFile) => {
-      const rel = relative(snapDir, snapFile)
-      const dst = resolveInsideRoot(root, rel)
-      return { src: snapFile, dst, rel }
-    })
 
     if (!args.confirm) {
       const affected = restorePairs.map(p => `- ${p.rel}`).join("\n")
@@ -68,27 +93,24 @@ export const bancaRestore = defineBancaTool({
 
     // CREATE PRE-RESTORE SNAPSHOT (SAFETY BACKUP)
     const backupLabel = sanitizeSnapshotLabel(`pre-restore-${Date.now()}`)
-    const backupDir = join(snapshotsDir, backupLabel)
+    let backupDir: string
     try {
-      resolveInsideRoot(snapshotsDir, backupLabel)
-    } catch {
-      return `blocked: snapshot path escapes project root`
+      backupDir = ensureRealDirInsideRoot(root, join(snapshotsDir, backupLabel))
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
+      throw err
     }
-    mkdirSync(backupDir, { recursive: true })
 
     // Copy current manuscript files to safety backup
     const copyFileToBackup = (srcPath: string) => {
       if (!srcPath || !existsSync(srcPath)) return
-      const relPath = relative(root, srcPath)
+      const src = resolveRealInsideRoot(root, srcPath)
+      const relPath = relative(canonicalRoot, src)
       if (relPath.startsWith("..") || isAbsolute(relPath)) {
-        throw new Error(`File escapes project root: ${srcPath}`)
+        throw new PathTraversalError("file escapes workspace root")
       }
-      const destPath = resolveInsideRoot(backupDir, relPath)
-      const destParent = dirname(destPath)
-      if (!existsSync(destParent)) {
-        mkdirSync(destParent, { recursive: true })
-      }
-      cpSync(srcPath, destPath, { recursive: true })
+      const destPath = prepareRealPathForWrite(root, join(backupDir, relPath))
+      cpSync(src, destPath, { recursive: true })
     }
 
     try {
@@ -99,30 +121,40 @@ export const bancaRestore = defineBancaTool({
       }
       addSnapshot(root, backupLabel, state.currentScore)
     } catch (err: any) {
+      if (err instanceof PathTraversalError) return `blocked: restore path escapes project root`
       return `failed to create pre-restore backup: ${err.message}`
     }
 
     // Now perform the actual restore safely
     const restoredFiles: string[] = []
     for (const pair of restorePairs) {
-      // Validate dst is inside root
+      let dstNow: string
       try {
-        resolveInsideRoot(root, pair.rel)
+        dstNow = resolveRealInsideRoot(root, pair.rel)
       } catch {
         return `blocked: restore path escapes project root: ${pair.rel}`
       }
-      
+
       // Delete existing destination file if present
-      if (existsSync(pair.dst)) {
-        rmSync(pair.dst, { recursive: true, force: true })
+      if (existsSync(dstNow)) {
+        rmSync(dstNow, { recursive: true, force: true })
       }
-      
-      const dstParent = dirname(pair.dst)
-      if (!existsSync(dstParent)) {
-        mkdirSync(dstParent, { recursive: true })
+
+      try {
+        ensureRealDirInsideRoot(root, dirname(dstNow))
+      } catch {
+        return `blocked: restore path escapes project root: ${pair.rel}`
       }
-      
-      cpSync(pair.src, pair.dst, { recursive: true })
+
+      let dstFinal: string
+      try {
+        // re-resolve immediately before copying
+        dstFinal = resolveRealInsideRoot(root, pair.rel)
+      } catch {
+        return `blocked: restore path escapes project root: ${pair.rel}`
+      }
+
+      cpSync(pair.src, dstFinal, { recursive: true })
       restoredFiles.push(pair.rel)
     }
 

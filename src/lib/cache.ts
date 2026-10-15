@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { join, dirname } from "node:path"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
+import { prepareRealPathForWrite } from "./safe_paths"
 import type { RefMetadata, ValidationResult } from "./academic"
 
 interface CacheEntry {
@@ -11,9 +12,11 @@ interface CacheEntry {
 
 export class RefCache {
   private path: string
+  private root: string
   private data: CacheEntry[] = []
 
   constructor(projectRoot: string) {
+    this.root = projectRoot
     this.path = join(projectRoot, ".banca", "cache", "refs.json")
     this.load()
   }
@@ -25,9 +28,8 @@ export class RefCache {
   }
 
   private save(): void {
-    const dir = dirname(this.path)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(this.path, JSON.stringify(this.data, null, 2), "utf-8")
+    const target = prepareRealPathForWrite(this.root, this.path)
+    writeFileSync(target, JSON.stringify(this.data, null, 2), "utf-8")
   }
 
   get(ref: RefMetadata): ValidationResult | null {

@@ -1,10 +1,16 @@
-import { existsSync, readFileSync, writeFileSync, cpSync, mkdirSync } from "node:fs"
-import { join, dirname } from "node:path"
+import { existsSync, readFileSync, writeFileSync, cpSync } from "node:fs"
+import { join, relative } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths, isPathProtected, isPathAllowed, globToRegex, toPosixPath } from "../lib/paths"
-import { resolveInsideRoot, relativeInsideRoot } from "../lib/safe_paths"
+import {
+  ensureRealDirInsideRoot,
+  PathTraversalError,
+  prepareRealPathForWrite,
+  realWorkspaceRoot,
+  resolveRealInsideRoot,
+} from "../lib/safe_paths"
 import { addIteration } from "../lib/state"
 import { checkScoreNotDecreased } from "../lib/guards"
 import { analyzeCitationDensity } from "../lib/citation"
@@ -35,19 +41,34 @@ export const bancaCorrigir = defineBancaTool({
 
     if (corrections.length === 0) return "no corrections provided"
 
+    // Canonical preflight: resolve every destination to its real path before
+    // any snapshot or write. Symlinks escaping the workspace block the batch.
+    const prepared: Array<{ file: string; abs: string; relPath: string }> = []
     for (const c of corrections) {
       try {
-        resolveInsideRoot(root, c.file)
+        const abs = resolveRealInsideRoot(root, c.file)
+        const relPath = toPosixPath(relative(realWorkspaceRoot(root), abs))
+        prepared.push({ file: c.file, abs, relPath })
       } catch {
         return `blocked: ${c.file} escapes project root`
       }
     }
 
+    // Workspace persistence paths this tool will touch must also be internal.
+    try {
+      resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
+      if (!args.skipSnapshot) {
+        resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))
+      }
+    } catch {
+      return `blocked: workspace state paths escape project root`
+    }
+
     // immutableFacts guard: block edits to immutable files
-    for (const c of corrections) {
-      const relPath = toPosixPath(relativeInsideRoot(root, c.file))
+    for (let i = 0; i < corrections.length; i++) {
+      const c = corrections[i]
       for (const fact of config.immutableFacts) {
-        if (globToRegex(fact).test(relPath)) {
+        if (globToRegex(fact).test(prepared[i].relPath)) {
           return `blocked: ${c.file} is immutable (immutableFacts: "${fact}"). ${c.oldText.substring(0, 60)}...`
         }
       }
@@ -56,28 +77,35 @@ export const bancaCorrigir = defineBancaTool({
     // snapshot
     if (!args.skipSnapshot) {
       const snapLabel = `pre-${Date.now()}`
-      const snapDir = join(root, ".banca", "snapshots", snapLabel)
-      resolveInsideRoot(join(root, ".banca", "snapshots"), snapLabel)
-      mkdirSync(snapDir, { recursive: true })
-      for (const c of corrections) {
-        const fp = resolveInsideRoot(root, c.file)
-        if (existsSync(fp)) {
-          const rel = relativeInsideRoot(root, c.file)
-          const dest = resolveInsideRoot(snapDir, rel)
-          mkdirSync(dirname(dest), { recursive: true })
-          cpSync(fp, dest)
+      try {
+        const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
+        const snapDir = ensureRealDirInsideRoot(root, join(snapshotsDir, snapLabel))
+        for (const p of prepared) {
+          if (existsSync(p.abs)) {
+            const dest = prepareRealPathForWrite(root, join(snapDir, p.relPath))
+            cpSync(resolveRealInsideRoot(root, p.abs), dest)
+          }
         }
+      } catch (err) {
+        if (err instanceof PathTraversalError) return `blocked: workspace state paths escape project root`
+        throw err
       }
     }
 
     const results: string[] = []
-    for (const c of corrections) {
-      const fp = resolveInsideRoot(root, c.file)
+    for (let i = 0; i < corrections.length; i++) {
+      const c = corrections[i]
+      const p = prepared[i]
+      let fp: string
+      try {
+        fp = resolveRealInsideRoot(root, p.abs)
+      } catch {
+        return `blocked: ${c.file} escapes project root`
+      }
       if (!existsSync(fp)) { results.push(`✗ ${c.file}: not found`); continue }
 
-      const canonizedRelPath = toPosixPath(relativeInsideRoot(root, c.file))
-      if (isPathProtected(canonizedRelPath, config)) { results.push(`✗ ${c.file}: protected path`); continue }
-      if (!isPathAllowed(canonizedRelPath, config)) { results.push(`✗ ${c.file}: not in allowed paths`); continue }
+      if (isPathProtected(p.relPath, config)) { results.push(`✗ ${c.file}: protected path`); continue }
+      if (!isPathAllowed(p.relPath, config)) { results.push(`✗ ${c.file}: not in allowed paths`); continue }
 
       const content = readFileSync(fp, "utf-8")
       if (typeof c.oldText !== "string" || c.oldText.length === 0) {
@@ -117,7 +145,14 @@ export const bancaCorrigir = defineBancaTool({
       // Replace ALL occurrences (String.replace with string only replaces the
       // first one, which silently drops repeated corrections).
       const updated = content.replaceAll(c.oldText, c.newText)
-      writeFileSync(fp, updated, "utf-8")
+      let target: string
+      try {
+        // re-resolve immediately before writing to narrow the TOCTOU window
+        target = resolveRealInsideRoot(root, p.abs)
+      } catch {
+        return `blocked: ${c.file} escapes project root`
+      }
+      writeFileSync(target, updated, "utf-8")
       results.push(
         `✓ ${c.file} (${occurrenceCount} replacement${occurrenceCount > 1 ? "s" : ""})`,
       )

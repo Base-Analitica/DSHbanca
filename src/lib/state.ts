@@ -9,7 +9,7 @@ import {
   type Stats,
 } from "node:fs"
 import { join, dirname, resolve } from "node:path"
-import { resolveInsideRoot } from "./safe_paths"
+import { resolveInsideRoot, prepareRealPathForWrite } from "./safe_paths"
 import {
   AnalysisCheckpointError,
   type AnalysisCheckpoint,
@@ -54,9 +54,7 @@ export function loadState(projectRoot: string): ProjectState {
 }
 
 export function saveState(projectRoot: string, state: ProjectState): void {
-  const p = getStatePath(projectRoot)
-  const dir = dirname(p)
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const p = prepareRealPathForWrite(projectRoot, getStatePath(projectRoot))
   writeFileSync(p, JSON.stringify(state, null, 2), "utf-8")
 }
 
