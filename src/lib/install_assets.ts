@@ -795,12 +795,15 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
   if (existsSync(pluginAssetsDir)) {
     // Install versioned agents
     copyDirectory(join(pluginAssetsDir, "opencode", "agents"), join(projectRoot, ".opencode", "agents"), force, installed)
+    copyDirectory(join(pluginAssetsDir, "opencode", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
     
     // Install versioned commands
     copyDirectory(join(pluginAssetsDir, "opencode", "commands"), join(projectRoot, ".opencode", "commands"), force, installed)
     
-    // Install versioned skills
+    // Install versioned skills (OpenCode + DSH)
     copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".opencode", "skills"), force, installed)
+    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
+    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".agents", "skills"), force, installed)
     
     // Install versioned templates
     copyDirectory(join(pluginAssetsDir, "templates"), join(projectRoot, ".banca"), force, installed)
@@ -808,6 +811,7 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
     // Fallback agents
     for (const [name, content] of Object.entries(AGENTS)) {
       write(join(projectRoot, ".opencode", "agents", name), content)
+      write(join(projectRoot, ".dsh", "agents", name), content)
     }
 
     // Fallback commands
@@ -819,6 +823,8 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
     for (const [skillName, files] of Object.entries(SKILLS)) {
       for (const [fileName, content] of Object.entries(files)) {
         write(join(projectRoot, ".opencode", "skills", skillName, fileName), content)
+        write(join(projectRoot, ".dsh", "skills", skillName, fileName), content)
+        write(join(projectRoot, ".agents", "skills", skillName, fileName), content)
       }
     }
   }

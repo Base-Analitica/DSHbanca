@@ -1,0 +1,4 @@
+# dshbanca bundle patch: mount DSHbanca skills and tools into DSH
+- insert:
+    - id: dshbanca
+      name: 'dshbanca'

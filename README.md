@@ -1,24 +1,27 @@
-# OpenBanca
+# DSHbanca
 
-Plugin OpenCode para gestão, auditoria e correção de trabalhos acadêmicos (monografias, dissertações, TCCs).
+Plugin DSH (DeepSeek Harness) e OpenCode para gestão, auditoria e correção de trabalhos acadêmicos (monografias, dissertações, TCCs).
+
+Adaptado a partir do projeto original `OpenBanca` da organização **Base Analítica** para funcionamento nativo no ecossistema **dsh**.
 
 ## Objetivo
 
-O OpenBanca resolve o problema de qualidade em trabalhos acadêmicos ao fornecer um sistema automatizado de auditoria em 4 eixos (ABNT, Citações, Conteúdo, Estilo), correção contínua com guardrails, validação de referências via MCPs e detecção de padrões de IA.
+O DSHbanca resolve o problema de qualidade em trabalhos acadêmicos ao fornecer um sistema automatizado de auditoria em 4 eixos (ABNT, Citações, Conteúdo, Estilo), correção contínua com guardrails, validação de referências via MCPs e detecção de padrões de IA.
 
-O plugin se integra ao OpenCode como uma coleção de ferramentas, agentes e skills que executam workflow de correção acadêmica de forma estruturada e reproduzível.
+O plugin se integra ao **dsh** (DeepSeek Harness) via Cordis plugin loader e `ctx.skills`/`ctx.tools`, além de suportar OpenCode como coleção de ferramentas, agentes e skills que executam o workflow de correção acadêmica de forma estruturada e reproduzível.
 
 ## Para quem é
 
-- **Usuários de OpenCode** que escrevem trabalhos acadêmicos e precisam de auditoria automatizada
+- **Usuários de DSH (DeepSeek Harness)** que escrevem trabalhos acadêmicos e precisam de auditoria automatizada e skills acadêmicas
+- **Usuários de OpenCode** que precisam do workflow acadêmico integrado
 - **Agentes de IA** que precisam de ferramentas especializadas para revisão de textos acadêmicos
-- **Desenvolvedores de workflows** que querem extender ou personalizar o processo de correção
+- **Desenvolvedores de workflows** que querem estender ou personalizar o processo de correção
 - **Revisores de prompts/skills** que querem auditar e melhorar o bundle
 - **Educadores** que querem automatizar parte da correção de trabalhos estudantis
 
 ## Estado atual
 
-**Experimental / Protótipo (v0.1.0)** — pacote `@opencode/banca` **não publicado no npm** (`private: true`).
+**Experimental / Protótipo (v0.1.0)** — pacote `dshbanca` em desenvolvimento local.
 
 ### Funcionalidades implementadas no código — validação externa pendente
 
