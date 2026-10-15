@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, cpSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
@@ -7,10 +7,10 @@ import { resolveManuscriptPaths, isPathProtected, isPathAllowed, globToRegex, to
 import {
   ensureRealDirInsideRoot,
   PathTraversalError,
-  prepareRealPathForWrite,
   realWorkspaceRoot,
   resolveRealInsideRoot,
 } from "../lib/safe_paths"
+import { captureSnapshotFiles, lexicalProjectPath, logicalProjectRel } from "../lib/snapshot"
 import { addIteration } from "../lib/state"
 import { checkScoreNotDecreased } from "../lib/guards"
 import { analyzeCitationDensity } from "../lib/citation"
@@ -80,12 +80,13 @@ export const bancaCorrigir = defineBancaTool({
       try {
         const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
         const snapDir = ensureRealDirInsideRoot(root, join(snapshotsDir, snapLabel))
-        for (const p of prepared) {
-          if (existsSync(p.abs)) {
-            const dest = prepareRealPathForWrite(root, join(snapDir, p.relPath))
-            cpSync(resolveRealInsideRoot(root, p.abs), dest)
-          }
-        }
+        // Logical identity: the snapshot keys the correction target by its
+        // project-declared path, not by the canonical path a symlink resolves to.
+        const candidates = corrections.map((c) => {
+          const lexical = lexicalProjectPath(root, c.file)
+          return { logical: logicalProjectRel(root, lexical), abs: lexical }
+        })
+        captureSnapshotFiles({ root, snapshotsDir, snapDir, label: snapLabel, candidates })
       } catch (err) {
         if (err instanceof PathTraversalError) return `blocked: workspace state paths escape project root`
         throw err

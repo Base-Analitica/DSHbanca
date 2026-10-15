@@ -1,9 +1,9 @@
-import { existsSync, cpSync, rmSync } from "node:fs"
-import { join, dirname, relative, isAbsolute } from "node:path"
+import { existsSync, lstatSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
+import { dirname, isAbsolute, join, relative } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadState, addSnapshot } from "../lib/state"
-import { loadConfig } from "../lib/config"
+import { loadConfig, type ProjectConfig } from "../lib/config"
 import {
   ensureRealDirInsideRoot,
   PathTraversalError,
@@ -13,7 +13,214 @@ import {
   resolveRealInsideRoot,
   sanitizeSnapshotLabel,
 } from "../lib/safe_paths"
-import { resolveManuscriptPaths } from "../lib/paths"
+import { resolveManuscriptPaths, toPosixPath } from "../lib/paths"
+import {
+  captureSnapshotFiles,
+  loadSnapshotManifest,
+  logicalProjectRel,
+  sha256Of,
+  snapshotExclusionReason,
+  type SnapshotFileEntry,
+} from "../lib/snapshot"
+
+interface PlannedRestore {
+  /** Project-relative logical path; the file is restored at this identity. */
+  logical: string
+  /** Verified vault file (canonical path inside the workspace). */
+  source: string
+  sha256: string
+  size: number
+  /** True when the vault stored this file under a legacy canonical key. */
+  legacy: boolean
+}
+
+interface RestorePlan {
+  planned: PlannedRestore[]
+  notInSnapshot: string[]
+}
+
+function logicalManuscriptRel(root: string, config: ProjectConfig, which: "main" | "bib"): string {
+  const manuscriptRoot = resolveInsideRoot(root, config.manuscript.root)
+  const abs = resolveInsideRoot(manuscriptRoot, config.manuscript[which])
+  return logicalProjectRel(root, abs)
+}
+
+/**
+ * Canonical storage key a pre-fix (pre-manifest) snapshot could have used for
+ * a symlinked main/bib: the physical project-relative path of the current
+ * resolution. Returns null when the current path is not a symlink (legacy key
+ * equals the logical key) or cannot be resolved safely.
+ */
+function legacyCanonicalKey(root: string, logical: string): string | null {
+  try {
+    const canonicalRoot = realWorkspaceRoot(root)
+    const target = resolveRealInsideRoot(root, logical)
+    const rel = toPosixPath(relative(canonicalRoot, target))
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null
+    return rel === logical ? null : rel
+  } catch {
+    return null
+  }
+}
+
+type VaultRead =
+  | { source: string; sha256: string; size: number }
+  | "corrupted"
+  | "escapes"
+
+/** Read a vault file with canonical containment; never follows escaping links. */
+function readVaultFile(root: string, snapDir: string, rel: string): VaultRead {
+  let source: string
+  try {
+    source = resolveRealInsideRoot(root, join(snapDir, rel))
+  } catch {
+    return "escapes"
+  }
+  let st
+  try {
+    st = lstatSync(source)
+  } catch {
+    return "corrupted"
+  }
+  if (!st.isFile()) return "corrupted"
+  let bytes: Buffer
+  try {
+    bytes = readFileSync(source)
+  } catch {
+    return "corrupted"
+  }
+  return { source, sha256: sha256Of(bytes), size: bytes.length }
+}
+
+/**
+ * Plan a restore from a manifest snapshot: the manifest is authoritative.
+ * Every listed file must exist in the vault with the recorded size and hash,
+ * and main must be present, otherwise the restore is refused (never a partial
+ * success). Read-only: touches nothing outside the vault.
+ */
+function planManifestRestore(
+  root: string,
+  snapDir: string,
+  files: SnapshotFileEntry[],
+  manifest: { missing: string[]; skipped: Array<{ logical: string; reason: string }> },
+  expectedMain: string,
+): RestorePlan | string {
+  const planned: PlannedRestore[] = []
+  const seen = new Set<string>()
+  for (const entry of files) {
+    if (seen.has(entry.logical)) continue
+    seen.add(entry.logical)
+    const exclusion = snapshotExclusionReason(entry.logical)
+    if (exclusion) {
+      return `blocked: snapshot entry ${entry.logical} is not a restorable manuscript file (${exclusion})`
+    }
+    const read = readVaultFile(root, snapDir, entry.logical)
+    if (read === "escapes") return `blocked: restore path escapes project root`
+    if (read === "corrupted" || read.size !== entry.size || read.sha256 !== entry.sha256) {
+      return `blocked: snapshot content for ${entry.logical} is missing or corrupted`
+    }
+    planned.push({
+      logical: entry.logical,
+      source: read.source,
+      sha256: entry.sha256,
+      size: entry.size,
+      legacy: false,
+    })
+  }
+  if (!planned.some((p) => p.logical === expectedMain)) {
+    return `blocked: snapshot does not include ${expectedMain} — refusing an incomplete restore`
+  }
+  const notInSnapshot: string[] = []
+  for (const rel of [...manifest.missing, ...manifest.skipped.map((s) => s.logical)]) {
+    if (!planned.some((p) => p.logical === rel) && !notInSnapshot.includes(rel)) notInSnapshot.push(rel)
+  }
+  return { planned, notInSnapshot }
+}
+
+/**
+ * Plan a restore from a legacy snapshot (no manifest). Keys are derived from
+ * the project configuration; a symlinked main/bib is additionally looked up
+ * under the canonical key the pre-fix code would have used, but only when the
+ * mapping is unambiguous — if both copies exist the restore is refused.
+ * Chapters are discovered in the vault mirror. Read-only.
+ */
+function planLegacyRestore(
+  root: string,
+  snapDir: string,
+  config: ProjectConfig,
+  expectedMain: string,
+): RestorePlan | string {
+  let expectedBib: string
+  try {
+    expectedBib = logicalManuscriptRel(root, config, "bib")
+  } catch {
+    return `blocked: restore path escapes project root`
+  }
+
+  const planned: PlannedRestore[] = []
+  const notInSnapshot: string[] = []
+  const seenLogical = new Set<string>()
+  const seenKey = new Set<string>()
+
+  const existsInVault = (key: string): boolean => {
+    const read = readVaultFile(root, snapDir, key)
+    return read !== "escapes" && read !== "corrupted"
+  }
+  const pick = (logical: string, key: string): void => {
+    if (seenKey.has(key) || seenLogical.has(logical)) return
+    const read = readVaultFile(root, snapDir, key)
+    if (read === "escapes" || read === "corrupted") return
+    seenKey.add(key)
+    seenLogical.add(logical)
+    planned.push({
+      logical,
+      source: read.source,
+      sha256: read.sha256,
+      size: read.size,
+      legacy: key !== logical,
+    })
+  }
+
+  // main: logical key preferred; the canonical key of the current resolution is
+  // the deterministic fallback for pre-fix snapshots. Both present = ambiguous.
+  const legacyMainKey = legacyCanonicalKey(root, expectedMain)
+  const mainLogicalExists = existsInVault(expectedMain)
+  const mainLegacyExists = legacyMainKey !== null && existsInVault(legacyMainKey)
+  if (mainLogicalExists && mainLegacyExists) {
+    return `blocked: snapshot is ambiguous for ${expectedMain}: logical and legacy canonical copies both exist`
+  }
+  if (mainLogicalExists) pick(expectedMain, expectedMain)
+  else if (mainLegacyExists && legacyMainKey !== null) pick(expectedMain, legacyMainKey)
+  else return `blocked: snapshot does not include ${expectedMain} — refusing an incomplete restore`
+
+  // bib: not required; absence is reported explicitly, never guessed.
+  const legacyBibKey = legacyCanonicalKey(root, expectedBib)
+  const bibLogicalExists = existsInVault(expectedBib)
+  const bibLegacyExists = legacyBibKey !== null && existsInVault(legacyBibKey)
+  if (bibLogicalExists && bibLegacyExists) {
+    return `blocked: snapshot is ambiguous for ${expectedBib}: logical and legacy canonical copies both exist`
+  }
+  if (bibLogicalExists) pick(expectedBib, expectedBib)
+  else if (bibLegacyExists && legacyBibKey !== null) pick(expectedBib, legacyBibKey)
+  else notInSnapshot.push(expectedBib)
+
+  // chapters: discovered in the vault mirror; their logical path is the
+  // discovered relative path (discovery never follows symlinks).
+  let snapPaths
+  try {
+    snapPaths = resolveManuscriptPaths(snapDir, config)
+  } catch {
+    return `blocked: chapter discovery is incomplete in this snapshot — refusing an incomplete restore`
+  }
+  for (const ch of snapPaths.chapters) {
+    const rel = toPosixPath(relative(snapDir, ch))
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue
+    pick(rel, rel)
+  }
+
+  return { planned, notInSnapshot }
+}
+
 export const bancaRestore = defineBancaTool({
   description: "Restore project from a snapshot safely.",
   args: {
@@ -35,134 +242,262 @@ export const bancaRestore = defineBancaTool({
     const snap = state.snapshots.find((s) => s.id === args.snapshotId || s.label === args.snapshotId)
     if (!snap) return `snapshot not found: ${args.snapshotId}`
 
-    // Canonical preflight: snapshots root, snapshot directory and every
-    // restore destination must resolve inside the workspace before any change.
-    let canonicalRoot: string
+    // ---------- Phase 1: canonical containment of every vault/state path ----------
     let snapshotsDir: string
     let snapDir: string
     try {
-      canonicalRoot = realWorkspaceRoot(root)
+      realWorkspaceRoot(root)
       snapshotsDir = resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))
       const lexicalSnapDir = resolveInsideRoot(snapshotsDir, snap.label)
       snapDir = resolveRealInsideRoot(root, lexicalSnapDir)
+      resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
     } catch {
       return `blocked: snapshot path escapes project root`
     }
     if (!existsSync(snapDir)) return `snapshot directory not found: ${snapDir}`
 
-    // Resolve manuscript paths against snapshot directory
-    const snapPaths = resolveManuscriptPaths(snapDir, config)
-
-    // Resolve manuscript paths against project root to check current files
-    const currentPaths = resolveManuscriptPaths(root, config)
-
-    // Gather files to restore from snapshot with canonical containment
-    const restorePairs: Array<{ src: string; dst: string; rel: string }> = []
+    // ---------- Phase 2: read-only planning (no manuscript change) ----------
+    let expectedMain: string
     try {
-      const snapFiles: string[] = []
-      if (existsSync(snapPaths.main)) snapFiles.push(snapPaths.main)
-      if (existsSync(snapPaths.bib)) snapFiles.push(snapPaths.bib)
-      for (const ch of snapPaths.chapters) {
-        if (existsSync(ch)) snapFiles.push(ch)
-      }
-      for (const snapFile of snapFiles) {
-        const src = resolveRealInsideRoot(root, snapFile)
-        const rel = relative(snapDir, src)
-        if (rel.startsWith("..") || isAbsolute(rel)) {
-          throw new PathTraversalError("restore source escapes snapshot directory")
-        }
-        const dst = resolveRealInsideRoot(root, rel)
-        restorePairs.push({ src, dst, rel })
-      }
-      // state persistence must stay inside the workspace
-      resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
-    } catch (err) {
-      if (err instanceof PathTraversalError) return `blocked: restore path escapes project root`
-      throw err
+      expectedMain = logicalManuscriptRel(root, config, "main")
+    } catch {
+      return `blocked: restore path escapes project root`
     }
 
+    const manifestState = loadSnapshotManifest(snapshotsDir, snap.label)
+    if (manifestState.kind === "invalid") {
+      return `blocked: snapshot manifest is invalid or inconsistent`
+    }
+    const plan =
+      manifestState.kind === "valid"
+        ? planManifestRestore(root, snapDir, manifestState.manifest.files, manifestState.manifest, expectedMain)
+        : planLegacyRestore(root, snapDir, config, expectedMain)
+    if (typeof plan === "string") return plan
+
     if (!args.confirm) {
-      const affected = restorePairs.map(p => `- ${p.rel}`).join("\n")
-      return [
+      const lines = [
         `### Restore Dry-Run for Snapshot: ${snap.label}`,
         `To apply this restore, run with 'confirm: true'.`,
         `Files to be restored:`,
-        affected || "None"
-      ].join("\n")
+        ...plan.planned.map((p) => `- ${p.logical}${p.legacy ? " (legacy canonical key)" : ""}`),
+      ]
+      if (plan.notInSnapshot.length > 0) {
+        lines.push(`Not in snapshot (left unchanged):`)
+        lines.push(...plan.notInSnapshot.map((f) => `- ${f}`))
+      }
+      return lines.join("\n")
     }
 
-    // CREATE PRE-RESTORE SNAPSHOT (SAFETY BACKUP)
-    const backupLabel = sanitizeSnapshotLabel(`pre-restore-${Date.now()}`)
-    let backupDir: string
+    // ---------- Phase 3: validate every destination before any change ----------
+    for (const p of plan.planned) {
+      let target: string
+      try {
+        target = resolveRealInsideRoot(root, p.logical)
+      } catch {
+        return `blocked: restore path escapes project root: ${p.logical}`
+      }
+      if (existsSync(target)) {
+        let st
+        try {
+          st = lstatSync(target)
+        } catch {
+          return `blocked: destination for ${p.logical} is not accessible`
+        }
+        if (!st.isFile()) return `blocked: destination for ${p.logical} is not a regular file`
+      }
+    }
+
+    // ---------- Phase 4: stage the verified vault content inside the workspace ----------
+    const stagingLabel = `.restore-staging-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    let stagingDir: string
     try {
-      backupDir = ensureRealDirInsideRoot(root, join(snapshotsDir, backupLabel))
-    } catch (err) {
-      if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
-      throw err
-    }
-
-    // Copy current manuscript files to safety backup
-    const copyFileToBackup = (srcPath: string) => {
-      if (!srcPath || !existsSync(srcPath)) return
-      const src = resolveRealInsideRoot(root, srcPath)
-      const relPath = relative(canonicalRoot, src)
-      if (relPath.startsWith("..") || isAbsolute(relPath)) {
-        throw new PathTraversalError("file escapes workspace root")
-      }
-      const destPath = prepareRealPathForWrite(root, join(backupDir, relPath))
-      cpSync(src, destPath, { recursive: true })
+      stagingDir = ensureRealDirInsideRoot(root, join(snapshotsDir, stagingLabel))
+    } catch {
+      return `blocked: could not create a staging area inside the workspace`
     }
 
     try {
-      copyFileToBackup(currentPaths.main)
-      copyFileToBackup(currentPaths.bib)
-      for (const ch of currentPaths.chapters) {
-        copyFileToBackup(ch)
+      for (const p of plan.planned) {
+        let bytes: Buffer
+        try {
+          bytes = readFileSync(p.source)
+        } catch {
+          return `blocked: could not stage snapshot content for ${p.logical} — no manuscript file was modified`
+        }
+        if (bytes.length !== p.size || sha256Of(bytes) !== p.sha256) {
+          return `blocked: snapshot content for ${p.logical} changed during restore — no manuscript file was modified`
+        }
+        try {
+          const staged = prepareRealPathForWrite(root, join(stagingDir, p.logical))
+          writeFileSync(staged, bytes)
+          const written = readFileSync(staged)
+          if (written.length !== bytes.length || sha256Of(written) !== p.sha256) {
+            throw new Error("staging verification failed")
+          }
+        } catch {
+          return `blocked: could not stage snapshot content for ${p.logical} — no manuscript file was modified`
+        }
       }
-      addSnapshot(root, backupLabel, state.currentScore)
-    } catch (err: any) {
-      if (err instanceof PathTraversalError) return `blocked: restore path escapes project root`
-      return `failed to create pre-restore backup: ${err.message}`
+
+      // ---------- Phase 5: real backup of the pre-restore state ----------
+      const backupLabel = sanitizeSnapshotLabel(`pre-restore-${Date.now()}`)
+      let backupDir: string
+      try {
+        backupDir = ensureRealDirInsideRoot(root, join(snapshotsDir, backupLabel))
+        const candidates = plan.planned.map((p) => ({
+          logical: p.logical,
+          abs: resolveInsideRoot(root, p.logical),
+        }))
+        captureSnapshotFiles({ root, snapshotsDir, snapDir: backupDir, label: backupLabel, candidates })
+        addSnapshot(root, backupLabel, state.currentScore)
+      } catch (err) {
+        if (err instanceof PathTraversalError) {
+          return `blocked: pre-restore backup path escapes project root — no manuscript file was modified`
+        }
+        return `blocked: pre-restore backup failed — no manuscript file was modified (${(err as Error).message})`
+      }
+
+      // ---------- Phase 6: controlled replacement with rollback ----------
+      interface Applied {
+        logical: string
+        target: string
+        created: boolean
+        backupRel: string | null
+      }
+      const applied: Applied[] = []
+      let failure: { logical: string; reason: string } | null = null
+
+      for (const p of plan.planned) {
+        let target: string
+        try {
+          // re-resolve immediately before writing to narrow the TOCTOU window
+          target = resolveRealInsideRoot(root, p.logical)
+        } catch {
+          failure = { logical: p.logical, reason: "path containment changed during restore" }
+          break
+        }
+        const created = !existsSync(target)
+        const parent = dirname(target)
+        try {
+          ensureRealDirInsideRoot(root, parent)
+        } catch {
+          failure = { logical: p.logical, reason: "destination parent is not usable" }
+          break
+        }
+        const tmp = join(
+          parent,
+          `.dshbanca.restore.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}.tmp`,
+        )
+        try {
+          const bytes = readFileSync(join(stagingDir, p.logical))
+          if (bytes.length !== p.size || sha256Of(bytes) !== p.sha256) {
+            throw new Error("staged content mismatch")
+          }
+          writeFileSync(tmp, bytes)
+          // Atomic replace: the destination is never deleted beforehand, so a
+          // failure can never leave the manuscript without its content.
+          renameSync(tmp, target)
+          applied.push({ logical: p.logical, target, created, backupRel: created ? null : p.logical })
+          const written = readFileSync(target)
+          if (written.length !== bytes.length || sha256Of(written) !== p.sha256) {
+            throw new Error("restored content verification failed")
+          }
+        } catch (err) {
+          try {
+            if (existsSync(tmp)) {
+              const st = lstatSync(tmp)
+              if (st.isFile()) unlinkSync(tmp)
+            }
+          } catch {
+            /* best effort cleanup of our own temp file */
+          }
+          failure = { logical: p.logical, reason: (err as Error).message || "write failed" }
+          break
+        }
+      }
+
+      if (failure) {
+        const rollbackFailures: string[] = []
+        let rolledBack = 0
+        for (const rec of [...applied].reverse()) {
+          try {
+            const target = resolveRealInsideRoot(root, rec.logical)
+            if (rec.created) {
+              if (!existsSync(target)) {
+                rolledBack++
+              } else {
+                const st = lstatSync(target)
+                if (!st.isFile()) {
+                  rollbackFailures.push(rec.logical)
+                } else {
+                  unlinkSync(target)
+                  rolledBack++
+                }
+              }
+            } else if (rec.backupRel) {
+              const backupPath = join(backupDir, rec.backupRel)
+              if (!existsSync(backupPath)) {
+                rollbackFailures.push(rec.logical)
+                continue
+              }
+              const bytes = readFileSync(backupPath)
+              const parent = dirname(target)
+              ensureRealDirInsideRoot(root, parent)
+              const tmp = join(
+                parent,
+                `.dshbanca.rollback.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}.tmp`,
+              )
+              writeFileSync(tmp, bytes)
+              renameSync(tmp, target)
+              const written = readFileSync(target)
+              if (written.length !== bytes.length || sha256Of(written) !== sha256Of(bytes)) {
+                rollbackFailures.push(rec.logical)
+                continue
+              }
+              rolledBack++
+            } else {
+              rollbackFailures.push(rec.logical)
+            }
+          } catch {
+            rollbackFailures.push(rec.logical)
+          }
+        }
+        if (rollbackFailures.length > 0) {
+          return [
+            `partial: restore aborted at ${failure.logical} (${failure.reason})`,
+            `Rollback failed for: ${rollbackFailures.join(", ")}`,
+            `Safety backup kept: ${backupLabel}`,
+          ].join("\n")
+        }
+        return [
+          `failed: restore aborted at ${failure.logical} (${failure.reason})`,
+          `Rollback restored the pre-restore content of ${rolledBack} file(s).`,
+          `Safety backup created: ${backupLabel}`,
+        ].join("\n")
+      }
+
+      // ---------- Success ----------
+      const legacyUsed = plan.planned.filter((p) => p.legacy).map((p) => p.logical)
+      const lines = [
+        `restored from ${snap.label}`,
+        `Safety backup created: ${backupLabel}`,
+        `Restored files (content verified):`,
+        ...plan.planned.map((p) => `- ${p.logical}`),
+      ]
+      if (legacyUsed.length > 0) {
+        lines.push(`Legacy canonical keys used for: ${legacyUsed.join(", ")}`)
+      }
+      if (plan.notInSnapshot.length > 0) {
+        lines.push(`Not in snapshot (left unchanged):`)
+        lines.push(...plan.notInSnapshot.map((f) => `- ${f}`))
+      }
+      return lines.join("\n")
+    } finally {
+      try {
+        rmSync(stagingDir, { recursive: true, force: true })
+      } catch {
+        /* best effort cleanup of our own staging directory */
+      }
     }
-
-    // Now perform the actual restore safely
-    const restoredFiles: string[] = []
-    for (const pair of restorePairs) {
-      let dstNow: string
-      try {
-        dstNow = resolveRealInsideRoot(root, pair.rel)
-      } catch {
-        return `blocked: restore path escapes project root: ${pair.rel}`
-      }
-
-      // Delete existing destination file if present
-      if (existsSync(dstNow)) {
-        rmSync(dstNow, { recursive: true, force: true })
-      }
-
-      try {
-        ensureRealDirInsideRoot(root, dirname(dstNow))
-      } catch {
-        return `blocked: restore path escapes project root: ${pair.rel}`
-      }
-
-      let dstFinal: string
-      try {
-        // re-resolve immediately before copying
-        dstFinal = resolveRealInsideRoot(root, pair.rel)
-      } catch {
-        return `blocked: restore path escapes project root: ${pair.rel}`
-      }
-
-      cpSync(pair.src, dstFinal, { recursive: true })
-      restoredFiles.push(pair.rel)
-    }
-
-    return [
-      `restored from ${snap.label}`,
-      `Safety backup created: ${backupLabel}`,
-      `Restored files:`,
-      restoredFiles.map((f) => `- ${f}`).join("\n") || "None"
-    ].join("\n")
   },
 })

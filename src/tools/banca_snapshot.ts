@@ -1,42 +1,17 @@
-import { existsSync, cpSync } from "node:fs"
-import { join, relative, isAbsolute } from "node:path"
+import { join } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { addSnapshot } from "../lib/state"
 import { loadConfig } from "../lib/config"
-import { resolveManuscriptPaths } from "../lib/paths"
+import { ChapterDiscoveryError, resolveManuscriptPaths } from "../lib/paths"
 import {
   ensureRealDirInsideRoot,
   PathTraversalError,
-  prepareRealPathForWrite,
   realWorkspaceRoot,
   resolveRealInsideRoot,
   sanitizeSnapshotLabel,
 } from "../lib/safe_paths"
-
-function copyFileToSnapshot(srcPath: string, root: string, canonicalRoot: string, snapDir: string) {
-  if (!srcPath || !existsSync(srcPath)) return
-  const srcCanonical = resolveRealInsideRoot(root, srcPath)
-  const relPath = relative(canonicalRoot, srcCanonical)
-  if (relPath.startsWith("..") || isAbsolute(relPath)) {
-    throw new PathTraversalError("file escapes workspace root")
-  }
-  const posixRel = relPath.replace(/[/\\]+/g, "/")
-  if (
-    posixRel === ".env" ||
-    posixRel.startsWith(".env.") ||
-    posixRel.startsWith(".dsh/") ||
-    posixRel.startsWith(".banca/cache/") ||
-    posixRel.startsWith(".banca/reports/") ||
-    posixRel.startsWith(".git/") ||
-    posixRel.startsWith("node_modules/") ||
-    posixRel.startsWith("dist/")
-  ) {
-    return
-  }
-  const destPath = prepareRealPathForWrite(root, join(snapDir, relPath))
-  cpSync(srcCanonical, destPath, { recursive: true })
-}
+import { captureSnapshotFiles, logicalProjectRel, type SnapshotCaptureResult } from "../lib/snapshot"
 
 export const bancaSnapshot = defineBancaTool({
   description: "Create targeted snapshot of manuscript files. Registers in state.json.",
@@ -54,28 +29,41 @@ export const bancaSnapshot = defineBancaTool({
     const config = loadConfig(root)
 
     // Canonical preflight before any directory creation or copy: the state
-    // file, the snapshots root and the snapshot destination must all resolve
-    // inside the workspace.
-    let canonicalRoot: string
-    let snapDir: string
+    // file and the snapshots root must both resolve inside the workspace.
+    let snapshotsDir: string
     try {
-      canonicalRoot = realWorkspaceRoot(root)
+      realWorkspaceRoot(root)
       resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
-      const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
-      snapDir = ensureRealDirInsideRoot(root, join(snapshotsDir, label))
+      snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
     } catch (err) {
       if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
       throw err
     }
 
-    const paths = resolveManuscriptPaths(root, config)
-
+    // Incomplete chapter discovery aborts the snapshot: a partial chapter list
+    // would be stored as if it were the whole manuscript.
+    let paths
     try {
-      copyFileToSnapshot(paths.main, root, canonicalRoot, snapDir)
-      copyFileToSnapshot(paths.bib, root, canonicalRoot, snapDir)
-      for (const ch of paths.chapters) {
-        copyFileToSnapshot(ch, root, canonicalRoot, snapDir)
+      paths = resolveManuscriptPaths(root, config)
+    } catch (err) {
+      if (err instanceof ChapterDiscoveryError) {
+        return `blocked: chapter discovery is incomplete — snapshot aborted to avoid omitting manuscript files`
       }
+      throw err
+    }
+
+    // Logical identity: files are keyed by the configured project-relative
+    // path, never by the canonical path a symlink may resolve to.
+    let snapDir: string
+    let captured: SnapshotCaptureResult
+    try {
+      const candidates = [
+        { logical: logicalProjectRel(root, paths.main), abs: paths.main },
+        { logical: logicalProjectRel(root, paths.bib), abs: paths.bib },
+        ...paths.chapters.map((ch) => ({ logical: logicalProjectRel(root, ch), abs: ch })),
+      ]
+      snapDir = ensureRealDirInsideRoot(root, join(snapshotsDir, label))
+      captured = captureSnapshotFiles({ root, snapshotsDir, snapDir, label, candidates })
     } catch (err) {
       if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
       throw err
@@ -83,6 +71,20 @@ export const bancaSnapshot = defineBancaTool({
 
     addSnapshot(root, label, null)
 
-    return `snapshot → ${snapDir}`
+    const lines = [`snapshot → ${snapDir}`, `Captured (content verified):`]
+    lines.push(
+      ...(captured.files.length > 0
+        ? captured.files.map((f) => `- ${f.logical} (sha256: ${f.sha256.slice(0, 12)}…)`)
+        : ["None"]),
+    )
+    const notCaptured = [
+      ...captured.missing.map((m) => `${m} (not found)`),
+      ...captured.skipped.map((s) => `${s.logical} (${s.reason})`),
+    ]
+    if (notCaptured.length > 0) {
+      lines.push(`Not captured:`)
+      lines.push(...notCaptured.map((n) => `- ${n}`))
+    }
+    return lines.join("\n")
   },
 })
