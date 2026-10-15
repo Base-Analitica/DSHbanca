@@ -2,7 +2,10 @@
 
 Plugin DSH (DeepSeek Harness) e OpenCode para gestão, auditoria e correção de trabalhos acadêmicos (monografias, dissertações, TCCs).
 
-Adaptado a partir do projeto original `OpenBanca` da organização **Base Analítica** para funcionamento nativo no ecossistema **dsh**.
+### Relação com o projeto OpenBanca
+O **DSHbanca** é um projeto derivado e adaptado a partir do repositório [`OpenBanca`](https://github.com/Base-Analitica/openbanca) da organização **Base Analítica**.
+- **OpenBanca**: plugin de domínio acadêmico construído para o harness **OpenCode**, provendo ferramentas, agentes, skills e guardrails de correção e auditoria em LaTeX/ABNT.
+- **DSHbanca**: versão mantida como repositório independente na organização **Base Analítica**, estendendo e adaptando o núcleo acadêmico para funcionamento nativo no ecossistema **dsh** (DeepSeek Harness via Cordis plugin loader e `ctx.skills`/`ctx.tools`), preservando também total compatibilidade com o OpenCode.
 
 ## Objetivo
 
@@ -113,7 +116,7 @@ bun add @opencode/banca
 ### Instalação local (recomendado atualmente)
 
 ```bash
-git clone https://github.com/RenyEnnos/DSHbanca.git
+git clone https://github.com/Base-Analitica/DSHbanca.git
 cd DSHbanca
 bun install
 bun run build

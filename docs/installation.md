@@ -15,8 +15,8 @@
 ## Instalação Local (recomendado)
 
 ```bash
-git clone https://github.com/RenyEnnos/openbanca.git
-cd openbanca
+git clone https://github.com/Base-Analitica/DSHbanca.git
+cd DSHbanca
 bun install
 bun run build
 ```

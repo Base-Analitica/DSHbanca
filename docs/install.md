@@ -17,8 +17,8 @@
 
 ```bash
 # Para instalação de desenvolvimento local (não publicado):
-git clone https://github.com/RenyEnnos/openbanca.git
-cd openbanca
+git clone https://github.com/Base-Analitica/DSHbanca.git
+cd DSHbanca
 bun install
 bun run build
 ```
