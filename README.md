@@ -113,8 +113,8 @@ bun add @opencode/banca
 ### Instalação local (recomendado atualmente)
 
 ```bash
-git clone https://github.com/RenyEnnos/openbanca.git
-cd openbanca
+git clone https://github.com/RenyEnnos/DSHbanca.git
+cd DSHbanca
 bun install
 bun run build
 ```
