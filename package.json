@@ -41,7 +41,7 @@
     "e2e:opencode": "bun run build && bun run scripts/e2e-opencode.ts"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.17.13"
+    "zod": "^4.1.8"
   },
   "devDependencies": {
     "@types/node": "20.19.43",

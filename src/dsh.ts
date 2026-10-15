@@ -1,7 +1,9 @@
 import { readdir, readFile } from "node:fs/promises"
+import { realpathSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { dirname, join, resolve } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { dirname, join, resolve, relative, isAbsolute } from "node:path"
+import { z } from "zod"
+import { resolveInsideRoot, PathTraversalError } from "./lib/safe_paths.js"
 import { loadBancaTools } from "./lib/tools.js"
 
 export const name = "dshbanca"
@@ -82,11 +84,37 @@ async function discoverCandidates(skillsRoot: string, signal?: AbortSignal) {
   return candidates
 }
 
+const DESTRUCTIVE_TOOLS = new Set([
+  "banca_init",
+  "banca_corrigir",
+  "banca_snapshot",
+  "banca_compile",
+  "banca_restore",
+  "banca_loop",
+])
+
+const AUDITOR_PRESET_PREFIX = "banca-auditor"
+
+function isAuditorAgent(exec: any): boolean {
+  const preset: string | undefined = exec?.agent?.session?.header?.agentPreset
+  return preset !== undefined && preset.startsWith(AUDITOR_PRESET_PREFIX)
+}
+
+function resolveWorkspaceRoot(exec: any): string {
+  const cwd = exec?.agent?.session?.header?.cwd
+  if (cwd === undefined) {
+    throw new Error("DSHbanca requires a session workspace; no cwd in session header")
+  }
+  const resolvedCwd = realpathSync(cwd)
+  return resolvedCwd
+}
+
 export async function apply(ctx: any) {
   const definitions = await loadBancaTools()
+
   for (const [toolName, definition] of Object.entries(definitions)) {
-    const schema = tool.schema.object(definition.args)
-    const { $schema, ...parameters } = tool.schema.toJSONSchema(schema, { io: "input" })
+    const schema = z.object(definition.args)
+    const { $schema, ...parameters } = z.toJSONSchema(schema, { io: "input" })
     ctx.tools.register({
       name: toolName,
       description: definition.description,
@@ -97,22 +125,53 @@ export async function apply(ctx: any) {
       },
       async execute(input: unknown, exec: any) {
         exec.signal.throwIfAborted()
-        const args = schema.parse(input)
-        const cwd = exec.agent?.session.header.cwd
-        if (!cwd && !args.projectRoot) {
-          throw new Error("DSHbanca requires a session workspace or projectRoot")
+
+        if (DESTRUCTIVE_TOOLS.has(toolName) && isAuditorAgent(exec)) {
+          throw new Error(
+            `DSHbanca guard: tool "${toolName}" is denied for auditor agents — read-only enforcement`,
+          )
         }
-        // Relative project roots belong to the calling session, never the host process.
-        const directory = resolve(cwd ?? process.cwd(), args.projectRoot || ".")
-        const result = await definition.execute({ ...args, projectRoot: directory } as any, {
-          directory,
-          worktree: directory,
-          abort: exec.signal,
-        } as any)
+
+        const args = schema.parse(input)
+        const root = resolveWorkspaceRoot(exec)
+
+        let directory: string
+        if (args.projectRoot !== undefined && args.projectRoot !== "") {
+          if (isAbsolute(args.projectRoot)) {
+            const rel = relative(root, args.projectRoot)
+            if (rel.startsWith("..") || isAbsolute(rel)) {
+              throw new PathTraversalError(
+                `absolute path escapes workspace root: ${args.projectRoot}`,
+              )
+            }
+            directory = resolveInsideRoot(root, rel)
+          } else {
+            directory = resolveInsideRoot(root, args.projectRoot)
+          }
+          try {
+            directory = realpathSync(directory)
+          } catch {
+          }
+        } else {
+          directory = root
+        }
+
+        const result = await definition.execute(
+          { ...args, projectRoot: directory } as any,
+          { directory, worktree: directory, abort: exec.signal } as any,
+        )
         return typeof result === "string" ? result : result.output
       },
     })
   }
+
+  ctx.tools.guard((exec: any) => {
+    if (DESTRUCTIVE_TOOLS.has(exec?.tool?.name) && isAuditorAgent(exec)) {
+      return `DSHbanca guard: tool "${exec.tool.name}" is denied for auditor agents — read-only enforcement`
+    }
+    return undefined
+  })
+
   const skillsRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "skills")
   if (ctx.skills?.registerProvider) {
     ctx.skills.registerProvider(() => ({

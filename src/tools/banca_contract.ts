@@ -1,13 +1,12 @@
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths, isPathProtected, globToRegex, toPosixPath } from "../lib/paths"
 import { loadState } from "../lib/state"
 import { saveReport } from "../lib/reports"
-const z = tool.schema
-
-export const bancaContract = tool({
+export const bancaContract = defineBancaTool({
   description: "Generate correction contract: diff summary, immutable facts check, score impact.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

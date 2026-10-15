@@ -793,38 +793,32 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
   const pluginAssetsDir = customAssetsDir || join(__dirname, "..", "..", "assets")
 
   if (existsSync(pluginAssetsDir)) {
-    // Install versioned agents
-    copyDirectory(join(pluginAssetsDir, "opencode", "agents"), join(projectRoot, ".opencode", "agents"), force, installed)
-    copyDirectory(join(pluginAssetsDir, "opencode", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
-    
+    // Install versioned agents (DSH-native)
+    copyDirectory(join(pluginAssetsDir, "dsh", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
+
+    // Install versioned skills (DSH-native)
+    copyDirectory(join(pluginAssetsDir, "dsh", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
+
     // Install versioned commands
-    copyDirectory(join(pluginAssetsDir, "opencode", "commands"), join(projectRoot, ".opencode", "commands"), force, installed)
-    
-    // Install versioned skills (OpenCode + DSH)
-    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".opencode", "skills"), force, installed)
-    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
-    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".agents", "skills"), force, installed)
-    
+    copyDirectory(join(pluginAssetsDir, "dsh", "commands"), join(projectRoot, ".dsh", "commands"), force, installed)
+
     // Install versioned templates
     copyDirectory(join(pluginAssetsDir, "templates"), join(projectRoot, ".banca"), force, installed)
   } else {
-    // Fallback agents
+    // Fallback agents (DSH-native)
     for (const [name, content] of Object.entries(AGENTS)) {
-      write(join(projectRoot, ".opencode", "agents", name), content)
       write(join(projectRoot, ".dsh", "agents", name), content)
     }
 
-    // Fallback commands
+    // Fallback commands (DSH-native)
     for (const [name, content] of Object.entries(COMMANDS)) {
-      write(join(projectRoot, ".opencode", "commands", name), content)
+      write(join(projectRoot, ".dsh", "commands", name), content)
     }
 
-    // Fallback skills
+    // Fallback skills (DSH-native)
     for (const [skillName, files] of Object.entries(SKILLS)) {
       for (const [fileName, content] of Object.entries(files)) {
-        write(join(projectRoot, ".opencode", "skills", skillName, fileName), content)
         write(join(projectRoot, ".dsh", "skills", skillName, fileName), content)
-        write(join(projectRoot, ".agents", "skills", skillName, fileName), content)
       }
     }
   }

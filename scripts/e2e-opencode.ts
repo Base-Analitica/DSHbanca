@@ -415,11 +415,11 @@ export function verifyAgents(output: string, projectRoot?: string): string {
   if (projectRoot) {
     const missingLocal: string[] = [];
     for (const a of AGENTS_REQUIRED) {
-      const p = join(projectRoot, ".opencode", "agents", `${a}.md`);
+      const p = join(projectRoot, ".dsh/agents", `${a}.md`);
       if (!existsSync(p)) missingLocal.push(a);
     }
     if (missingLocal.length > 0) {
-      return `NO_MODEL_DISCOVERY_FAILED — agents not present under project .opencode/agents: ${missingLocal.join(", ")}`;
+      return `NO_MODEL_DISCOVERY_FAILED — agents not present under project .dsh/agents: ${missingLocal.join(", ")}`;
     }
   }
 
@@ -427,9 +427,9 @@ export function verifyAgents(output: string, projectRoot?: string): string {
 }
 
 /**
- * Skills discovery must prove provenance from the temporary project `.opencode/skills`.
- * A global copy with the same names must not satisfy the check.
- */
+  * Skills discovery must prove provenance from the temporary project `.dsh/skills`.
+  * A global copy with the same names must not satisfy the check.
+  */
 export function verifySkills(output: string, projectRoot?: string): string {
   // Prefer structured JSON (debug skill emits an array with location fields).
   let entries: Array<{ name?: string; location?: string }> = [];
@@ -471,7 +471,7 @@ export function verifySkills(output: string, projectRoot?: string): string {
     for (const s of SKILLS_REQUIRED) {
       const entry = byName.get(s)!;
       const loc = entry.location;
-      const expectedDir = resolve(rootResolved, ".opencode", "skills", s);
+       const expectedDir = resolve(rootResolved, ".dsh", "skills", s);
       const expectedFile = join(expectedDir, "SKILL.md");
       if (!loc) {
         badProvenance.push(`${s} (missing location)`);
@@ -483,7 +483,7 @@ export function verifySkills(output: string, projectRoot?: string): string {
         locResolved.startsWith(expectedDir + "/") ||
         locResolved.startsWith(expectedDir + "\\");
       if (!underProject) {
-        badProvenance.push(`${s} (location outside project .opencode/skills)`);
+         badProvenance.push(`${s} (location outside project .dsh/skills)`);
       }
       if (!existsSync(expectedFile)) {
         badProvenance.push(`${s} (local SKILL.md absent)`);
@@ -2799,7 +2799,7 @@ export function buildProjectRunEnv(
   env.XDG_CONFIG_HOME = join(isoHome, ".config");
   env.XDG_DATA_HOME = isoData;
   env.XDG_CACHE_HOME = isoCache;
-  // Block host default plugins / external skills; project .opencode still loads.
+  // Block host default plugins / external skills; project .dsh still loads.
   env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1";
   env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
   env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
@@ -3811,7 +3811,7 @@ async function run() {
     const preHashTex = preHashes.get("main.tex")!;
     const preHashBib = preHashes.get("referencias.bib")!;
 
-    const commandsDir = join(tmpProjectInit, ".opencode", "commands");
+    const commandsDir = join(tmpProjectInit, ".dsh", "commands");
     mkdirSync(commandsDir, { recursive: true });
     const initCmdSrc = join(repositoryRoot, "assets", "opencode", "commands", "banca-init.md");
     if (existsSync(initCmdSrc)) {
@@ -3821,7 +3821,7 @@ async function run() {
       discoveryAgentsOutcome = "FAIL";
     }
 
-    const pluginsDir = join(tmpProjectInit, ".opencode", "plugins");
+    const pluginsDir = join(tmpProjectInit, ".dsh", "plugins");
     mkdirSync(pluginsDir, { recursive: true });
     const builtPluginPath = join(repositoryRoot, "dist", "index.js");
     const builtPluginUrl = pathToFileURL(builtPluginPath).href;
@@ -3832,7 +3832,7 @@ async function run() {
     );
 
     report.push(
-      `Plugin loading mechanism:\nProject-local .opencode/plugins/openbanca-e2e.ts wrapper importing ${SF(builtPluginUrl, 300)}`
+      `Plugin loading mechanism:\nProject-local .dsh/plugins/openbanca-e2e.ts wrapper importing ${SF(builtPluginUrl, 300)}`
     );
 
     const discEnv = buildIsolatedDiscoveryEnv(isoHome, isoConfig, tmpProjectDisc);
@@ -3919,7 +3919,7 @@ async function run() {
     );
     report.push(`Auth seed: ${authSeed.seeded ? "copied-to-isolated-data-home" : "not-present"}`);
     report.push(
-      `Plugin provenance: project-local .opencode/plugins/openbanca-e2e.ts → stamped dist (host plugins excluded)`
+      `Plugin provenance: project-local .dsh/plugins/openbanca-e2e.ts → stamped dist (host plugins excluded)`
     );
     report.push(
       `OpenCode root resolution check: ${SF(
@@ -3965,7 +3965,7 @@ async function run() {
       if (!isTimedOut(initResult) && initResult.status === 0) {
         const { foundTool, foundSuccess } = verifyInitEvents(initEvents);
 
-        const skillsDir = join(tmpProjectInit, ".opencode", "skills");
+        const skillsDir = join(tmpProjectInit, ".dsh", "skills");
         let skillMdCount = 0;
         let exactSkills = false;
         if (existsSync(skillsDir)) {
@@ -3978,7 +3978,7 @@ async function run() {
           }
         }
 
-        const agentsDir = join(tmpProjectInit, ".opencode", "agents");
+        const agentsDir = join(tmpProjectInit, ".dsh/agents");
         let exactAgents = false;
         if (existsSync(agentsDir)) {
           const files = readdirSync(agentsDir).filter(

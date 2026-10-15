@@ -1,15 +1,14 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { ensureBancaDir, configPath, saveConfig } from "../lib/config"
 import { loadState, saveState } from "../lib/state"
 import { installAssets } from "../lib/install_assets"
 import type { ProjectConfig } from "../lib/config"
-const z = tool.schema
-
-export const bancaInit = tool({
-  description: "Initialize banca project. Creates .banca/ + .opencode/ assets + state.json.",
+export const bancaInit = defineBancaTool({
+  description: "Initialize banca project. Creates .banca/ + .dsh/ assets + state.json.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
     force: z.boolean().optional().describe("Overwrite existing config + assets"),

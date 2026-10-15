@@ -1,13 +1,12 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { saveReport } from "../lib/reports"
 import { assertInsideRoot } from "../lib/safe_paths"
-const z = tool.schema
-
 const PATTERNS: RegExp[] = [
   /(ademais|outrossim|destarte|sobremaneira|conquanto|tampouco)\b/gi,
   /(é imperativo|é crucial|é fundamental|é mister) que\b/gi,
@@ -66,7 +65,7 @@ except Exception as e:
   }
 }
 
-export const bancaIa = tool({
+export const bancaIa = defineBancaTool({
   description: "Scan manuscript for AI-generated text risk. Uses Python ensemble if available, otherwise regex heuristic.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

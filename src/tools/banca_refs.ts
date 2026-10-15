@@ -1,14 +1,13 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig, getMcpCommand } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { parseBibtex, bibEntryToRef } from "../lib/bibtex"
 import { resolveRef } from "../lib/provider_chain"
 import { RefCache } from "../lib/cache"
-const z = tool.schema
-
-export const bancaRefs = tool({
+export const bancaRefs = defineBancaTool({
   description: "Validate references via MCP (primary) → REST → cache chain. Reports provider used per reference.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

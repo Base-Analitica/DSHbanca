@@ -1,13 +1,13 @@
 import { existsSync, readFileSync, writeFileSync, cpSync, mkdirSync } from "node:fs"
 import { join, dirname } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths, isPathProtected, isPathAllowed, globToRegex, toPosixPath } from "../lib/paths"
 import { resolveInsideRoot, relativeInsideRoot } from "../lib/safe_paths"
 import { addIteration } from "../lib/state"
 import { checkScoreNotDecreased } from "../lib/guards"
 import { analyzeCitationDensity } from "../lib/citation"
-const z = tool.schema
 
 const CorrectionSchema = z.object({
   file: z.string(),
@@ -19,7 +19,7 @@ const CorrectionSchema = z.object({
   expectedOccurrences: z.number().optional(),
 })
 
-export const bancaCorrigir = tool({
+export const bancaCorrigir = defineBancaTool({
   description: "Apply corrections with snapshot + immutableFacts guard + regression check + state tracking.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

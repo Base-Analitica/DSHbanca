@@ -1,12 +1,11 @@
 import { existsSync, mkdirSync, cpSync } from "node:fs"
 import { join, dirname, relative, isAbsolute } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { addSnapshot } from "../lib/state"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { sanitizeSnapshotLabel, resolveInsideRoot } from "../lib/safe_paths"
-const z = tool.schema
-
 function copyFileToSnapshot(srcPath: string, projectRoot: string, snapDir: string) {
   if (!srcPath || !existsSync(srcPath)) return
   const relPath = relative(projectRoot, srcPath)
@@ -17,7 +16,7 @@ function copyFileToSnapshot(srcPath: string, projectRoot: string, snapDir: strin
   if (
     posixRel === ".env" ||
     posixRel.startsWith(".env.") ||
-    posixRel.startsWith(".opencode/") ||
+    posixRel.startsWith(".dsh/") ||
     posixRel.startsWith(".banca/cache/") ||
     posixRel.startsWith(".banca/reports/") ||
     posixRel.startsWith(".git/") ||
@@ -34,7 +33,7 @@ function copyFileToSnapshot(srcPath: string, projectRoot: string, snapDir: strin
   cpSync(srcPath, destPath, { recursive: true })
 }
 
-export const bancaSnapshot = tool({
+export const bancaSnapshot = defineBancaTool({
   description: "Create targeted snapshot of manuscript files. Registers in state.json.",
   args: {
     label: z.string().optional().describe("Snapshot label"),

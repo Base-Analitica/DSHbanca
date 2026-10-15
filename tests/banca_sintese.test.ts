@@ -742,18 +742,28 @@ describe("banca_sintese — validated global synthesis input tool", () => {
     expect(readdirSync(join(analysisDir, "findings")).length).toBe(1)
   })
 
-  test("11) OpenCode entry registers banca_sintese and preserves existing tools", async () => {
-    const { default: plugin } = await import("../src/index")
-    const surface = await plugin({} as any)
-    expect(Object.keys(surface.tool!).sort()).toEqual([
+  test("11) DSH entry registers banca_sintese and preserves existing tools", async () => {
+    const { apply } = await import("../src/dsh")
+    const tools = new Map()
+    const guards: any[] = []
+    await apply({
+      tools: {
+        register: (def: any) => tools.set(def.name, def),
+        guard: (fn: any) => guards.push(fn),
+      },
+      skills: { registerProvider: (_f: any) => {} },
+    })
+    expect(tools.size).toBe(16)
+    expect([...tools.keys()].sort()).toEqual([
       "banca_auditar", "banca_checklist", "banca_compile", "banca_context",
       "banca_contract", "banca_corrigir", "banca_ia", "banca_init", "banca_loop",
       "banca_plagio", "banca_refs", "banca_restore", "banca_sintese", "banca_snapshot",
       "banca_status", "banca_validate",
     ])
-    for (const definition of Object.values(surface.tool!)) {
+    for (const definition of tools.values()) {
       expect(typeof definition.execute).toBe("function")
     }
+    expect(guards.length).toBeGreaterThanOrEqual(1)
   })
 
   test("12) success payload is only the primitive contract", async () => {

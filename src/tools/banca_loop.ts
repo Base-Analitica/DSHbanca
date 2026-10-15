@@ -1,14 +1,13 @@
 import { existsSync, readFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { loadState, addIteration, addSnapshot } from "../lib/state"
 import { generateReport, saveReport } from "../lib/reports"
 import { analyzeCitationDensity } from "../lib/citation"
-const z = tool.schema
-
-export const bancaLoop = tool({
+export const bancaLoop = defineBancaTool({
   description: "Runs an assisted loop step (checks target, takes snapshot, audits citations, prepares next steps). Implementation is preparatory/assisted and does not run autonomous corrections.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

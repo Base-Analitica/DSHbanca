@@ -1,13 +1,12 @@
 import { existsSync, cpSync, rmSync, mkdirSync } from "node:fs"
 import { join, dirname, relative, isAbsolute } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadState, addSnapshot } from "../lib/state"
 import { loadConfig } from "../lib/config"
 import { resolveInsideRoot, sanitizeSnapshotLabel } from "../lib/safe_paths"
 import { resolveManuscriptPaths } from "../lib/paths"
-const z = tool.schema
-
-export const bancaRestore = tool({
+export const bancaRestore = defineBancaTool({
   description: "Restore project from a snapshot safely.",
   args: {
     snapshotId: z.string().optional().describe("Snapshot ID or label to restore from"),

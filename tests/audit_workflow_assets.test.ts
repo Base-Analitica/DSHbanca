@@ -14,8 +14,8 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { installAssets } from "../src/lib/install_assets"
 
-const AGENT_REL = join(".opencode", "agents", "banca-auditor.md")
-const SKILL_REL = join(".opencode", "skills", "banca-avaliacao", "SKILL.md")
+const AGENT_REL = join(".dsh", "agents", "banca-auditor.md")
+const SKILL_REL = join(".dsh", "skills", "banca-avaliacao", "SKILL.md")
 
 const BANNED_PHRASES = [
   "nota final",
@@ -167,7 +167,7 @@ describe("audit workflow assets (#86 / #90)", () => {
     // Prefer byte-identity with repo sources as well.
     const sourceAgent = normalize(
       readFileSync(
-        join(process.cwd(), "assets", "opencode", "agents", "banca-auditor.md"),
+        join(process.cwd(), "assets", "dsh", "agents", "banca-auditor.md"),
         "utf-8",
       ),
     )
@@ -176,7 +176,7 @@ describe("audit workflow assets (#86 / #90)", () => {
         join(
           process.cwd(),
           "assets",
-          "opencode",
+          "dsh",
           "skills",
           "banca-avaliacao",
           "SKILL.md",

@@ -24,14 +24,18 @@ if (process.env.DSH_TEST_HOST_PACKAGE) {
   runtime = new ToolRuntime(ctx);
 }
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-const patch = parse(readFileSync(pkg.dsh.bundle.patch, 'utf8'));
-const plugin = await import(patch[0].insert[0].name);
-const tools = new Map();
-let provider;
-await plugin.apply({
-  skills: { registerProvider: factory => { provider = factory(); } },
-  tools: { register: definition => { tools.set(definition.name, definition); runtime?.register(definition); } },
-});
+  const patch = parse(readFileSync(pkg.dsh.bundle.patch, 'utf8'));
+  const plugin = await import(patch[0].insert[0].name);
+  const tools = new Map();
+  const guards = [];
+  let provider;
+  await plugin.apply({
+    skills: { registerProvider: factory => { provider = factory(); } },
+    tools: {
+      register: definition => { tools.set(definition.name, definition); runtime?.register(definition); },
+      guard: guardFn => guards.push(guardFn),
+    },
+  });
 const names = ['init','status','context','auditar','sintese','corrigir','refs','ia','plagio','loop','snapshot','compile','checklist','restore','validate','contract'].map(n => 'banca_' + n);
 assert.deepEqual([...tools.keys()].sort(), names.sort());
 assert(plugin.inject.includes('tools'));

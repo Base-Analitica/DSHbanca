@@ -968,20 +968,20 @@ describe("Discovery provenance (global contamination)", () => {
         "banca-referencias",
         "banca-revisor",
       ]) {
-        const d = join(project, ".opencode", "skills", s);
+        const d = join(project, ".dsh", "skills", s);
         mkdirSync(d, { recursive: true });
         writeFileSync(join(d, "SKILL.md"), `---\nname: ${s}\ndescription: x\n---\n`);
       }
       const globalLoc = "/tmp/global-config/skills/banca-avaliacao/SKILL.md";
       const payload = JSON.stringify([
         { name: "banca-avaliacao", location: globalLoc },
-        { name: "banca-correcao", location: join(project, ".opencode/skills/banca-correcao/SKILL.md") },
-        { name: "banca-detector-ia", location: join(project, ".opencode/skills/banca-detector-ia/SKILL.md") },
-        { name: "banca-grille", location: join(project, ".opencode/skills/banca-grille/SKILL.md") },
-        { name: "banca-plagio", location: join(project, ".opencode/skills/banca-plagio/SKILL.md") },
-        { name: "banca-planejador", location: join(project, ".opencode/skills/banca-planejador/SKILL.md") },
-        { name: "banca-referencias", location: join(project, ".opencode/skills/banca-referencias/SKILL.md") },
-        { name: "banca-revisor", location: join(project, ".opencode/skills/banca-revisor/SKILL.md") },
+        { name: "banca-correcao", location: join(project, ".dsh/skills/banca-correcao/SKILL.md") },
+        { name: "banca-detector-ia", location: join(project, ".dsh/skills/banca-detector-ia/SKILL.md") },
+        { name: "banca-grille", location: join(project, ".dsh/skills/banca-grille/SKILL.md") },
+        { name: "banca-plagio", location: join(project, ".dsh/skills/banca-plagio/SKILL.md") },
+        { name: "banca-planejador", location: join(project, ".dsh/skills/banca-planejador/SKILL.md") },
+        { name: "banca-referencias", location: join(project, ".dsh/skills/banca-referencias/SKILL.md") },
+        { name: "banca-revisor", location: join(project, ".dsh/skills/banca-revisor/SKILL.md") },
       ]);
       const result = verifySkills(payload, project);
       expect(result).toContain("NO_MODEL_DISCOVERY_FAILED");
@@ -1005,7 +1005,7 @@ describe("Discovery provenance (global contamination)", () => {
         "banca-referencias",
         "banca-revisor",
       ]) {
-        const d = join(project, ".opencode", "skills", s);
+        const d = join(project, ".dsh", "skills", s);
         mkdirSync(d, { recursive: true });
         const loc = join(d, "SKILL.md");
         writeFileSync(loc, `---\nname: ${s}\ndescription: x\n---\n`);
@@ -1017,7 +1017,7 @@ describe("Discovery provenance (global contamination)", () => {
     }
   });
 
-  test("agents listed but missing from project .opencode fail", () => {
+  test("agents listed but missing from project .dsh fail", () => {
     const project = mkdtempSync(join(tmpdir(), "e2e-agents-"));
     try {
       const list = `
@@ -1669,11 +1669,11 @@ describe("No-model path, sanitization of classification, host isolation", () => 
 
       try {
         spawnSync("git", ["init"], { cwd: project, encoding: "utf8" });
-        mkdirSync(join(project, ".opencode", "commands"), { recursive: true });
-        mkdirSync(join(project, ".opencode", "plugins"), { recursive: true });
+        mkdirSync(join(project, ".dsh", "commands"), { recursive: true });
+        mkdirSync(join(project, ".dsh", "plugins"), { recursive: true });
         writeFileSync(
-          join(project, ".opencode", "commands", "banca-init.md"),
-          readFileSync(join(repo, "assets/opencode/commands/banca-init.md"))
+          join(project, ".dsh", "commands", "banca-init.md"),
+          readFileSync(join(repo, "assets/dsh/commands/banca-init.md"))
         );
         const distPath = join(repo, "dist", "index.js");
         if (!existsSync(distPath)) {
@@ -1690,7 +1690,7 @@ describe("No-model path, sanitization of classification, host isolation", () => 
 
         const pluginUrl = pathToFileURL(distPath).href;
         writeFileSync(
-          join(project, ".opencode", "plugins", "openbanca-e2e.ts"),
+          join(project, ".dsh", "plugins", "openbanca-e2e.ts"),
           `export { default } from ${JSON.stringify(pluginUrl)};\n`
         );
         writeFileSync(
