@@ -13,7 +13,13 @@ import {
   resolveRealInsideRoot,
   sanitizeSnapshotLabel,
 } from "../lib/safe_paths"
-import { resolveManuscriptPaths, toPosixPath } from "../lib/paths"
+import {
+  globToRegex,
+  isPathAllowed,
+  isPathProtected,
+  resolveManuscriptPaths,
+  toPosixPath,
+} from "../lib/paths"
 import {
   createSnapshot,
   destinationIdentityConflict,
@@ -109,6 +115,57 @@ function destinationPlanError(root: string, logicals: string[]): string | null {
 }
 
 /**
+ * Apply the project's academic write policy to one restore destination.
+ * Snapshot metadata never grants permission: logical paths must be allowed,
+ * while the canonical destination is checked for protected namespaces and
+ * immutable facts so an internal symlink cannot bypass those policies.
+ */
+function restorePolicyError(root: string, config: ProjectConfig, logical: string): string | null {
+  const logicalExclusion = snapshotExclusionReason(logical)
+  if (logicalExclusion) {
+    return `blocked: restore destination ${logical} is not a manuscript file (${logicalExclusion})`
+  }
+  if (!isPathAllowed(logical, config)) {
+    return `blocked: restore destination ${logical} is outside allowedPaths`
+  }
+
+  let canonicalRel: string
+  try {
+    const target = resolveRealInsideRoot(root, logical)
+    canonicalRel = toPosixPath(relative(realWorkspaceRoot(root), target))
+  } catch {
+    return `blocked: restore destination escapes project root`
+  }
+  if (!canonicalRel || canonicalRel.startsWith("..") || isAbsolute(canonicalRel)) {
+    return `blocked: restore destination escapes project root`
+  }
+
+  const canonicalExclusion = snapshotExclusionReason(canonicalRel)
+  if (canonicalExclusion) {
+    return `blocked: restore destination ${logical} resolves into a protected namespace (${canonicalExclusion})`
+  }
+  if (isPathProtected(logical, config) || isPathProtected(canonicalRel, config)) {
+    return `blocked: restore destination ${logical} is protected by protectedPaths`
+  }
+
+  for (const fact of config.immutableFacts) {
+    const re = globToRegex(fact)
+    if (re.test(logical) || re.test(canonicalRel)) {
+      return `blocked: restore destination ${logical} is immutable (immutableFacts: "${fact}")`
+    }
+  }
+  return null
+}
+
+function restorePlanPolicyError(root: string, config: ProjectConfig, planned: PlannedRestore[]): string | null {
+  for (const entry of planned) {
+    const error = restorePolicyError(root, config, entry.logical)
+    if (error) return error
+  }
+  return null
+}
+
+/**
  * Plan a restore from a manifest snapshot: the manifest is authoritative.
  * Every listed file must exist in the vault with the recorded size and hash.
  * A `restorable` snapshot (or a legacy manifest without a kind) must include
@@ -121,6 +178,7 @@ function planManifestRestore(
   root: string,
   snapDir: string,
   files: SnapshotFileEntry[],
+  config: ProjectConfig,
   manifest: {
     kind: SnapshotKind
     missing: string[]
@@ -137,6 +195,8 @@ function planManifestRestore(
     if (exclusion) {
       return `blocked: snapshot entry ${entry.logical} is not a restorable manuscript file (${exclusion})`
     }
+    const policyError = restorePolicyError(root, config, entry.logical)
+    if (policyError) return policyError
     const read = readVaultFile(root, snapDir, entry.logical)
     if (read === "escapes") return `blocked: restore path escapes project root`
     if (read === "corrupted" || read.size !== entry.size || read.sha256 !== entry.sha256) {
@@ -244,6 +304,9 @@ function planLegacyRestore(
     pick(rel, rel)
   }
 
+  const policyError = restorePlanPolicyError(root, config, planned)
+  if (policyError) return policyError
+
   return { planned, notInSnapshot }
 }
 
@@ -334,7 +397,7 @@ export const bancaRestore = defineBancaTool({
     }
     const plan =
       manifestState.kind === "valid"
-        ? planManifestRestore(root, snapDir, manifestState.manifest.files, manifestState.manifest, expectedMain)
+        ? planManifestRestore(root, snapDir, manifestState.manifest.files, config, manifestState.manifest, expectedMain)
         : planLegacyRestore(root, snapDir, config, expectedMain)
     if (typeof plan === "string") return plan
 
@@ -459,6 +522,13 @@ export const bancaRestore = defineBancaTool({
           `Safety backup created: ${backupLabel}`,
         ].join("\n")
       }
+      const revalidationPolicyError = restorePlanPolicyError(root, config, plan.planned)
+      if (revalidationPolicyError) {
+        return [
+          `blocked: restore aborted before writing — ${revalidationPolicyError.replace(/^blocked: /, "")}`,
+          `Safety backup created: ${backupLabel}`,
+        ].join("\n")
+      }
 
       // ---------- Phase 6: controlled replacement with rollback ----------
       interface Applied {
@@ -472,6 +542,11 @@ export const bancaRestore = defineBancaTool({
 
       for (const p of plan.planned) {
         let target: string
+        const policyError = restorePolicyError(root, config, p.logical)
+        if (policyError) {
+          failure = { logical: p.logical, reason: policyError.replace(/^blocked: /, "") }
+          break
+        }
         try {
           // re-resolve immediately before writing to narrow the TOCTOU window
           target = resolveRealInsideRoot(root, p.logical)

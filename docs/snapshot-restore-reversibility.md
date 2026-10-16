@@ -72,6 +72,32 @@ depois de apagar `texto/main.tex`.
   que já foi aplicado quando um arquivo falha; rollback parcial é reportado
   como `partial` e o backup é preservado.
 
+### Rodada 5 — autorização de destinos no restore
+
+O manifesto continua sendo apenas uma declaração não confiável de bytes. O
+campo `kind: "partial"` não concede autorização para escrever no manuscrito.
+Antes de qualquer staging ou backup, cada destino planejado passa pela política
+do projeto:
+
+- o caminho lógico precisa ser seguro e casar com `allowedPaths`;
+- `protectedPaths` é aplicado ao caminho lógico e ao caminho canônico;
+- `immutableFacts` é aplicado ao caminho lógico e ao caminho canônico;
+- a resolução canônica continua confinada ao workspace e recusa symlinks
+  externos ou quebrados;
+- `.env`, `.dsh/`, `.banca/`, `.git/`, `node_modules/` e `dist/` continuam
+  bloqueados pela exclusão fixa, inclusive quando alcançados por symlink.
+
+O lote é rejeitado antes do primeiro write se qualquer entrada falhar. A mesma
+política é reaplicada depois do staging e do backup, imediatamente antes das
+substituições efetivas. Isso preserva restores `partial` legítimos sem permitir
+que um manifesto com hashes válidos contorne a configuração acadêmica.
+
+O teste dedicado `tests/restore_policy_scope.test.ts` verifica, com projetos
+sintéticos e efeitos reais no filesystem, protected/allowed paths,
+`immutableFacts`, symlinks internos que apontam para dados protegidos, symlinks
+externos ou quebrados, namespaces internos, lote misto atômico e compatibilidade
+com snapshots `restorable` e legados.
+
 ## Compatibilidade de snapshots legados
 
 Chave lógica é o formato novo; snapshots antigos (sem manifesto) continuam
@@ -159,3 +185,22 @@ pré-restore (V2) e é ele próprio restaurável (ciclo backup → V2 → s1 →
 ## Publicação
 
 Commit e SHA final são registrados na descrição da PR #1, que permanece draft.
+
+## Evidência atual da rodada 5
+
+- RED reproduzido no SHA vulnerável `6058d59dd6a3ff4db080acf2a5599177bc121f34`:
+  um manifesto `partial` com `dados/resultado.tex` retornou sucesso, alterou o
+  arquivo protegido e criou backup em `state.json`.
+- GREEN: `tests/restore_policy_scope.test.ts` passou com 10 testes e 32
+  asserções, incluindo hashes e bytes do cofre, conteúdo do manuscrito, estado
+  persistido e árvore externa.
+- Gates focados: typecheck, build, quatro suítes de snapshots/confinamento e o
+  teste DSH nativo passaram com exit code 0.
+- Suíte completa: exit code 1, com 682 pass e 1 fail. A falha permanece no teste
+  legado `real OpenCode: contaminated host config does not load global plugin;
+  local banca_init completes`, fora do escopo DSH e não alterado nesta rodada.
+- DSH real: `@deepseek-ai/dsh@0.2.0-rc.2`, com `ToolRuntime` e Cordis reais no
+  teste nativo; discovery das 16 ferramentas, discovery de skill, leitura em
+  workspace de agente, guard de mutação do auditor e ferramenta autorizada
+  passaram. Isso é evidência de runtime nativo, não E2E completo com sessão e
+  modelo.
