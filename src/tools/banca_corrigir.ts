@@ -94,7 +94,10 @@ export const bancaCorrigir = defineBancaTool({
         // Internal labels may collide within one millisecond: the central
         // createSnapshot picks the first free `-N` suffix and never reuses an
         // existing snapshot directory or manifest. Pre-correction snapshots
-        // stay unregistered (workspace-only recovery point, as before).
+        // stay unregistered (workspace-only recovery point, as before) and are
+        // declared `partial`: they capture only the files this correction will
+        // touch, so they are never announced as full recovery points (the
+        // physical destination policy still applies to their own contents).
         createSnapshot({
           root,
           snapshotsDir,
@@ -102,6 +105,7 @@ export const bancaCorrigir = defineBancaTool({
           candidates,
           labelPolicy: "unique",
           register: false,
+          kind: "partial",
         })
       } catch (err) {
         if (err instanceof PathTraversalError) return `blocked: workspace state paths escape project root`

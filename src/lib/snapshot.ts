@@ -13,6 +13,18 @@
  *   tree). Duplicated logical keys are captured once; the first occurrence
  *   wins (main, then bib, then chapters).
  *
+ * Restorability policy (round 4): creation and restoration share one physical
+ * destination policy ({@link inspectDestinationIdentity} /
+ * {@link destinationIdentityConflict}). A capture whose logical paths would
+ * collide on the same physical file — the exact situation `banca_restore`
+ * refuses — is refused before the label is claimed, so a snapshot announced as
+ * restorable can always be restored in the same configuration. A `restorable`
+ * capture must additionally carry its mandatory main file; markers
+ * (`banca_loop`) and declared partial captures (pre-correction snapshot,
+ * pre-restore backup of an incomplete state) say so in the manifest
+ * ({@link SnapshotManifest.kind}) instead of pretending to be full recovery
+ * points.
+ *
  * Immutability policy (P1-B fix): {@link createSnapshot} is the single entry
  * point that claims a label and writes a snapshot. A label is refused when it
  * is already registered in `state.json`, when the snapshot directory exists
@@ -50,6 +62,27 @@ export const SNAPSHOT_MANIFEST_SUFFIX = ".manifest.json"
 /** Sibling marker written while a capture is in flight. */
 export const SNAPSHOT_INCOMPLETE_MARKER = ".capture-incomplete"
 
+/**
+ * Contractual semantics of a capture:
+ * - `restorable`: validated public recovery point. The capture was refused
+ *   unless its mandatory main file was captured and no two logical paths would
+ *   resolve to the same physical destination, so `banca_restore` can complete
+ *   it.
+ * - `partial`: declared subset capture. A pre-correction snapshot (only the
+ *   files a supervised correction will touch) or a pre-restore backup of a
+ *   state that was already incomplete on disk. It restores exactly the files
+ *   it captured and never claims to be a full recovery point.
+ * - `marker`: process milestone without restorable content (`banca_loop`).
+ *   `banca_restore` refuses it explicitly.
+ */
+export type SnapshotKind = "restorable" | "partial" | "marker"
+
+export const SNAPSHOT_KINDS: readonly SnapshotKind[] = ["restorable", "partial", "marker"]
+
+function isSnapshotKind(value: unknown): value is SnapshotKind {
+  return typeof value === "string" && (SNAPSHOT_KINDS as readonly string[]).includes(value)
+}
+
 export interface SnapshotFileEntry {
   /** Project-relative logical path (POSIX) — the manuscript identity. */
   logical: string
@@ -62,6 +95,11 @@ export interface SnapshotManifest {
   version: number
   label: string
   createdAt: string
+  /**
+   * Capture semantics (see {@link SnapshotKind}). Manifests stored before this
+   * field existed read as `restorable` and keep the previous restore contract.
+   */
+  kind: SnapshotKind
   files: SnapshotFileEntry[]
   /** Expected logical paths (main/bib) that did not exist at capture time. */
   missing: string[]
@@ -167,6 +205,76 @@ function lstatOrNull(path: string) {
 }
 
 /**
+ * Resolve one logical project path to the physical file it occupies and derive
+ * the identity key used to detect incompatible destinations. Existing files are
+ * keyed by device+inode, so two logical paths reaching the same file through an
+ * internal symlink are detectable before any write; missing destinations are
+ * keyed by their canonical project-relative path. Destinations resolving into a
+ * protected namespace (secrets, internal banca state, host/build dirs) are
+ * refused, so a planted internal symlink cannot redirect a capture or a restore
+ * into `.banca/state.json` or `.env`. Read-only: touches nothing.
+ *
+ * Shared by snapshot creation and restore so both apply the exact same
+ * incompatibility policy. Reasons are returned without a message prefix; callers
+ * map them to their own contract.
+ */
+export type DestinationInspection =
+  | { ok: true; target: string; identityKey: string; canonicalRel: string }
+  | { ok: false; reason: string }
+
+export function inspectDestinationIdentity(root: string, logical: string): DestinationInspection {
+  let target: string
+  try {
+    target = resolveRealInsideRoot(root, logical)
+  } catch {
+    return { ok: false, reason: `destination for ${logical} escapes the project root` }
+  }
+  const canonicalRoot = realWorkspaceRoot(root)
+  const canonicalRel = toPosixPath(relative(canonicalRoot, target))
+  if (canonicalRel && canonicalRel !== ".." && !canonicalRel.startsWith("../")) {
+    const exclusion = snapshotExclusionReason(canonicalRel)
+    if (exclusion) {
+      return {
+        ok: false,
+        reason: `destination for ${logical} resolves into a protected namespace (${exclusion})`,
+      }
+    }
+  }
+  let st
+  try {
+    st = lstatSync(target)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { ok: false, reason: `destination for ${logical} is not accessible` }
+    }
+    return { ok: true, target, identityKey: `path:${canonicalRel}`, canonicalRel }
+  }
+  if (!st.isFile()) return { ok: false, reason: `destination for ${logical} is not a regular file` }
+  return { ok: true, target, identityKey: `${st.dev}:${st.ino}`, canonicalRel }
+}
+
+/**
+ * Map every logical path to its physical identity and return the first
+ * incompatibility, or null when the whole destination plan is compatible. The
+ * check is order-independent: any collision refuses the plan integrally,
+ * regardless of which logical path is processed first, even when the contents
+ * coincide.
+ */
+export function destinationIdentityConflict(root: string, logicals: string[]): string | null {
+  const identities = new Map<string, string>()
+  for (const logical of logicals) {
+    const inspection = inspectDestinationIdentity(root, logical)
+    if (!inspection.ok) return inspection.reason
+    const existing = identities.get(inspection.identityKey)
+    if (existing !== undefined) {
+      return `destinations collide: ${existing}, ${logical} resolve to the same file (${inspection.canonicalRel})`
+    }
+    identities.set(inspection.identityKey, logical)
+  }
+  return null
+}
+
+/**
  * Capture manuscript files into the snapshot vault, preserving logical
  * identity. Reads are validated canonically (external/broken symlinks raise
  * {@link PathTraversalError}); writes go to `snapDir/<logical>` through
@@ -178,6 +286,7 @@ export function captureSnapshotFiles(input: {
   snapshotsDir: string
   snapDir: string
   label: string
+  kind: SnapshotKind
   candidates: SnapshotCandidate[]
 }): SnapshotCaptureResult {
   const { root, snapDir, label } = input
@@ -248,6 +357,7 @@ export function captureSnapshotFiles(input: {
     version: SNAPSHOT_MANIFEST_VERSION,
     label,
     createdAt: new Date().toISOString(),
+    kind: input.kind,
     files,
     missing,
     skipped,
@@ -280,6 +390,21 @@ export class SnapshotCaptureError extends Error {
   }
 }
 
+/**
+ * The capture would produce a snapshot that cannot be used as the recovery
+ * point it is announced to be (physical destination collision, missing
+ * mandatory main file, ...). Nothing is registered and nothing is left behind.
+ */
+export class SnapshotNotRestorableError extends SnapshotCaptureError {
+  readonly reason: string
+
+  constructor(reason: string) {
+    super(`snapshot is not restorable: ${reason}`)
+    this.name = "SnapshotNotRestorableError"
+    this.reason = reason
+  }
+}
+
 export type SnapshotLabelPolicy = "strict" | "unique"
 
 export interface CreatedSnapshot {
@@ -289,6 +414,7 @@ export interface CreatedSnapshot {
   snapDir: string
   /** Registry id, or null when the snapshot is intentionally unregistered. */
   id: string | null
+  kind: SnapshotKind
   files: SnapshotFileEntry[]
   missing: string[]
   skipped: Array<{ logical: string; reason: string }>
@@ -337,9 +463,44 @@ export function createSnapshot(input: {
   labelPolicy: SnapshotLabelPolicy
   register: boolean
   scoreBefore?: number | null
+  /**
+   * Capture semantics. Defaults to `partial`: internal producers never claim
+   * full restorability unless they ask for it and satisfy its preconditions.
+   */
+  kind?: SnapshotKind
+  /** Mandatory logical path for a `restorable` capture (the configured main). */
+  requiredLogical?: string
 }): CreatedSnapshot {
   const { root, snapshotsDir, candidates } = input
+  const kind: SnapshotKind = input.kind ?? "partial"
   let label = input.label
+
+  if (kind === "marker" && candidates.length > 0) {
+    throw new SnapshotCaptureError("marker snapshots cannot capture manuscript files")
+  }
+
+  // Restorability preflight, before the label is claimed: a capture announced
+  // as a recovery point applies the same physical-destination policy restore
+  // enforces. A restorable capture whose logical paths would collide on one
+  // physical file (or that would reach a protected namespace) could never be
+  // restored, so it is refused here with nothing written.
+  if (kind !== "marker") {
+    const logicals: string[] = []
+    for (const candidate of candidates) {
+      assertSafeLogicalRel(candidate.logical)
+      if (!logicals.includes(candidate.logical)) logicals.push(candidate.logical)
+    }
+    if (kind === "restorable") {
+      if (!input.requiredLogical) {
+        throw new SnapshotCaptureError("a restorable snapshot requires its mandatory logical path")
+      }
+      if (!logicals.includes(input.requiredLogical)) {
+        throw new SnapshotNotRestorableError(`${input.requiredLogical} is not part of this capture`)
+      }
+      const conflict = destinationIdentityConflict(root, logicals)
+      if (conflict !== null) throw new SnapshotNotRestorableError(conflict)
+    }
+  }
 
   if (input.labelPolicy === "unique") {
     // Internal producers (pre-restore backup, pre-correction snapshot, loop
@@ -381,15 +542,31 @@ export function createSnapshot(input: {
   let manifestCreated = false
   try {
     writeFileSync(markerPath, `${label}\n`, { encoding: "utf8" })
-    const captured = captureSnapshotFiles({ root, snapshotsDir, snapDir, label, candidates })
+    const captured = captureSnapshotFiles({ root, snapshotsDir, snapDir, label, kind, candidates })
+    // The manifest already exists on disk: record it before the restorability
+    // check below so a rejection removes it with the rest of the capture.
     manifestPath = captured.manifestPath
     manifestCreated = true
+    // Authoritative restorability check on the captured inventory: the main
+    // file must really be in the vault. A file that disappeared (or became a
+    // broken link) between the preflight and the read aborts here, and the
+    // cleanup below removes the half-written snapshot.
+    if (kind === "restorable" && input.requiredLogical) {
+      if (!captured.files.some((f) => f.logical === input.requiredLogical)) {
+        const skipped = captured.skipped.find((s) => s.logical === input.requiredLogical)
+        const reason = captured.missing.includes(input.requiredLogical!)
+          ? "not found"
+          : skipped?.reason ?? "not captured"
+        throw new SnapshotNotRestorableError(`${input.requiredLogical} was not captured (${reason})`)
+      }
+    }
     unlinkSync(markerPath)
     const id = input.register ? addSnapshot(root, label, input.scoreBefore ?? null) : null
     return {
       label,
       snapDir,
       id,
+      kind,
       files: captured.files,
       missing: captured.missing,
       skipped: captured.skipped,
@@ -442,6 +619,13 @@ function validateManifest(raw: unknown): SnapshotManifest | null {
   if (m.version !== SNAPSHOT_MANIFEST_VERSION) return null
   if (typeof m.label !== "string") return null
   if (typeof m.createdAt !== "string") return null
+  // Manifests written before the field existed keep the previous contract
+  // (restorable, main required). An unknown value is not guessed at.
+  let kind: SnapshotKind = "restorable"
+  if (m.kind !== undefined) {
+    if (!isSnapshotKind(m.kind)) return null
+    kind = m.kind
+  }
   if (!Array.isArray(m.files)) return null
   const files: SnapshotFileEntry[] = []
   for (const entry of m.files) {
@@ -475,6 +659,7 @@ function validateManifest(raw: unknown): SnapshotManifest | null {
     version: SNAPSHOT_MANIFEST_VERSION,
     label: m.label,
     createdAt: m.createdAt,
+    kind,
     files,
     missing,
     skipped,

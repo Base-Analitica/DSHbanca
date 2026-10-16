@@ -15,6 +15,7 @@ import {
   logicalProjectRel,
   SnapshotCaptureError,
   SnapshotConflictError,
+  SnapshotNotRestorableError,
   type CreatedSnapshot,
 } from "../lib/snapshot"
 
@@ -59,12 +60,17 @@ export const bancaSnapshot = defineBancaTool({
 
     // Logical identity: files are keyed by the configured project-relative
     // path, never by the canonical path a symlink may resolve to. The central
-    // createSnapshot refuses any label that already holds snapshot data and
-    // never truncates an existing snapshot, directory or manifest.
+    // createSnapshot refuses any label that already holds snapshot data, never
+    // truncates an existing snapshot, and — before registering anything —
+    // applies the same physical destination policy restore enforces: a project
+    // whose configured paths collide on one file (or whose main is absent,
+    // broken, external or redirected into a protected namespace) is refused
+    // here instead of being announced as a recovery point that cannot be used.
     let created: CreatedSnapshot
+    const mainLogical = logicalProjectRel(root, paths.main)
     try {
       const candidates = [
-        { logical: logicalProjectRel(root, paths.main), abs: paths.main },
+        { logical: mainLogical, abs: paths.main },
         { logical: logicalProjectRel(root, paths.bib), abs: paths.bib },
         ...paths.chapters.map((ch) => ({ logical: logicalProjectRel(root, ch), abs: ch })),
       ]
@@ -76,11 +82,16 @@ export const bancaSnapshot = defineBancaTool({
         labelPolicy: "strict",
         register: true,
         scoreBefore: null,
+        kind: "restorable",
+        requiredLogical: mainLogical,
       })
     } catch (err) {
       if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
       if (err instanceof SnapshotConflictError) {
         return `blocked: snapshot label "${label}" is not available (${err.reason}) — existing snapshot data was left untouched`
+      }
+      if (err instanceof SnapshotNotRestorableError) {
+        return `blocked: snapshot is not restorable — ${err.reason} — nothing was registered and no partial snapshot was left behind`
       }
       if (err instanceof SnapshotCaptureError) {
         return `blocked: snapshot capture failed — no snapshot was registered`
@@ -102,6 +113,9 @@ export const bancaSnapshot = defineBancaTool({
       lines.push(`Not captured:`)
       lines.push(...notCaptured.map((n) => `- ${n}`))
     }
+    lines.push(
+      `Recovery point verified: restorable (${mainLogical} captured, no destination collisions)`,
+    )
     return lines.join("\n")
   },
 })

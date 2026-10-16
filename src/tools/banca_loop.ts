@@ -72,7 +72,9 @@ export const bancaLoop = defineBancaTool({
 
     // Phase: snapshot. The central createSnapshot claims a collision-free
     // label (internal labels may collide within one millisecond) and registers
-    // the recovery point only after the marker/manifest were completed.
+    // the recovery point only after the marker/manifest were completed. A loop
+    // snapshot is an explicit `marker`: a process milestone without restorable
+    // files, never presented as a manuscript recovery point.
     const snapLabel = `loop-${Date.now()}`
     let loopSnapshotLabel: string
     try {
@@ -86,6 +88,7 @@ export const bancaLoop = defineBancaTool({
         labelPolicy: "unique",
         register: true,
         scoreBefore,
+        kind: "marker",
       }).label
     } catch (err) {
       if (err instanceof PathTraversalError) return "blocked: workspace state paths escape project root"

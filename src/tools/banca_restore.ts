@@ -16,6 +16,7 @@ import {
 import { resolveManuscriptPaths, toPosixPath } from "../lib/paths"
 import {
   createSnapshot,
+  destinationIdentityConflict,
   loadSnapshotManifest,
   logicalProjectRel,
   sha256Of,
@@ -23,6 +24,7 @@ import {
   snapshotExclusionReason,
   type CreatedSnapshot,
   type SnapshotFileEntry,
+  type SnapshotKind,
 } from "../lib/snapshot"
 
 interface PlannedRestore {
@@ -94,82 +96,36 @@ function readVaultFile(root: string, snapDir: string, rel: string): VaultRead {
   return { source, sha256: sha256Of(bytes), size: bytes.length }
 }
 
-type DestinationInspection =
-  | { ok: true; target: string; identityKey: string; canonicalRel: string }
-  | { ok: false; blocked: string }
-
 /**
- * Resolve one planned restore destination to its canonical location and
- * identify the physical file it will occupy (P1-A). Existing files are keyed
- * by device+inode, so two distinct logical paths resolving to the same file
- * are detectable before any write; missing destinations are keyed by their
- * canonical project-relative path. Destinations resolving into a protected
- * namespace (secrets, internal banca state, host/build dirs) are refused, so a
- * planted internal symlink cannot redirect a restore into `.banca/state.json`
- * or `.env`. Read-only: touches nothing.
- */
-function inspectRestoreDestination(root: string, logical: string): DestinationInspection {
-  let target: string
-  try {
-    target = resolveRealInsideRoot(root, logical)
-  } catch {
-    return { ok: false, blocked: `blocked: restore path escapes project root: ${logical}` }
-  }
-  const canonicalRoot = realWorkspaceRoot(root)
-  const canonicalRel = toPosixPath(relative(canonicalRoot, target))
-  if (canonicalRel && canonicalRel !== ".." && !canonicalRel.startsWith("../")) {
-    const exclusion = snapshotExclusionReason(canonicalRel)
-    if (exclusion) {
-      return {
-        ok: false,
-        blocked: `blocked: restore destination for ${logical} resolves into a protected namespace (${exclusion})`,
-      }
-    }
-  }
-  let st
-  try {
-    st = lstatSync(target)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      return { ok: false, blocked: `blocked: destination for ${logical} is not accessible` }
-    }
-    return { ok: true, target, identityKey: `path:${canonicalRel}`, canonicalRel }
-  }
-  if (!st.isFile()) return { ok: false, blocked: `blocked: destination for ${logical} is not a regular file` }
-  return { ok: true, target, identityKey: `${st.dev}:${st.ino}`, canonicalRel }
-}
-
-/**
- * Build the logical → physical identity map for every planned destination.
+ * Build the logical → physical identity map for every planned destination
+ * using the shared destination policy (same routine snapshot creation applies).
  * Returns the colliding pair description when two logical paths would write to
  * the same physical file; the check is order-independent (any collision refuses
  * the whole restore, regardless of which path is processed first).
  */
 function destinationPlanError(root: string, logicals: string[]): string | null {
-  const identities = new Map<string, string>()
-  for (const logical of logicals) {
-    const inspection = inspectRestoreDestination(root, logical)
-    if (!inspection.ok) return inspection.blocked
-    const existing = identities.get(inspection.identityKey)
-    if (existing !== undefined) {
-      return `blocked: restore destinations collide: ${existing}, ${logical} resolve to the same file (${inspection.canonicalRel})`
-    }
-    identities.set(inspection.identityKey, logical)
-  }
-  return null
+  const reason = destinationIdentityConflict(root, logicals)
+  return reason === null ? null : `blocked: ${reason}`
 }
 
 /**
  * Plan a restore from a manifest snapshot: the manifest is authoritative.
- * Every listed file must exist in the vault with the recorded size and hash,
- * and main must be present, otherwise the restore is refused (never a partial
- * success). Read-only: touches nothing outside the vault.
+ * Every listed file must exist in the vault with the recorded size and hash.
+ * A `restorable` snapshot (or a legacy manifest without a kind) must include
+ * main, otherwise the restore is refused (never a partial success). A
+ * `partial` capture restores exactly the files it captured — it is a
+ * controlled recovery, never presented as a full one. Read-only: touches
+ * nothing outside the vault.
  */
 function planManifestRestore(
   root: string,
   snapDir: string,
   files: SnapshotFileEntry[],
-  manifest: { missing: string[]; skipped: Array<{ logical: string; reason: string }> },
+  manifest: {
+    kind: SnapshotKind
+    missing: string[]
+    skipped: Array<{ logical: string; reason: string }>
+  },
   expectedMain: string,
 ): RestorePlan | string {
   const planned: PlannedRestore[] = []
@@ -194,7 +150,10 @@ function planManifestRestore(
       legacy: false,
     })
   }
-  if (!planned.some((p) => p.logical === expectedMain)) {
+  if (planned.length === 0) {
+    return `blocked: snapshot has no restorable files — refusing the restore`
+  }
+  if (manifest.kind !== "partial" && !planned.some((p) => p.logical === expectedMain)) {
     return `blocked: snapshot does not include ${expectedMain} — refusing an incomplete restore`
   }
   const notInSnapshot: string[] = []
@@ -303,7 +262,25 @@ export const bancaRestore = defineBancaTool({
     // list snapshots
     if (!args.snapshotId) {
       if (state.snapshots.length === 0) return "no snapshots available"
-      return state.snapshots.map((s) => `  ${s.id} — ${s.label} (${new Date(s.createdAt).toLocaleDateString()})`).join("\n")
+      // The list states the semantics of each entry: markers and partial
+      // captures are visible as such instead of looking like full recovery
+      // points the restore would refuse.
+      let listDir: string | null = null
+      try {
+        listDir = resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))
+      } catch {
+        listDir = null
+      }
+      return state.snapshots
+        .map((s) => {
+          const date = new Date(s.createdAt).toLocaleDateString()
+          if (listDir === null) return `  ${s.id} — ${s.label} (${date})`
+          const manifestState = loadSnapshotManifest(listDir, s.label)
+          const kind = manifestState.kind === "valid" ? manifestState.manifest.kind : null
+          const note = kind === "marker" ? " [marker]" : kind === "partial" ? " [partial]" : ""
+          return `  ${s.id} — ${s.label} (${date})${note}`
+        })
+        .join("\n")
     }
 
     const snap = state.snapshots.find((s) => s.id === args.snapshotId || s.label === args.snapshotId)
@@ -348,6 +325,12 @@ export const bancaRestore = defineBancaTool({
     const manifestState = loadSnapshotManifest(snapshotsDir, snap.label)
     if (manifestState.kind === "invalid") {
       return `blocked: snapshot manifest is invalid or inconsistent`
+    }
+    // A process marker is registered for history, not for recovery: it has no
+    // restorable content and is refused explicitly instead of being reported
+    // as an incomplete snapshot.
+    if (manifestState.kind === "valid" && manifestState.manifest.kind === "marker") {
+      return `blocked: snapshot "${snap.label}" is a process marker without restorable files — refusing the restore`
     }
     const plan =
       manifestState.kind === "valid"
@@ -414,10 +397,28 @@ export const bancaRestore = defineBancaTool({
       }
 
       // ---------- Phase 5: real backup of the pre-restore state ----------
-      // The backup is a full snapshot created through the central, immutable
-      // snapshot path: the label is unique, never overwrites an existing
-      // recovery point and is registered only after the manifest exists.
+      // The backup is created through the central, immutable snapshot path: the
+      // label is unique, never overwrites an existing recovery point and is
+      // registered only after the manifest exists. It is a `restorable`
+      // recovery point only when the plan covers the configured main file, the
+      // pre-restore destinations are compatible and every planned file was
+      // still on disk; otherwise it is declared `partial` in its manifest — a
+      // faithful capture that never promises a full restoration.
       let backup: CreatedSnapshot
+      const destinationOnDisk = (logical: string): boolean => {
+        try {
+          return lstatSync(resolveRealInsideRoot(root, logical)).isFile()
+        } catch {
+          return false
+        }
+      }
+      const plannedLogicals = plan.planned.map((p) => p.logical)
+      const backupKind: SnapshotKind =
+        plan.planned.some((p) => p.logical === expectedMain) &&
+        plan.planned.every((p) => destinationOnDisk(p.logical)) &&
+        destinationIdentityConflict(root, plannedLogicals) === null
+          ? "restorable"
+          : "partial"
       try {
         const candidates = plan.planned.map((p) => ({
           logical: p.logical,
@@ -431,6 +432,8 @@ export const bancaRestore = defineBancaTool({
           labelPolicy: "unique",
           register: true,
           scoreBefore: state.currentScore,
+          kind: backupKind,
+          requiredLogical: backupKind === "restorable" ? expectedMain : undefined,
         })
       } catch (err) {
         if (err instanceof PathTraversalError) {
@@ -613,6 +616,13 @@ export const bancaRestore = defineBancaTool({
       if (plan.notInSnapshot.length > 0) {
         lines.push(`Not in snapshot (left unchanged):`)
         lines.push(...plan.notInSnapshot.map((f) => `- ${f}`))
+      }
+      // A partial capture is a controlled recovery of exactly the captured
+      // files; the result never implies that the whole project was restored.
+      if (manifestState.kind === "valid" && manifestState.manifest.kind === "partial") {
+        lines.push(
+          `Partial recovery: this snapshot captured only the files listed above; every other project file was left unchanged.`,
+        )
       }
       return lines.join("\n")
     } finally {
