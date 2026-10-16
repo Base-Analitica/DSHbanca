@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
@@ -16,6 +17,7 @@ import {
   SnapshotCaptureError,
   SnapshotConflictError,
   SnapshotNotRestorableError,
+  snapshotRestorePolicyError,
   type CreatedSnapshot,
 } from "../lib/snapshot"
 
@@ -74,6 +76,15 @@ export const bancaSnapshot = defineBancaTool({
         { logical: logicalProjectRel(root, paths.bib), abs: paths.bib },
         ...paths.chapters.map((ch) => ({ logical: logicalProjectRel(root, ch), abs: ch })),
       ]
+      for (const candidate of candidates) {
+        // Missing optional files are not captured and therefore cannot make
+        // the resulting recovery point immediately unrestorable.
+        if (!existsSync(candidate.abs)) continue
+        const policyError = snapshotRestorePolicyError(root, config, candidate.logical)
+        if (policyError) {
+          return `blocked: snapshot is not restorable — ${policyError.replace(/^blocked: /, "")} — nothing was registered and no partial snapshot was left behind`
+        }
+      }
       created = createSnapshot({
         root,
         snapshotsDir,

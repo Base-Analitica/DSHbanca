@@ -13,13 +13,7 @@ import {
   resolveRealInsideRoot,
   sanitizeSnapshotLabel,
 } from "../lib/safe_paths"
-import {
-  globToRegex,
-  isPathAllowed,
-  isPathProtected,
-  resolveManuscriptPaths,
-  toPosixPath,
-} from "../lib/paths"
+import { resolveManuscriptPaths, toPosixPath } from "../lib/paths"
 import {
   createSnapshot,
   destinationIdentityConflict,
@@ -28,6 +22,7 @@ import {
   sha256Of,
   SNAPSHOT_INCOMPLETE_MARKER,
   snapshotExclusionReason,
+  snapshotRestorePolicyError,
   type CreatedSnapshot,
   type SnapshotFileEntry,
   type SnapshotKind,
@@ -115,46 +110,12 @@ function destinationPlanError(root: string, logicals: string[]): string | null {
 }
 
 /**
- * Apply the project's academic write policy to one restore destination.
- * Snapshot metadata never grants permission: logical paths must be allowed,
- * while the canonical destination is checked for protected namespaces and
- * immutable facts so an internal symlink cannot bypass those policies.
+ * Apply the shared project's academic write policy to one restore destination.
+ * Snapshot metadata never grants permission: both logical and canonical paths
+ * must satisfy the configured rules so an internal symlink cannot bypass them.
  */
 function restorePolicyError(root: string, config: ProjectConfig, logical: string): string | null {
-  const logicalExclusion = snapshotExclusionReason(logical)
-  if (logicalExclusion) {
-    return `blocked: restore destination ${logical} is not a manuscript file (${logicalExclusion})`
-  }
-  if (!isPathAllowed(logical, config)) {
-    return `blocked: restore destination ${logical} is outside allowedPaths`
-  }
-
-  let canonicalRel: string
-  try {
-    const target = resolveRealInsideRoot(root, logical)
-    canonicalRel = toPosixPath(relative(realWorkspaceRoot(root), target))
-  } catch {
-    return `blocked: restore destination escapes project root`
-  }
-  if (!canonicalRel || canonicalRel.startsWith("..") || isAbsolute(canonicalRel)) {
-    return `blocked: restore destination escapes project root`
-  }
-
-  const canonicalExclusion = snapshotExclusionReason(canonicalRel)
-  if (canonicalExclusion) {
-    return `blocked: restore destination ${logical} resolves into a protected namespace (${canonicalExclusion})`
-  }
-  if (isPathProtected(logical, config) || isPathProtected(canonicalRel, config)) {
-    return `blocked: restore destination ${logical} is protected by protectedPaths`
-  }
-
-  for (const fact of config.immutableFacts) {
-    const re = globToRegex(fact)
-    if (re.test(logical) || re.test(canonicalRel)) {
-      return `blocked: restore destination ${logical} is immutable (immutableFacts: "${fact}")`
-    }
-  }
-  return null
+  return snapshotRestorePolicyError(root, config, logical)
 }
 
 function restorePlanPolicyError(root: string, config: ProjectConfig, planned: PlannedRestore[]): string | null {

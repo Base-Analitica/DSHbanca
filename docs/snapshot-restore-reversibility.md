@@ -204,3 +204,35 @@ Commit e SHA final são registrados na descrição da PR #1, que permanece draft
   workspace de agente, guard de mutação do auditor e ferramenta autorizada
   passaram. Isso é evidência de runtime nativo, não E2E completo com sessão e
   modelo.
+
+## Rodada 6 — autorização física por `allowedPaths`
+
+Em `84f7db89b87f2cb511104f918c7a1957ec8ef1de`, `restorePolicyError()` já
+validava `allowedPaths` para a identidade lógica, mas não para o caminho
+canônico. Um symlink interno `capitulos/alias.tex -> ../dados/resultado.tex`
+passava pela regra lógica e gravava no destino físico fora da allowlist.
+
+O teste `allowed logical symlink cannot restore into a physical path outside
+allowedPaths` executou `banca_restore` no HEAD vulnerável com manifesto `partial`
+válido e `allowedPaths: ["capitulos/*.tex"]`. O tool respondeu falsamente
+`restored from alias`, criou backup desnecessário e mudou
+`dados/resultado.tex` de `CURRENT-PHYSICAL` (SHA-256
+`74c97714a4c78edc4a8c7b932bb2dca3b97dab3fb45d9f55775f2518c9c94993`) para
+`SNAPSHOT-PHYSICAL` (SHA-256
+`7a42aa7f51b16561ab3974194dba02a50e3b5d093b37fd62118ce3a773673aa6`).
+
+A política foi centralizada em `snapshotRestorePolicyError()` em
+`src/lib/snapshot.ts`. Ela autoriza separadamente os caminhos lógico e físico
+canônico quanto a `allowedPaths`, `protectedPaths` e `immutableFacts`, além de
+rejeitar escapes e namespaces fixos. `banca_restore` usa a mesma função no
+planejamento e nas revalidações anteriores às escritas. Como a inspeção também
+confirmou que `banca_snapshot` podia anunciar como `restorable` um arquivo cujo
+destino físico seria recusado pelo restore, a criação pública agora chama a
+mesma política antes de capturar/registrar o ponto de recuperação; arquivos
+opcionais ausentes continuam sem bloquear a captura.
+
+GREEN em `tests/restore_policy_scope.test.ts`: 15 testes / 53 asserções. O caso
+de exploração agora bloqueia antes do backup e asserta conteúdo físico,
+symlink, estado e snapshot byte a byte; controles confirmam que um symlink
+interno restaura quando ambos os caminhos são permitidos, e que allowlist
+lógica, `immutableFacts` físico e criação `restorable` são respeitados.

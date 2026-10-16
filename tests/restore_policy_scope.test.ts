@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -188,6 +189,129 @@ describe("banca_restore authorization policy", () => {
 
       expect(result).toContain("immutableFacts")
       expect(readFileSync(join(root, "capitulos/cap1.tex"), "utf8")).toBe("CURRENT-IMMUTABLE")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("allowed logical symlink cannot restore into a physical path outside allowedPaths", async () => {
+    const root = setupProject({ allowedPaths: ["capitulos/*.tex"], protectedPaths: [] })
+    try {
+      write(root, "dados/resultado.tex", "CURRENT-PHYSICAL")
+      mkdirSync(join(root, "capitulos"), { recursive: true })
+      symlinkSync("../dados/resultado.tex", join(root, "capitulos/alias.tex"))
+      registerSnapshot(root, "alias", "partial", [{ logical: "capitulos/alias.tex", content: "SNAPSHOT-PHYSICAL" }])
+      const stateBefore = readFileSync(join(root, ".banca", "state.json"))
+      const manifestBefore = readFileSync(join(root, ".banca", "snapshots", "alias.manifest.json"))
+      const snapshotBefore = readFileSync(join(root, ".banca", "snapshots", "alias", "capitulos", "alias.tex"))
+      const vaultEntriesBefore = readdirSync(join(root, ".banca", "snapshots")).sort()
+      const physicalBefore = readFileSync(join(root, "dados/resultado.tex"))
+
+      const result = await restore(root, "alias")
+      const physicalAfter = readFileSync(join(root, "dados/resultado.tex"))
+      expect(result).toContain("blocked")
+      expect(result).not.toContain("restored from")
+      expect(physicalAfter).toEqual(physicalBefore)
+      expect(lstatSync(join(root, "capitulos/alias.tex")).isSymbolicLink()).toBe(true)
+      expect(readFileSync(join(root, ".banca", "state.json"))).toEqual(stateBefore)
+      expect(readFileSync(join(root, ".banca", "snapshots", "alias.manifest.json"))).toEqual(manifestBefore)
+      expect(readFileSync(join(root, ".banca", "snapshots", "alias", "capitulos", "alias.tex"))).toEqual(
+        snapshotBefore,
+      )
+      expect(readdirSync(join(root, ".banca", "snapshots")).sort()).toEqual(vaultEntriesBefore)
+      expect(readFileSync(join(root, "main.tex"), "utf8")).toBe("MAIN")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("logical authorization is still required when physical target is allowed", async () => {
+    const root = setupProject({ allowedPaths: ["dados/*.tex"], protectedPaths: [] })
+    try {
+      write(root, "dados/resultado.tex", "CURRENT-PHYSICAL")
+      mkdirSync(join(root, "capitulos"), { recursive: true })
+      symlinkSync("../dados/resultado.tex", join(root, "capitulos/alias.tex"))
+      registerSnapshot(root, "logical-denied", "partial", [
+        { logical: "capitulos/alias.tex", content: "SNAPSHOT-PHYSICAL" },
+      ])
+
+      const result = await restore(root, "logical-denied")
+
+      expect(result).toContain("outside allowedPaths")
+      expect(readFileSync(join(root, "dados/resultado.tex"), "utf8")).toBe("CURRENT-PHYSICAL")
+      expect(lstatSync(join(root, "capitulos/alias.tex")).isSymbolicLink()).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("internal symlink restores when both logical and physical paths are allowed", async () => {
+    const root = setupProject({
+      allowedPaths: ["capitulos/*.tex", "dados/*.tex"],
+      protectedPaths: [],
+    })
+    try {
+      write(root, "dados/resultado.tex", "CURRENT-PHYSICAL")
+      mkdirSync(join(root, "capitulos"), { recursive: true })
+      symlinkSync("../dados/resultado.tex", join(root, "capitulos/alias.tex"))
+      registerSnapshot(root, "both-allowed", "partial", [
+        { logical: "capitulos/alias.tex", content: "SNAPSHOT-PHYSICAL" },
+      ])
+
+      const result = await restore(root, "both-allowed")
+
+      expect(result).toContain("restored from both-allowed")
+      expect(readFileSync(join(root, "dados/resultado.tex"), "utf8")).toBe("SNAPSHOT-PHYSICAL")
+      expect(lstatSync(join(root, "capitulos/alias.tex")).isSymbolicLink()).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("physical immutableFacts still block an otherwise allowed symlink restore", async () => {
+    const root = setupProject({
+      allowedPaths: ["capitulos/*.tex", "dados/*.tex"],
+      protectedPaths: [],
+      immutableFacts: ["dados/*.tex"],
+    })
+    try {
+      write(root, "dados/resultado.tex", "CURRENT-IMMUTABLE")
+      mkdirSync(join(root, "capitulos"), { recursive: true })
+      symlinkSync("../dados/resultado.tex", join(root, "capitulos/alias.tex"))
+      registerSnapshot(root, "physical-immutable", "partial", [
+        { logical: "capitulos/alias.tex", content: "SNAPSHOT-PHYSICAL" },
+      ])
+
+      const result = await restore(root, "physical-immutable")
+
+      expect(result).toContain("immutableFacts")
+      expect(readFileSync(join(root, "dados/resultado.tex"), "utf8")).toBe("CURRENT-IMMUTABLE")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("banca_snapshot does not register a restorable capture with an unauthorized physical target", async () => {
+    const root = setupProject({ allowedPaths: ["capitulos/*.tex"], protectedPaths: [] })
+    try {
+      write(root, "dados/resultado.tex", "CURRENT-PHYSICAL")
+      mkdirSync(join(root, "capitulos"), { recursive: true })
+      symlinkSync("../dados/resultado.tex", join(root, "capitulos/alias.tex"))
+      const configPath = join(root, ".banca", "project.json")
+      const config = JSON.parse(readFileSync(configPath, "utf8"))
+      config.manuscript.main = "capitulos/alias.tex"
+      writeFileSync(configPath, JSON.stringify(config))
+      registerState(root, "baseline")
+      const stateBefore = readFileSync(join(root, ".banca", "state.json"))
+
+      const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+      const result = String(await bancaSnapshot.execute({ projectRoot: root, label: "unauthorized-alias" }, {} as any))
+
+      expect(result).toContain("not restorable")
+      expect(readFileSync(join(root, ".banca", "state.json"))).toEqual(stateBefore)
+      expect(existsSync(join(root, ".banca", "snapshots", "unauthorized-alias"))).toBe(false)
+      expect(existsSync(join(root, ".banca", "snapshots", "unauthorized-alias.manifest.json"))).toBe(false)
+      expect(readFileSync(join(root, "dados/resultado.tex"), "utf8")).toBe("CURRENT-PHYSICAL")
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

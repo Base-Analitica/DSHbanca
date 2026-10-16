@@ -55,7 +55,15 @@ import {
   resolveInsideRoot,
   resolveRealInsideRoot,
 } from "./safe_paths"
-import { isAbsoluteDriveOrUncForm, normalizePublicPath, toPosixPath } from "./paths"
+import {
+  globToRegex,
+  isAbsoluteDriveOrUncForm,
+  isPathAllowed,
+  isPathProtected,
+  normalizePublicPath,
+  toPosixPath,
+} from "./paths"
+import type { ProjectConfig } from "./config"
 
 export const SNAPSHOT_MANIFEST_VERSION = 1
 export const SNAPSHOT_MANIFEST_SUFFIX = ".manifest.json"
@@ -193,6 +201,51 @@ export function snapshotExclusionReason(posixRel: string): string | null {
   if (posixRel.startsWith(".git/")) return "git metadata (.git)"
   if (posixRel.startsWith("node_modules/")) return "dependencies (node_modules)"
   if (posixRel.startsWith("dist/")) return "build output (dist)"
+  return null
+}
+
+/**
+ * Shared write authorization for recovery destinations. Both restore planning
+ * and public restorable-snapshot creation use this policy so a registered
+ * recovery point cannot immediately fail the same project's path rules.
+ */
+export function snapshotRestorePolicyError(root: string, config: ProjectConfig, logical: string): string | null {
+  const logicalExclusion = snapshotExclusionReason(logical)
+  if (logicalExclusion) {
+    return `blocked: restore destination ${logical} is not a manuscript file (${logicalExclusion})`
+  }
+  if (!isPathAllowed(logical, config)) {
+    return `blocked: restore destination ${logical} is outside allowedPaths`
+  }
+
+  let canonicalRel: string
+  try {
+    const target = resolveRealInsideRoot(root, logical)
+    canonicalRel = toPosixPath(relative(realWorkspaceRoot(root), target))
+  } catch {
+    return `blocked: restore destination escapes project root`
+  }
+  if (!canonicalRel || canonicalRel.startsWith("..") || isAbsolute(canonicalRel)) {
+    return `blocked: restore destination escapes project root`
+  }
+
+  const canonicalExclusion = snapshotExclusionReason(canonicalRel)
+  if (canonicalExclusion) {
+    return `blocked: restore destination ${logical} resolves into a protected namespace (${canonicalExclusion})`
+  }
+  if (!isPathAllowed(canonicalRel, config)) {
+    return `blocked: restore destination ${logical} resolves outside allowedPaths`
+  }
+  if (isPathProtected(logical, config) || isPathProtected(canonicalRel, config)) {
+    return `blocked: restore destination ${logical} is protected by protectedPaths`
+  }
+
+  for (const fact of config.immutableFacts) {
+    const re = globToRegex(fact)
+    if (re.test(logical) || re.test(canonicalRel)) {
+      return `blocked: restore destination ${logical} is immutable (immutableFacts: "${fact}")`
+    }
+  }
   return null
 }
 
