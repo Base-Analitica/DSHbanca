@@ -24,6 +24,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Segurança
 
+- E2E legado OpenCode deixa de iniciar no `bun test` padrão; execução de modelo e uso/cópia de credenciais exigem opt-ins separados e modelo explicitamente selecionado.
 - Reduzido risco de execução shell na compilação LaTeX (validação de engines, argumentos separados)
 - Auto-registro de dependência externa (crossref-academic via `uvx`) deixou de ser comportamento padrão
 - Script check-secrets.sh: modo `--ci` detecta chaves reais sem falso positivo em documentação

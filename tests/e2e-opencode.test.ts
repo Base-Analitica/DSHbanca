@@ -47,6 +47,7 @@ import {
   seedIsolatedAuth,
   PRESERVED_ENV_KEYS,
   resolveBinary,
+  opencodeModelE2eOptInError,
   hasStructuredProtocolFailure,
   normalizeTextEvent,
   normalizeAllTextEvents,
@@ -1638,6 +1639,9 @@ describe("No-model path, sanitization of classification, host isolation", () => 
             TMPDIR: tmpdir(),
             // Rebuild is fine (no opencode needed); avoids FAIL from missing stamp dominating exit.
             E2E_SKIP_REBUILD: "0",
+            DSHBANCA_ENABLE_OPENCODE_MODEL_E2E: "1",
+            DSHBANCA_ALLOW_OPENCODE_E2E_HOST_AUTH: "1",
+            OPENCODE_E2E_MODEL: "fixture/no-provider-model",
           },
           timeout: 120000,
         });
@@ -1653,10 +1657,11 @@ describe("No-model path, sanitization of classification, host isolation", () => 
     { timeout: 150000 }
   );
 
-  // Dynamic OpenCode proofs must not silently pass when the binary is absent.
-  const openCodeBinForDynamicProof = resolveBinary();
+  // The model-dependent OpenCode proof requires explicit model and host-auth consent, and a discoverable binary.
+  const modelE2eOptInError = opencodeModelE2eOptInError();
+  const openCodeBinForDynamicProof = modelE2eOptInError ? undefined : resolveBinary();
 
-  test.skipIf(!openCodeBinForDynamicProof)(
+  test.skipIf(Boolean(modelE2eOptInError) || !openCodeBinForDynamicProof)(
     "real OpenCode: contaminated host config does not load global plugin; local banca_init completes",
     () => {
       const bin = openCodeBinForDynamicProof as string;
@@ -1729,7 +1734,7 @@ export default async () => ({});
 
         const args = buildOpencodeRunArgs({
           projectDir: project,
-          model: process.env.OPENCODE_E2E_MODEL || "opencode/mimo-v2.5-free",
+          model: process.env.OPENCODE_E2E_MODEL,
           command: "banca-init",
         });
         const res = runSafe(bin, args, project, 240000, env);

@@ -28,3 +28,9 @@ O CI geral do repositório não provisiona nem instala DSH. Ele emite um aviso e
 ## Limites
 
 Este teste comprova perfil Cordis e ToolRuntime real, com contexto de workspace sintético. Ele não comprova sessão de agente, tool loop, inferência de modelo, guard através de identidade de agente real, validação humana, nem persistência/retomada de uma conversa. Nenhuma dessas etapas é invocada pelo gate.
+
+## Segurança da suíte de testes
+
+`bun test` não inicia o E2E legado do OpenCode, mesmo que encontre um executável OpenCode. A execução dependente de modelo fica atrás de opt-in explícito e exige seleção de modelo e consentimento separado para credenciais do host. Para executá-la deliberadamente, defina `DSHBANCA_ENABLE_OPENCODE_MODEL_E2E=1`, `OPENCODE_E2E_MODEL=<modelo escolhido>` e `DSHBANCA_ALLOW_OPENCODE_E2E_HOST_AUTH=1`; sem qualquer uma dessas condições, o teste é omitido ou o runner retorna `BLOCKED` antes de procurar credenciais ou iniciar subprocessos.
+
+`buildProjectRunEnv()` também não lê `auth.json` nem propaga variáveis de autenticação por padrão. A cópia de credenciais ocorre somente quando o chamador passa explicitamente `seedAuth: true`. O gate `e2e:dsh:profile` não usa OpenCode, credenciais ou modelos.

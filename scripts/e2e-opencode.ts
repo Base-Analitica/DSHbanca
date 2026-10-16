@@ -2712,9 +2712,8 @@ export function resolveOpencodeProjectRoot(opts: {
 }
 
 /**
- * Env keys preserved when isolating host config/plugins.
- * Intentionally excludes NODE_OPTIONS, BUN_INSTALL, XDG_RUNTIME_DIR and other
- * host runtime pointers that are not credentials and can re-couple isolation to the host.
+ * Allowlist available to the isolated runner. Credential entries are copied only
+ * when seedAuth is explicitly true. Host runtime pointers remain excluded.
  */
 export const PRESERVED_ENV_KEYS = [
   "OPENCODE_API_KEY",
@@ -2733,8 +2732,31 @@ export const PRESERVED_ENV_KEYS = [
   "TEMP",
 ] as const;
 
-/** @deprecated use PRESERVED_ENV_KEYS — kept as alias for clarity in reviews */
-const AUTH_ENV_ALLOWLIST = PRESERVED_ENV_KEYS;
+const HOST_AUTH_ENV_KEYS = new Set([
+  "OPENCODE_API_KEY",
+  "OPENCODE_AUTH_CONTENT",
+  "OPENCODE_SERVER_PASSWORD",
+  "OPENCODE_SERVER_USERNAME",
+]);
+
+export const OPENCODE_MODEL_E2E_OPT_IN = "DSHBANCA_ENABLE_OPENCODE_MODEL_E2E";
+export const OPENCODE_HOST_AUTH_OPT_IN = "DSHBANCA_ALLOW_OPENCODE_E2E_HOST_AUTH";
+
+/** A real-model OpenCode test requires a specific opt-in, explicit model, and separate auth consent. */
+export function opencodeModelE2eOptInError(
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  if (env[OPENCODE_MODEL_E2E_OPT_IN] !== "1") {
+    return `${OPENCODE_MODEL_E2E_OPT_IN}=1 is required`;
+  }
+  if (!env.OPENCODE_E2E_MODEL?.trim()) {
+    return "OPENCODE_E2E_MODEL must explicitly name the model; no default model is selected";
+  }
+  if (env[OPENCODE_HOST_AUTH_OPT_IN] !== "1") {
+    return `${OPENCODE_HOST_AUTH_OPT_IN}=1 is required before host credentials may be used`;
+  }
+  return undefined;
+}
 
 export type ProjectRunEnvOptions = {
   /** Absolute isolated HOME (no host plugins/skills/agents). */
@@ -2745,7 +2767,7 @@ export type ProjectRunEnvOptions = {
   base?: NodeJS.ProcessEnv;
   /** Host home used only to seed auth credentials into the isolated data dir. */
   hostHome?: string;
-  /** When true (default), copy host auth.json into isolated XDG data if present. */
+  /** When true, explicitly allow copying host auth.json and passing allowlisted auth vars. Defaults to false. */
   seedAuth?: boolean;
 };
 
@@ -2753,7 +2775,7 @@ export type ProjectRunEnvOptions = {
  * Env for project-local behavioral OpenCode runs.
  * Forces PWD to the project root and redirects HOME/XDG/OPENCODE_CONFIG_DIR to
  * isolated temps so host global plugins cannot satisfy tool events.
- * Auth is preserved via allowlisted env vars and optional seeded auth.json only.
+ * Host auth is never read or propagated unless seedAuth is explicitly true.
  */
 export function buildProjectRunEnv(
   projectRoot: string,
@@ -2783,12 +2805,14 @@ export function buildProjectRunEnv(
   mkdirSync(isoCache, { recursive: true });
   mkdirSync(join(isoHome, ".config"), { recursive: true });
 
-  if (opts.seedAuth !== false) {
+  const allowHostAuth = opts.seedAuth === true;
+  if (allowHostAuth) {
     seedIsolatedAuth(isoHome, opts.hostHome || process.env.HOME || homedir());
   }
 
   const env: NodeJS.ProcessEnv = {};
-  for (const key of AUTH_ENV_ALLOWLIST) {
+  for (const key of PRESERVED_ENV_KEYS) {
+    if (!allowHostAuth && HOST_AUTH_ENV_KEYS.has(key)) continue;
     if (base[key] !== undefined) env[key] = base[key];
   }
 
@@ -3611,6 +3635,13 @@ function buildIsolatedDiscoveryEnv(
 }
 
 async function run() {
+  const optInError = opencodeModelE2eOptInError();
+  if (optInError) {
+    console.error(`BLOCKED: OpenCode model E2E is disabled by default. ${optInError}`);
+    process.exitCode = 2;
+    return;
+  }
+
   const repositoryRoot = process.cwd();
   const report: string[] = [];
 
