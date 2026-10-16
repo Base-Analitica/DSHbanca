@@ -1,36 +1,67 @@
 # Gate E2E de perfil nativo DSH
 
-O comando `bun run e2e:dsh:profile` exercita o mecanismo real do DSH instalado, sem iniciar agente, enviar prompt ao SDK ou chamar modelo. O gate cria um perfil `sdk` temporário, instala o checkout e um observador temporário usando `dsh plugin --profile ... add --offline`, inspeciona a composição efetiva e inicia o perfil pela CLI DSH. O observador consulta `ctx.tools.schemas()` e `ctx.skills.list()`, cria uma sessão vazia real do `SessionStore` apenas para fornecer o workspace ao `ToolRuntime`, e executa `banca_init` e `banca_status` através de `ctx.tools.execute()`.
+O comando `bun run e2e:dsh:profile` executa o perfil SDK real do DSH instalado. Ele não inicia um loop de modelo, não envia `session.prompt` ou `Agent.send`, não usa credenciais e não faz inferência. O teste instala somente o checkout local, o observador temporário e as dependências disponíveis no cache offline.
 
-## Pré-requisitos
+## Contrato DSH verificado
 
-- DSH instalado e executável no `PATH` (ou `DSH_BIN` apontando para um executável DSH real).
-- Node e Bun executáveis no `PATH`.
-- O pacote `pnpm.cjs` já disponível em um cache Corepack local offline (ou `PNPM_BIN` apontando diretamente para esse arquivo). O gate não baixa pnpm nem libera acesso à rede.
-- Dependências do checkout instaladas pelo fluxo normal do projeto.
+A evidência foi conferida contra DSH `0.2.0-rc.2`, Cordis `4.0.4` e cordis-plugin-loader `1.0.5`. O runner registra também as versões instaladas dos pacotes `@deepseek-ai/dsh-agent`, `dsh-agent-loop`, `dsh-tools`, `dsh-agent-preset`, `dsh-agent-preset-registry` e `dsh-api-session-controller`.
 
-O gate usa o SDK profile fornecido pelo DSH `dsh --profile <nome> --from-default-profile sdk --dump-config`, instala somente diretórios locais via `dsh plugin --profile <nome> add --offline --store-dir <sandbox> <checkout> <observador>`, e inicia o perfil com `dsh --profile <nome> --patch <overlay>`. A instalação/boot são limitados por timeout; os processos são iniciados em grupo e encerrados se excederem o limite.
+- `ctx.agents.create({ sessionId, meta: { cwd } })` é a API nativa usada neste perfil. `AgentRegistry` delega a criação ao `AgentLoop`, que publica um `Agent` e sua `Session`. O teste confere `ctx.agents.get(agent.id) === agent`, `ctx.sessions.get(agent.id) === agent.session`, identidade de sessão igual à identidade do agente e `dispose()` do `AgentHandle` no teardown.
+- O pacote `@deepseek-ai/dsh-api-session-controller` expõe o serviço `ctx.sessionController`. `SessionController.create({ cwd, agentPreset })` delega a criação/resolução ao `ApiSessionAgentController.ensureSession`. `SessionController.prompt()` é uma operação distinta e não é chamada pelo gate. O `hostApiSurvey` do perfil SDK real informa que `sessionController.create` e `sessionController.prompt` não estão montados neste perfil (`false`). Por isso o teste usa `ctx.agents.create`, que retorna o `AgentHandle` real e fornece o `dispose()` explícito, sem construir um controlador paralelo.
+- A descoberta de presets é feita pelo serviço `ctx.agentPresets` de `@deepseek-ai/dsh-agent-preset-registry`. O perfil temporário carrega a declaração pelo plugin Cordis `@deepseek-ai/dsh-agent-preset`, lista e resolve `banca-auditor`, cria um `Agent` real, chama `ctx.agentPresets.select(agent, "banca-auditor")` e verifica tanto `composedPreset(agent.ctx)` quanto a projeção persistida `agentPreset` da sessão.
+- O despacho usa `ctx.tools.execute({ callId, name, arguments, agent, signal })` com o objeto `Agent` criado pelo DSH. No DSH inspecionado, `ToolRuntime` executa o waterfall `tools/pre-execute`, consulta os guards monotônicos e só então despacha o corpo. `ctx.tools.guard()` retorna o disposer Cordis da contribuição, que acompanha o lifecycle do contexto/plugin.
 
-## Isolamento e relatório
+### Fixture de preset e limite de descoberta
 
-Cada execução cria um diretório aleatório com permissões restritas e configura `DSH_HOME`, `HOME`, `TMPDIR`, diretórios XDG, cache/config do npm, `PNPM_HOME`, store pnpm e Corepack para subdiretórios desse sandbox. `DSH_TELEMETRY_MODE=DISABLED` evita exportação de telemetria. O DSH global é apenas executado para uso da CLI e leitura de módulos; perfil, pacote observer, projeto LaTeX/BibTeX, estado e store de pacotes são temporários. O pacote pnpm é chamado diretamente de sua cópia cacheada por um wrapper privado do sandbox, evitando escrita no estado global do Corepack. `pnpm --offline` e `COREPACK_ENABLE_NETWORK=0` impedem download. O gate compara o estado Git do checkout antes e depois do boot para detectar escrita fora do sandbox no repositório.
+O overlay do perfil E2E inclui um preset temporário `banca-auditor` com composição vazia. Essa declaração usa o registro e o carregamento nativos do DSH para testar identidade, seleção e enforcement sem modelo. Ela não adiciona permissões nem substitui o agente de produção.
 
-O relatório sanitizado e persistente fica em `docs/evidence/dsh-profile-e2e.latest.json`. Ele registra SHA, versões, códigos de saída, bundles anteriores/posteriores, composição Cordis, os nomes das ferramentas, skill, inventário SHA-256 relativo do projeto sintético, comportamento read-only e limpeza. Caminhos absolutos e saída bruta do host não são armazenados; em falhas, somente um trecho curto com caminhos conhecidos redigidos é preservado para diagnóstico.
+Este gate **não comprova** que o DSH importe automaticamente `assets/dsh/agents/banca-auditor.md` ou `.dsh/agents/banca-auditor.md` para o registro nativo `AgentPreset`. A fixture de perfil não carrega o conteúdo dessas instruções. A identidade efetiva provada aqui é a identidade DSH validada pela registry e composta no `Agent.ctx`, não a execução do protocolo de auditoria por um modelo.
+
+## Cenário, integridade e teardown
+
+O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo. Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
+
+Depois da seleção nativa de `banca-auditor`, o teste:
+
+1. despacha `banca_corrigir` e `banca_restore` pelo `ToolRuntime` real e exige erro com a razão explícita de política read-only, sem abort ou erro de argumentos;
+2. registra tools-sombra no escopo real do Agent, com corpos que escreveriam no manuscrito e em marcadores. As chamadas de `banca_corrigir` e `banca_restore` são recusadas pelo guard nativo antes dos corpos, com zero invocações e sem marcadores;
+3. compara o inventário SHA-256 completo, por caminho relativo, antes e depois das negações, incluindo `.banca/state.json`, o manuscrito e o snapshot;
+4. confirma que `banca_status` continua permitido e que seu inventário antes/depois permanece igual;
+5. cria outro `Agent` real pelo `AgentRegistry`, com `origin: "subagent"`, sessão pai e sem preset corretor. Uma tool-sombra de correção é recusada antes do corpo e os hashes continuam iguais;
+6. verifica zero eventos `turn/start` e `request/header`, descarta os dois `AgentHandle`s com `dispose()` e, ao sair do processo DSH, remove o sandbox completo.
+
+As tools-sombra são uma sonda adicional do guard nativo: seus corpos deliberadamente não contêm verificação de identidade. Elas não substituem os despachos das tools acadêmicas reais, que também são feitos com argumentos válidos e têm sua integridade verificada.
+
+O relatório sanitizado registra SHA do repositório, versões, preset composto, tentativas e classificações, inventários relativos, atividade externa e teardown. Por padrão, o arquivo é `docs/evidence/dsh-profile-e2e.latest.json`. Para preservar um artefato preexistente, o chamador pode apontar `DSHBANCA_DSH_PROFILE_REPORT_PATH` para um caminho de scratch. O caminho externo não é gravado nem impresso no relatório.
+
+## Pré-requisitos e isolamento
+
+- DSH real no `PATH` ou `DSH_BIN` apontando para um executável existente.
+- Node e Bun no `PATH`.
+- Cópia do pnpm disponível no cache Corepack offline ou `PNPM_BIN` apontando para um `pnpm.cjs` já instalado.
+- Dependências do checkout instaladas pelo fluxo normal.
+
+Cada execução cria um diretório aleatório com permissões restritas e coloca `DSH_HOME`, `HOME`, `TMPDIR`, diretórios XDG, caches npm/Corepack, store pnpm e perfil DSH nesse sandbox. `DSH_TELEMETRY_MODE=DISABLED`, `pnpm --offline` e `COREPACK_ENABLE_NETWORK=0` evitam telemetria e downloads. O perfil usa stdin EOF, não envia solicitações JSON-RPC do SDK e nunca inicia modelo. O gate também compara o estado Git do checkout antes e depois da execução.
 
 ## Status e interpretação
 
-- `PASS` / exit code `0`: instalação, composição, boot real, descoberta exata das 16 ferramentas, skill, execução e hashes passaram, e o sandbox foi removido.
-- `FAIL` / exit code `1`: o DSH estava disponível, mas uma etapa de execução ou asserção violou o contrato.
-- `BLOCKED` / exit code `2`: DSH, runtime ou pnpm offline necessário não está disponível. Ausência do DSH jamais é um teste aprovado.
+- `PASS` / exit `0`: instalação offline, composição Cordis, descoberta das 16 tools e skills, identidade real `banca-auditor` pelo AgentRegistry/preset registry, negações antes dos corpos, integridade, status permitido, ausência de atividade de modelo e teardown passaram.
+- `FAIL` / exit `1`: DSH estava disponível, mas uma etapa ou asserção do contrato falhou.
+- `BLOCKED` / exit `2`: DSH, runtime ou dependência offline necessária não estava disponível. Ausência do host nunca conta como aprovação.
 
-O CI geral do repositório não provisiona nem instala DSH. Ele emite um aviso explícito `BLOCKED` e não conta essa etapa como validação quando a variável de repositório `DSH_PROFILE_E2E_ENABLED` não é `true`. Defina a variável como `true` somente para um runner provisionado com DSH e cache pnpm offline. Nesse runner o gate é obrigatório: se DSH estiver ausente, o comando retorna `BLOCKED` com código diferente de zero. Os testes de contrato em `tests/e2e_dsh_profile_contract.test.ts` exercitam as rejeições locais para composição incompleta, entrypoint, tool/skill ausentes, execução omitida, mutação inesperada e hashes divergentes, mas não substituem o gate de perfil DSH real.
+O CI comum não provisiona DSH. Sem `DSH_PROFILE_E2E_ENABLED=true`, ele registra a etapa como `BLOCKED`, não como validada. Com essa variável habilitada em runner provisionado, o E2E é obrigatório.
 
-## Limites
+Os testes em `tests/e2e_dsh_profile_contract.test.ts` validam rejeições do contrato com fixtures locais. Eles não simulam nem substituem a execução do host real, e nunca contam como evidência E2E.
 
-Este teste comprova perfil Cordis e ToolRuntime real, com contexto de workspace sintético. Ele não comprova sessão de agente, tool loop, inferência de modelo, guard através de identidade de agente real, validação humana, nem persistência/retomada de uma conversa. Nenhuma dessas etapas é invocada pelo gate.
+## Limitações
+
+- Não cobre loop real de agente, `SessionController.prompt`, chamadas a modelo, identidade originada pelo gerenciador de subagents, avaliação acadêmica ou julgamento humano.
+- O `Agent` com `origin: "subagent"` é criado pelo `AgentRegistry` nativo com metadados de origem e sessão pai, sem chamar o serviço que executa delegação. O teste comprova enforcement fail-closed para essa identidade DSH, não o lifecycle completo de spawn do subagent manager.
+- A fixture vazia comprova a identidade e a política do preset no host. Não comprova descoberta, importação ou execução das instruções Markdown de `banca-auditor`.
+- Os hashes são de arquivos sintéticos e relativos ao workspace temporário. Nenhum manuscrito real é usado.
 
 ## Segurança da suíte de testes
 
-`bun test` não inicia o E2E legado do OpenCode, mesmo que encontre um executável OpenCode. A execução dependente de modelo fica atrás de opt-in explícito e exige seleção de modelo e consentimento separado para credenciais do host. Para executá-la deliberadamente, defina `DSHBANCA_ENABLE_OPENCODE_MODEL_E2E=1`, `OPENCODE_E2E_MODEL=<modelo escolhido>` e `DSHBANCA_ALLOW_OPENCODE_E2E_HOST_AUTH=1`; sem qualquer uma dessas condições, o teste é omitido ou o runner retorna `BLOCKED` antes de procurar credenciais ou iniciar subprocessos.
+`bun test` não inicia o E2E legado do OpenCode, mesmo que encontre um executável OpenCode. A execução dependente de modelo fica atrás de opt-in explícito e exige seleção de modelo e consentimento separado para credenciais do host. Para executá-la deliberadamente, defina `DSHBANCA_ENABLE_OPENCODE_MODEL_E2E=1`, `OPENCODE_E2E_MODEL=<modelo escolhido>` e `DSHBANCA_ALLOW_OPENCODE_E2E_HOST_AUTH=1`. Sem qualquer uma dessas condições, o teste é omitido ou o runner retorna `BLOCKED` antes de procurar credenciais ou iniciar subprocessos.
 
 `buildProjectRunEnv()` também não lê `auth.json` nem propaga variáveis de autenticação por padrão. A cópia de credenciais ocorre somente quando o chamador passa explicitamente `seedAuth: true`. O gate `e2e:dsh:profile` não usa OpenCode, credenciais ou modelos.

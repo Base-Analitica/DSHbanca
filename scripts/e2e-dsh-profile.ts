@@ -14,12 +14,21 @@ import {
 } from "node:fs"
 import { createHash } from "node:crypto"
 import { homedir, tmpdir } from "node:os"
-import { dirname, join, relative, resolve, sep } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expectedTools, missingHostExitCode, passExitCode, failureExitCode, validateEvidence, validateProfileEvidence } from "./lib/dsh-profile-e2e-contract.js"
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
-const reportPath = resolve(repositoryRoot, "docs/evidence/dsh-profile-e2e.latest.json")
+const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH?.trim()
+const reportPath = configuredReportPath
+  ? resolve(repositoryRoot, configuredReportPath)
+  : resolve(repositoryRoot, "docs/evidence/dsh-profile-e2e.latest.json")
+const reportPathLabel = (() => {
+  const repositoryRelative = relative(repositoryRoot, reportPath)
+  return repositoryRelative === ".." || repositoryRelative.startsWith(`..${sep}`) || isAbsolute(repositoryRelative)
+    ? "<external report path>"
+    : repositoryRelative
+})()
 const timeoutMs = 120_000
 const bootTimeoutMs = 30_000
 const maxOutputBytes = 1_000_000
@@ -52,7 +61,20 @@ const report: GateReport = {
   status: "BLOCKED",
   startedAt: new Date().toISOString(),
   repository: { revision: "unknown", dirty: true },
-  versions: { dsh: null, cordis: null, cordisPluginLoader: null, node: process.version, bun: null, pnpm: null },
+  versions: {
+    dsh: null,
+    cordis: null,
+    cordisPluginLoader: null,
+    dshAgent: null,
+    dshAgentLoop: null,
+    dshTools: null,
+    dshAgentPreset: null,
+    dshAgentPresetRegistry: null,
+    dshApiSessionController: null,
+    node: process.version,
+    bun: null,
+    pnpm: null,
+  },
   sandbox: { isolated: false, removed: null },
   stages: {},
   failures: [],
@@ -266,7 +288,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const name = ${JSON.stringify(observerName)};
-export const inject = ["tools", "skills", "sessions"];
+export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections"];
 const expected = ${JSON.stringify(expectedTools)};
 const sha = async (path) => createHash("sha256").update(await readFile(path)).digest("hex");
 const inventory = async (root, prefix = "") => {
@@ -282,6 +304,26 @@ const inventory = async (root, prefix = "") => {
   return result;
 };
 const fail = (message) => { throw new Error("DSHbanca profile E2E observer: " + message); };
+const resultMessage = (result) => {
+  if (typeof result?.error?.message === "string") return result.error.message;
+  const content = Array.isArray(result?.content)
+    ? result.content.filter((block) => block.type === "text").map((block) => block.text).join("\\n")
+    : "";
+  if (content) return content.replace(/^Error:\\s*/, "");
+  return typeof result?.value === "string" ? result.value : "";
+};
+const runTool = async (context, callId, name, args, agent) => {
+  const controller = new AbortController();
+  const result = await context.tools.execute({ callId, name, arguments: args, agent, signal: controller.signal });
+  return { result, message: resultMessage(result), aborted: controller.signal.aborted };
+};
+const modelEventCount = (session) => session.snapshotEvents().filter((event) =>
+  event.type === "turn/start" || event.type === "request/header"
+).length;
+const decoyOutput = {
+  schema: { type: "string" },
+  render: (_args, value) => [{ type: "text", text: value }],
+};
 
 export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
@@ -298,37 +340,314 @@ export async function apply(ctx) {
   if (JSON.stringify(tools) !== JSON.stringify([...expected].sort())) fail("the DSH tools service did not discover the exact expected banca tool set; observed count=" + tools.length + " names=" + JSON.stringify(tools));
   if (!skillFound) fail("the DSH skills service did not discover banca-avaliacao");
 
-  const session = ctx.sessions.create(undefined, { meta: { cwd: workspace } });
-  if (!session?.header || session.header.cwd !== workspace) fail("DSH did not create a live synthetic workspace session");
-  const agent = { session };
-  const execute = (callId, name, args = {}) => ctx.tools.execute({ callId, name, arguments: args, agent, signal: new AbortController().signal });
+  const sessionController = ctx.get("sessionController");
+  const presetRows = await ctx.agentPresets.list();
+  const auditorPresetRow = presetRows.find((preset) => preset.id === "banca-auditor");
+  if (!auditorPresetRow || auditorPresetRow.broken) fail("the host AgentPresetRegistry did not load a usable banca-auditor declaration");
+  const resolvedPreset = await ctx.agentPresets.resolve("banca-auditor");
+  if (resolvedPreset.id !== "banca-auditor" || resolvedPreset.broken) fail("the DSH host did not validate the banca-auditor preset");
 
-  const init = await execute("dshbanca-e2e-init", "banca_init");
-  if (init.isError) fail("native banca_init execution failed");
-  const files = ["main.tex", "referencias.bib", ".banca/project.json", ".banca/state.json"];
-  for (const file of files) {
-    try { await readFile(join(workspace, file)); }
-    catch { fail("banca_init did not create the expected synthetic project state"); }
+  const auditorHandle = await ctx.agents.create({
+    sessionId: "session-dshbanca-e2e-auditor-" + process.pid + "-" + Date.now(),
+    meta: { cwd: workspace },
+  });
+  let unverifiedHandle;
+  let result;
+  try {
+    const agent = auditorHandle.agent;
+    const session = agent.session;
+    if (
+      ctx.agents.get(agent.id) !== agent ||
+      ctx.sessions.get(agent.id) !== session ||
+      agent.id !== session.id ||
+      session.header.cwd !== workspace
+    ) fail("ctx.agents.create did not publish one live DSH Agent and matching SessionStore identity");
+    if (agent.status !== "idle") fail("fresh DSH Agent was not idle before direct native ToolRuntime validation");
+
+    const init = await runTool(ctx, "dshbanca-e2e-init", "banca_init", {}, agent);
+    if (init.result.isError) fail("native banca_init execution failed for the live DSH Agent");
+    const files = ["main.tex", "referencias.bib", ".banca/project.json", ".banca/state.json"];
+    for (const file of files) {
+      try { await readFile(join(workspace, file)); }
+      catch { fail("banca_init did not create the expected synthetic project state"); }
+    }
+
+    const baselineText = "\\\\documentclass{article}\\n\\\\begin{document}\\nBASELINE_SENTINEL synthetic manuscript.\\n\\\\end{document}\\n";
+    await writeFile(join(workspace, "main.tex"), baselineText, { mode: 0o600 });
+    const restoreLabel = "dshbanca-issue-2-restore-sentinel";
+    const snapshot = await runTool(ctx, "dshbanca-e2e-snapshot", "banca_snapshot", { label: restoreLabel }, agent);
+    if (snapshot.result.isError || !snapshot.message.includes("Recovery point verified: restorable")) {
+      fail("the non-auditor setup could not create a verified restorable snapshot");
+    }
+    const snapshotState = JSON.parse(await readFile(join(workspace, ".banca", "state.json"), "utf8"));
+    const snapshotExists = Array.isArray(snapshotState.snapshots) && snapshotState.snapshots.some((row) =>
+      row.id === restoreLabel || row.label === restoreLabel
+    );
+    if (!snapshotExists) fail("the DSHbanca state did not persist the setup snapshot used by the restore denial");
+
+    const beforeCorrection = await readFile(join(workspace, "main.tex"), "utf8");
+    const setupCorrectionArgs = {
+      corrections: [{ file: "main.tex", oldText: "BASELINE_SENTINEL", newText: "CURRENT_SENTINEL" }],
+      skipSnapshot: true,
+    };
+    const setupCorrection = await runTool(ctx, "dshbanca-e2e-setup-correction", "banca_corrigir", setupCorrectionArgs, agent);
+    const currentText = await readFile(join(workspace, "main.tex"), "utf8");
+    const correctionWouldMutate = beforeCorrection.includes("BASELINE_SENTINEL") &&
+      setupCorrection.result.isError === false && currentText.includes("CURRENT_SENTINEL");
+    if (!correctionWouldMutate) fail("the valid synthetic correction precondition did not perform its expected setup mutation");
+    const restoreWouldMutate = snapshotExists && currentText !== baselineText;
+    if (!restoreWouldMutate) fail("the valid snapshot restore precondition would not change the synthetic manuscript");
+
+    const presetSelected = await ctx.agentPresets.select(agent, "banca-auditor");
+    const effectivePreset = ctx.agentPresets.composedPreset(agent.ctx);
+    const sessionPresetProjection = ctx.sessionProjections.stateOf(session, "agentPreset");
+    if (
+      presetSelected !== "banca-auditor" ||
+      effectivePreset !== "banca-auditor" ||
+      sessionPresetProjection !== "banca-auditor"
+    ) fail("native DSH preset selection did not produce a live banca-auditor Agent composition");
+
+    const turnEventsBeforeGuard = modelEventCount(session);
+    if (turnEventsBeforeGuard !== 0) fail("a model-facing turn/request event appeared before the guard checks");
+
+    const correctionArgs = {
+      corrections: [{ file: "main.tex", oldText: "CURRENT_SENTINEL", newText: "AUDITOR_MUTATION_MUST_NOT_RUN" }],
+      skipSnapshot: true,
+    };
+    const restoreArgs = { snapshotId: restoreLabel, confirm: true };
+    const deniedBefore = await inventory(workspace);
+    const correctionAttempt = await runTool(ctx, "dshbanca-e2e-auditor-correct", "banca_corrigir", correctionArgs, agent);
+    const restoreAttempt = await runTool(ctx, "dshbanca-e2e-auditor-restore", "banca_restore", restoreArgs, agent);
+
+    let nativeBodyInvocations = 0;
+    const nativeBodyMarker = ".dshbanca-native-guard-body-ran";
+    const disposeNativeProbe = agent.ctx.tools.register({
+      name: "banca_corrigir",
+      description: "Issue #2 guard probe: this scoped body has no DSHbanca identity check and would mutate the synthetic manuscript.",
+      parameters: { type: "object" },
+      output: decoyOutput,
+      async execute() {
+        nativeBodyInvocations++;
+        await writeFile(join(workspace, nativeBodyMarker), "native guard failed to stop this body\\n", { mode: 0o600 });
+        await writeFile(join(workspace, "main.tex"), "NATIVE_GUARD_PROBE_MUTATED_THE_MANUSCRIPT\\n", { mode: 0o600 });
+        return "native guard probe body ran";
+      },
+    });
+    const nativeProbe = await runTool(ctx, "dshbanca-e2e-native-guard-probe", "banca_corrigir", correctionArgs, agent);
+    disposeNativeProbe();
+
+    let nativeRestoreBodyInvocations = 0;
+    const nativeRestoreMarker = ".dshbanca-native-restore-guard-body-ran";
+    const disposeNativeRestoreProbe = agent.ctx.tools.register({
+      name: "banca_restore",
+      description: "Issue #2 restore guard probe: this scoped body has no DSHbanca identity check and would restore the synthetic manuscript.",
+      parameters: { type: "object" },
+      output: decoyOutput,
+      async execute() {
+        nativeRestoreBodyInvocations++;
+        await writeFile(join(workspace, nativeRestoreMarker), "native restore guard failed to stop this body\\n", { mode: 0o600 });
+        await writeFile(join(workspace, "main.tex"), baselineText, { mode: 0o600 });
+        return "native restore guard probe body ran";
+      },
+    });
+    const nativeRestoreProbe = await runTool(ctx, "dshbanca-e2e-native-restore-guard-probe", "banca_restore", restoreArgs, agent);
+    disposeNativeRestoreProbe();
+
+    const afterNativeProbe = await inventory(workspace);
+    const deniedAfter = afterNativeProbe;
+    if (JSON.stringify(deniedBefore) !== JSON.stringify(deniedAfter)) fail("an auditor denial changed protected synthetic files or persistent state");
+    if (
+      nativeBodyInvocations !== 0 ||
+      nativeRestoreBodyInvocations !== 0 ||
+      Object.hasOwn(afterNativeProbe, nativeBodyMarker) ||
+      Object.hasOwn(afterNativeProbe, nativeRestoreMarker)
+    ) {
+      fail("the native DSH guard did not stop the scoped mutation body before dispatch");
+    }
+
+    const auditorMutationAttempts = [
+      {
+        toolName: "banca_corrigir",
+        dispatchCount: 1,
+        argumentsValid: correctionWouldMutate,
+        operationWouldMutate: correctionWouldMutate,
+        isError: correctionAttempt.result.isError === true,
+        message: correctionAttempt.message,
+        aborted: correctionAttempt.aborted,
+      },
+      {
+        toolName: "banca_restore",
+        dispatchCount: 1,
+        argumentsValid: snapshotExists && restoreArgs.confirm === true,
+        operationWouldMutate: restoreWouldMutate,
+        isError: restoreAttempt.result.isError === true,
+        message: restoreAttempt.message,
+        aborted: restoreAttempt.aborted,
+      },
+    ];
+    if (auditorMutationAttempts.some((attempt) => !attempt.isError || attempt.aborted || !attempt.message.includes("read-only enforcement"))) {
+      fail("the auditor mutation attempt was not classified as a non-aborted read-only guard denial");
+    }
+
+    const statusBefore = await inventory(workspace);
+    const status = await runTool(ctx, "dshbanca-e2e-auditor-status", "banca_status", {}, agent);
+    const statusAfter = await inventory(workspace);
+    const statusSucceeded = status.result.isError === false && status.message.includes("main.tex");
+    if (!statusSucceeded || JSON.stringify(statusBefore) !== JSON.stringify(statusAfter)) {
+      fail("banca_status did not remain permitted and read-only for the real auditor Agent");
+    }
+
+    unverifiedHandle = await ctx.agents.create({
+      sessionId: "session-dshbanca-e2e-unverified-subagent-" + process.pid + "-" + Date.now(),
+      meta: {
+        cwd: workspace,
+        parentSession: agent.id,
+        origin: "subagent",
+        delegationDepth: 1,
+      },
+    });
+    const unverifiedAgent = unverifiedHandle.agent;
+    const unverifiedPreset = ctx.agentPresets.composedPreset(unverifiedAgent.ctx);
+    if (
+      ctx.agents.get(unverifiedAgent.id) !== unverifiedAgent ||
+      ctx.sessions.get(unverifiedAgent.id) !== unverifiedAgent.session ||
+      unverifiedAgent.session.header.origin !== "subagent"
+    ) fail("unverified delegation fixture was not created as a live DSH Agent with subagent Session metadata");
+
+    const unverifiedBefore = await inventory(workspace);
+    let unverifiedBodyInvocations = 0;
+    const unverifiedMarker = ".dshbanca-unverified-subagent-body-ran";
+    const disposeUnverifiedProbe = unverifiedAgent.ctx.tools.register({
+      name: "banca_corrigir",
+      description: "Issue #2 fail-closed probe for a real subagent-origin Agent without a verified corrector preset.",
+      parameters: { type: "object" },
+      output: decoyOutput,
+      async execute() {
+        unverifiedBodyInvocations++;
+        await writeFile(join(workspace, unverifiedMarker), "unverified subagent body ran\\n", { mode: 0o600 });
+        await writeFile(join(workspace, "main.tex"), "UNVERIFIED_SUBAGENT_MUTATED_THE_MANUSCRIPT\\n", { mode: 0o600 });
+        return "unverified subagent body ran";
+      },
+    });
+    const unverifiedAttempt = await runTool(ctx, "dshbanca-e2e-unverified-correction", "banca_corrigir", correctionArgs, unverifiedAgent);
+    disposeUnverifiedProbe();
+    const unverifiedAfter = await inventory(workspace);
+    if (
+      unverifiedAttempt.result.isError !== true ||
+      unverifiedAttempt.aborted ||
+      !unverifiedAttempt.message.includes("without a verified banca-corretor preset") ||
+      unverifiedBodyInvocations !== 0 ||
+      Object.hasOwn(unverifiedAfter, unverifiedMarker) ||
+      JSON.stringify(unverifiedBefore) !== JSON.stringify(unverifiedAfter)
+    ) fail("a live subagent-origin Agent without verified corrector identity was not denied before mutation");
+
+    const auditorEventsAfterChecks = modelEventCount(session);
+    const childModelEvents = modelEventCount(unverifiedAgent.session);
+    if (auditorEventsAfterChecks !== 0 || childModelEvents !== 0) fail("the profile E2E unexpectedly entered a model-facing turn");
+
+    result = {
+      lifecycle: "observer Cordis apply reached; real DSH AgentRegistry.create + AgentLoop publication; preset registry resolution and selection observed; direct ToolRuntime calls only",
+      profileRuntime: true,
+      session: "live DSH SessionStore Session and AgentRegistry Agent; no session.prompt, Agent.send, turn/start, or request/header event",
+      hostApiSurvey: {
+        agentRegistryCreate: typeof ctx.agents?.create === "function",
+        toolRuntimeExecute: typeof ctx.tools?.execute === "function",
+        agentPresetRegistrySelect: typeof ctx.agentPresets?.select === "function",
+        agentPresetRegistryComposedPreset: typeof ctx.agentPresets?.composedPreset === "function",
+        sessionControllerCreate: typeof sessionController?.create === "function",
+        sessionControllerPrompt: typeof sessionController?.prompt === "function",
+      },
+      toolNames: tools,
+      exactToolSet: true,
+      skillFound,
+      executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status"],
+      statusSucceeded,
+      statusReadOnly: JSON.stringify(statusBefore) === JSON.stringify(statusAfter),
+      workspaceInventoryBeforeStatus: statusBefore,
+      workspaceInventoryAfterStatus: statusAfter,
+      agentIdentity: {
+        createdVia: "ctx.agents.create",
+        agentRegistryContainsAgent: true,
+        sessionStoreContainsSession: true,
+        agentAndSessionIdMatch: agent.id === session.id,
+        presetRegisteredByHost: Boolean(auditorPresetRow && !auditorPresetRow.broken),
+        presetResolvedByHost: resolvedPreset.id === "banca-auditor" && !resolvedPreset.broken,
+        effectivePreset,
+        sessionProjectionPreset: sessionPresetProjection,
+        syntheticContext: false,
+        modelTurnEvents: auditorEventsAfterChecks,
+      },
+      auditorMutationAttempts,
+      nativeGuardProbe: {
+        toolName: "banca_corrigir",
+        dispatchCount: 1,
+        isError: nativeProbe.result.isError === true,
+        message: nativeProbe.message,
+        bodyInvocations: nativeBodyInvocations,
+        bodyMarkerAbsent: !Object.hasOwn(afterNativeProbe, nativeBodyMarker),
+      },
+      nativeRestoreGuardProbe: {
+        toolName: "banca_restore",
+        dispatchCount: 1,
+        isError: nativeRestoreProbe.result.isError === true,
+        message: nativeRestoreProbe.message,
+        bodyInvocations: nativeRestoreBodyInvocations,
+        bodyMarkerAbsent: !Object.hasOwn(afterNativeProbe, nativeRestoreMarker),
+      },
+      deniedWorkspaceInventoryBefore: deniedBefore,
+      deniedWorkspaceInventoryAfter: deniedAfter,
+      permittedStatus: {
+        dispatched: true,
+        isError: status.result.isError === true,
+        outputIncludesMain: status.message.includes("main.tex"),
+        inventoryBefore: statusBefore,
+        inventoryAfter: statusAfter,
+      },
+      unverifiedDelegation: {
+        agentRegistryContainsAgent: true,
+        sessionStoreContainsSession: true,
+        agentAndSessionIdMatch: unverifiedAgent.id === unverifiedAgent.session.id,
+        sessionOrigin: unverifiedAgent.session.header.origin,
+        effectivePreset: unverifiedPreset ?? null,
+        attempt: {
+          toolName: "banca_corrigir",
+          dispatchCount: 1,
+          argumentsValid: correctionWouldMutate,
+          isError: unverifiedAttempt.result.isError === true,
+          message: unverifiedAttempt.message,
+          aborted: unverifiedAttempt.aborted,
+          bodyInvocations: unverifiedBodyInvocations,
+        },
+        inventoryBefore: unverifiedBefore,
+        inventoryAfter: unverifiedAfter,
+        modelTurnEvents: childModelEvents,
+      },
+      agentTeardown: { auditorAgentDisposed: false, unverifiedAgentDisposed: false },
+      externalActivity: { modelCalls: 0, sessionPromptCalls: 0, agentSendCalls: 0, credentialsUsed: false },
+    };
+  } finally {
+    const disposalErrors = [];
+    if (unverifiedHandle) {
+      try {
+        await unverifiedHandle.dispose();
+        if (result) result.agentTeardown.unverifiedAgentDisposed = true;
+      } catch (error) {
+        disposalErrors.push(error);
+      }
+    } else if (result) {
+      result.agentTeardown.unverifiedAgentDisposed = true;
+    }
+    try {
+      await auditorHandle.dispose();
+      if (result) result.agentTeardown.auditorAgentDisposed = true;
+    } catch (error) {
+      disposalErrors.push(error);
+    }
+    if (disposalErrors.length > 0) throw new AggregateError(disposalErrors, "DSH Agent handle teardown failed");
   }
-  const before = await inventory(workspace);
-  const status = await execute("dshbanca-e2e-status", "banca_status");
-  if (status.isError || typeof status.value !== "string" || !status.value.includes("main.tex")) fail("native banca_status did not return the synthetic project's status");
-  const after = await inventory(workspace);
-  if (JSON.stringify(before) !== JSON.stringify(after)) fail("banca_status changed files in the synthetic workspace");
-
-  const result = {
-    lifecycle: "observer Cordis apply reached after DSHbanca registrations; target plugin application confirmed by actual tool and skill services",
-    profileRuntime: true,
-    session: "live DSH SessionStore session with synthetic agent-shaped ToolRuntime context; no agent loop",
-    toolNames: tools,
-    exactToolSet: true,
-    skillFound,
-    executedTools: ["banca_init", "banca_status"],
-    statusSucceeded: true,
-    statusReadOnly: JSON.stringify(before) === JSON.stringify(after),
-    workspaceInventoryBeforeStatus: before,
-    workspaceInventoryAfterStatus: after,
-  };
+  if (!result.agentTeardown.auditorAgentDisposed || !result.agentTeardown.unverifiedAgentDisposed) {
+    fail("real DSH Agent handles were not explicitly disposed");
+  }
   await writeFile(reportPath, JSON.stringify(result, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
 }
 export default { name, inject, apply };
@@ -429,6 +748,23 @@ async function main(): Promise<void> {
   report.versions.cordis = JSON.parse(readFileSync(cordisManifestPath, "utf8")).version
   report.versions.cordisPluginLoader = JSON.parse(readFileSync(loaderManifestPath, "utf8")).version
 
+  const hostPackageVersions = [
+    ["dshAgent", "@deepseek-ai/dsh-agent"],
+    ["dshAgentLoop", "@deepseek-ai/dsh-agent-loop"],
+    ["dshTools", "@deepseek-ai/dsh-tools"],
+    ["dshAgentPreset", "@deepseek-ai/dsh-agent-preset"],
+    ["dshAgentPresetRegistry", "@deepseek-ai/dsh-agent-preset-registry"],
+    ["dshApiSessionController", "@deepseek-ai/dsh-api-session-controller"],
+  ] as const
+  for (const [key, packageName] of hostPackageVersions) {
+    const packageManifest = findPackageJson(dshRoot, packageName)
+    if (!packageManifest) {
+      fail(`DSH installation is missing required host API package ${packageName}`, "BLOCKED")
+      return
+    }
+    report.versions[key] = JSON.parse(readFileSync(packageManifest, "utf8")).version
+  }
+
   const nodeVersion = nodeExecutable ? commandVersion(nodeExecutable, ["--version"], env) : null
   const bunVersion = bunExecutable ? commandVersion(bunExecutable, ["--version"], env) : null
   report.versions.node = nodeVersion
@@ -461,7 +797,14 @@ async function main(): Promise<void> {
   report.stages.profileName = "unique isolated SDK profile"
   report.stages.defaultProfile = "sdk"
   report.stages.installMode = "DSH native plugin command, local checkout, pnpm --offline and isolated store"
-  report.stages.externalActivity = { telemetry: "DISABLED", modelCalls: 0, sdkJsonRpcRequestsSent: 0 }
+  report.stages.externalActivity = {
+    telemetry: "DISABLED",
+    modelCalls: 0,
+    sessionPromptCalls: 0,
+    agentSendCalls: 0,
+    credentialsUsed: false,
+    sdkJsonRpcRequestsSent: 0,
+  }
 
   const setup = await run(dshExecutable, ["--profile", profileName, "--from-default-profile", "sdk", "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
   report.stages.profileInitialization = { exitCode: setup.exitCode, timedOut: setup.timedOut }
@@ -489,7 +832,7 @@ async function main(): Promise<void> {
   writeFileSync(join(workspace, "capitulos", "introducao.tex"), "Introdução sintética para teste do DSHbanca.\n", { mode: 0o600 })
   createObserverPackage(observerRoot, workspace, observerResult)
   const overlayPath = join(scratch, "observer.patch.yml")
-  writeFileSync(overlayPath, `- insert:\n    - id: dshbanca-e2e-observer\n      name: ${observerName}\n`, { mode: 0o600 })
+  writeFileSync(overlayPath, `- insert:\n    - id: dshbanca-e2e-agent-preset-registry\n      name: '@deepseek-ai/dsh-agent-preset-registry'\n      config:\n        default: banca-auditor\n    - id: dshbanca-e2e-auditor-preset\n      name: '@deepseek-ai/dsh-agent-preset'\n      config:\n        id: banca-auditor\n        name: banca-auditor\n        description: 'Temporary no-model DSH identity fixture for the native guard E2E.'\n        plugins: []\n    - id: dshbanca-e2e-observer\n      name: ${observerName}\n`, { mode: 0o600 })
 
   const pnpmWrapper = join(dirs.bin, process.platform === "win32" ? "pnpm.cmd" : "pnpm")
   if (process.platform === "win32") {
@@ -529,10 +872,18 @@ async function main(): Promise<void> {
   }
 
   const dump = await run(dshExecutable, ["--profile", profileName, "--patch", overlayPath, "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
-  report.stages.composedProfile = { exitCode: dump.exitCode, containsDshbancaEntry: dump.stdout.includes("name: dshbanca/dsh"), containsObserverEntry: dump.stdout.includes(`name: ${observerName}`) }
+  const presetRegistryEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset-registry")
+  const auditorPresetEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset") && dump.stdout.includes("banca-auditor")
+  report.stages.composedProfile = {
+    exitCode: dump.exitCode,
+    containsDshbancaEntry: dump.stdout.includes("name: dshbanca/dsh"),
+    containsObserverEntry: dump.stdout.includes(`name: ${observerName}`),
+    containsPresetRegistryEntry: presetRegistryEntry,
+    containsAuditorPresetEntry: auditorPresetEntry,
+  }
   const composedEntry = dump.stdout.includes("name: dshbanca/dsh")
-  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`)) {
-    fail(`The real DSH composed profile is missing the required DSHbanca or observer entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)})`)
+  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry) {
+    fail(`The real DSH composed profile is missing a required DSHbanca, observer, preset-registry, or auditor-preset entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry})`)
     return
   }
   const checkoutBundle = join(profileDir, "node_modules", "dshbanca")
@@ -547,6 +898,8 @@ async function main(): Promise<void> {
     profileManifestHasObserver: dependencyNames.includes(observerName),
     composedEntry,
     entrypointResolved,
+    presetRegistryEntry,
+    auditorPresetEntry,
   })
   if (profileErrors.length > 0) {
     fail(`Profile composition validation failed: ${profileErrors.join("; ")}`)
@@ -579,6 +932,17 @@ async function main(): Promise<void> {
     workspaceInventoryBeforeStatus: observed.workspaceInventoryBeforeStatus,
     workspaceInventoryAfterStatus: observed.workspaceInventoryAfterStatus,
     session: observed.session,
+    agentIdentity: observed.agentIdentity,
+    auditorMutationAttempts: observed.auditorMutationAttempts,
+    nativeGuardProbe: observed.nativeGuardProbe,
+    nativeRestoreGuardProbe: observed.nativeRestoreGuardProbe,
+    deniedWorkspaceInventoryBefore: observed.deniedWorkspaceInventoryBefore,
+    deniedWorkspaceInventoryAfter: observed.deniedWorkspaceInventoryAfter,
+    permittedStatus: observed.permittedStatus,
+    unverifiedDelegation: observed.unverifiedDelegation,
+    agentTeardown: observed.agentTeardown,
+    externalActivity: observed.externalActivity,
+    hostApiSurvey: observed.hostApiSurvey,
   }
   if (errors.length > 0) {
     fail(`Real DSH runtime evidence violated the profile contract: ${errors.join("; ")}`)
@@ -586,9 +950,14 @@ async function main(): Promise<void> {
   }
   const projectAfterBoot = inventoryTree(workspace)
   report.stages.syntheticWorkspaceUnchangedByStatus = JSON.stringify(observed.workspaceInventoryBeforeStatus) === JSON.stringify(observed.workspaceInventoryAfterStatus)
+  report.stages.syntheticWorkspaceUnchangedByDenials = JSON.stringify(observed.deniedWorkspaceInventoryBefore) === JSON.stringify(observed.deniedWorkspaceInventoryAfter)
   report.stages.syntheticWorkspaceFilesCreatedByNativeInit = Object.keys(projectAfterBoot).length > Object.keys(projectBeforeBoot).length
-  if (!report.stages.syntheticWorkspaceUnchangedByStatus || !report.stages.syntheticWorkspaceFilesCreatedByNativeInit) {
-    fail("Expected read-only status invariance or native initialization effects were not observed")
+  report.stages.modelTurnEvents = {
+    auditor: observed.agentIdentity?.modelTurnEvents,
+    unverifiedSubagent: observed.unverifiedDelegation?.modelTurnEvents,
+  }
+  if (!report.stages.syntheticWorkspaceUnchangedByStatus || !report.stages.syntheticWorkspaceUnchangedByDenials || !report.stages.syntheticWorkspaceFilesCreatedByNativeInit) {
+    fail("Expected status/denial integrity or native initialization effects were not observed")
     return
   }
   if (statusBeforeBoot !== null && repoStatus() !== statusBeforeBoot) {
@@ -632,13 +1001,13 @@ try {
   } catch (error) {
     finalStatus = "FAIL"
     report.status = finalStatus
-    report.failures.push(`Could not preserve sanitized report at ${relative(repositoryRoot, reportPath)}: ${error instanceof Error ? error.message : "unknown error"}`)
-    process.stderr.write(`FAIL: report persistence failed (${relative(repositoryRoot, reportPath)})\n`)
+    report.failures.push(`Could not preserve sanitized report at ${reportPathLabel}: ${error instanceof Error ? error.message : "unknown error"}`)
+    process.stderr.write(`FAIL: report persistence failed (${reportPathLabel})\n`)
   }
 }
 
 process.stdout.write(`${finalStatus}: DSH native profile gate\n`)
-process.stdout.write(`Report: ${relative(repositoryRoot, reportPath)}\n`)
-if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
+process.stdout.write(`Report: ${reportPathLabel}\n`)
+if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)
 process.exitCode = finalStatus === "PASS" ? passExitCode() : finalStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode()
