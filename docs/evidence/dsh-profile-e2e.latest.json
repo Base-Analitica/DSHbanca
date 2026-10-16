@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "status": "PASS",
-  "startedAt": "2026-10-16T14:51:46.711Z",
+  "startedAt": "2026-10-16T14:59:11.677Z",
   "repository": {
-    "revision": "830faac96717598aa303231e40c72c3b9973302b",
+    "revision": "55c90e509e1e6781f3f869ec5572c7774758e1fe",
     "dirty": true
   },
   "versions": {
@@ -162,5 +162,5 @@
   "limitations": [
     "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos."
   ],
-  "finishedAt": "2026-10-16T14:51:50.209Z"
+  "finishedAt": "2026-10-16T14:59:15.592Z"
 }
