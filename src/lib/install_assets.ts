@@ -1,4 +1,4 @@
-import { existsSync, cpSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, cpSync, lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, dirname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
@@ -780,6 +780,31 @@ function copyDirectory(projectRoot: string, src: string, dest: string, force: bo
 export function installAssets(projectRoot: string, force: boolean, customAssetsDir?: string): string[] {
   const installed: string[] = []
 
+  const pluginAssetsDir = customAssetsDir || join(__dirname, "..", "..", "assets")
+  const versionedAuditor = join(pluginAssetsDir, "dsh", "agents", "banca-auditor.md")
+  const expectedAuditor = existsSync(versionedAuditor)
+    ? readFileSync(versionedAuditor)
+    : Buffer.from(AGENTS["banca-auditor.md"], "utf8")
+  const existingAuditorAsset = join(projectRoot, ".dsh", "agents", "banca-auditor.md")
+  const auditorLoaderCopy = join(projectRoot, "banca-auditor.md")
+
+  // Preflight both instruction destinations before any installer writes. This
+  // keeps a user-owned root file collision from leaving a partially installed
+  // .dsh/.banca tree behind, even when force is enabled.
+  for (const [path, label] of [[existingAuditorAsset, "installed"], [auditorLoaderCopy, "loader"]] as const) {
+    try {
+      const stat = lstatSync(path)
+      if (!stat.isFile()) throw new Error(`${label} banca-auditor instructions must be a regular file`)
+      const safePath = resolveRealInsideRoot(projectRoot, path)
+      if (!readFileSync(safePath).equals(expectedAuditor)) {
+        throw new Error(`${label} banca-auditor instructions differ from the canonical source`)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  }
+  prepareRealPathForWrite(projectRoot, auditorLoaderCopy)
+
   // Preflight: the asset roots themselves must resolve inside the workspace
   // before anything is written. A symlinked `.dsh`/`.banca` pointing outside
   // blocks the whole installation with no partial external changes.
@@ -793,8 +818,6 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
       installed.push(target)
     }
   }
-
-  const pluginAssetsDir = customAssetsDir || join(__dirname, "..", "..", "assets")
 
   if (existsSync(pluginAssetsDir)) {
     // Install versioned agents (DSH-native)
@@ -825,6 +848,39 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
         write(join(projectRoot, ".dsh", "skills", skillName, fileName), content)
       }
     }
+  }
+
+  // The native DSH instructions loader resolves basename candidates relative
+  // to the Agent workspace. Keep the established .dsh installation, and add
+  // one regular workspace-root copy derived from that installed canonical
+  // asset. Never replace a user file or follow a workspace alias here.
+  const auditorSource = join(projectRoot, ".dsh", "agents", "banca-auditor.md")
+  const sourceStat = lstatSync(auditorSource)
+  if (!sourceStat.isFile()) {
+    throw new Error("canonical banca-auditor instructions must be a regular file")
+  }
+  const sourceContent = readFileSync(auditorSource)
+  if (!sourceContent.equals(expectedAuditor)) {
+    throw new Error("installed banca-auditor instructions differ from the canonical source")
+  }
+  let destinationStat
+  try {
+    destinationStat = lstatSync(auditorLoaderCopy)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  if (destinationStat) {
+    if (!destinationStat.isFile()) {
+      throw new Error("banca-auditor loader destination must be a regular file")
+    }
+    const destination = resolveRealInsideRoot(projectRoot, auditorLoaderCopy)
+    if (!readFileSync(destination).equals(sourceContent)) {
+      throw new Error("banca-auditor loader destination collides with an existing workspace file")
+    }
+  } else {
+    const target = prepareRealPathForWrite(projectRoot, auditorLoaderCopy)
+    writeFileSync(target, sourceContent, { flag: "wx" })
+    installed.push(target)
   }
 
   // Ensure default templates exist (write them if not already copied from versioned folder)

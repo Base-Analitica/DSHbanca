@@ -2,3 +2,18 @@
 - insert:
     - id: dshbanca
       name: 'dshbanca/dsh'
+    - id: dshbanca-banca-auditor-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: banca-auditor
+        name: banca-auditor
+        description: Auditor acadêmico DSHbanca com instruções de workspace restritas a este preset.
+        plugins:
+          - name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+              instructionFileCandidates:
+                - banca-auditor.md
+              localInstructionFileCandidates: []
+              projectRootMarkers:
+                - .git

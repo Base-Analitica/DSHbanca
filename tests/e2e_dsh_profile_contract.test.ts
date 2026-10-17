@@ -9,6 +9,7 @@ import {
   validateAuditorMarkdownEvidence,
   validateEvidence,
   validateProfileEvidence,
+  validatePresetReferences,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
 
 const completeAuditorMarkdownEvidence = {
@@ -18,6 +19,9 @@ const completeAuditorMarkdownEvidence = {
   installedPath: ".dsh/agents/banca-auditor.md",
   installedSha256: canonicalAuditorMarkdownSha256,
   installedSha1: canonicalAuditorMarkdownSha1,
+  loaderCopyPath: "banca-auditor.md",
+  loaderCopySha256: canonicalAuditorMarkdownSha256,
+  loaderCopySha1: canonicalAuditorMarkdownSha1,
   hostDiscovered: true,
   presetId: "banca-auditor",
   presetCompositionEmpty: false,
@@ -25,6 +29,12 @@ const completeAuditorMarkdownEvidence = {
   instructionContextMessageCount: 1,
   loadedSourceSha1: canonicalAuditorMarkdownSha1,
   nativePreStepObserved: true,
+  instructionMessageRole: "user",
+  instructionMessageSourceKind: "agent-instructions",
+  instructionMessagePath: "banca-auditor.md",
+  controlInstructionMessageCount: 0,
+  preStepEvent: { id: "evt-auditor-1", agentId: "agent-auditor-1", sessionId: "agent-auditor-1" },
+  preStepEventIds: ["evt-auditor-1"],
   agentAndSessionIdMatch: true,
   agentRegistryContainsAgent: true,
   sessionStoreContainsSession: true,
@@ -43,6 +53,7 @@ const completeProfile = {
   entrypointResolved: true,
   presetRegistryEntry: true,
   auditorPresetEntry: true,
+  controlPresetEntry: true,
 }
 
 const completeRuntime = {
@@ -132,11 +143,24 @@ const completeRuntime = {
     inventoryAfter: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
     modelTurnEvents: 0,
   },
-  agentTeardown: { auditorAgentDisposed: true, unverifiedAgentDisposed: true },
-  externalActivity: { modelCalls: 0, sessionPromptCalls: 0, agentSendCalls: 0, credentialsUsed: false },
+  agentTeardown: { auditorAgentDisposed: true, controlAgentDisposed: true, unverifiedAgentDisposed: true, auditorAgentUnregistered: true, controlAgentUnregistered: true },
+  externalActivity: {
+    modelCalls: 0, sessionPromptCalls: 0, agentSendCalls: 2, agentRequestEvents: 0, stepStartEvents: 0,
+    forbiddenStoredEventTypes: ["step/start", "request/header", "agent/request", "assistant/message"],
+    auditorStoredForbiddenEvents: [], controlStoredForbiddenEvents: [], credentialsUsed: false,
+  },
 }
 
 describe("DSH profile E2E evidence contract", () => {
+  test("rejects unresolved and duplicate registry preset IDs", () => {
+    expect(validatePresetReferences("standard", ["banca-auditor"])).toContain(
+      "AgentPresetRegistry default does not resolve to a declared preset",
+    )
+    expect(validatePresetReferences("banca-auditor", ["banca-auditor", "banca-auditor"])).toContain(
+      "AgentPreset declarations contain duplicate IDs",
+    )
+    expect(validatePresetReferences("banca-auditor", ["banca-auditor"])).toEqual([])
+  })
   test("accepts complete profile composition and runtime evidence", () => {
     expect(validateProfileEvidence(completeProfile)).toEqual([])
     expect(validateEvidence(completeRuntime)).toEqual([])
@@ -152,6 +176,8 @@ describe("DSH profile E2E evidence contract", () => {
     ["altered canonical Markdown source digest", { ...completeAuditorMarkdownEvidence, sourceSha1: "sha1:altered" }, "canonical auditor Markdown is missing or altered"],
     ["altered installed Markdown", { ...completeAuditorMarkdownEvidence, installedSha256: "sha256:altered" }, "installed auditor Markdown differs from canonical source"],
     ["altered installed Markdown source digest", { ...completeAuditorMarkdownEvidence, installedSha1: "sha1:altered" }, "installed auditor Markdown differs from canonical source"],
+    ["missing loader-root Markdown", { ...completeAuditorMarkdownEvidence, loaderCopyPath: undefined }, "loader-root auditor Markdown differs from canonical source"],
+    ["altered loader-root Markdown", { ...completeAuditorMarkdownEvidence, loaderCopySha256: "sha256:altered" }, "loader-root auditor Markdown differs from canonical source"],
     ["file present but not discovered by DSH", { ...completeAuditorMarkdownEvidence, hostDiscovered: false }, "DSH did not discover auditor Markdown content"],
     ["empty host preset", { ...completeAuditorMarkdownEvidence, presetCompositionHasInstructionLoader: false }, "banca-auditor preset does not mount native instruction content"],
     ["empty preset masked by an instruction-loader marker", { ...completeAuditorMarkdownEvidence, presetCompositionEmpty: true }, "banca-auditor preset does not mount native instruction content"],
@@ -159,6 +185,11 @@ describe("DSH profile E2E evidence contract", () => {
     ["missing instruction context message count", { ...completeAuditorMarkdownEvidence, instructionContextMessageCount: 0 }, "native pre-step instruction projection was not observed"],
     ["altered loaded source digest", { ...completeAuditorMarkdownEvidence, loadedSourceSha1: "sha1:altered" }, "native DSH did not load Markdown into the agent session"],
     ["installed Markdown not loaded by the host", { ...completeAuditorMarkdownEvidence, nativePreStepObserved: false }, "native pre-step instruction projection was not observed"],
+    ["system-role instruction message", { ...completeAuditorMarkdownEvidence, instructionMessageRole: "system" }, "native instruction projection is not a user message from the expected source"],
+    ["control Agent received auditor instructions", { ...completeAuditorMarkdownEvidence, controlInstructionMessageCount: 1 }, "control Agent received auditor-only instructions"],
+    ["pre-step evidence without event identity", { ...completeAuditorMarkdownEvidence, preStepEvent: { id: "", agentId: "agent-auditor-1", sessionId: "agent-auditor-1" }, preStepEventIds: [] }, "pre-step evidence lacks unique native event provenance"],
+    ["pre-step evidence for another Agent", { ...completeAuditorMarkdownEvidence, preStepEvent: { id: "evt-auditor-1", agentId: "other", sessionId: "agent-auditor-1" } }, "pre-step evidence lacks unique native event provenance"],
+    ["duplicate pre-step event evidence", { ...completeAuditorMarkdownEvidence, preStepEventIds: ["evt-auditor-1", "evt-auditor-1"] }, "pre-step evidence lacks unique native event provenance"],
     ["synthetic context or preset fixture", { ...completeAuditorMarkdownEvidence, syntheticPresetFixture: true }, "auditor Markdown evidence is synthetic rather than host-validated"],
     ["loaded content not bound to the matching native Agent and Session", { ...completeAuditorMarkdownEvidence, agentAndSessionIdMatch: false }, "auditor instruction content is not bound to the live banca-auditor Agent and Session"],
     ["model-backed evidence", { ...completeAuditorMarkdownEvidence, modelCalls: 1 }, "E2E used or did not rule out a model/credential call"],
@@ -173,6 +204,7 @@ describe("DSH profile E2E evidence contract", () => {
     ["composition absent", { ...completeProfile, composedEntry: false }, "Cordis composition entry missing"],
     ["native preset registry absent", { ...completeProfile, presetRegistryEntry: false }, "DSH AgentPresetRegistry entry missing"],
     ["auditor preset declaration absent", { ...completeProfile, auditorPresetEntry: false }, "banca-auditor DSH AgentPreset entry missing"],
+    ["scratch control preset absent", { ...completeProfile, controlPresetEntry: false }, "scratch control DSH AgentPreset entry missing"],
   ])("rejects %s", (_label, evidence, expectedError) => {
     expect(validateProfileEvidence(evidence)).toContain(expectedError)
   })
@@ -205,7 +237,29 @@ describe("DSH profile E2E evidence contract", () => {
     expect(validateEvidence({
       ...completeRuntime,
       externalActivity: { ...completeRuntime.externalActivity, modelCalls: 1, credentialsUsed: true },
-    })).toContain("E2E used or did not rule out a model/credential call")
+    })).toContain("E2E did not stop both native pre-step probes before step/start and agent/request, or used a model/credential")
+  })
+
+  test("rejects lifecycle evidence without direct native Session event snapshots", () => {
+    expect(validateEvidence({
+      ...completeRuntime,
+      externalActivity: {
+        ...completeRuntime.externalActivity,
+        auditorStoredForbiddenEvents: undefined,
+        controlStoredForbiddenEvents: undefined,
+      },
+    })).toContain("E2E did not stop both native pre-step probes before step/start and agent/request, or used a model/credential")
+  })
+
+  test("requires fail-closed native pre-step probes", () => {
+    expect(validateEvidence({
+      ...completeRuntime,
+      externalActivity: { ...completeRuntime.externalActivity, stepStartEvents: 1 },
+    })).toContain("E2E did not stop both native pre-step probes before step/start and agent/request, or used a model/credential")
+    expect(validateEvidence({
+      ...completeRuntime,
+      agentTeardown: { ...completeRuntime.agentTeardown, controlAgentDisposed: false },
+    })).toContain("real DSH Agent lifecycle teardown was not verified")
   })
 
   test("rejects missing allowed banca_status behavior for the auditor", () => {

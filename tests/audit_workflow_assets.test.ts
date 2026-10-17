@@ -6,15 +6,21 @@
 import { expect, test, describe, afterEach } from "bun:test"
 import {
   existsSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  symlinkSync,
+  writeFileSync,
 } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { installAssets } from "../src/lib/install_assets"
 
 const AGENT_REL = join(".dsh", "agents", "banca-auditor.md")
+const LOADER_AGENT_REL = "banca-auditor.md"
 const SKILL_REL = join(".dsh", "skills", "banca-avaliacao", "SKILL.md")
 
 const BANNED_PHRASES = [
@@ -54,6 +60,20 @@ function normalize(content: string): string {
 
 function readInstalled(root: string, rel: string): string {
   return normalize(readFileSync(join(root, rel), "utf-8"))
+}
+
+function projectInventory(root: string): Record<string, string> {
+  const inventory: Record<string, string> = {}
+  const walk = (directory: string, prefix = "") => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) walk(path, rel)
+      else inventory[rel] = entry.isFile() ? readFileSync(path, "utf8") : "<non-regular>"
+    }
+  }
+  walk(root)
+  return inventory
 }
 
 function parseFrontmatter(md: string): string {
@@ -186,6 +206,77 @@ describe("audit workflow assets (#86 / #90)", () => {
     )
     expect(versionedAgent).toBe(sourceAgent)
     expect(versionedSkill).toBe(sourceSkill)
+    expect(readInstalled(versionedRoot, LOADER_AGENT_REL)).toBe(sourceAgent)
+    expect(readInstalled(fallbackRoot, LOADER_AGENT_REL)).toBe(sourceAgent)
+    expect(lstatSync(join(versionedRoot, LOADER_AGENT_REL)).isFile()).toBe(true)
+  })
+
+  test("refuses to overwrite a pre-existing root auditor file", () => {
+    const root = tempProject("audit-wf-root-collision-")
+    const destination = join(root, LOADER_AGENT_REL)
+    writeFileSync(destination, "user-owned content\n")
+
+    const before = projectInventory(root)
+    expect(() => installAssets(root, true)).toThrow(/loader banca-auditor instructions differ from the canonical source/)
+    expect(readFileSync(destination, "utf8")).toBe("user-owned content\n")
+    expect(projectInventory(root)).toEqual(before)
+  })
+
+  test("refuses a root auditor symlink", () => {
+    const root = tempProject("audit-wf-root-symlink-")
+    const external = tempProject("audit-wf-root-symlink-target-")
+    const destination = join(root, LOADER_AGENT_REL)
+    const target = join(external, "instructions.md")
+    writeFileSync(target, "outside\n")
+    symlinkSync(target, destination)
+
+    expect(() => installAssets(root, true)).toThrow()
+    expect(readFileSync(target, "utf8")).toBe("outside\n")
+  })
+
+  test("refuses a non-file root auditor destination before changing the workspace", () => {
+    const root = tempProject("audit-wf-root-special-")
+    const destination = join(root, LOADER_AGENT_REL)
+    mkdirSync(destination)
+    writeFileSync(join(destination, "user-data.txt"), "preserve\n")
+    const before = projectInventory(root)
+
+    expect(() => installAssets(root, true)).toThrow(/loader banca-auditor instructions must be a regular file/)
+    expect(projectInventory(root)).toEqual(before)
+  })
+
+  test("identifies stale root copies without silently replacing them", () => {
+    const root = tempProject("audit-wf-root-stale-")
+    const destination = join(root, LOADER_AGENT_REL)
+    writeFileSync(destination, "stale workspace content\n")
+
+    expect(() => installAssets(root, true)).toThrow(/loader banca-auditor instructions differ from the canonical source/)
+    expect(readFileSync(destination, "utf8")).toBe("stale workspace content\n")
+  })
+
+  test("detects a stale legacy installation before deriving the loader copy", () => {
+    const root = tempProject("audit-wf-legacy-stale-")
+    const legacyPath = join(root, AGENT_REL)
+    mkdirSync(join(root, ".dsh", "agents"), { recursive: true })
+    writeFileSync(legacyPath, "stale legacy content\n")
+
+    expect(() => installAssets(root, false)).toThrow(/installed banca-auditor instructions differ from the canonical source/)
+    expect(readFileSync(legacyPath, "utf8")).toBe("stale legacy content\n")
+    expect(existsSync(join(root, LOADER_AGENT_REL))).toBe(false)
+  })
+
+  test("rejects a symlinked legacy asset before any copy can follow it", () => {
+    const root = tempProject("audit-wf-legacy-symlink-")
+    const external = tempProject("audit-wf-legacy-target-")
+    const legacyPath = join(root, AGENT_REL)
+    const target = join(external, "instructions.md")
+    mkdirSync(join(root, ".dsh", "agents"), { recursive: true })
+    writeFileSync(target, "external content\n")
+    symlinkSync(target, legacyPath)
+
+    expect(() => installAssets(root, true)).toThrow(/must be a regular file/)
+    expect(readFileSync(target, "utf8")).toBe("external content\n")
+    expect(existsSync(join(root, LOADER_AGENT_REL))).toBe(false)
   })
 
   test("agent frontmatter is deny-by-default with path-limited read", () => {

@@ -15,7 +15,9 @@ import {
 import { createHash } from "node:crypto"
 import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
+import { parse as parseYaml } from "yaml"
+import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "./lib/dsh-profile-e2e-presets.js"
 import {
   canonicalAuditorMarkdownSha256,
   expectedTools,
@@ -25,6 +27,7 @@ import {
   validateAuditorMarkdownEvidence,
   validateEvidence,
   validateProfileEvidence,
+  validatePresetReferences,
 } from "./lib/dsh-profile-e2e-contract.js"
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
@@ -40,7 +43,7 @@ const reportPathLabel = (() => {
 })()
 const timeoutMs = 120_000
 const bootTimeoutMs = 30_000
-const maxOutputBytes = 1_000_000
+const maxOutputBytes = 8_000_000
 const profileName = `dshbanca-e2e-${process.pid}-${Date.now()}`
 const observerName = "dshbanca-e2e-observer"
 
@@ -91,6 +94,7 @@ const report: GateReport = {
   limitations: [
     "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
     "O resultado da identidade/guard (#2) e o carregamento das instruções Markdown (#3) são reportados separadamente.",
+    "A sonda ativa agent/pre-step exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
   ],
 }
 
@@ -145,6 +149,79 @@ function findDshPackageRoot(executable: string): string | undefined {
   }
 }
 
+async function validateNativePresetConfig(dshExecutable: string) {
+  const dshRoot = findDshPackageRoot(dshExecutable)
+  if (!dshRoot) throw new Error("installed DSH package root is unavailable")
+  const packageRoot = join(dshRoot, "node_modules", "@deepseek-ai")
+  const registryModule = await import(pathToFileURL(join(packageRoot, "dsh-agent-preset-registry", "lib", "index.js")).href)
+  const presetModule = await import(pathToFileURL(join(packageRoot, "dsh-agent-preset", "lib", "index.js")).href)
+  const instructionModule = await import(pathToFileURL(join(packageRoot, "dsh-agent-instructions", "lib", "index.js")).href)
+  const patchRows = (parseYaml(readFileSync(join(repositoryRoot, "cordis.patch.yml"), "utf8")) as any[])
+    .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
+  const overlayRows = (parseYaml(buildSdkPresetOverlayPatch(observerName)) as any[])
+    .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
+  const registryRow = overlayRows.find((row) => row?.name === "@deepseek-ai/dsh-agent-preset-registry")
+  const fixturePresetRows = overlayRows.filter((row) => row?.name === "@deepseek-ai/dsh-agent-preset")
+  const neutralPresetRow = fixturePresetRows.find((row) => row?.config?.id === e2eControlPresetId)
+  const presetIds = [
+    ...patchRows.filter((row) => row?.name === "@deepseek-ai/dsh-agent-preset").map((row) => row?.config?.id),
+    ...fixturePresetRows.map((row) => row?.config?.id),
+  ]
+  const auditorRow = patchRows.find((row) => row?.name === "@deepseek-ai/dsh-agent-preset" && row?.config?.id === "banca-auditor")
+  const bundleRegistryAbsent = !patchRows.some((row) => row?.name === "@deepseek-ai/dsh-agent-preset-registry")
+  const bundleStandardAbsent = !patchRows.some((row) => row?.name === "@deepseek-ai/dsh-agent-preset" && row?.config?.id === "standard")
+  const registryResult = await registryModule.AgentPresetRegistry.Config["~standard"].validate(registryRow?.config)
+  const missingDefaultResult = await registryModule.AgentPresetRegistry.Config["~standard"].validate({})
+  const unknownDefaultErrors = validatePresetReferences("unknown-dshbanca-e2e-preset", presetIds)
+  const duplicatePresetErrors = validatePresetReferences(registryRow?.config?.default, [...presetIds, e2eControlPresetId])
+  const fixtureDefaultResolved = validatePresetReferences(registryRow?.config?.default, presetIds).length === 0
+  const neutralPresetResult = neutralPresetRow
+    ? await presetModule.default.Config["~standard"].validate(neutralPresetRow.config)
+    : { issues: [{ message: "scratch control preset row missing" }] }
+  const presetResult = auditorRow
+    ? await presetModule.default.Config["~standard"].validate(auditorRow.config)
+    : { issues: [{ message: "banca-auditor preset row missing" }] }
+  const instructionRow = auditorRow?.config?.plugins?.find((row) => row?.name === "@deepseek-ai/dsh-agent-instructions")
+  const instructionResult = instructionRow
+    ? await instructionModule.Config["~standard"].validate(instructionRow.config)
+    : { issues: [{ message: "native instruction loader child missing" }] }
+  const childProblem = auditorRow ? registryModule.entryListProblem(auditorRow.config.plugins) : "banca-auditor preset row missing"
+  const rejectedMissingDefault = Array.isArray(missingDefaultResult.issues) &&
+    missingDefaultResult.issues.some((issue) => issue.path?.[0] === "default")
+  const webAppRoot = join(packageRoot, "dsh-web-app")
+  const webHostRows = (parseYaml(readFileSync(join(webAppRoot, "cordis.patch.yml"), "utf8")) as any[])
+    .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
+  const webHostRegistry = webHostRows.find((row) => row?.name === "@deepseek-ai/dsh-agent-preset-registry")
+  const webStandardRows = (parseYaml(readFileSync(join(webAppRoot, "presets", "standard.patch.yml"), "utf8")) as any[])
+    .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
+  const webStandardPreset = webStandardRows.find((row) => row?.name === "@deepseek-ai/dsh-agent-preset" && row?.config?.id === "standard")
+  const hostStandardPreserved = webHostRegistry?.config?.default === "standard" && Boolean(webStandardPreset) && bundleRegistryAbsent && bundleStandardAbsent
+  const registryInjectionRequired = Array.isArray(presetModule.default.inject) && presetModule.default.inject.includes("agentPresets")
+  const accepted = bundleRegistryAbsent && bundleStandardAbsent && !registryResult.issues && rejectedMissingDefault &&
+    fixtureDefaultResolved && !neutralPresetResult.issues && !presetResult.issues &&
+    !instructionResult.issues && childProblem === undefined && unknownDefaultErrors.length > 0 &&
+    duplicatePresetErrors.length > 0 && hostStandardPreserved && registryInjectionRequired
+  return {
+    accepted,
+    bundleRegistryAbsent,
+    bundleStandardAbsent,
+    scratchRegistryAccepted: !registryResult.issues,
+    absentDefaultRejected: rejectedMissingDefault,
+    unknownDefaultRejected: unknownDefaultErrors.length > 0,
+    duplicatePresetIdRejected: duplicatePresetErrors.length > 0,
+    fixtureDefaultResolved,
+    fixtureNeutralPresetAccepted: !neutralPresetResult.issues,
+    hostStandardPreserved,
+    registryInjectionRequired,
+    presetAccepted: !presetResult.issues,
+    instructionConfigAccepted: !instructionResult.issues,
+    childPluginStructureAccepted: childProblem === undefined,
+    scratchDefaultId: registryRow?.config?.default ?? null,
+    presetId: auditorRow?.config?.id ?? null,
+    instructionCandidates: instructionRow?.config?.instructionFileCandidates ?? [],
+  }
+}
+
 function findPnpmCli(): string | undefined {
   const roots = new Set<string>()
   if (process.env.COREPACK_HOME) roots.add(resolve(process.env.COREPACK_HOME))
@@ -179,15 +256,31 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
     })
     let stdout = ""
     let stderr = ""
-    let outputBytes = 0
+    let stdoutTail = ""
+    let stderrTail = ""
+    let stdoutTruncated = false
+    let stderrTruncated = false
     let timedOut = false
     const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
-      outputBytes += chunk.length
       const text = chunk.toString("utf8")
-      if (outputBytes <= maxOutputBytes) {
-        if (stream === "stdout") stdout += text
-        else stderr += text
+      let current = stream === "stdout" ? stdout : stderr
+      let tail = stream === "stdout" ? stdoutTail : stderrTail
+      let truncated = stream === "stdout" ? stdoutTruncated : stderrTruncated
+      if (!truncated && Buffer.byteLength(current) + chunk.length <= maxOutputBytes) {
+        current += text
+      } else {
+        const half = Math.floor(maxOutputBytes / 2)
+        if (!truncated) {
+          const combined = current + text
+          current = combined.slice(0, half)
+          tail = combined.slice(-half)
+          truncated = true
+        } else {
+          tail = (tail + text).slice(-half)
+        }
       }
+      if (stream === "stdout") { stdout = current; stdoutTail = tail; stdoutTruncated = truncated }
+      else { stderr = current; stderrTail = tail; stderrTruncated = truncated }
     }
     child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk))
     child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk))
@@ -197,13 +290,31 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
     }, options.timeoutMs)
     child.once("error", (error) => {
       clearTimeout(timer)
-      resolveResult({ exitCode: null, signal: null, timedOut, stdout, stderr: `${stderr}\n${error.message}` })
+      resolveResult({ exitCode: null, signal: null, timedOut, stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout, stderr: `${stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr}\n${error.message}` })
     })
     child.once("close", (code, signal) => {
       clearTimeout(timer)
-      resolveResult({ exitCode: code, signal, timedOut, stdout, stderr })
+      resolveResult({
+        exitCode: code,
+        signal,
+        timedOut,
+        stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout,
+        stderr: stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr,
+      })
     })
   })
+}
+
+function runDsh(nodeExecutable: string, dshExecutable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe" }): Promise<CommandResult> {
+  // findExecutable resolves symlinks, so the DSH bin becomes lib/bin.js.
+  // Invoke that script with the selected Node binary instead of relying on the
+  // parent runtime's shebang handling for a directly spawned JavaScript file.
+  return run(nodeExecutable, [dshExecutable, ...args], options)
+}
+
+function runDshWithPty(scriptExecutable: string, nodeExecutable: string, dshExecutable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<CommandResult> {
+  const command = [nodeExecutable, dshExecutable, ...args].map(shellQuote).join(" ")
+  return run(scriptExecutable, ["-q", "-e", "-c", command, "/dev/null"], options)
 }
 
 function terminateProcessTree(child: ReturnType<typeof spawn>): void {
@@ -340,7 +451,7 @@ const runTool = async (context, callId, name, args, agent) => {
   return { result, message: resultMessage(result), aborted: controller.signal.aborted };
 };
 const modelEventCount = (session) => session.snapshotEvents().filter((event) =>
-  event.type === "turn/start" || event.type === "request/header"
+  event.type === "request/header"
 ).length;
 const decoyOutput = {
   schema: { type: "string" },
@@ -382,9 +493,13 @@ export async function apply(ctx) {
     meta: { cwd: workspace },
   });
   let unverifiedHandle;
+  let controlHandle;
   let result;
+  let auditorAgentId;
+  let controlAgentId;
   try {
     const agent = auditorHandle.agent;
+    auditorAgentId = agent.id;
     const session = agent.session;
     if (
       ctx.agents.get(agent.id) !== agent ||
@@ -402,13 +517,22 @@ export async function apply(ctx) {
       catch { fail("banca_init did not create the expected synthetic project state"); }
     }
     const installedAuditorMarkdownPath = join(workspace, ".dsh", "agents", "banca-auditor.md");
+    const loaderAuditorMarkdownPath = join(workspace, "banca-auditor.md");
     let installedAuditorMarkdownSha256 = null;
     let installedAuditorMarkdownSha1 = null;
+    let loaderAuditorMarkdownSha256 = null;
+    let loaderAuditorMarkdownSha1 = null;
     try {
       installedAuditorMarkdownSha256 = await sha(installedAuditorMarkdownPath);
       installedAuditorMarkdownSha1 = await sha1(installedAuditorMarkdownPath);
     } catch {
       // Missing installed instructions are captured as a BLOCKED/FAIL issue #3 result below.
+    }
+    try {
+      loaderAuditorMarkdownSha256 = await sha(loaderAuditorMarkdownPath);
+      loaderAuditorMarkdownSha1 = await sha1(loaderAuditorMarkdownPath);
+    } catch {
+      // The native loader-root candidate is independently required by issue #3.
     }
 
     const baselineText = "\\\\documentclass{article}\\n\\\\begin{document}\\nBASELINE_SENTINEL synthetic manuscript.\\n\\\\end{document}\\n";
@@ -446,17 +570,82 @@ export async function apply(ctx) {
       sessionPresetProjection !== "banca-auditor"
     ) fail("native DSH preset selection did not produce a live banca-auditor Agent composition");
 
-    const instructionSources = [
-      ...agent.inbox.nextStep
-        .filter((message) => message?.source?.kind === "agent-instructions")
-        .map((message) => message.source),
-      ...session.snapshotEvents()
-        .filter((event) => event.type === "user/message" && event.data?.source?.kind === "agent-instructions")
-        .map((event) => event.data.source),
-    ];
-    const loadedSourceSha1 = instructionSources
+    controlHandle = await ctx.agents.create({
+      sessionId: "session-dshbanca-e2e-control-" + process.pid + "-" + Date.now(),
+      meta: { cwd: workspace },
+    });
+    const controlAgent = controlHandle.agent;
+    controlAgentId = controlAgent.id;
+    const controlSession = controlAgent.session;
+    if (ctx.agents.get(controlAgent.id) !== controlAgent || ctx.sessions.get(controlAgent.id) !== controlSession || controlAgent.id !== controlSession.id) {
+      fail("the control Agent/Session was not published by native DSH registries");
+    }
+    const controlSelected = await ctx.agentPresets.select(controlAgent, e2eControlPresetId);
+    if (controlSelected !== e2eControlPresetId || ctx.agentPresets.composedPreset(controlAgent.ctx) !== e2eControlPresetId) {
+      fail("control Agent did not retain the isolated empty control preset");
+    }
+
+    const preStepObservations = [];
+    let forbiddenStepStarts = 0;
+    let forbiddenAgentRequests = 0;
+    ctx.on("session/event", (observedSession, event) => {
+      if ((observedSession === session || observedSession === controlSession) && event.type === "step/start") forbiddenStepStarts++;
+    });
+    ctx.on("agent/pre-step", async (payload, next) => {
+      const decision = await next();
+      if (payload.agent !== agent && payload.agent !== controlAgent) return decision;
+      const messages = decision.kind === "enter" ? decision.messages : [];
+      const instructionMessages = messages.filter((message) => message?.source?.kind === "agent-instructions" &&
+        message.source.changes?.some((change) => change?.path === "banca-auditor.md"));
+      const instructionMessage = instructionMessages[0];
+      preStepObservations.push({
+        id: instructionMessage?.id ?? "",
+        agentId: payload.agent.id,
+        sessionId: payload.agent.session.id,
+        step: payload.step,
+        turn: payload.turn,
+        role: instructionMessage?.role ?? null,
+        source: instructionMessage?.source ?? null,
+        instructionMessageCount: instructionMessages.length,
+      });
+      return { kind: "reject" };
+    });
+    ctx.on("agent/request", async ({ agent: requestedAgent }, next) => {
+      if (requestedAgent === agent || requestedAgent === controlAgent) {
+        forbiddenAgentRequests++;
+        throw new Error("DSHbanca E2E fail-closed barrier: agent/request is forbidden");
+      }
+      return next();
+    });
+    for (const [probeAgent, probeLabel] of [[agent, "auditor"], [controlAgent, "control"]]) {
+      probeAgent.send({
+        id: "dshbanca-prestep-probe-" + probeLabel + "-" + process.pid,
+        role: "user",
+        content: [{ type: "text", text: "Synthetic pre-step observation only." }],
+        source: { kind: "user" },
+      }, "next-turn", true);
+      await probeAgent.whenIdle();
+    }
+    const forbiddenStoredEventTypes = ["step/start", "request/header", "agent/request", "assistant/message"];
+    const auditorStoredForbiddenEvents = session.snapshotEvents()
+      .filter((event) => forbiddenStoredEventTypes.includes(event.type))
+      .map((event) => event.type);
+    const controlStoredForbiddenEvents = controlSession.snapshotEvents()
+      .filter((event) => forbiddenStoredEventTypes.includes(event.type))
+      .map((event) => event.type);
+    if (forbiddenStepStarts !== 0 || forbiddenAgentRequests !== 0) {
+      fail("pre-step observation crossed the fail-closed barrier into step/start or agent/request");
+    }
+    if (auditorStoredForbiddenEvents.length !== 0 || controlStoredForbiddenEvents.length !== 0) {
+      fail("native Session event logs contain a forbidden lifecycle event after pre-step rejection");
+    }
+    const auditorPreStep = preStepObservations.find((observation) => observation.agentId === agent.id);
+    const controlPreStep = preStepObservations.find((observation) => observation.agentId === controlAgent.id);
+    if (!auditorPreStep || !controlPreStep) fail("native agent/pre-step was not observed for both auditor and control Agents");
+    const instructionMessages = auditorPreStep.source?.kind === "agent-instructions" ? [auditorPreStep.source] : [];
+    const loadedSourceSha1 = instructionMessages
       .flatMap((source) => Array.isArray(source?.changes) ? source.changes : [])
-      .find((change) => change?.path === ".dsh/agents/banca-auditor.md")?.digest ?? null;
+      .find((change) => change?.path === "banca-auditor.md")?.digest ?? null;
 
     const turnEventsBeforeGuard = modelEventCount(session);
     if (turnEventsBeforeGuard !== 0) fail("a model-facing turn/request event appeared before the guard checks");
@@ -616,22 +805,31 @@ export async function apply(ctx) {
         installedPath: ".dsh/agents/banca-auditor.md",
         installedSha256: installedAuditorMarkdownSha256,
         installedSha1: installedAuditorMarkdownSha1,
+        loaderCopyPath: "banca-auditor.md",
+        loaderCopySha256: loaderAuditorMarkdownSha256,
+        loaderCopySha1: loaderAuditorMarkdownSha1,
         hostDiscovered: loadedSourceSha1 === auditorMarkdownSourceSha1,
         presetId: "banca-auditor",
-        presetDeclarationSource: "temporary DSH Cordis overlay fixture",
+        presetDeclarationSource: "DSHbanca Cordis bundle patch",
         presetCompositionSha256,
         presetCompositionEmpty: presetCompositionContent.trim() === "[]" || presetCompositionContent.trim() === "",
         presetCompositionHasInstructionLoader,
-        instructionContextMessageCount: instructionSources.length,
+        instructionContextMessageCount: auditorPreStep.instructionMessageCount,
         loadedSourceSha1,
-        nativePreStepObserved: instructionSources.length > 0,
+        nativePreStepObserved: true,
+        instructionMessageRole: auditorPreStep.role,
+        instructionMessageSourceKind: auditorPreStep.source?.kind ?? null,
+        instructionMessagePath: auditorPreStep.source?.changes?.find((change) => change?.digest === loadedSourceSha1)?.path ?? null,
+        controlInstructionMessageCount: controlPreStep.instructionMessageCount,
+        preStepEvent: { id: auditorPreStep.id, agentId: auditorPreStep.agentId, sessionId: auditorPreStep.sessionId },
+        preStepEventIds: [auditorPreStep.id],
         agentAndSessionIdMatch: agent.id === session.id,
         agentRegistryContainsAgent: ctx.agents.get(agent.id) === agent,
         sessionStoreContainsSession: ctx.sessions.get(agent.id) === session,
         effectivePreset,
         sessionPresetProjection,
         syntheticContext: false,
-        syntheticPresetFixture: true,
+        syntheticPresetFixture: false,
         modelCalls: auditorEventsAfterChecks,
         credentialsUsed: false,
       },
@@ -700,11 +898,31 @@ export async function apply(ctx) {
         inventoryAfter: unverifiedAfter,
         modelTurnEvents: childModelEvents,
       },
-      agentTeardown: { auditorAgentDisposed: false, unverifiedAgentDisposed: false },
-      externalActivity: { modelCalls: 0, sessionPromptCalls: 0, agentSendCalls: 0, credentialsUsed: false },
+      agentTeardown: { auditorAgentDisposed: false, controlAgentDisposed: false, unverifiedAgentDisposed: false },
+      externalActivity: {
+        modelCalls: 0,
+        sessionPromptCalls: 0,
+        agentSendCalls: 2,
+        agentRequestEvents: forbiddenAgentRequests,
+        stepStartEvents: forbiddenStepStarts,
+        forbiddenStoredEventTypes,
+        auditorStoredForbiddenEvents,
+        controlStoredForbiddenEvents,
+        credentialsUsed: false,
+      },
     };
   } finally {
     const disposalErrors = [];
+    if (controlHandle) {
+      try {
+        await controlHandle.dispose();
+        if (result) result.agentTeardown.controlAgentDisposed = true;
+      } catch (error) {
+        disposalErrors.push(error);
+      }
+    } else if (result) {
+      result.agentTeardown.controlAgentDisposed = true;
+    }
     if (unverifiedHandle) {
       try {
         await unverifiedHandle.dispose();
@@ -723,9 +941,14 @@ export async function apply(ctx) {
     }
     if (disposalErrors.length > 0) throw new AggregateError(disposalErrors, "DSH Agent handle teardown failed");
   }
-  if (!result.agentTeardown.auditorAgentDisposed || !result.agentTeardown.unverifiedAgentDisposed) {
+  if (!result.agentTeardown.auditorAgentDisposed || !result.agentTeardown.controlAgentDisposed || !result.agentTeardown.unverifiedAgentDisposed) {
     fail("real DSH Agent handles were not explicitly disposed");
   }
+  const auditorAgentUnregistered = auditorAgentId !== undefined && ctx.agents.get(auditorAgentId) === undefined && ctx.sessions.get(auditorAgentId) === undefined
+  const controlAgentUnregistered = controlAgentId !== undefined && ctx.agents.get(controlAgentId) === undefined && ctx.sessions.get(controlAgentId) === undefined
+  result.agentTeardown.auditorAgentUnregistered = auditorAgentUnregistered
+  result.agentTeardown.controlAgentUnregistered = controlAgentUnregistered
+  if (!auditorAgentUnregistered || !controlAgentUnregistered) fail("disposed auditor/control Agent or Session remained registered");
   await writeFile(reportPath, JSON.stringify(result, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
 }
 export default { name, inject, apply };
@@ -747,6 +970,18 @@ async function main(): Promise<void> {
   const bunExecutable = findExecutable("bun")
   if (!nodeExecutable || !bunExecutable) {
     fail("Node or Bun executable is unavailable", "BLOCKED")
+    return
+  }
+  try {
+    const nativePresetSchema = await validateNativePresetConfig(dshExecutable)
+    report.stages.nativePresetSchema = nativePresetSchema
+    if (!nativePresetSchema.accepted) {
+      fail("installed DSH native preset schemas rejected the bundled auditor composition", "FAIL")
+      return
+    }
+  } catch {
+    report.stages.nativePresetSchema = { status: "BLOCKED", packageContractsAvailable: false }
+    fail("installed DSH preset schema API is unavailable; native config validation cannot be claimed", "BLOCKED")
     return
   }
 
@@ -799,24 +1034,14 @@ async function main(): Promise<void> {
   for (const value of [dirs.dshHome, dirs.home, dirs.tmp, dirs.xdgConfig, dirs.xdgCache, dirs.xdgData, dirs.xdgState, dirs.xdgRuntime, dirs.pnpmHome, dirs.pnpmStore, dirs.npmCache, dirs.corepack]) ensureInside(scratch, value)
   report.sandbox.isolated = true
 
-  const dshVersionResult = await run(dshExecutable, ["--version"], { cwd: repositoryRoot, env, timeoutMs: 10_000 })
-  report.stages.dshVersionExitCode = dshVersionResult.exitCode
-  if (dshVersionResult.exitCode !== 0) {
-    fail(`DSH CLI exists but --version failed: ${safeOutput(dshVersionResult)}`)
-    return
-  }
-  report.versions.dsh = dshVersionResult.stdout.trim().split(/\r?\n/)[0] ?? null
-
   const dshRoot = findDshPackageRoot(dshExecutable)
   if (!dshRoot) {
     fail("DSH executable was found but its installed @deepseek-ai/dsh package root could not be verified", "BLOCKED")
     return
   }
   const dshManifest = JSON.parse(readFileSync(join(dshRoot, "package.json"), "utf8"))
-  if (dshManifest.version !== report.versions.dsh) {
-    fail("DSH CLI --version does not match its installed package manifest")
-    return
-  }
+  report.versions.dsh = dshManifest.version
+  report.stages.dshVersionSource = "package manifest adjacent to the resolved DSH CLI entrypoint; interactive preflight separately runs dsh --version"
   const cordisManifestPath = findPackageJson(dshRoot, "@deepseek-ai/cordis")
   const loaderManifestPath = findPackageJson(dshRoot, "@deepseek-ai/cordis-plugin-loader")
   if (!cordisManifestPath || !loaderManifestPath) {
@@ -885,7 +1110,7 @@ async function main(): Promise<void> {
     sdkJsonRpcRequestsSent: 0,
   }
 
-  const setup = await run(dshExecutable, ["--profile", profileName, "--from-default-profile", "sdk", "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
+  const setup = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--from-default-profile", "sdk", "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
   report.stages.profileInitialization = { exitCode: setup.exitCode, timedOut: setup.timedOut }
   if (setup.exitCode !== 0 || setup.timedOut) {
     fail(`DSH could not create the isolated SDK profile: ${safeOutput(setup)}`)
@@ -910,13 +1135,14 @@ async function main(): Promise<void> {
     ? createHash("sha1").update(readFileSync(auditorMarkdownSourcePath)).digest("hex")
     : null
   mkdirSync(workspace, { recursive: true, mode: 0o700 })
+  mkdirSync(join(workspace, ".git"), { recursive: false, mode: 0o700 })
   mkdirSync(join(workspace, "capitulos"), { recursive: true, mode: 0o700 })
   writeFileSync(join(workspace, "main.tex"), "\\documentclass{article}\n\\begin{document}\nTexto acadêmico sintético de validação.\\end{document}\n", { mode: 0o600 })
   writeFileSync(join(workspace, "referencias.bib"), "@article{synthetic2026, title={Referência Sintética}, author={Pessoa, Exemplo}, year={2026}}\n", { mode: 0o600 })
   writeFileSync(join(workspace, "capitulos", "introducao.tex"), "Introdução sintética para teste do DSHbanca.\n", { mode: 0o600 })
   createObserverPackage(observerRoot, workspace, observerResult, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1)
   const overlayPath = join(scratch, "observer.patch.yml")
-  writeFileSync(overlayPath, `- insert:\n    - id: dshbanca-e2e-agent-preset-registry\n      name: '@deepseek-ai/dsh-agent-preset-registry'\n      config:\n        default: banca-auditor\n    - id: dshbanca-e2e-auditor-preset\n      name: '@deepseek-ai/dsh-agent-preset'\n      config:\n        id: banca-auditor\n        name: banca-auditor\n        description: 'Temporary no-model DSH identity fixture for the native guard E2E.'\n        plugins: []\n    - id: dshbanca-e2e-observer\n      name: ${observerName}\n`, { mode: 0o600 })
+  writeFileSync(overlayPath, buildSdkPresetOverlayPatch(observerName), { mode: 0o600 })
 
   const pnpmWrapper = join(dirs.bin, process.platform === "win32" ? "pnpm.cmd" : "pnpm")
   if (process.platform === "win32") {
@@ -933,7 +1159,7 @@ async function main(): Promise<void> {
     return
   }
 
-  const add = await run(dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env, timeoutMs })
+  const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env, timeoutMs })
   report.stages.nativeBundleInstall = { exitCode: add.exitCode, timedOut: add.timedOut }
   if (add.exitCode !== 0 || add.timedOut) {
     const offlineMissing = /ERR_PNPM_NO_OFFLINE_TARBALL|ERR_PNPM_FETCH|no matching version.*found offline|not available in the store/i.test(`${add.stderr}\n${add.stdout}`)
@@ -955,19 +1181,33 @@ async function main(): Promise<void> {
     return
   }
 
-  const dump = await run(dshExecutable, ["--profile", profileName, "--patch", overlayPath, "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
-  const presetRegistryEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset-registry")
-  const auditorPresetEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset") && dump.stdout.includes("banca-auditor")
+  const scriptExecutable = findExecutable("script")
+  if (!scriptExecutable) {
+    fail("BLOCKED: a POSIX pseudo-terminal is required to capture the installed DSH --dump-config output", "BLOCKED")
+    return
+  }
+  const dump = await runDshWithPty(scriptExecutable, nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath, "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
+  const presetRegistryEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset-registry") && dump.stdout.includes(`default: ${e2eControlPresetId}`)
+  const auditorPresetEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset") &&
+    dump.stdout.includes("id: banca-auditor") &&
+    dump.stdout.includes("@deepseek-ai/dsh-agent-instructions") &&
+    dump.stdout.includes("instructionFileCandidates:") &&
+    dump.stdout.includes("- banca-auditor.md")
+  const controlPresetEntry = dump.stdout.includes(`id: ${e2eControlPresetId}`) && dump.stdout.includes("plugins: []")
   report.stages.composedProfile = {
     exitCode: dump.exitCode,
+    stdoutBytes: Buffer.byteLength(dump.stdout),
+    stderrBytes: Buffer.byteLength(dump.stderr),
+    outputTruncated: dump.stdout.includes("<output truncated>") || dump.stderr.includes("<output truncated>"),
     containsDshbancaEntry: dump.stdout.includes("name: dshbanca/dsh"),
     containsObserverEntry: dump.stdout.includes(`name: ${observerName}`),
     containsPresetRegistryEntry: presetRegistryEntry,
     containsAuditorPresetEntry: auditorPresetEntry,
+    containsControlPresetEntry: controlPresetEntry,
   }
   const composedEntry = dump.stdout.includes("name: dshbanca/dsh")
-  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry) {
-    fail(`The real DSH composed profile is missing a required DSHbanca, observer, preset-registry, or auditor-preset entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry})`)
+  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry) {
+    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, or control-preset entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry})`)
     return
   }
   const checkoutBundle = join(profileDir, "node_modules", "dshbanca")
@@ -984,15 +1224,26 @@ async function main(): Promise<void> {
     entrypointResolved,
     presetRegistryEntry,
     auditorPresetEntry,
+    controlPresetEntry,
   })
   if (profileErrors.length > 0) {
     fail(`Profile composition validation failed: ${profileErrors.join("; ")}`)
     return
   }
 
+  if (process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED !== "yes") {
+    report.stages.profileBoot = {
+      status: "BLOCKED",
+      started: false,
+      reason: "new human authorization is required for the one-shot no-model Agent pre-step probe",
+    }
+    fail("BLOCKED: set DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes only after explicit maintainer authorization; no DSH lifecycle was started", "BLOCKED")
+    return
+  }
+
   const projectBeforeBoot = inventoryTree(workspace)
   const statusBeforeBoot = repoStatus()
-  const boot = await run(dshExecutable, ["--profile", profileName, "--patch", overlayPath], { cwd: workspace, env, timeoutMs: bootTimeoutMs })
+  const boot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], { cwd: workspace, env, timeoutMs: bootTimeoutMs })
   report.stages.profileBoot = { exitCode: boot.exitCode, signal: boot.signal, timedOut: boot.timedOut, stdin: "EOF; no SDK request or model call sent" }
   if (boot.exitCode !== 0 || boot.timedOut) {
     fail(`Real DSH SDK profile boot failed, timed out, or exited unexpectedly before evidence: ${safeOutput(boot)}`)
@@ -1008,7 +1259,8 @@ async function main(): Promise<void> {
   const auditorMarkdownErrors = validateAuditorMarkdownEvidence(auditorMarkdownEvidence)
   const auditorMarkdownDistributionErrors = auditorMarkdownErrors.filter((error) =>
     error === "canonical auditor Markdown is missing or altered" ||
-    error === "installed auditor Markdown differs from canonical source"
+    error === "installed auditor Markdown differs from canonical source" ||
+    error === "loader-root auditor Markdown differs from canonical source"
   )
   const auditorMarkdownStatus = auditorMarkdownErrors.length === 0
     ? "PASS"
@@ -1052,11 +1304,12 @@ async function main(): Promise<void> {
         defaultCandidates: ["AGENTS.md", "CLAUDE.md"],
         configuredCandidatesMustBeBasenames: true,
         projectionHook: "agent/pre-step",
-        publicNoModelProjectionApiObserved: false,
+        projectionRejectedBeforeStepStart: true,
+        requestBarrierInstalled: true,
       },
     },
     blocker: auditorMarkdownStatus === "BLOCKED"
-      ? "The real DSH profile installed the canonical Markdown, but the native preset fixture is empty and no public no-model DSH path exposed loaded instruction content on the live Agent/Session. The native agent/pre-step projection was not invoked."
+      ? "Native agent/pre-step evidence is pending the separately authorized one-shot no-model probe."
       : null,
   }
   if (auditorMarkdownStatus === "FAIL") {

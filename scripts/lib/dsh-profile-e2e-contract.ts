@@ -28,6 +28,7 @@ export interface ProfileEvidence {
   entrypointResolved?: boolean
   presetRegistryEntry?: boolean
   auditorPresetEntry?: boolean
+  controlPresetEntry?: boolean
 }
 
 export interface RuntimeEvidence {
@@ -78,6 +79,18 @@ export function validateProfileEvidence(evidence: ProfileEvidence): string[] {
   if (evidence.entrypointResolved !== true) errors.push("plugin entrypoint did not resolve in profile node_modules")
   if (evidence.presetRegistryEntry !== true) errors.push("DSH AgentPresetRegistry entry missing")
   if (evidence.auditorPresetEntry !== true) errors.push("banca-auditor DSH AgentPreset entry missing")
+  if (evidence.controlPresetEntry !== true) errors.push("scratch control DSH AgentPreset entry missing")
+  return errors
+}
+
+/** Ensure the required registry fallback resolves to exactly one declared preset. */
+export function validatePresetReferences(defaultId: unknown, presetIds: unknown[]): string[] {
+  const errors: string[] = []
+  const ids = presetIds.filter((id): id is string => typeof id === "string")
+  if (typeof defaultId !== "string" || !ids.includes(defaultId)) {
+    errors.push("AgentPresetRegistry default does not resolve to a declared preset")
+  }
+  if (new Set(ids).size !== ids.length) errors.push("AgentPreset declarations contain duplicate IDs")
   return errors
 }
 
@@ -106,6 +119,13 @@ export function validateAuditorMarkdownEvidence(value: unknown): string[] {
   ) {
     errors.push("installed auditor Markdown differs from canonical source")
   }
+  if (
+    evidence.loaderCopyPath !== "banca-auditor.md" ||
+    evidence.loaderCopySha256 !== evidence.sourceSha256 ||
+    evidence.loaderCopySha1 !== evidence.sourceSha1
+  ) {
+    errors.push("loader-root auditor Markdown differs from canonical source")
+  }
   if (evidence.hostDiscovered !== true) {
     errors.push("DSH did not discover auditor Markdown content")
   }
@@ -123,10 +143,31 @@ export function validateAuditorMarkdownEvidence(value: unknown): string[] {
   }
   if (
     evidence.nativePreStepObserved !== true ||
-    !Number.isInteger(evidence.instructionContextMessageCount) ||
-    evidence.instructionContextMessageCount < 1
+    evidence.instructionContextMessageCount !== 1
   ) {
     errors.push("native pre-step instruction projection was not observed")
+  }
+  const preStepEvent = isRecord(evidence.preStepEvent) ? evidence.preStepEvent : undefined
+  const eventIds = Array.isArray(evidence.preStepEventIds) ? evidence.preStepEventIds : []
+  if (
+    !preStepEvent ||
+    typeof preStepEvent.id !== "string" || preStepEvent.id.length === 0 ||
+    typeof preStepEvent.agentId !== "string" || preStepEvent.agentId.length === 0 ||
+    preStepEvent.sessionId !== preStepEvent.agentId ||
+    JSON.stringify(eventIds) !== JSON.stringify([preStepEvent.id]) ||
+    preStepEvent.id === preStepEvent.agentId
+  ) {
+    errors.push("pre-step evidence lacks unique native event provenance")
+  }
+  if (
+    evidence.instructionMessageRole !== "user" ||
+    evidence.instructionMessageSourceKind !== "agent-instructions" ||
+    evidence.instructionMessagePath !== "banca-auditor.md"
+  ) {
+    errors.push("native instruction projection is not a user message from the expected source")
+  }
+  if (evidence.controlInstructionMessageCount !== 0) {
+    errors.push("control Agent received auditor-only instructions")
   }
   if (
     evidence.agentAndSessionIdMatch !== true ||
@@ -270,15 +311,24 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
   if (
     activity?.modelCalls !== 0 ||
     activity.sessionPromptCalls !== 0 ||
-    activity.agentSendCalls !== 0 ||
+    activity.agentSendCalls !== 2 ||
+    activity.agentRequestEvents !== 0 ||
+    activity.stepStartEvents !== 0 ||
+    !Array.isArray(activity.forbiddenStoredEventTypes) ||
+    JSON.stringify(activity.forbiddenStoredEventTypes) !== JSON.stringify(["step/start", "request/header", "agent/request", "assistant/message"]) ||
+    !Array.isArray(activity.auditorStoredForbiddenEvents) || activity.auditorStoredForbiddenEvents.length !== 0 ||
+    !Array.isArray(activity.controlStoredForbiddenEvents) || activity.controlStoredForbiddenEvents.length !== 0 ||
     activity.credentialsUsed !== false
   ) {
-    errors.push("E2E used or did not rule out a model/credential call")
+    errors.push("E2E did not stop both native pre-step probes before step/start and agent/request, or used a model/credential")
   }
 
   const teardown = isRecord(evidence.agentTeardown) ? evidence.agentTeardown : undefined
-  if (teardown?.auditorAgentDisposed !== true || teardown.unverifiedAgentDisposed !== true) {
+  if (teardown?.auditorAgentDisposed !== true || teardown.controlAgentDisposed !== true || teardown.unverifiedAgentDisposed !== true) {
     errors.push("real DSH Agent lifecycle teardown was not verified")
+  }
+  if (teardown?.auditorAgentUnregistered !== true || teardown.controlAgentUnregistered !== true) {
+    errors.push("disposed auditor/control Agents remained in native registries")
   }
   return errors
 }
