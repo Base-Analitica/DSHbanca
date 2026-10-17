@@ -16,6 +16,7 @@ test("DSHbanca declares only its academic auditor preset and leaves global regis
   expect(registry).toBeUndefined()
   expect(presets.map((row) => row.config?.id)).toEqual(["banca-auditor"])
   expect(instructionLoader?.config?.maxBytes).toBe(65536)
+  expect(instructionLoader?.inject).toContain("fs")
   expect(instructionLoader?.config?.instructionFileCandidates).toEqual(["banca-auditor.md"])
   expect(instructionLoader?.config?.localInstructionFileCandidates).toEqual([])
   expect(instructionLoader?.config?.projectRootMarkers).toEqual([".git"])

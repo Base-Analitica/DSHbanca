@@ -21,6 +21,30 @@ export const expectedTools = [
 export const canonicalAuditorMarkdownSha256 = "103cbdf191600d83a8becdb43ce89fc37aa0f5c532768238929524d0cbedaf7a"
 export const canonicalAuditorMarkdownSha1 = "aedf761fe161b1befc61eaad15b6ec01cd11153c"
 
+export type ProfileGateStatus = "PASS" | "FAIL" | "BLOCKED"
+
+/** No pre-step means the Markdown lifecycle gate has not been proven; once observed, any missing or invalid projection is a material failure. */
+export function classifyAuditorMarkdownStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.nativePreStepObserved !== true) return "BLOCKED"
+  return validateAuditorMarkdownEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
+/** Keep the legacy identity/read-only gate visible while making Markdown mandatory for overall acceptance. */
+export function classifyProfileGateStatuses(
+  issue2Status: ProfileGateStatus,
+  auditorMarkdownStatus: ProfileGateStatus,
+): { issue2Status: ProfileGateStatus; auditorMarkdownStatus: ProfileGateStatus; overallStatus: ProfileGateStatus; exitCode: number } {
+  const overallStatus: ProfileGateStatus = issue2Status === "FAIL" || auditorMarkdownStatus === "FAIL"
+    ? "FAIL"
+    : issue2Status === "BLOCKED" || auditorMarkdownStatus === "BLOCKED" ? "BLOCKED" : "PASS"
+  return {
+    issue2Status,
+    auditorMarkdownStatus,
+    overallStatus,
+    exitCode: overallStatus === "PASS" ? passExitCode() : overallStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
+  }
+}
+
 export interface ProfileEvidence {
   profileManifestHasBundle?: boolean
   profileManifestHasObserver?: boolean

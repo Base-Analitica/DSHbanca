@@ -7,6 +7,8 @@ import {
   missingHostExitCode,
   passExitCode,
   validateAuditorMarkdownEvidence,
+  classifyAuditorMarkdownStatus,
+  classifyProfileGateStatuses,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -168,6 +170,35 @@ describe("DSH profile E2E evidence contract", () => {
 
   test("accepts only content-hash-backed Markdown loaded into a native auditor Agent and Session", () => {
     expect(validateAuditorMarkdownEvidence(completeAuditorMarkdownEvidence)).toEqual([])
+  })
+
+  test("missing Markdown evidence blocks issue 3 while preserving the separate issue 2 result and nonzero exit", () => {
+    expect(classifyAuditorMarkdownStatus(undefined)).toBe("BLOCKED")
+    expect(classifyProfileGateStatuses("PASS", "BLOCKED")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+  })
+
+  test("proven Markdown allows PASS, while observed missing content and material integrity errors fail", () => {
+    expect(classifyAuditorMarkdownStatus(completeAuditorMarkdownEvidence)).toBe("PASS")
+    expect(classifyAuditorMarkdownStatus({
+      ...completeAuditorMarkdownEvidence,
+      hostDiscovered: false,
+      instructionContextMessageCount: 0,
+      loadedSourceSha1: null,
+    })).toBe("FAIL")
+    expect(classifyAuditorMarkdownStatus({ ...completeAuditorMarkdownEvidence, hostDiscovered: false })).toBe("FAIL")
+    expect(classifyAuditorMarkdownStatus({ ...completeAuditorMarkdownEvidence, loaderCopySha256: "sha256:tampered" })).toBe("FAIL")
+    expect(classifyProfileGateStatuses("PASS", "PASS")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      overallStatus: "PASS",
+      exitCode: 0,
+    })
+    expect(classifyProfileGateStatuses("FAIL", "PASS").overallStatus).toBe("FAIL")
   })
 
   test.each([

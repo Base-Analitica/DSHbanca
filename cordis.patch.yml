@@ -10,6 +10,8 @@
         description: Auditor acadêmico DSHbanca com instruções de workspace restritas a este preset.
         plugins:
           - name: '@deepseek-ai/dsh-agent-instructions'
+            inject:
+              - fs
             config:
               maxBytes: 65536
               instructionFileCandidates:

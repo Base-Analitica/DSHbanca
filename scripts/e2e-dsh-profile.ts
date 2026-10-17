@@ -25,6 +25,8 @@ import {
   missingHostExitCode,
   passExitCode,
   failureExitCode,
+  classifyAuditorMarkdownStatus,
+  classifyProfileGateStatuses,
   validateAuditorMarkdownEvidence,
   validateEvidence,
   validateProfileEvidence,
@@ -1256,14 +1258,11 @@ async function main(): Promise<void> {
   const errors = validateEvidence(observed)
   const auditorMarkdownEvidence = observed.auditorMarkdownEvidence
   const auditorMarkdownErrors = validateAuditorMarkdownEvidence(auditorMarkdownEvidence)
-  const auditorMarkdownDistributionErrors = auditorMarkdownErrors.filter((error) =>
-    error === "canonical auditor Markdown is missing or altered" ||
-    error === "installed auditor Markdown differs from canonical source" ||
-    error === "loader-root auditor Markdown differs from canonical source"
-  )
-  const auditorMarkdownStatus = auditorMarkdownErrors.length === 0
-    ? "PASS"
-    : auditorMarkdownDistributionErrors.length > 0 ? "FAIL" : "BLOCKED"
+  const auditorMarkdownStatus = classifyAuditorMarkdownStatus(auditorMarkdownEvidence)
+  const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
+  report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
+  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus)
+  report.stages.gateSummary = gateStatuses
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
     toolNames: observed.toolNames,
@@ -1342,7 +1341,7 @@ async function main(): Promise<void> {
     fail("A prerequisite step unexpectedly changed the checkout before profile boot")
     return
   }
-  finalStatus = "PASS"
+  finalStatus = gateStatuses.overallStatus
 }
 
 try {
