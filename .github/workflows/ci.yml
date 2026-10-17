@@ -30,6 +30,14 @@ jobs:
       - name: Run Tests
         run: bun test
 
+      - name: Run native DSH profile E2E on a provisioned runner
+        if: ${{ vars.DSH_PROFILE_E2E_ENABLED == 'true' }}
+        run: bun run e2e:dsh:profile
+
+      - name: Report native DSH profile E2E as blocked when DSH is unavailable
+        if: ${{ vars.DSH_PROFILE_E2E_ENABLED != 'true' }}
+        run: 'echo "::warning title=BLOCKED: DSH profile E2E::Not executed because this runner is not provisioned with DSH and the offline pnpm package cache. Ordinary CI success does not validate native DSH profile loading."'
+
       - name: Run Validation Script
         run: bash scripts/validate.sh
 

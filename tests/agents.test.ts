@@ -326,7 +326,7 @@ describe("Agent Validation", () => {
     try {
       installAssets(tmpProject, true, nonexistentDir);
 
-      const installedAgentsDir = join(tmpProject, ".opencode", "agents");
+      const installedAgentsDir = join(tmpProject, ".dsh", "agents");
       expect(existsSync(installedAgentsDir)).toBe(true);
 
       const expectedAgents = [
@@ -337,7 +337,7 @@ describe("Agent Validation", () => {
         "banca-loop.md"
       ];
 
-      const versionedDir = join(process.cwd(), "assets", "opencode", "agents");
+      const versionedDir = join(process.cwd(), "assets", "dsh", "agents");
 
       for (const agent of expectedAgents) {
         const fallbackPath = join(installedAgentsDir, agent);
@@ -371,7 +371,7 @@ describe("Agent Validation", () => {
     try {
       installAssets(tmpProject, true); // normal copy from assets
 
-      const installedAgentsDir = join(tmpProject, ".opencode", "agents");
+      const installedAgentsDir = join(tmpProject, ".dsh", "agents");
       expect(existsSync(installedAgentsDir)).toBe(true);
 
       const res = runValidator(installedAgentsDir);

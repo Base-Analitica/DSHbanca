@@ -1,7 +1,9 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs"
+import { readFileSync, existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
+import { ensureRealDirInsideRoot, PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
 import { loadCanonicalLatexManuscript } from "../lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../lib/analysis_coverage"
 import {
@@ -16,12 +18,11 @@ import {
   loadAnalysisCheckpoint,
   saveAnalysisCheckpoint,
 } from "../lib/state"
-const z = tool.schema
 
 /**
  * Format checkpoint errors for the tool surface.
  * AnalysisCheckpointError messages are assumed safe at source (no absolute paths).
- * Unexpected errors never surface raw host messages.
+ * Unexpected errors never surface raw host exception messages.
  */
 function formatCheckpointError(err: unknown): string {
   if (err instanceof AnalysisCheckpointError) {
@@ -38,7 +39,7 @@ function formatCheckpointError(err: unknown): string {
   ].join("\n")
 }
 
-export const bancaContext = tool({
+export const bancaContext = defineBancaTool({
   description:
     "Build context pack from the canonical manuscript plan and the persisted exhaustive-analysis checkpoint. Progress advances only when completedBatchId is supplied.",
   args: {
@@ -252,10 +253,15 @@ export const bancaContext = tool({
       parts.push(...optionalParts)
     }
 
-    const ctxDir = join(root, ".banca", "context")
-    mkdirSync(ctxDir, { recursive: true })
-    const out = join(ctxDir, `context-${Date.now()}.md`)
-    writeFileSync(out, parts.join("\n"), "utf-8")
+    let out = ""
+    try {
+      const ctxDir = ensureRealDirInsideRoot(root, join(root, ".banca", "context"))
+      out = resolveRealInsideRoot(root, join(ctxDir, `context-${Date.now()}.md`))
+      writeFileSync(out, parts.join("\n"), "utf-8")
+    } catch (err) {
+      if (err instanceof PathTraversalError) return "context blocked: context pack path escapes workspace root"
+      throw err
+    }
     return `context → ${out}`
   },
 })

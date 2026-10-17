@@ -1,5 +1,6 @@
-import { writeFileSync, existsSync, mkdirSync } from "node:fs"
+import { writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { prepareRealPathForWrite, resolveInsideRoot } from "./safe_paths"
 
 export type ReportSection = {
   title: string
@@ -21,9 +22,10 @@ export function generateReport(title: string, sections: ReportSection[]): string
 }
 
 export function saveReport(projectRoot: string, filename: string, content: string): string {
-  const reportDir = join(projectRoot, ".banca", "reports")
-  if (!existsSync(reportDir)) mkdirSync(reportDir, { recursive: true })
-  const path = join(reportDir, filename)
-  writeFileSync(path, content, "utf-8")
-  return path
+  const target = prepareRealPathForWrite(
+    projectRoot,
+    resolveInsideRoot(projectRoot, join(".banca", "reports", filename)),
+  )
+  writeFileSync(target, content, "utf-8")
+  return target
 }

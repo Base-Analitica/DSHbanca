@@ -415,11 +415,11 @@ export function verifyAgents(output: string, projectRoot?: string): string {
   if (projectRoot) {
     const missingLocal: string[] = [];
     for (const a of AGENTS_REQUIRED) {
-      const p = join(projectRoot, ".opencode", "agents", `${a}.md`);
+      const p = join(projectRoot, ".dsh/agents", `${a}.md`);
       if (!existsSync(p)) missingLocal.push(a);
     }
     if (missingLocal.length > 0) {
-      return `NO_MODEL_DISCOVERY_FAILED — agents not present under project .opencode/agents: ${missingLocal.join(", ")}`;
+      return `NO_MODEL_DISCOVERY_FAILED — agents not present under project .dsh/agents: ${missingLocal.join(", ")}`;
     }
   }
 
@@ -427,9 +427,9 @@ export function verifyAgents(output: string, projectRoot?: string): string {
 }
 
 /**
- * Skills discovery must prove provenance from the temporary project `.opencode/skills`.
- * A global copy with the same names must not satisfy the check.
- */
+  * Skills discovery must prove provenance from the temporary project `.dsh/skills`.
+  * A global copy with the same names must not satisfy the check.
+  */
 export function verifySkills(output: string, projectRoot?: string): string {
   // Prefer structured JSON (debug skill emits an array with location fields).
   let entries: Array<{ name?: string; location?: string }> = [];
@@ -471,7 +471,7 @@ export function verifySkills(output: string, projectRoot?: string): string {
     for (const s of SKILLS_REQUIRED) {
       const entry = byName.get(s)!;
       const loc = entry.location;
-      const expectedDir = resolve(rootResolved, ".opencode", "skills", s);
+       const expectedDir = resolve(rootResolved, ".dsh", "skills", s);
       const expectedFile = join(expectedDir, "SKILL.md");
       if (!loc) {
         badProvenance.push(`${s} (missing location)`);
@@ -483,7 +483,7 @@ export function verifySkills(output: string, projectRoot?: string): string {
         locResolved.startsWith(expectedDir + "/") ||
         locResolved.startsWith(expectedDir + "\\");
       if (!underProject) {
-        badProvenance.push(`${s} (location outside project .opencode/skills)`);
+         badProvenance.push(`${s} (location outside project .dsh/skills)`);
       }
       if (!existsSync(expectedFile)) {
         badProvenance.push(`${s} (local SKILL.md absent)`);
@@ -2712,9 +2712,8 @@ export function resolveOpencodeProjectRoot(opts: {
 }
 
 /**
- * Env keys preserved when isolating host config/plugins.
- * Intentionally excludes NODE_OPTIONS, BUN_INSTALL, XDG_RUNTIME_DIR and other
- * host runtime pointers that are not credentials and can re-couple isolation to the host.
+ * Allowlist available to the isolated runner. Credential entries are copied only
+ * when seedAuth is explicitly true. Host runtime pointers remain excluded.
  */
 export const PRESERVED_ENV_KEYS = [
   "OPENCODE_API_KEY",
@@ -2733,8 +2732,31 @@ export const PRESERVED_ENV_KEYS = [
   "TEMP",
 ] as const;
 
-/** @deprecated use PRESERVED_ENV_KEYS — kept as alias for clarity in reviews */
-const AUTH_ENV_ALLOWLIST = PRESERVED_ENV_KEYS;
+const HOST_AUTH_ENV_KEYS = new Set([
+  "OPENCODE_API_KEY",
+  "OPENCODE_AUTH_CONTENT",
+  "OPENCODE_SERVER_PASSWORD",
+  "OPENCODE_SERVER_USERNAME",
+]);
+
+export const OPENCODE_MODEL_E2E_OPT_IN = "DSHBANCA_ENABLE_OPENCODE_MODEL_E2E";
+export const OPENCODE_HOST_AUTH_OPT_IN = "DSHBANCA_ALLOW_OPENCODE_E2E_HOST_AUTH";
+
+/** A real-model OpenCode test requires a specific opt-in, explicit model, and separate auth consent. */
+export function opencodeModelE2eOptInError(
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  if (env[OPENCODE_MODEL_E2E_OPT_IN] !== "1") {
+    return `${OPENCODE_MODEL_E2E_OPT_IN}=1 is required`;
+  }
+  if (!env.OPENCODE_E2E_MODEL?.trim()) {
+    return "OPENCODE_E2E_MODEL must explicitly name the model; no default model is selected";
+  }
+  if (env[OPENCODE_HOST_AUTH_OPT_IN] !== "1") {
+    return `${OPENCODE_HOST_AUTH_OPT_IN}=1 is required before host credentials may be used`;
+  }
+  return undefined;
+}
 
 export type ProjectRunEnvOptions = {
   /** Absolute isolated HOME (no host plugins/skills/agents). */
@@ -2745,7 +2767,7 @@ export type ProjectRunEnvOptions = {
   base?: NodeJS.ProcessEnv;
   /** Host home used only to seed auth credentials into the isolated data dir. */
   hostHome?: string;
-  /** When true (default), copy host auth.json into isolated XDG data if present. */
+  /** When true, explicitly allow copying host auth.json and passing allowlisted auth vars. Defaults to false. */
   seedAuth?: boolean;
 };
 
@@ -2753,7 +2775,7 @@ export type ProjectRunEnvOptions = {
  * Env for project-local behavioral OpenCode runs.
  * Forces PWD to the project root and redirects HOME/XDG/OPENCODE_CONFIG_DIR to
  * isolated temps so host global plugins cannot satisfy tool events.
- * Auth is preserved via allowlisted env vars and optional seeded auth.json only.
+ * Host auth is never read or propagated unless seedAuth is explicitly true.
  */
 export function buildProjectRunEnv(
   projectRoot: string,
@@ -2783,12 +2805,14 @@ export function buildProjectRunEnv(
   mkdirSync(isoCache, { recursive: true });
   mkdirSync(join(isoHome, ".config"), { recursive: true });
 
-  if (opts.seedAuth !== false) {
+  const allowHostAuth = opts.seedAuth === true;
+  if (allowHostAuth) {
     seedIsolatedAuth(isoHome, opts.hostHome || process.env.HOME || homedir());
   }
 
   const env: NodeJS.ProcessEnv = {};
-  for (const key of AUTH_ENV_ALLOWLIST) {
+  for (const key of PRESERVED_ENV_KEYS) {
+    if (!allowHostAuth && HOST_AUTH_ENV_KEYS.has(key)) continue;
     if (base[key] !== undefined) env[key] = base[key];
   }
 
@@ -2799,7 +2823,7 @@ export function buildProjectRunEnv(
   env.XDG_CONFIG_HOME = join(isoHome, ".config");
   env.XDG_DATA_HOME = isoData;
   env.XDG_CACHE_HOME = isoCache;
-  // Block host default plugins / external skills; project .opencode still loads.
+  // Block host default plugins / external skills; project .dsh still loads.
   env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1";
   env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
   env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
@@ -3611,6 +3635,13 @@ function buildIsolatedDiscoveryEnv(
 }
 
 async function run() {
+  const optInError = opencodeModelE2eOptInError();
+  if (optInError) {
+    console.error(`BLOCKED: OpenCode model E2E is disabled by default. ${optInError}`);
+    process.exitCode = 2;
+    return;
+  }
+
   const repositoryRoot = process.cwd();
   const report: string[] = [];
 
@@ -3811,7 +3842,7 @@ async function run() {
     const preHashTex = preHashes.get("main.tex")!;
     const preHashBib = preHashes.get("referencias.bib")!;
 
-    const commandsDir = join(tmpProjectInit, ".opencode", "commands");
+    const commandsDir = join(tmpProjectInit, ".dsh", "commands");
     mkdirSync(commandsDir, { recursive: true });
     const initCmdSrc = join(repositoryRoot, "assets", "opencode", "commands", "banca-init.md");
     if (existsSync(initCmdSrc)) {
@@ -3821,7 +3852,7 @@ async function run() {
       discoveryAgentsOutcome = "FAIL";
     }
 
-    const pluginsDir = join(tmpProjectInit, ".opencode", "plugins");
+    const pluginsDir = join(tmpProjectInit, ".dsh", "plugins");
     mkdirSync(pluginsDir, { recursive: true });
     const builtPluginPath = join(repositoryRoot, "dist", "index.js");
     const builtPluginUrl = pathToFileURL(builtPluginPath).href;
@@ -3832,7 +3863,7 @@ async function run() {
     );
 
     report.push(
-      `Plugin loading mechanism:\nProject-local .opencode/plugins/openbanca-e2e.ts wrapper importing ${SF(builtPluginUrl, 300)}`
+      `Plugin loading mechanism:\nProject-local .dsh/plugins/openbanca-e2e.ts wrapper importing ${SF(builtPluginUrl, 300)}`
     );
 
     const discEnv = buildIsolatedDiscoveryEnv(isoHome, isoConfig, tmpProjectDisc);
@@ -3919,7 +3950,7 @@ async function run() {
     );
     report.push(`Auth seed: ${authSeed.seeded ? "copied-to-isolated-data-home" : "not-present"}`);
     report.push(
-      `Plugin provenance: project-local .opencode/plugins/openbanca-e2e.ts → stamped dist (host plugins excluded)`
+      `Plugin provenance: project-local .dsh/plugins/openbanca-e2e.ts → stamped dist (host plugins excluded)`
     );
     report.push(
       `OpenCode root resolution check: ${SF(
@@ -3965,7 +3996,7 @@ async function run() {
       if (!isTimedOut(initResult) && initResult.status === 0) {
         const { foundTool, foundSuccess } = verifyInitEvents(initEvents);
 
-        const skillsDir = join(tmpProjectInit, ".opencode", "skills");
+        const skillsDir = join(tmpProjectInit, ".dsh", "skills");
         let skillMdCount = 0;
         let exactSkills = false;
         if (existsSync(skillsDir)) {
@@ -3978,7 +4009,7 @@ async function run() {
           }
         }
 
-        const agentsDir = join(tmpProjectInit, ".opencode", "agents");
+        const agentsDir = join(tmpProjectInit, ".dsh/agents");
         let exactAgents = false;
         if (existsSync(agentsDir)) {
           const files = readdirSync(agentsDir).filter(

@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, cpSync, readdirSync, writeFileSync } from "node:fs"
+import { existsSync, cpSync, lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, dirname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
+import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -763,14 +764,12 @@ function getFilesRecursively(dir: string): string[] {
   return results
 }
 
-function copyDirectory(src: string, dest: string, force: boolean, installed: string[]) {
+function copyDirectory(projectRoot: string, src: string, dest: string, force: boolean, installed: string[]) {
   if (!existsSync(src)) return
   const files = getFilesRecursively(src)
   for (const file of files) {
     const rel = relative(src, file)
-    const destPath = join(dest, rel)
-    const destDir = dirname(destPath)
-    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
+    const destPath = prepareRealPathForWrite(projectRoot, join(dest, rel))
     if (!existsSync(destPath) || force) {
       cpSync(file, destPath)
       installed.push(destPath)
@@ -781,57 +780,112 @@ function copyDirectory(src: string, dest: string, force: boolean, installed: str
 export function installAssets(projectRoot: string, force: boolean, customAssetsDir?: string): string[] {
   const installed: string[] = []
 
+  const pluginAssetsDir = customAssetsDir || join(__dirname, "..", "..", "assets")
+  const versionedAuditor = join(pluginAssetsDir, "dsh", "agents", "banca-auditor.md")
+  const expectedAuditor = existsSync(versionedAuditor)
+    ? readFileSync(versionedAuditor)
+    : Buffer.from(AGENTS["banca-auditor.md"], "utf8")
+  const existingAuditorAsset = join(projectRoot, ".dsh", "agents", "banca-auditor.md")
+  const auditorLoaderCopy = join(projectRoot, "banca-auditor.md")
+
+  // Preflight both instruction destinations before any installer writes. This
+  // keeps a user-owned root file collision from leaving a partially installed
+  // .dsh/.banca tree behind, even when force is enabled.
+  for (const [path, label] of [[existingAuditorAsset, "installed"], [auditorLoaderCopy, "loader"]] as const) {
+    try {
+      const stat = lstatSync(path)
+      if (!stat.isFile()) throw new Error(`${label} banca-auditor instructions must be a regular file`)
+      const safePath = resolveRealInsideRoot(projectRoot, path)
+      if (!readFileSync(safePath).equals(expectedAuditor)) {
+        throw new Error(`${label} banca-auditor instructions differ from the canonical source`)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  }
+  prepareRealPathForWrite(projectRoot, auditorLoaderCopy)
+
+  // Preflight: the asset roots themselves must resolve inside the workspace
+  // before anything is written. A symlinked `.dsh`/`.banca` pointing outside
+  // blocks the whole installation with no partial external changes.
+  resolveRealInsideRoot(projectRoot, join(projectRoot, ".dsh"))
+  resolveRealInsideRoot(projectRoot, join(projectRoot, ".banca"))
+
   function write(path: string, content: string) {
-    const dir = dirname(path)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    if (!existsSync(path) || force) {
-      writeFileSync(path, content, "utf-8")
-      installed.push(path)
+    const target = prepareRealPathForWrite(projectRoot, path)
+    if (!existsSync(target) || force) {
+      writeFileSync(target, content, "utf-8")
+      installed.push(target)
     }
   }
 
-  const pluginAssetsDir = customAssetsDir || join(__dirname, "..", "..", "assets")
-
   if (existsSync(pluginAssetsDir)) {
-    // Install versioned agents
-    copyDirectory(join(pluginAssetsDir, "opencode", "agents"), join(projectRoot, ".opencode", "agents"), force, installed)
-    copyDirectory(join(pluginAssetsDir, "opencode", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
-    
+    // Install versioned agents (DSH-native)
+    copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
+
+    // Install versioned skills (DSH-native)
+    copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
+
     // Install versioned commands
-    copyDirectory(join(pluginAssetsDir, "opencode", "commands"), join(projectRoot, ".opencode", "commands"), force, installed)
-    
-    // Install versioned skills (OpenCode + DSH)
-    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".opencode", "skills"), force, installed)
-    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
-    copyDirectory(join(pluginAssetsDir, "opencode", "skills"), join(projectRoot, ".agents", "skills"), force, installed)
-    
+    copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "commands"), join(projectRoot, ".dsh", "commands"), force, installed)
+
     // Install versioned templates
-    copyDirectory(join(pluginAssetsDir, "templates"), join(projectRoot, ".banca"), force, installed)
+    copyDirectory(projectRoot, join(pluginAssetsDir, "templates"), join(projectRoot, ".banca"), force, installed)
   } else {
-    // Fallback agents
+    // Fallback agents (DSH-native)
     for (const [name, content] of Object.entries(AGENTS)) {
-      write(join(projectRoot, ".opencode", "agents", name), content)
       write(join(projectRoot, ".dsh", "agents", name), content)
     }
 
-    // Fallback commands
+    // Fallback commands (DSH-native)
     for (const [name, content] of Object.entries(COMMANDS)) {
-      write(join(projectRoot, ".opencode", "commands", name), content)
+      write(join(projectRoot, ".dsh", "commands", name), content)
     }
 
-    // Fallback skills
+    // Fallback skills (DSH-native)
     for (const [skillName, files] of Object.entries(SKILLS)) {
       for (const [fileName, content] of Object.entries(files)) {
-        write(join(projectRoot, ".opencode", "skills", skillName, fileName), content)
         write(join(projectRoot, ".dsh", "skills", skillName, fileName), content)
-        write(join(projectRoot, ".agents", "skills", skillName, fileName), content)
       }
     }
   }
 
+  // The native DSH instructions loader resolves basename candidates relative
+  // to the Agent workspace. Keep the established .dsh installation, and add
+  // one regular workspace-root copy derived from that installed canonical
+  // asset. Never replace a user file or follow a workspace alias here.
+  const auditorSource = join(projectRoot, ".dsh", "agents", "banca-auditor.md")
+  const sourceStat = lstatSync(auditorSource)
+  if (!sourceStat.isFile()) {
+    throw new Error("canonical banca-auditor instructions must be a regular file")
+  }
+  const sourceContent = readFileSync(auditorSource)
+  if (!sourceContent.equals(expectedAuditor)) {
+    throw new Error("installed banca-auditor instructions differ from the canonical source")
+  }
+  let destinationStat
+  try {
+    destinationStat = lstatSync(auditorLoaderCopy)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  if (destinationStat) {
+    if (!destinationStat.isFile()) {
+      throw new Error("banca-auditor loader destination must be a regular file")
+    }
+    const destination = resolveRealInsideRoot(projectRoot, auditorLoaderCopy)
+    if (!readFileSync(destination).equals(sourceContent)) {
+      throw new Error("banca-auditor loader destination collides with an existing workspace file")
+    }
+  } else {
+    const target = prepareRealPathForWrite(projectRoot, auditorLoaderCopy)
+    writeFileSync(target, sourceContent, { flag: "wx" })
+    installed.push(target)
+  }
+
   // Ensure default templates exist (write them if not already copied from versioned folder)
   for (const [name, content] of Object.entries(TEMPLATES)) {
-    const destPath = join(projectRoot, ".banca", name)
+    const destPath = resolveRealInsideRoot(projectRoot, join(projectRoot, ".banca", name))
     // Check if it was already installed via versioned copy
     if (!installed.includes(destPath)) {
       write(destPath, content)

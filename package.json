@@ -32,16 +32,17 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && bun build src/lib/tools.ts --target=node --packages=external --outfile=dist/lib/tools.js",
     "dev": "tsc --watch",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "validate:skills": "bun run scripts/validate-skills.ts",
     "validate:agents": "bun run scripts/validate-agents.ts",
+    "e2e:dsh:profile": "bun run scripts/e2e-dsh-profile.ts",
     "e2e:opencode": "bun run build && bun run scripts/e2e-opencode.ts"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.17.13"
+    "zod": "^4.1.8"
   },
   "devDependencies": {
     "@types/node": "20.19.43",

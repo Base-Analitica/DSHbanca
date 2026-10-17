@@ -1,12 +1,11 @@
 import { existsSync, readdirSync } from "node:fs"
 import { join } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { loadState } from "../lib/state"
-const z = tool.schema
-
-export const bancaStatus = tool({
+export const bancaStatus = defineBancaTool({
   description: "Show banca project status from config + state.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

@@ -12,7 +12,7 @@ describe("Command Assets Validation", () => {
     try {
       installAssets(tmpProject, true, nonexistentDir);
 
-      const installedCommandsDir = join(tmpProject, ".opencode", "commands");
+      const installedCommandsDir = join(tmpProject, ".dsh", "commands");
       expect(existsSync(installedCommandsDir)).toBe(true);
 
       const expectedCommands = [
@@ -21,7 +21,7 @@ describe("Command Assets Validation", () => {
         "banca-auditar.md",
       ];
 
-      const versionedDir = join(process.cwd(), "assets", "opencode", "commands");
+      const versionedDir = join(process.cwd(), "assets", "dsh", "commands");
 
       for (const cmd of expectedCommands) {
         const fallbackPath = join(installedCommandsDir, cmd);
@@ -39,7 +39,7 @@ describe("Command Assets Validation", () => {
       expect(files.length).toBe(expectedCommands.length);
       expect(files).not.toContain("banca:init.md");
 
-      // Verify no invalid Windows characters inside assets/opencode/commands
+      // Verify no invalid Windows characters inside assets/dsh/commands
       const repoCommands = readdirSync(versionedDir);
       for (const repoFile of repoCommands) {
         expect(repoFile).not.toMatch(/:/);
