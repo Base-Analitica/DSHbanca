@@ -16,7 +16,16 @@ import { createHash } from "node:crypto"
 import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
-import { expectedTools, missingHostExitCode, passExitCode, failureExitCode, validateEvidence, validateProfileEvidence } from "./lib/dsh-profile-e2e-contract.js"
+import {
+  canonicalAuditorMarkdownSha256,
+  expectedTools,
+  missingHostExitCode,
+  passExitCode,
+  failureExitCode,
+  validateAuditorMarkdownEvidence,
+  validateEvidence,
+  validateProfileEvidence,
+} from "./lib/dsh-profile-e2e-contract.js"
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH?.trim()
@@ -70,6 +79,7 @@ const report: GateReport = {
     dshTools: null,
     dshAgentPreset: null,
     dshAgentPresetRegistry: null,
+    dshAgentInstructions: null,
     dshApiSessionController: null,
     node: process.version,
     bun: null,
@@ -78,7 +88,10 @@ const report: GateReport = {
   sandbox: { isolated: false, removed: null },
   stages: {},
   failures: [],
-  limitations: ["Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos."],
+  limitations: [
+    "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
+    "O resultado da identidade/guard (#2) e o carregamento das instruções Markdown (#3) são reportados separadamente.",
+  ],
 }
 
 let scratchRoot: string | undefined
@@ -274,7 +287,13 @@ function ensureInside(base: string, path: string): void {
   }
 }
 
-function createObserverPackage(observerRoot: string, workspace: string, observerResult: string): void {
+function createObserverPackage(
+  observerRoot: string,
+  workspace: string,
+  observerResult: string,
+  auditorMarkdownSourceSha256: string | null,
+  auditorMarkdownSourceSha1: string | null,
+): void {
   mkdirSync(observerRoot, { recursive: true, mode: 0o700 })
   writeFileSync(join(observerRoot, "package.json"), JSON.stringify({
     name: observerName,
@@ -290,7 +309,10 @@ import { join } from "node:path";
 export const name = ${JSON.stringify(observerName)};
 export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections"];
 const expected = ${JSON.stringify(expectedTools)};
+const auditorMarkdownSourceSha256 = ${JSON.stringify(auditorMarkdownSourceSha256)};
+const auditorMarkdownSourceSha1 = ${JSON.stringify(auditorMarkdownSourceSha1)};
 const sha = async (path) => createHash("sha256").update(await readFile(path)).digest("hex");
+const sha1 = async (path) => createHash("sha1").update(await readFile(path)).digest("hex");
 const inventory = async (root, prefix = "") => {
   const result = {};
   const entries = (await readdir(root, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
@@ -346,6 +368,14 @@ export async function apply(ctx) {
   if (!auditorPresetRow || auditorPresetRow.broken) fail("the host AgentPresetRegistry did not load a usable banca-auditor declaration");
   const resolvedPreset = await ctx.agentPresets.resolve("banca-auditor");
   if (resolvedPreset.id !== "banca-auditor" || resolvedPreset.broken) fail("the DSH host did not validate the banca-auditor preset");
+  const presetDocument = typeof ctx.agentPresets.readDocument === "function"
+    ? await ctx.agentPresets.readDocument("banca-auditor")
+    : undefined;
+  const presetCompositionContent = typeof presetDocument?.content === "string" ? presetDocument.content : "";
+  const presetCompositionHasInstructionLoader = presetCompositionContent.includes("@deepseek-ai/dsh-agent-instructions");
+  const presetCompositionSha256 = presetCompositionContent.length > 0
+    ? createHash("sha256").update(presetCompositionContent).digest("hex")
+    : null;
 
   const auditorHandle = await ctx.agents.create({
     sessionId: "session-dshbanca-e2e-auditor-" + process.pid + "-" + Date.now(),
@@ -370,6 +400,15 @@ export async function apply(ctx) {
     for (const file of files) {
       try { await readFile(join(workspace, file)); }
       catch { fail("banca_init did not create the expected synthetic project state"); }
+    }
+    const installedAuditorMarkdownPath = join(workspace, ".dsh", "agents", "banca-auditor.md");
+    let installedAuditorMarkdownSha256 = null;
+    let installedAuditorMarkdownSha1 = null;
+    try {
+      installedAuditorMarkdownSha256 = await sha(installedAuditorMarkdownPath);
+      installedAuditorMarkdownSha1 = await sha1(installedAuditorMarkdownPath);
+    } catch {
+      // Missing installed instructions are captured as a BLOCKED/FAIL issue #3 result below.
     }
 
     const baselineText = "\\\\documentclass{article}\\n\\\\begin{document}\\nBASELINE_SENTINEL synthetic manuscript.\\n\\\\end{document}\\n";
@@ -406,6 +445,18 @@ export async function apply(ctx) {
       effectivePreset !== "banca-auditor" ||
       sessionPresetProjection !== "banca-auditor"
     ) fail("native DSH preset selection did not produce a live banca-auditor Agent composition");
+
+    const instructionSources = [
+      ...agent.inbox.nextStep
+        .filter((message) => message?.source?.kind === "agent-instructions")
+        .map((message) => message.source),
+      ...session.snapshotEvents()
+        .filter((event) => event.type === "user/message" && event.data?.source?.kind === "agent-instructions")
+        .map((event) => event.data.source),
+    ];
+    const loadedSourceSha1 = instructionSources
+      .flatMap((source) => Array.isArray(source?.changes) ? source.changes : [])
+      .find((change) => change?.path === ".dsh/agents/banca-auditor.md")?.digest ?? null;
 
     const turnEventsBeforeGuard = modelEventCount(session);
     if (turnEventsBeforeGuard !== 0) fail("a model-facing turn/request event appeared before the guard checks");
@@ -554,8 +605,35 @@ export async function apply(ctx) {
         toolRuntimeExecute: typeof ctx.tools?.execute === "function",
         agentPresetRegistrySelect: typeof ctx.agentPresets?.select === "function",
         agentPresetRegistryComposedPreset: typeof ctx.agentPresets?.composedPreset === "function",
+        agentPresetRegistryReadDocument: typeof ctx.agentPresets?.readDocument === "function",
         sessionControllerCreate: typeof sessionController?.create === "function",
         sessionControllerPrompt: typeof sessionController?.prompt === "function",
+      },
+      auditorMarkdownEvidence: {
+        sourcePath: "assets/dsh/agents/banca-auditor.md",
+        sourceSha256: auditorMarkdownSourceSha256,
+        sourceSha1: auditorMarkdownSourceSha1,
+        installedPath: ".dsh/agents/banca-auditor.md",
+        installedSha256: installedAuditorMarkdownSha256,
+        installedSha1: installedAuditorMarkdownSha1,
+        hostDiscovered: loadedSourceSha1 === auditorMarkdownSourceSha1,
+        presetId: "banca-auditor",
+        presetDeclarationSource: "temporary DSH Cordis overlay fixture",
+        presetCompositionSha256,
+        presetCompositionEmpty: presetCompositionContent.trim() === "[]" || presetCompositionContent.trim() === "",
+        presetCompositionHasInstructionLoader,
+        instructionContextMessageCount: instructionSources.length,
+        loadedSourceSha1,
+        nativePreStepObserved: instructionSources.length > 0,
+        agentAndSessionIdMatch: agent.id === session.id,
+        agentRegistryContainsAgent: ctx.agents.get(agent.id) === agent,
+        sessionStoreContainsSession: ctx.sessions.get(agent.id) === session,
+        effectivePreset,
+        sessionPresetProjection,
+        syntheticContext: false,
+        syntheticPresetFixture: true,
+        modelCalls: auditorEventsAfterChecks,
+        credentialsUsed: false,
       },
       toolNames: tools,
       exactToolSet: true,
@@ -754,6 +832,7 @@ async function main(): Promise<void> {
     ["dshTools", "@deepseek-ai/dsh-tools"],
     ["dshAgentPreset", "@deepseek-ai/dsh-agent-preset"],
     ["dshAgentPresetRegistry", "@deepseek-ai/dsh-agent-preset-registry"],
+    ["dshAgentInstructions", "@deepseek-ai/dsh-agent-instructions"],
     ["dshApiSessionController", "@deepseek-ai/dsh-api-session-controller"],
   ] as const
   for (const [key, packageName] of hostPackageVersions) {
@@ -825,12 +904,17 @@ async function main(): Promise<void> {
   const observerRoot = join(scratch, "observer")
   const workspace = join(scratch, "synthetic-project")
   const observerResult = join(scratch, "observer-result.json")
+  const auditorMarkdownSourcePath = join(repositoryRoot, "assets", "dsh", "agents", "banca-auditor.md")
+  const auditorMarkdownSourceSha256 = existsSync(auditorMarkdownSourcePath) ? hashFile(auditorMarkdownSourcePath) : null
+  const auditorMarkdownSourceSha1 = existsSync(auditorMarkdownSourcePath)
+    ? createHash("sha1").update(readFileSync(auditorMarkdownSourcePath)).digest("hex")
+    : null
   mkdirSync(workspace, { recursive: true, mode: 0o700 })
   mkdirSync(join(workspace, "capitulos"), { recursive: true, mode: 0o700 })
   writeFileSync(join(workspace, "main.tex"), "\\documentclass{article}\n\\begin{document}\nTexto acadêmico sintético de validação.\\end{document}\n", { mode: 0o600 })
   writeFileSync(join(workspace, "referencias.bib"), "@article{synthetic2026, title={Referência Sintética}, author={Pessoa, Exemplo}, year={2026}}\n", { mode: 0o600 })
   writeFileSync(join(workspace, "capitulos", "introducao.tex"), "Introdução sintética para teste do DSHbanca.\n", { mode: 0o600 })
-  createObserverPackage(observerRoot, workspace, observerResult)
+  createObserverPackage(observerRoot, workspace, observerResult, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1)
   const overlayPath = join(scratch, "observer.patch.yml")
   writeFileSync(overlayPath, `- insert:\n    - id: dshbanca-e2e-agent-preset-registry\n      name: '@deepseek-ai/dsh-agent-preset-registry'\n      config:\n        default: banca-auditor\n    - id: dshbanca-e2e-auditor-preset\n      name: '@deepseek-ai/dsh-agent-preset'\n      config:\n        id: banca-auditor\n        name: banca-auditor\n        description: 'Temporary no-model DSH identity fixture for the native guard E2E.'\n        plugins: []\n    - id: dshbanca-e2e-observer\n      name: ${observerName}\n`, { mode: 0o600 })
 
@@ -920,6 +1004,15 @@ async function main(): Promise<void> {
   }
   const observed = JSON.parse(readFileSync(observerResult, "utf8"))
   const errors = validateEvidence(observed)
+  const auditorMarkdownEvidence = observed.auditorMarkdownEvidence
+  const auditorMarkdownErrors = validateAuditorMarkdownEvidence(auditorMarkdownEvidence)
+  const auditorMarkdownDistributionErrors = auditorMarkdownErrors.filter((error) =>
+    error === "canonical auditor Markdown is missing or altered" ||
+    error === "installed auditor Markdown differs from canonical source"
+  )
+  const auditorMarkdownStatus = auditorMarkdownErrors.length === 0
+    ? "PASS"
+    : auditorMarkdownDistributionErrors.length > 0 ? "FAIL" : "BLOCKED"
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
     toolNames: observed.toolNames,
@@ -943,6 +1036,35 @@ async function main(): Promise<void> {
     agentTeardown: observed.agentTeardown,
     externalActivity: observed.externalActivity,
     hostApiSurvey: observed.hostApiSurvey,
+  }
+  report.stages.auditorMarkdown = {
+    status: auditorMarkdownStatus,
+    evidence: auditorMarkdownEvidence,
+    validationErrors: auditorMarkdownErrors,
+    hostContract: {
+      agentPresetRegistry: {
+        version: report.versions.dshAgentPresetRegistry,
+        readDocument: "reads a declared preset's child plugin list as YAML",
+        markdownAgentImportObserved: false,
+      },
+      agentInstructions: {
+        version: report.versions.dshAgentInstructions,
+        defaultCandidates: ["AGENTS.md", "CLAUDE.md"],
+        configuredCandidatesMustBeBasenames: true,
+        projectionHook: "agent/pre-step",
+        publicNoModelProjectionApiObserved: false,
+      },
+    },
+    blocker: auditorMarkdownStatus === "BLOCKED"
+      ? "The real DSH profile installed the canonical Markdown, but the native preset fixture is empty and no public no-model DSH path exposed loaded instruction content on the live Agent/Session. The native agent/pre-step projection was not invoked."
+      : null,
+  }
+  if (auditorMarkdownStatus === "FAIL") {
+    fail(`Issue #3 auditor Markdown source/install integrity failed: ${auditorMarkdownErrors.join("; ")}`)
+    return
+  }
+  if (auditorMarkdownStatus === "BLOCKED") {
+    report.limitations.push("Issue #3 auditor Markdown loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
   if (errors.length > 0) {
     fail(`Real DSH runtime evidence violated the profile contract: ${errors.join("; ")}`)
@@ -1006,7 +1128,10 @@ try {
   }
 }
 
-process.stdout.write(`${finalStatus}: DSH native profile gate\n`)
+const auditorMarkdownStatus = typeof report.stages.auditorMarkdown === "object" && report.stages.auditorMarkdown !== null
+  ? (report.stages.auditorMarkdown as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)

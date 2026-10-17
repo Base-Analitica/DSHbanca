@@ -1,12 +1,40 @@
 import { describe, expect, test } from "bun:test"
 import {
+  canonicalAuditorMarkdownSha256,
+  canonicalAuditorMarkdownSha1,
   expectedTools,
   failureExitCode,
   missingHostExitCode,
   passExitCode,
+  validateAuditorMarkdownEvidence,
   validateEvidence,
   validateProfileEvidence,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
+
+const completeAuditorMarkdownEvidence = {
+  sourcePath: "assets/dsh/agents/banca-auditor.md",
+  sourceSha256: canonicalAuditorMarkdownSha256,
+  sourceSha1: canonicalAuditorMarkdownSha1,
+  installedPath: ".dsh/agents/banca-auditor.md",
+  installedSha256: canonicalAuditorMarkdownSha256,
+  installedSha1: canonicalAuditorMarkdownSha1,
+  hostDiscovered: true,
+  presetId: "banca-auditor",
+  presetCompositionEmpty: false,
+  presetCompositionHasInstructionLoader: true,
+  instructionContextMessageCount: 1,
+  loadedSourceSha1: canonicalAuditorMarkdownSha1,
+  nativePreStepObserved: true,
+  agentAndSessionIdMatch: true,
+  agentRegistryContainsAgent: true,
+  sessionStoreContainsSession: true,
+  effectivePreset: "banca-auditor",
+  sessionProjectionPreset: "banca-auditor",
+  syntheticContext: false,
+  syntheticPresetFixture: false,
+  modelCalls: 0,
+  credentialsUsed: false,
+}
 
 const completeProfile = {
   profileManifestHasBundle: true,
@@ -112,6 +140,31 @@ describe("DSH profile E2E evidence contract", () => {
   test("accepts complete profile composition and runtime evidence", () => {
     expect(validateProfileEvidence(completeProfile)).toEqual([])
     expect(validateEvidence(completeRuntime)).toEqual([])
+  })
+
+  test("accepts only content-hash-backed Markdown loaded into a native auditor Agent and Session", () => {
+    expect(validateAuditorMarkdownEvidence(completeAuditorMarkdownEvidence)).toEqual([])
+  })
+
+  test.each([
+    ["missing canonical Markdown", { ...completeAuditorMarkdownEvidence, sourcePath: undefined }, "canonical auditor Markdown is missing or altered"],
+    ["altered canonical Markdown", { ...completeAuditorMarkdownEvidence, sourceSha256: "sha256:altered" }, "canonical auditor Markdown is missing or altered"],
+    ["altered canonical Markdown source digest", { ...completeAuditorMarkdownEvidence, sourceSha1: "sha1:altered" }, "canonical auditor Markdown is missing or altered"],
+    ["altered installed Markdown", { ...completeAuditorMarkdownEvidence, installedSha256: "sha256:altered" }, "installed auditor Markdown differs from canonical source"],
+    ["altered installed Markdown source digest", { ...completeAuditorMarkdownEvidence, installedSha1: "sha1:altered" }, "installed auditor Markdown differs from canonical source"],
+    ["file present but not discovered by DSH", { ...completeAuditorMarkdownEvidence, hostDiscovered: false }, "DSH did not discover auditor Markdown content"],
+    ["empty host preset", { ...completeAuditorMarkdownEvidence, presetCompositionHasInstructionLoader: false }, "banca-auditor preset does not mount native instruction content"],
+    ["empty preset masked by an instruction-loader marker", { ...completeAuditorMarkdownEvidence, presetCompositionEmpty: true }, "banca-auditor preset does not mount native instruction content"],
+    ["preset name registered without Markdown content", { ...completeAuditorMarkdownEvidence, loadedSourceSha1: undefined }, "native DSH did not load Markdown into the agent session"],
+    ["missing instruction context message count", { ...completeAuditorMarkdownEvidence, instructionContextMessageCount: 0 }, "native pre-step instruction projection was not observed"],
+    ["altered loaded source digest", { ...completeAuditorMarkdownEvidence, loadedSourceSha1: "sha1:altered" }, "native DSH did not load Markdown into the agent session"],
+    ["installed Markdown not loaded by the host", { ...completeAuditorMarkdownEvidence, nativePreStepObserved: false }, "native pre-step instruction projection was not observed"],
+    ["synthetic context or preset fixture", { ...completeAuditorMarkdownEvidence, syntheticPresetFixture: true }, "auditor Markdown evidence is synthetic rather than host-validated"],
+    ["loaded content not bound to the matching native Agent and Session", { ...completeAuditorMarkdownEvidence, agentAndSessionIdMatch: false }, "auditor instruction content is not bound to the live banca-auditor Agent and Session"],
+    ["model-backed evidence", { ...completeAuditorMarkdownEvidence, modelCalls: 1 }, "E2E used or did not rule out a model/credential call"],
+    ["credential-backed evidence", { ...completeAuditorMarkdownEvidence, credentialsUsed: true }, "E2E used or did not rule out a model/credential call"],
+  ])("rejects %s", (_label, evidence, expectedError) => {
+    expect(validateAuditorMarkdownEvidence(evidence)).toContain(expectedError)
   })
 
   test.each([

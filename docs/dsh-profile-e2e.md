@@ -17,6 +17,23 @@ O overlay do perfil E2E inclui um preset temporário `banca-auditor` com composi
 
 Este gate **não comprova** que o DSH importe automaticamente `assets/dsh/agents/banca-auditor.md` ou `.dsh/agents/banca-auditor.md` para o registro nativo `AgentPreset`. A fixture de perfil não carrega o conteúdo dessas instruções. A identidade efetiva provada aqui é a identidade DSH validada pela registry e composta no `Agent.ctx`, não a execução do protocolo de auditoria por um modelo.
 
+## Issue #3: proveniência e limite de carregamento do Markdown
+
+O relatório separa o gate de identidade/guard da issue #2 do substatus de carregamento de instruções da issue #3. O `status` raiz continua descrevendo somente o gate de identidade, ferramentas e read-only da issue #2. `stages.auditorMarkdown.status` é o resultado específico da issue #3. Um `PASS` raiz não é aprovação do carregamento do Markdown.
+
+No checkout validado, a fonte canônica é `assets/dsh/agents/banca-auditor.md` (SHA-256 `103cbdf191600d83a8becdb43ce89fc37aa0f5c532768238929524d0cbedaf7a`, SHA-1 `aedf761fe161b1befc61eaad15b6ec01cd11153c`). `package.json` inclui `assets`; a instalação executada por `banca_init`/`installAssets` copia esse arquivo para `.dsh/agents/banca-auditor.md`. O E2E registra os hashes do arquivo-fonte e da cópia efetivamente instalada. A suíte `audit_workflow_assets.test.ts` também compara as instalações versionada e fallback. A igualdade desses hashes comprova distribuição e instalação, não descoberta ou associação pelo host.
+
+Contratos instalados inspecionados no DSH `0.2.0-rc.2`:
+
+- `@deepseek-ai/dsh-agent-preset` recebe uma definição declarativa com `id` e `plugins` Cordis.
+- `@deepseek-ai/dsh-agent-preset-registry` registra definições declaradas. `ctx.agentPresets.readDocument(id)` retorna a lista YAML de plugins da declaração, não importa um agente Markdown do diretório do projeto.
+- `@deepseek-ai/dsh-agent-instructions` é um loader de instruções de workspace. Seus candidatos padrão são `AGENTS.md` e `CLAUDE.md`; nomes configurados precisam ser basenames, sem `/` ou `\\`, e a projeção de conteúdo no contexto da sessão ocorre no hook `agent/pre-step`.
+- O `AgentLoop.preStep` é privado no contrato TypeScript instalado. O perfil cria um `Agent` real via `ctx.agents.create`, mas não chama `Agent.send`, `session.prompt` nem inicia o lifecycle de turn/step que executa a projeção.
+
+O E2E real confirma que `banca_init` instala a fonte no workspace sintético e usa `readDocument` para inspecionar a composição nativa. A declaração de auditor usada para preservar o teste da issue #2 é uma fixture temporária com `plugins: []`. Não há mensagem de instruções com proveniência `.dsh/agents/banca-auditor.md` no inbox/eventos do agente, nem SHA-1 de conteúdo carregado pelo host. Por isso `stages.auditorMarkdown.status` fica `BLOCKED`, mesmo se o status raiz do gate da issue #2 for `PASS`.
+
+O contrato e os testes negativos rejeitam arquivo ausente/adulterado, cópia divergente, descoberta ausente, preset vazio, nome de preset sem digest de conteúdo carregado, projeção não observada, vínculo sintético ou IDs Agent/Session divergentes. Esses testes locais validam apenas o contrato de evidência. Não substituem a integração real nem afirmam que o DSH carregou as instruções. Nenhuma cópia adicional, loader próprio, permissão ou alteração do trust model foi introduzida para contornar o limite do host.
+
 ## Cenário, integridade e teardown
 
 O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo. Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
@@ -58,6 +75,7 @@ Os testes em `tests/e2e_dsh_profile_contract.test.ts` validam rejeições do con
 - Não cobre loop real de agente, `SessionController.prompt`, chamadas a modelo, identidade originada pelo gerenciador de subagents, avaliação acadêmica ou julgamento humano.
 - O `Agent` com `origin: "subagent"` é criado pelo `AgentRegistry` nativo com metadados de origem e sessão pai, sem chamar o serviço que executa delegação. O teste comprova enforcement fail-closed para essa identidade DSH, não o lifecycle completo de spawn do subagent manager.
 - A fixture vazia comprova a identidade e a política do preset no host. Não comprova descoberta, importação ou execução das instruções Markdown de `banca-auditor`.
+- O E2E mantém o status de identidade/guard da issue #2 separado de `stages.auditorMarkdown.status`. A issue #3 continua `BLOCKED` até existir evidência nativa do conteúdo carregado e associado ao Agent/Session, sem executar modelo.
 - Os hashes são de arquivos sintéticos e relativos ao workspace temporário. Nenhum manuscrito real é usado.
 
 ## Segurança da suíte de testes

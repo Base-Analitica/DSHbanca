@@ -17,6 +17,10 @@ export const expectedTools = [
   "banca_contract",
 ] as const
 
+/** Pinned source identity for this no-content-change validation slice. */
+export const canonicalAuditorMarkdownSha256 = "103cbdf191600d83a8becdb43ce89fc37aa0f5c532768238929524d0cbedaf7a"
+export const canonicalAuditorMarkdownSha1 = "aedf761fe161b1befc61eaad15b6ec01cd11153c"
+
 export interface ProfileEvidence {
   profileManifestHasBundle?: boolean
   profileManifestHasObserver?: boolean
@@ -74,6 +78,71 @@ export function validateProfileEvidence(evidence: ProfileEvidence): string[] {
   if (evidence.entrypointResolved !== true) errors.push("plugin entrypoint did not resolve in profile node_modules")
   if (evidence.presetRegistryEntry !== true) errors.push("DSH AgentPresetRegistry entry missing")
   if (evidence.auditorPresetEntry !== true) errors.push("banca-auditor DSH AgentPreset entry missing")
+  return errors
+}
+
+/**
+ * Validate proof that the canonical auditor Markdown was loaded by DSH and
+ * bound to a live native Agent/Session. File presence and preset identity alone
+ * are deliberately insufficient. This is a separate acceptance contract from
+ * the existing identity/guard gate because the installed host cannot currently
+ * expose this proof without entering its model-facing pre-step lifecycle.
+ */
+export function validateAuditorMarkdownEvidence(value: unknown): string[] {
+  const evidence = isRecord(value) ? value : {}
+  const errors: string[] = []
+
+  if (
+    evidence.sourcePath !== "assets/dsh/agents/banca-auditor.md" ||
+    evidence.sourceSha256 !== canonicalAuditorMarkdownSha256 ||
+    evidence.sourceSha1 !== canonicalAuditorMarkdownSha1
+  ) {
+    errors.push("canonical auditor Markdown is missing or altered")
+  }
+  if (
+    evidence.installedPath !== ".dsh/agents/banca-auditor.md" ||
+    evidence.installedSha256 !== evidence.sourceSha256 ||
+    evidence.installedSha1 !== evidence.sourceSha1
+  ) {
+    errors.push("installed auditor Markdown differs from canonical source")
+  }
+  if (evidence.hostDiscovered !== true) {
+    errors.push("DSH did not discover auditor Markdown content")
+  }
+  if (
+    evidence.presetId !== "banca-auditor" ||
+    evidence.presetCompositionEmpty !== false ||
+    evidence.presetCompositionHasInstructionLoader !== true
+  ) {
+    errors.push("banca-auditor preset does not mount native instruction content")
+  }
+  if (
+    evidence.loadedSourceSha1 !== canonicalAuditorMarkdownSha1
+  ) {
+    errors.push("native DSH did not load Markdown into the agent session")
+  }
+  if (
+    evidence.nativePreStepObserved !== true ||
+    !Number.isInteger(evidence.instructionContextMessageCount) ||
+    evidence.instructionContextMessageCount < 1
+  ) {
+    errors.push("native pre-step instruction projection was not observed")
+  }
+  if (
+    evidence.agentAndSessionIdMatch !== true ||
+    evidence.agentRegistryContainsAgent !== true ||
+    evidence.sessionStoreContainsSession !== true ||
+    evidence.effectivePreset !== "banca-auditor" ||
+    evidence.sessionProjectionPreset !== "banca-auditor"
+  ) {
+    errors.push("auditor instruction content is not bound to the live banca-auditor Agent and Session")
+  }
+  if (evidence.syntheticContext !== false || evidence.syntheticPresetFixture !== false) {
+    errors.push("auditor Markdown evidence is synthetic rather than host-validated")
+  }
+  if (evidence.modelCalls !== 0 || evidence.credentialsUsed !== false) {
+    errors.push("E2E used or did not rule out a model/credential call")
+  }
   return errors
 }
 
