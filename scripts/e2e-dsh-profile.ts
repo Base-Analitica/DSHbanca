@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { parse as parseYaml } from "yaml"
 import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "./lib/dsh-profile-e2e-presets.js"
+import { renderControlPresetSelector } from "./lib/dsh-profile-e2e-observer-control.js"
 import {
   canonicalAuditorMarkdownSha256,
   expectedTools,
@@ -457,6 +458,7 @@ const decoyOutput = {
   schema: { type: "string" },
   render: (_args, value) => [{ type: "text", text: value }],
 };
+${renderControlPresetSelector(e2eControlPresetId)}
 
 export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
@@ -580,10 +582,7 @@ export async function apply(ctx) {
     if (ctx.agents.get(controlAgent.id) !== controlAgent || ctx.sessions.get(controlAgent.id) !== controlSession || controlAgent.id !== controlSession.id) {
       fail("the control Agent/Session was not published by native DSH registries");
     }
-    const controlSelected = await ctx.agentPresets.select(controlAgent, e2eControlPresetId);
-    if (controlSelected !== e2eControlPresetId || ctx.agentPresets.composedPreset(controlAgent.ctx) !== e2eControlPresetId) {
-      fail("control Agent did not retain the isolated empty control preset");
-    }
+    await selectControlPreset(ctx, controlAgent);
 
     const preStepObservations = [];
     let forbiddenStepStarts = 0;
