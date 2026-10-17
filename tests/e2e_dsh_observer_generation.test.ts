@@ -51,6 +51,37 @@ test("actual generated observer module binds the control preset ID without runne
     await expect(generatedModule.selectControlPreset(ctx, agent)).resolves.toBe("dshbanca-e2e-control-neutral")
     expect(selectedId).toBe("dshbanca-e2e-control-neutral")
 
+
+    // Installed @deepseek-ai/dsh-agent-instructions uses syncInbox() when a
+    // downstream pre-step listener rejects, rather than decision.messages.
+    // Verify observation can prove a native message queued in nextStep without
+    // falsely allowing any model-facing step.
+    const auditorInstruction = {
+      id: "native-auditor-instruction-1",
+      role: "user",
+      source: {
+        kind: "agent-instructions",
+        changes: [{ path: "banca-auditor.md", digest: "canonical-sha1" }],
+      },
+    }
+    const queued = generatedModule.captureNativeInstructionMessages([], [auditorInstruction])
+    expect(queued).toEqual([{ channel: "post-reject-inbox", message: auditorInstruction }])
+    expect(generatedModule.captureNativeInstructionMessages([auditorInstruction], [auditorInstruction]))
+      .toEqual([{ channel: "pre-step-decision", message: auditorInstruction }])
+    expect(generatedModule.captureNativeInstructionMessages([], [
+      { ...auditorInstruction, source: { kind: "agent-instructions", changes: [{ path: "AGENTS.md" }] } },
+    ])).toEqual([])
+    expect(generatedModule.captureNativeInstructionMessages([], [])).toEqual([])
+    // The neutral control must receive ZERO native instructions, including
+    // unrelated AGENTS.md messages, not merely zero banca-auditor.md copies.
+    const unrelatedInstruction = {
+      ...auditorInstruction,
+      id: "unrelated-instruction",
+      source: { kind: "agent-instructions", changes: [{ path: "AGENTS.md" }] },
+    }
+    expect(generatedModule.captureNativeInstructionMessages([], [unrelatedInstruction], null))
+      .toEqual([{ channel: "post-reject-inbox", message: unrelatedInstruction }])
+
     // Negative control: remove the exact serialized module-local binding. This
     // reproduces the reviewed free-reference failure in generated JavaScript.
     const brokenModuleSource = generatedModuleSource.replace(

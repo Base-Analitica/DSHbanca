@@ -456,6 +456,25 @@ const runTool = async (context, callId, name, args, agent) => {
 const modelEventCount = (session) => session.snapshotEvents().filter((event) =>
   event.type === "request/header"
 ).length;
+// Native dsh-agent-instructions uses syncInbox() on a downstream pre-step
+// reject. That stages the user instruction in nextStep without placing it in
+// decision.messages. Observe both surfaces without releasing the safety reject.
+export function captureNativeInstructionMessages(decisionMessages, queuedMessages, requiredPath = "banca-auditor.md") {
+  const results = [];
+  const seen = new Set();
+  for (const [channel, messages] of [["pre-step-decision", decisionMessages], ["post-reject-inbox", queuedMessages]]) {
+    for (const message of Array.isArray(messages) ? messages : []) {
+      if (message?.source?.kind !== "agent-instructions" ||
+          !Array.isArray(message.source.changes) ||
+          (requiredPath !== null && !message.source.changes.some((change) => change?.path === requiredPath))) continue;
+      const identity = typeof message.id === "string" && message.id ? message.id : message;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      results.push({ channel, message });
+    }
+  }
+  return results;
+}
 const decoyOutput = {
   schema: { type: "string" },
   render: (_args, value) => [{ type: "text", text: value }],
@@ -595,19 +614,12 @@ export async function apply(ctx) {
     ctx.on("agent/pre-step", async (payload, next) => {
       const decision = await next();
       if (payload.agent !== agent && payload.agent !== controlAgent) return decision;
-      const messages = decision.kind === "enter" ? decision.messages : [];
-      const instructionMessages = messages.filter((message) => message?.source?.kind === "agent-instructions" &&
-        message.source.changes?.some((change) => change?.path === "banca-auditor.md"));
-      const instructionMessage = instructionMessages[0];
       preStepObservations.push({
-        id: instructionMessage?.id ?? "",
         agentId: payload.agent.id,
         sessionId: payload.agent.session.id,
         step: payload.step,
         turn: payload.turn,
-        role: instructionMessage?.role ?? null,
-        source: instructionMessage?.source ?? null,
-        instructionMessageCount: instructionMessages.length,
+        decisionMessages: decision.kind === "enter" ? decision.messages : [],
       });
       return { kind: "reject" };
     });
@@ -643,10 +655,15 @@ export async function apply(ctx) {
     const auditorPreStep = preStepObservations.find((observation) => observation.agentId === agent.id);
     const controlPreStep = preStepObservations.find((observation) => observation.agentId === controlAgent.id);
     if (!auditorPreStep || !controlPreStep) fail("native agent/pre-step was not observed for both auditor and control Agents");
-    const instructionMessages = auditorPreStep.source?.kind === "agent-instructions" ? [auditorPreStep.source] : [];
-    const loadedSourceSha1 = instructionMessages
-      .flatMap((source) => Array.isArray(source?.changes) ? source.changes : [])
-      .find((change) => change?.path === "banca-auditor.md")?.digest ?? null;
+    const auditorNativeInstructions = captureNativeInstructionMessages(
+      auditorPreStep.decisionMessages, agent.inbox.nextStep,
+    );
+    const controlNativeInstructions = captureNativeInstructionMessages(
+      controlPreStep.decisionMessages, controlAgent.inbox.nextStep, null,
+    );
+    const auditorNativeInstruction = auditorNativeInstructions[0]?.message;
+    const loadedSourceSha1 = auditorNativeInstruction?.source?.changes
+      ?.find((change) => change?.path === "banca-auditor.md")?.digest ?? null;
 
     const turnEventsBeforeGuard = modelEventCount(session);
     if (turnEventsBeforeGuard !== 0) fail("a model-facing turn/request event appeared before the guard checks");
@@ -815,15 +832,18 @@ export async function apply(ctx) {
         presetCompositionSha256,
         presetCompositionEmpty: presetCompositionContent.trim() === "[]" || presetCompositionContent.trim() === "",
         presetCompositionHasInstructionLoader,
-        instructionContextMessageCount: auditorPreStep.instructionMessageCount,
+        instructionContextMessageCount: auditorNativeInstructions.length,
         loadedSourceSha1,
+        nativeInstructionCaptureChannel: auditorNativeInstructions[0]?.channel ?? null,
+        auditorPostRejectInboxMessageCount: agent.inbox.nextStep.length,
+        controlPostRejectInboxMessageCount: controlAgent.inbox.nextStep.length,
         nativePreStepObserved: true,
-        instructionMessageRole: auditorPreStep.role,
-        instructionMessageSourceKind: auditorPreStep.source?.kind ?? null,
-        instructionMessagePath: auditorPreStep.source?.changes?.find((change) => change?.digest === loadedSourceSha1)?.path ?? null,
-        controlInstructionMessageCount: controlPreStep.instructionMessageCount,
-        preStepEvent: { id: auditorPreStep.id, agentId: auditorPreStep.agentId, sessionId: auditorPreStep.sessionId },
-        preStepEventIds: [auditorPreStep.id],
+        instructionMessageRole: auditorNativeInstruction?.role ?? null,
+        instructionMessageSourceKind: auditorNativeInstruction?.source?.kind ?? null,
+        instructionMessagePath: auditorNativeInstruction?.source?.changes?.find((change) => change?.digest === loadedSourceSha1)?.path ?? null,
+        controlInstructionMessageCount: controlNativeInstructions.length,
+        preStepEvent: { id: auditorNativeInstruction?.id ?? "", agentId: auditorPreStep.agentId, sessionId: auditorPreStep.sessionId },
+        preStepEventIds: [auditorNativeInstruction?.id ?? ""],
         agentAndSessionIdMatch: agent.id === session.id,
         agentRegistryContainsAgent: ctx.agents.get(agent.id) === agent,
         sessionStoreContainsSession: ctx.sessions.get(agent.id) === session,
