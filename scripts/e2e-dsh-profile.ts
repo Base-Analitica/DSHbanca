@@ -848,7 +848,7 @@ export async function apply(ctx) {
         agentRegistryContainsAgent: ctx.agents.get(agent.id) === agent,
         sessionStoreContainsSession: ctx.sessions.get(agent.id) === session,
         effectivePreset,
-        sessionPresetProjection,
+        sessionProjectionPreset: sessionPresetProjection,
         syntheticContext: false,
         syntheticPresetFixture: false,
         modelCalls: auditorEventsAfterChecks,

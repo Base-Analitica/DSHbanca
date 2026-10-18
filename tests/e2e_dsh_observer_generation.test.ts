@@ -4,7 +4,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { readFileSync } from "node:fs"
-import { expectedTools } from "../scripts/lib/dsh-profile-e2e-contract.js"
+import {
+  canonicalAuditorMarkdownSha1,
+  canonicalAuditorMarkdownSha256,
+  classifyAuditorMarkdownStatus,
+  expectedTools,
+  validateAuditorMarkdownEvidence,
+} from "../scripts/lib/dsh-profile-e2e-contract.js"
 import { e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "../scripts/lib/dsh-profile-e2e-observer-control.js"
 
@@ -95,4 +101,89 @@ test("actual generated observer module binds the control preset ID without runne
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test("generated auditor evidence uses the strict session projection contract", async () => {
+  const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const templateStart = runnerSource.indexOf("const observerSource = `")
+  const contentStart = templateStart + "const observerSource = `".length
+  const contentEnd = runnerSource.indexOf("\n`\n  writeFileSync(join(observerRoot, \"index.js\"), observerSource", contentStart)
+  expect(templateStart).toBeGreaterThanOrEqual(0)
+  expect(contentEnd).toBeGreaterThan(contentStart)
+  const template = runnerSource.slice(contentStart, contentEnd)
+  const renderObserver = new Function(
+    "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
+    "workspace", "observerResult", "renderControlPresetSelector", "e2eControlPresetId",
+    `return \`${template}\`;`,
+  ) as (...args: unknown[]) => string
+  const generatedModuleSource = renderObserver(
+    "dshbanca-e2e-observer", expectedTools,
+    canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
+    "/tmp/synthetic-workspace", "/tmp/observer-result.json", renderControlPresetSelector, e2eControlPresetId,
+  )
+
+  // Evaluate the exact object literal embedded in the generated observer module.
+  // This keeps the regression tied to the producer instead of a hand-built
+  // payload that already satisfies the validator.
+  const marker = "auditorMarkdownEvidence: {"
+  const start = generatedModuleSource.indexOf(marker)
+  expect(start).toBeGreaterThanOrEqual(0)
+  const objectStart = start + marker.length - 1
+  let depth = 0
+  let objectEnd = -1
+  for (let index = objectStart; index < generatedModuleSource.length; index++) {
+    if (generatedModuleSource[index] === "{") depth++
+    if (generatedModuleSource[index] === "}" && --depth === 0) {
+      objectEnd = index + 1
+      break
+    }
+  }
+  expect(objectEnd).toBeGreaterThan(objectStart)
+  const objectLiteral = generatedModuleSource.slice(objectStart, objectEnd)
+  const generatedAgent = { id: "agent-auditor-1", inbox: { nextStep: [] } }
+  const generatedSession = { id: "agent-auditor-1" }
+  const emitted = new Function(
+    "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
+    "installedAuditorMarkdownSha256", "installedAuditorMarkdownSha1",
+    "loaderAuditorMarkdownSha256", "loaderAuditorMarkdownSha1",
+    "loadedSourceSha1", "presetCompositionSha256", "presetCompositionContent",
+    "presetCompositionHasInstructionLoader", "auditorNativeInstructions", "agent",
+    "controlAgent", "auditorNativeInstruction", "controlNativeInstructions",
+    "auditorPreStep", "session", "ctx", "effectivePreset", "sessionPresetProjection",
+    "auditorEventsAfterChecks",
+    `return (${objectLiteral});`,
+  )(
+    canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
+    canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
+    canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
+    canonicalAuditorMarkdownSha1, "sha256:preset", "native instruction loader",
+    true, [{ channel: "post-reject-inbox", message: {
+      id: "evt-auditor-1", role: "user",
+      source: { kind: "agent-instructions", changes: [{ path: "banca-auditor.md", digest: canonicalAuditorMarkdownSha1 }] },
+    } }],
+    generatedAgent,
+    { id: "control-agent-1", inbox: { nextStep: [] } },
+    { id: "evt-auditor-1", role: "user", source: {
+      kind: "agent-instructions", changes: [{ path: "banca-auditor.md", digest: canonicalAuditorMarkdownSha1 }],
+    } },
+    [],
+    { agentId: "agent-auditor-1", sessionId: "agent-auditor-1" },
+    generatedSession,
+    {
+      agents: { get: () => generatedAgent },
+      sessions: { get: () => generatedSession },
+    },
+    "banca-auditor", "banca-auditor", 0,
+  )
+
+  expect(emitted.sessionProjectionPreset).toBe("banca-auditor")
+  expect(emitted.sessionPresetProjection).toBeUndefined()
+  expect(validateAuditorMarkdownEvidence(emitted)).toEqual([])
+  expect(classifyAuditorMarkdownStatus(emitted)).toBe("PASS")
+  expect(validateAuditorMarkdownEvidence({ ...emitted, sessionProjectionPreset: undefined })).toContain(
+    "auditor instruction content is not bound to the live banca-auditor Agent and Session",
+  )
+  expect(validateAuditorMarkdownEvidence({ ...emitted, sessionProjectionPreset: "banca-corretor" })).toContain(
+    "auditor instruction content is not bound to the live banca-auditor Agent and Session",
+  )
 })

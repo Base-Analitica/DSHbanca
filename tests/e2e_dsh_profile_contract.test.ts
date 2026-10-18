@@ -212,6 +212,7 @@ describe("DSH profile E2E evidence contract", () => {
     ["file present but not discovered by DSH", { ...completeAuditorMarkdownEvidence, hostDiscovered: false }, "DSH did not discover auditor Markdown content"],
     ["empty host preset", { ...completeAuditorMarkdownEvidence, presetCompositionHasInstructionLoader: false }, "banca-auditor preset does not mount native instruction content"],
     ["empty preset masked by an instruction-loader marker", { ...completeAuditorMarkdownEvidence, presetCompositionEmpty: true }, "banca-auditor preset does not mount native instruction content"],
+    ["invalid auditor preset ID", { ...completeAuditorMarkdownEvidence, presetId: "banca-corretor" }, "banca-auditor preset does not mount native instruction content"],
     ["preset name registered without Markdown content", { ...completeAuditorMarkdownEvidence, loadedSourceSha1: undefined }, "native DSH did not load Markdown into the agent session"],
     ["missing instruction context message count", { ...completeAuditorMarkdownEvidence, instructionContextMessageCount: 0 }, "native pre-step instruction projection was not observed"],
     ["altered loaded source digest", { ...completeAuditorMarkdownEvidence, loadedSourceSha1: "sha1:altered" }, "native DSH did not load Markdown into the agent session"],
@@ -223,6 +224,9 @@ describe("DSH profile E2E evidence contract", () => {
     ["duplicate pre-step event evidence", { ...completeAuditorMarkdownEvidence, preStepEventIds: ["evt-auditor-1", "evt-auditor-1"] }, "pre-step evidence lacks unique native event provenance"],
     ["synthetic context or preset fixture", { ...completeAuditorMarkdownEvidence, syntheticPresetFixture: true }, "auditor Markdown evidence is synthetic rather than host-validated"],
     ["loaded content not bound to the matching native Agent and Session", { ...completeAuditorMarkdownEvidence, agentAndSessionIdMatch: false }, "auditor instruction content is not bound to the live banca-auditor Agent and Session"],
+    ["missing session projection preset", { ...completeAuditorMarkdownEvidence, sessionProjectionPreset: undefined }, "auditor instruction content is not bound to the live banca-auditor Agent and Session"],
+    ["altered session projection preset", { ...completeAuditorMarkdownEvidence, sessionProjectionPreset: "banca-corretor" }, "auditor instruction content is not bound to the live banca-auditor Agent and Session"],
+    ["incompatible effective Agent preset", { ...completeAuditorMarkdownEvidence, effectivePreset: "banca-corretor" }, "auditor instruction content is not bound to the live banca-auditor Agent and Session"],
     ["model-backed evidence", { ...completeAuditorMarkdownEvidence, modelCalls: 1 }, "E2E used or did not rule out a model/credential call"],
     ["credential-backed evidence", { ...completeAuditorMarkdownEvidence, credentialsUsed: true }, "E2E used or did not rule out a model/credential call"],
   ])("rejects %s", (_label, evidence, expectedError) => {
