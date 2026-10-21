@@ -1,63 +1,75 @@
 # DSHbanca
 
-Plugin DSH (DeepSeek Harness) e OpenCode para gestão, auditoria e correção de trabalhos acadêmicos (monografias, dissertações, TCCs).
+Plugin acadêmico para o **DSH (DeepSeek Harness)**, voltado à gestão, auditoria e correção de trabalhos acadêmicos (monografias, dissertações, TCCs).
 
-### Relação com o projeto OpenBanca
-O **DSHbanca** é um projeto derivado e adaptado a partir do repositório [`OpenBanca`](https://github.com/Base-Analitica/openbanca) da organização **Base Analítica**.
-- **OpenBanca**: plugin de domínio acadêmico construído para o harness **OpenCode**, provendo ferramentas, agentes, skills e guardrails de correção e auditoria em LaTeX/ABNT.
-- **DSHbanca**: versão mantida como repositório independente na organização **Base Analítica**, estendendo e adaptando o núcleo acadêmico para funcionamento nativo no ecossistema **dsh** (DeepSeek Harness via Cordis plugin loader e `ctx.skills`/`ctx.tools`), preservando também total compatibilidade com o OpenCode.
+## Harness, escopo e limites
 
-## Objetivo
+**O DSH é o único harness deste projeto.** O DSHbanca é a camada de domínio acadêmico executada sobre ele e integrada nativamente por **Cordis**. Não existe compatibilidade dual, fallback para outro harness, runtime paralelo, roteador de modelos nem loop de agente próprio neste repositório.
 
-O DSHbanca resolve o problema de qualidade em trabalhos acadêmicos ao fornecer um sistema automatizado de auditoria em 4 eixos (ABNT, Citações, Conteúdo, Estilo), correção contínua com guardrails, validação de referências via MCPs e detecção de padrões de IA.
+| Componente | Responsabilidade |
+|---|---|
+| **DSH** | Runtime, modelos e autenticação, sessões/identidade/lifecycle de agentes, dispatch de tools, permissões, skills, plugins e configuração do ambiente. |
+| **DSHbanca** | Ingestão e representação do manuscrito, cobertura e proveniência por lote, checkpoints e findings, rubricas, validações determinísticas, guardrails, snapshots e ferramentas acadêmicas. |
 
-O plugin se integra ao **dsh** (DeepSeek Harness) via Cordis plugin loader e `ctx.skills`/`ctx.tools`, além de suportar OpenCode como coleção de ferramentas, agentes e skills que executam o workflow de correção acadêmica de forma estruturada e reproduzível.
+A separação acima é normativa; ela **não** comprova que todos os fluxos já estejam integrados ou executáveis no DSH. Consulte [AGENTS.md](AGENTS.md), [docs/architecture.md](docs/architecture.md) e [docs/terminal-agent-workflow.md](docs/terminal-agent-workflow.md).
 
-## Para quem é
+### Relação com o OpenBanca
 
-- **Usuários de DSH (DeepSeek Harness)** que escrevem trabalhos acadêmicos e precisam de auditoria automatizada e skills acadêmicas
-- **Usuários de OpenCode** que precisam do workflow acadêmico integrado
-- **Agentes de IA** que precisam de ferramentas especializadas para revisão de textos acadêmicos
-- **Desenvolvedores de workflows** que querem estender ou personalizar o processo de correção
-- **Revisores de prompts/skills** que querem auditar e melhorar o bundle
-- **Educadores** que querem automatizar parte da correção de trabalhos estudantis
+O **OpenBanca** é um **projeto separado**, mantido para o harness **OpenCode**. O DSHbanca é um repositório independente da organização Base Analítica, dedicado ao DSH. A existência do OpenBanca não cria compatibilidade, fallback nem autorização de cópia: nenhuma regra do outro projeto define a arquitetura deste repositório, e a licença deste projeto ainda não foi definida (ver [Licença](#licença)). Menções a OpenCode no código e na documentação são **legado histórico em migração**, não integração suportada.
 
 ## Estado atual
 
-**Experimental / Protótipo (v0.1.0)** — pacote `dshbanca` em desenvolvimento local.
+**Experimental / protótipo (`0.1.0`)** — pacote `dshbanca`, `private: true`, `UNLICENSED`, sem publicação em npm. Nada neste repositório deve ser tratado como integração DSH concluída.
 
-### Funcionalidades implementadas no código — validação externa pendente
+### Presente na `master` (`2302a75`)
 
-- **Inicialização de projeto (`/banca:init`)**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
-- **Auditoria em 4 eixos com nota integrada**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
-- **Correção com guardrails (arquivos imutáveis)**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
-- **Validação de referências (cadeia MCP → REST → cache)**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO COM MCP REAL`
-- **Detecção heurística/python de padrões de IA**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM CI (EXECUÇÃO GITHUB PENDENTE)`
-- **Loop de correção contínua com circuit breaker**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
-- **Snapshots para versionamento de correções**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
-- **Compilação LaTeX**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO COM LATEX REAL`
-- **Checklist de entrega**: `IMPLEMENTADO` | `COBERTO POR TESTE LOCAL` | `NÃO VALIDADO EM OPENCODE`
+- Empacotamento Cordis **declarado**: `package.json` expõe `./dsh` e `dsh.bundle.patch`; [`cordis.patch.yml`](cordis.patch.yml) monta `dshbanca/dsh`. Declarar o entrypoint não comprova que o host o carregou.
+- `src/dsh.ts` declara `name = "dshbanca"`, injeta `skills` e registra um **provider de skills** quando `ctx.skills.registerProvider` existe.
+- **16 módulos de ferramentas** em `src/tools/`, registrados no entry principal do pacote (`src/index.ts`), que ainda usa a interface `@opencode-ai/plugin`. A presença desses módulos não comprova dispatch nativo no DSH.
+- **8 skills acadêmicas** em `skills/`.
+- CI configurada e executada na `master`: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda `typecheck`, `build`, `bun test`, `scripts/validate.sh` e `scripts/check-secrets.sh --ci`.
 
-### Estado de Validação Geral
+### Proposto na PR #1 (draft, `CHANGES_REQUESTED`)
 
-- `IMPLEMENTADO`: Sim, codificado no repositório.
-- `COBERTO POR TESTE LOCAL`: Sim, verificado via suíte de testes do Bun localmente.
-- `NÃO VALIDADO EM CI`: O workflow do GitHub Actions existe, mas a execução no GitHub ainda é pendente.
-- `NÃO VALIDADO EM OPENCODE`: O plugin e os comandos/agentes ainda não foram executados em um cliente real do OpenCode.
-- `NÃO VALIDADO COM MCP REAL`: Os testes utilizam mock do protocolo MCP, o funcionamento com servidores MCP reais (ex: crossref-academic executado via uvx) não foi verificado.
-- `NÃO VALIDADO COM LATEX REAL`: A lógica de compilação foi testada com comandos mock e unitários; a compilação real de documentos complexos LaTeX não foi executada de ponta a ponta pelo plugin.
+A [PR #1](https://github.com/Base-Analitica/DSHbanca/pull/1), branch `fix/dsh-native-tools` (HEAD consultado `c6e7bd5`), propõe o registro nativo das tools acadêmicas via Cordis/`ctx.tools`, o guard de autorização/read-only do auditor, o preset do auditor e um gate E2E de perfil DSH. Enquanto essa PR permanecer draft e com revisão solicitada, **nada nela pode ser descrito como presente na `master` nem como funcionalidade disponível**.
 
-### Riscos e limitações conhecidas
+### Pendente ou não comprovado
 
-- Requer OpenCode >= 1.x
-- Requer Node.js >= 18 ou Bun >= 1.x
-- LaTeX (lualatex) é opcional mas necessário para compilação
-- MCPs são consumidos, não empacotados pelo plugin
-- A detecção de IA é heurística (regex), não definitiva
+- **E2E DSH real no SHA final**: não comprovado. Resultado observado em SHA anterior da PR não vale como prova do HEAD atual. CI convencional, build e teste unitário não substituem esse gate.
+- **Instruções Markdown do `banca-auditor`**: a associação e a projeção no Agent/sessão reais são o objeto da [issue #3](https://github.com/Base-Analitica/DSHbanca/issues/3), ainda bloqueada. Arquivo em `assets/`, nome de preset ou hash igual não provam carregamento.
+- **Decisões acadêmicas por opções selecionáveis** ([issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)): direção de produto registrada, dependente da #3; não implementada aqui.
+- **MCP, LaTeX/BibTeX real, corpus versionado e avaliação humana**: não validados de ponta a ponta por este plugin.
+
+### Níveis de evidência usados nesta documentação
+
+- `IMPLEMENTADO NA MASTER`: código presente na base `2302a75`.
+- `PROPOSTO NA PR #1 (DRAFT)`: existe apenas em branch de PR, não incorporado.
+- `TESTE LOCAL`: coberto por teste unitário/local; não prova integração nem host real.
+- `E2E DSH NÃO COMPROVADO`: exigiria execução no DSH real no SHA final.
+- `LEGADO OPENCODE`: artefato herdado de outro harness, preservado por histórico e não recomendado como integração DSH.
+
+## O que o DSHbanca faz
+
+Camada acadêmica presente no código da `master`, com os limites acima:
+
+- ingestão do manuscrito LaTeX, com includes, proveniência por arquivo/linha e fingerprint;
+- cobertura e segmentação em lotes canônicos, com checkpoints versionados e retomada;
+- findings estruturados validados por plano, lote e proveniência, e entrada de síntese global condicionada à cobertura completa;
+- rubricas e validações acadêmicas determinísticas;
+- guardrails de correção, snapshots e política de restore;
+- utilitários de referências/BibTeX, compilação LaTeX e relatórios.
+
+Validações LaTeX/BibTeX verificam estrutura, includes e referências. Análise heurística de IA e de similaridade produz **sinais metodológicos**. Nenhuma delas constitui avaliação acadêmica humana, nota, aprovação ou reprovação.
+
+## Para quem é
+
+- pessoas que escrevem trabalhos acadêmicos e usam o **DSH**;
+- desenvolvedores de fluxos acadêmicos que consomem as tools e skills do DSHbanca;
+- revisores de prompts/skills do bundle acadêmico.
 
 ## Estrutura do repositório
 
-```
+```text
 .
 ├── README.md                    # Este arquivo
 ├── CHANGELOG.md                 # Histórico de mudanças
@@ -65,55 +77,34 @@ O plugin se integra ao **dsh** (DeepSeek Harness) via Cordis plugin loader e `ct
 ├── CONTRIBUTING.md              # Guia de contribuição
 ├── SECURITY.md                  # Política de segurança
 ├── LICENSE_PENDING.md           # Licença (pendente)
-├── .gitignore                   # Arquivos ignorados pelo Git
-├── .editorconfig                # Configuração de edição
 ├── package.json                 # Dependências e scripts
-├── tsconfig.json                # Configuração TypeScript
-├── bun.lock                     # Lockfile do Bun
+├── cordis.patch.yml             # Patch de bundle que monta dshbanca/dsh no DSH
 ├── docs/                        # Documentação técnica
-│   ├── overview.md              # Visão geral do projeto
-│   ├── installation.md          # Guia de instalação
-│   ├── usage.md                 # Guia de uso
-│   ├── architecture.md          # Arquitetura do sistema
-│   ├── skill-spec.md            # Especificação das skills
-│   ├── ai-review-protocol.md    # Protocolo de revisão por IA
-│   ├── troubleshooting.md       # Solução de problemas
-│   └── decisions/               # Decisões de design
-├── src/                         # Código fonte TypeScript
-│   ├── index.ts                 # Entry point do plugin
-│   ├── lib/                     # Bibliotecas internas
-│   └── tools/                   # 15 ferramentas do plugin
-├── assets/                      # Assets do OpenCode
-│   ├── opencode/                # Agentes, comandos, skills
+├── src/
+│   ├── index.ts                 # Entry principal do pacote
+│   ├── dsh.ts                   # Entry Cordis/DSH (provider de skills na master)
+│   ├── lib/                     # Bibliotecas acadêmicas internas
+│   └── tools/                   # 16 módulos de ferramentas acadêmicas
+├── skills/                      # 8 skills acadêmicas empacotadas
+├── assets/
+│   ├── opencode/                # LEGADO OPENCODE: agentes, comandos e skills
 │   └── templates/               # Templates (style-guide)
-├── tests/                       # Testes
+├── tests/                       # Testes (inclui runner legado de outro harness)
 ├── prompts/                     # Prompts para revisão por IA
-├── scripts/                     # Scripts de validação
-└── .github/                     # Templates GitHub
+└── scripts/                     # Scripts de validação
 ```
 
 ## Instalação
 
 ### Pré-requisitos
 
-- OpenCode >= 1.x
-- Node.js >= 18 ou Bun >= 1.x
-- LaTeX: TeX Live com lualatex (opcional, para compilação)
+- **DSH (DeepSeek Harness)** instalado e capaz de carregar o bundle Cordis. A versão mínima **não está fixada nem comprovada** neste repositório.
+- Node.js >= 18 ou Bun >= 1.x.
+- LaTeX (TeX Live com `lualatex`) apenas para compilação; opcional.
 
-### Instalação via npm/bun (PENDENTE)
+Não há instrução de instalação publicada e validada para o DSHbanca: o pacote é `private` e `UNLICENSED`.
 
-> ⚠️ **PENDENTE**: o pacote `@opencode/banca` ainda **não está publicado no npm**.  
-> O `package.json` marca `"private": true` e `"license": "UNLICENSED"`.  
-> Os comandos abaixo são **planos futuros**, não instruções validadas.
-
-```bash
-# PENDENTE: pacote ainda não publicado
-npm install @opencode/banca
-# ou
-bun add @opencode/banca
-```
-
-### Instalação local (recomendado atualmente)
+### Execução local do repositório
 
 ```bash
 git clone https://github.com/Base-Analitica/DSHbanca.git
@@ -122,121 +113,80 @@ bun install
 bun run build
 ```
 
-> NÃO VALIDADO: a instalação local com Bun foi testada apenas quanto à resolução de dependências e compilação TypeScript. O uso real com OpenCode não foi validado.
+A instalação local foi exercitada apenas quanto a resolução de dependências e compilação TypeScript; não há validação de uso real no DSH.
 
-### Configuração no OpenCode
+> **Pacote npm: não publicado.** Não existe pacote público do DSHbanca no npm, e `@opencode/banca` não é um pacote aplicável a este projeto. O `package.json` marca `"private": true` e `"license": "UNLICENSED"`.
 
-```json
-// opencode.json
-{
-  "plugin": ["@opencode/banca"]
-}
-```
+### Integração com o DSH
 
-### Inicialização
+O repositório declara o bundle em `package.json` e `cordis.patch.yml` (id `dshbanca`, entry `dshbanca/dsh`). O carregamento efetivo pelo DSH **não foi comprovado no SHA final**; não existe comando de instalação validado a documentar aqui.
 
-```bash
-/banca:init
-```
+## Ferramentas e skills
 
-Cria `.banca/` + `.opencode/` (agents, commands, skills, templates).
+### Ferramentas registradas na `master`
 
-## Uso básico
+`src/tools/` contém 16 módulos, registrados no entry principal do pacote (`src/index.ts`) com os nomes abaixo:
 
-### Inicializar um projeto
+| Ferramenta | Função |
+|---|---|
+| `banca_init` | Inicializa o projeto (`.banca/`) |
+| `banca_status` | Estado atual do projeto |
+| `banca_context` | Context pack para o host/LLM |
+| `banca_auditar` | Auditoria por lotes canônicos |
+| `banca_sintese` | Entrada de síntese global (exige cobertura completa) |
+| `banca_corrigir` | Aplica correções com proteções |
+| `banca_refs` | Referências (cadeia MCP → REST → cache) |
+| `banca_ia` | Triagem heurística de padrões de IA |
+| `banca_plagio` | Interpreta relatório CopySpider |
+| `banca_loop` | Etapa assistida/preparatória do loop |
+| `banca_snapshot` | Snapshot direcionado |
+| `banca_restore` | Restauração a partir de snapshot |
+| `banca_compile` | Compilação LaTeX |
+| `banca_checklist` | Checklist de entrega |
+| `banca_validate` | Valida `project.json` |
+| `banca_contract` | Contrato pós-correção |
 
-```bash
-/banca:init
-```
+A exposição nativa dessas ferramentas no DSH depende da PR #1 (draft). Skills empacotadas em `skills/`: `banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias`, `banca-revisor` (8).
 
-### Rodar uma auditoria
+### Legado OpenCode
 
-```bash
-/banca:auditar
-```
-
-Gera relatório completo nos 4 eixos (ABNT, Citações, Conteúdo, Estilo) com nota integrada.
-
-### Corrigir o trabalho
-
-```bash
-/banca:corrigir
-```
-
-Aplica correções com guardrails (protege arquivos imutáveis).
-
-### Loop de correção contínua
-
-```bash
-/banca:loop correcao-continua
-```
-
-Executa etapa assistida de preparação do loop: avalia meta de nota, cria snapshot de segurança e gera relatório com próximos passos estruturados (não executa ações autônomas de correção ou compilação).
-
-### Validar referências
-
-```bash
-/banca:refs
-```
-
-Gera certidão de referências via cadeia MCP → REST → cache.
-
-> ⚠️ O MCP `crossref-academic` não é registrado automaticamente.  
-> Para habilitar o auto-registro experimental, use `OPENBANCA_ENABLE_CROSSREF_MCP=1`.
-
-### Verificar risco de IA
-
-```bash
-/banca:ia
-```
-
-Scan heurístico de padrões de IA no texto.
+`assets/opencode/` preserva agentes, comandos e skills do outro harness; `package.json` conserva o script `e2e:opencode` e a dependência `@opencode-ai/plugin`. Isso é **legado histórico em migração**: não é caminho de operação do DSHbanca e não deve ser apresentado como integração DSH. A variável `OPENBANCA_ENABLE_CROSSREF_MCP` (e a equivalente `DSHBANCA_ENABLE_CROSSREF_MCP`) é lida pelo entry legado para auto-registrar um MCP; MCPs e integrações com provedores pertencem ao host e não são instrução operacional deste projeto.
 
 ## Como revisar com IA
 
-O repositório foi preparado para revisão por modelos de IA. Consulte a pasta `prompts/` para prompts prontos:
+O repositório mantém prompts prontos em `prompts/`:
 
 - `prompts/ai-reviewer-general.md` - Revisão geral do projeto
 - `prompts/ai-reviewer-code.md` - Revisão de código e estrutura
 - `prompts/ai-reviewer-docs.md` - Revisão de documentação
 - `prompts/ai-reviewer-security.md` - Revisão de segurança
 
-Consulte também `docs/ai-review-protocol.md` para o protocolo completo de revisão.
+Consulte [docs/ai-review-protocol.md](docs/ai-review-protocol.md) para o protocolo completo. Esse protocolo ainda contém nomenclatura do harness legado; se divergir da arquitetura DSH-only, trate a afirmação divergente como dívida documental.
+
+## Limitações e riscos
+
+- Nenhum fluxo de DSH está comprovado de ponta a ponta; a integração nativa está em PR draft.
+- O detector de IA é heurístico e **não comprova autoria**; plágio e similaridade também são sinais, não vereditos.
+- Um índice interno de auditoria **não representa aprovação ou reprovação acadêmica**.
+- Referências via MCP não foram validadas com servidores reais nesta base.
+- LaTeX/BibTeX real, corpus versionado e avaliação humana continuam pendentes.
+- O consumo das instruções Markdown do `banca-auditor` pelo Agent depende da issue #3.
+- LaTeX (`lualatex`) é opcional; sem ele não há compilação real.
 
 ## Como contribuir
 
-Consulte `CONTRIBUTING.md` para guia completo de contribuição.
+Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para o guia de contribuição.
 
 ## Segurança
 
-Consulte `SECURITY.md` para política de segurança e como reportar problemas.
+Consulte [SECURITY.md](SECURITY.md) para a política de segurança e o canal de reporte. Correções acadêmicas, alteração de rubricas, scoring e julgamento institucional exigem autorização humana explícita; não use manuscritos reais sem autorização.
 
 ## Roadmap
 
-Consulte `ROADMAP.md` para o plano de desenvolvimento.
+Consulte [ROADMAP.md](ROADMAP.md) para o plano de desenvolvimento.
 
 ## Licença
 
-Licença ainda não definida. Não reutilize este projeto publicamente sem autorização do autor.
+Licença ainda não definida (`UNLICENSED`); ver [LICENSE_PENDING.md](LICENSE_PENDING.md). Não reutilize este projeto publicamente sem autorização do autor.
 
 TODO: escolher uma licença apropriada (MIT, Apache-2.0, GPL-3.0 ou proprietária).
-
-## Comandos Disponíveis
-
-| Comando | Descrição |
-|---------|-----------|
-| `/banca:init` | Inicializa projeto |
-| `/banca:status` | Estado atual |
-| `/banca:context` | Context pack para LLM |
-| `/banca:auditar` | Auditoria 4 eixos + nota |
-| `/banca:corrigir` | Aplica correções + guardrails |
-| `/banca:refs` | Valida referências (MCP→REST→cache) |
-| `/banca:ia` | Risco IA (regex) |
-| `/banca:plagio` | Parse CopySpider |
-| `/banca:loop` | Etapa assistida do loop (preparatório) |
-| `/banca:snapshot` | Snapshot direcionado |
-| `/banca:restore` | Restaura de snapshot |
-| `/banca:compile` | Compila LaTeX |
-| `/banca:checklist` | Checklist entrega |
-| `/banca:validate` | Valida project.json |
-| `/banca:contract` | Contrato pós-correção |
