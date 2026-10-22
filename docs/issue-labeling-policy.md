@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-Esta política define como humanos e agentes de IA devem classificar, atualizar, despachar e encerrar issues do OpenBanca.
+Esta política define como humanos e agentes de IA devem classificar, atualizar, despachar e encerrar issues do DSHbanca, cujo **único harness é o DSH (DeepSeek Harness)**. O OpenBanca é um projeto separado, voltado ao OpenCode; menções a OpenCode aqui são legado histórico em migração e não representam compatibilidade, fallback ou integração suportada.
 
 Os labels existem para responder cinco perguntas sem depender de interpretação livre:
 
@@ -29,7 +29,7 @@ Exemplo válido:
 ```text
 bug
 priority:p0
-area:opencode
+area:dsh
 needs:e2e
 agent:ready
 ```
@@ -65,7 +65,7 @@ A prioridade representa o impacto **atual do trabalho ainda não resolvido**, n�
 
 ### Exemplos
 
-- Commands principais não são descobertos pelo OpenCode: `priority:p0`.
+- Tools, skills ou agents centrais não são descobertos pelo DSH: `priority:p0`.
 - Auditor pode editar arquivos apesar de ser declarado read-only: `priority:p1`.
 - Documentação mostra um argumento inexistente: normalmente `priority:p2`.
 - Ajuste cosmético sem efeito funcional: `priority:p3`.
@@ -89,7 +89,8 @@ Aplique pelo menos um e no máximo dois:
 
 | Label | Escopo |
 |---|---|
-| `area:opencode` | Commands, skills, agents, permissões e integração com o host. |
+| `area:dsh` | Integração DSH/Cordis: agents, tools, skills, lifecycle e permissões. |
+| `area:opencode` | **Legado histórico/deprecated.** Integração do repositório antigo com OpenCode; não usar em issues novas e não representa compatibilidade suportada. |
 | `area:audit` | Rubricas, findings, scoring, ABNT, conteúdo e estilo. |
 | `area:manuscript` | Ingestão, LaTeX, Markdown, DOCX, includes, parsing e proveniência. |
 | `area:references` | BibTeX, DOI, Crossref, MCP, cache, referências e citações. |
@@ -98,6 +99,8 @@ Aplique pelo menos um e no máximo dois:
 | `area:ci` | GitHub Actions, build, testes, release e validações automatizadas. |
 
 Se um issue parecer exigir três ou mais áreas, o agente deve avaliar se ele precisa ser dividido em issues menores.
+
+Issues novas alinhadas ao DSH usam `area:dsh` para a integração do plugin com o host (Cordis, agents, tools, skills, lifecycle e permissões). O label `area:opencode` permanece disponível apenas para issues e PRs históricos já classificados, até a migração descrita em [Migração de labels históricos](#migração-de-labels-históricos); ele não deve ser aplicado a trabalho novo e não indica suporte a outro harness.
 
 ## Labels operacionais
 
@@ -142,14 +145,15 @@ Aplicar quando o issue não pode ser encerrado apenas com testes unitários, moc
 
 Exemplos:
 
-- descoberta real de commands, skills ou agents no OpenCode;
-- enforcement real de permissões;
-- integração MCP;
-- compilação LaTeX real;
-- workflow do GitHub Actions executado;
+- discovery real de tools, skills ou agents no DSH;
+- associação ao Agent/Session e dispatch nativos observados no DSH real;
+- enforcement real de permissões antes da mutação;
+- integração MCP mediada pelo host;
+- compilação LaTeX/BibTeX real;
+- comportamento dependente de modelo, somente sob autorização humana específica;
 - comportamento dependente do ambiente do host.
 
-O issue só pode ser fechado quando a evidência E2E estiver registrada no próprio issue ou em PR/artefato claramente vinculado.
+Testes unitários, mocks, inspeção estática, build e CI convencional **não** substituem o E2E DSH real no SHA final. O issue só pode ser fechado quando a evidência correspondente estiver registrada no próprio issue ou em PR/artefato claramente vinculado, com SHA e limitações.
 
 ## Label de automação
 
@@ -266,9 +270,15 @@ A automação:
 - não remove labels desconhecidos automaticamente;
 - falha diante de nomes duplicados, cores inválidas ou configuração incompleta.
 
+O workflow dispara em push na `master` que altere `.github/labels.yml`. Alterações na taxonomia só têm efeito remoto **após o merge** e não devem ser executadas manualmente por quem propõe a mudança; verificar a sincronização real é etapa de fechamento do mantenedor.
+
 O label `jules` possui um efeito adicional externo ao workflow: quando aplicado a uma issue e o aplicativo Jules está autorizado, a integração do Google inicia uma tarefa e comenta automaticamente na issue.
 
 A remoção ou renomeação de um label deve ser uma mudança deliberada, revisada e acompanhada de migração dos issues afetados.
+
+## Migração de labels históricos
+
+A retirada de `area:opencode` não ocorre nesta política nem neste slice. O trabalho futuro e separado deve: fazer o inventário do uso histórico de `area:opencode` em issues e PRs; migrar individualmente apenas os registros pertinentes para `area:dsh`, quando a classificação continuar correta; confirmar a sincronização dos labels na base; e só então avaliar a retirada do alias, com revisão humana registrada. Até lá, `area:opencode` permanece como compatibilidade de metadados históricos.
 
 ## Resumo de conformidade
 
@@ -278,6 +288,7 @@ Um issue está corretamente classificado quando:
 [ ] possui um tipo
 [ ] possui uma prioridade
 [ ] possui uma ou duas áreas
+[ ] usa area:dsh em trabalho novo alinhado ao DSH
 [ ] não contém labels inventados
 [ ] decisões humanas pendentes estão marcadas
 [ ] necessidade de E2E está marcada

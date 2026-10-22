@@ -1,8 +1,10 @@
 version: 1
 
-# Fonte de verdade da taxonomia de issues do OpenBanca.
+# Fonte de verdade da taxonomia de issues do DSHbanca (DSH é o único harness).
 # O workflow sync-labels.yml cria ou atualiza estes labels, mas nunca apaga
 # labels fora desta lista automaticamente.
+# area:opencode é legado histórico/deprecated; não usar em issues novas. A
+# migração dos registros históricos é trabalho separado.
 labels:
   - name: "bug"
     color: "d73a4a"
@@ -39,9 +41,14 @@ labels:
     description: "Melhoria menor, manutenção ou baixo impacto."
     group: "priority"
 
+  - name: "area:dsh"
+    color: "6e40c9"
+    description: "Integração DSH/Cordis: agents, tools, skills, lifecycle e permissões."
+    group: "area"
+
   - name: "area:opencode"
     color: "5319e7"
-    description: "Commands, skills, agents, permissões ou integração com o OpenCode."
+    description: "LEGADO/DEPRECATED: integração histórica com OpenCode; não usar em issues novas."
     group: "area"
 
   - name: "area:audit"
@@ -123,6 +130,8 @@ rules:
     minimum: 1
     maximum: 2
     allowed:
+      - "area:dsh"
+      # area:opencode retido apenas para issues históricas até migração separada.
       - "area:opencode"
       - "area:audit"
       - "area:manuscript"
