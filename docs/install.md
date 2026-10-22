@@ -1,70 +1,32 @@
-# Instalação
+# Instalação (guia rápido)
+
+Este é um guia de **preparação local do repositório**, não de instalação funcional no host. Consulte [installation.md](installation.md) para o estado da integração, fontes e limites de evidência.
 
 ## Pré-requisitos
-- OpenCode >= 1.x
-- Node.js >= 18 ou Bun >= 1.x
-- LaTeX: TeX Live com lualatex (opcional)
 
-> ⚠️ **PENDENTE**: o pacote `@opencode/banca` ainda **não está publicado no npm**.  
-> O `package.json` marca `"private": true`. As instruções de instalação via npm/bun abaixo são **planos futuros, não instruções validadas**.
+- **Git e Bun** para os comandos abaixo. A CI fixa Bun `1.3.9`; isso não estabelece uma versão mínima suportada.
+- **DSH (DeepSeek Harness)/Cordis** é o destino exclusivo da integração, mas não precisa ser iniciado para preparar o repositório. A versão mínima de DSH **não foi validada**.
+- LaTeX é opcional para trabalho futuro de compilação de manuscritos; não é necessário neste preparo.
 
-```json
-// opencode.json
-{
-  "plugin": ["@opencode/banca"]
-}
-```
+## Preparo local
 
 ```bash
-# Para instalação de desenvolvimento local (não publicado):
 git clone https://github.com/Base-Analitica/DSHbanca.git
 cd DSHbanca
-bun install
+bun install --frozen-lockfile
 bun run build
 ```
 
-## Inicialização
+Clone e resolução de dependências podem exigir rede. Este preparo não exige modelo, credenciais de provedor nem MCP externo.
 
-```bash
-/banca:init
-```
+**Instalar dependências e compilar não instala funcionalmente o plugin no DSH**, não registra o bundle no host e não comprova discovery ou dispatch.
 
-Cria `.banca/` + `.opencode/` (agents, commands, skills, templates):
+## Estado e próximo gate
 
-```
-.banca/
-  project.json      # configuração
-  state.json        # estado (score, iterações, snapshots)
-  scorecard.md
-  iterations.md
-  checklist.md
-  knowledge.md
-  reports/
-  context/
-  snapshots/
-  cache/
-.opencode/
-  agents/           # @banca-* agents
-  commands/         # /banca:* comandos
-  skills/           # skills disponíveis
-```
+O pacote `dshbanca` é `private: true` e `UNLICENSED`, sem publicação oficial nem fluxo de instalação/uso final validado. Não há comando CLI DSH de instalação validado a recomendar.
 
-## Ferramentas (15)
+A `master` declara export `./dsh`, patch Cordis e provider de skills. As 16 ferramentas nativas, o guard e o gate E2E são propostas da [PR #1](https://github.com/Base-Analitica/DSHbanca/pull/1), ainda **draft/CHANGES_REQUESTED**, não funcionalidades incorporadas. O consumo Markdown do auditor segue bloqueado na [issue #3](https://github.com/Base-Analitica/DSHbanca/issues/3); evidência de SHA anterior não comprova o HEAD final.
 
-| Tool | Descrição |
-|------|-----------|
-| `/banca:init` | Inicializa projeto |
-| `/banca:status` | Estado atual |
-| `/banca:context` | Context pack para LLM |
-| `/banca:auditar` | Auditoria 4 eixos + nota |
-| `/banca:corrigir` | Aplica correções + guardrails |
-| `/banca:refs` | Valida referências (MCP→REST→cache) |
-| `/banca:ia` | Risco IA (regex) |
-| `/banca:plagio` | Parse CopySpider |
-| `/banca:loop` | Loop correção contínua |
-| `/banca:snapshot` | Snapshot direcionado |
-| `/banca:restore` | Restaura de snapshot |
-| `/banca:compile` | Compila LaTeX |
-| `/banca:checklist` | Checklist entrega |
-| `/banca:validate` | Valida project.json |
-| `/banca:contract` | Contrato pós-correção |
+OpenBanca é outro projeto, voltado ao OpenCode; orientações desse legado **não são suportadas** aqui. Não use a suíte integral sem o preflight de segurança descrito no [guia detalhado](installation.md).
+
+Referências: [README](../README.md), [governança](../AGENTS.md) e [arquitetura](architecture.md).
