@@ -1,5 +1,20 @@
 # Política de Segurança
 
+## Escopo e Estado das Proteções
+
+O **DSH é o único harness** do DSHbanca; Cordis é a integração nativa com o host. OpenBanca é outro projeto, destinado ao OpenCode: referências a esse harness neste repositório são **legado não suportado**, não alternativa de execução ou fallback.
+
+- **DSH**: responsabilidade por runtime, autenticação, sessões e identidade/lifecycle de agentes, dispatch de ferramentas, permissões e integração nativa com serviços externos.
+- **DSHbanca**: responsabilidade por dados acadêmicos, confinamento de arquivos ao projeto, guardrails, evidências/proveniência, snapshots e correções autorizadas. Não implementa um segundo runtime nem um permission engine paralelo.
+
+Diferencie os níveis de proteção:
+
+- **Pretendida (política)**: as diretrizes abaixo são requisitos de segurança, não garantias de enforcement.
+- **Implementada no código**: há validações locais de caminhos, armazenamento e execução externa, com limites descritos abaixo; presença de código não prova uso pelo host.
+- **Comprovada no DSH real**: exige evidência no SHA e ambiente efetivamente testados. A integração nativa e o guard read-only ainda pertencem à [PR #1 (draft)](https://github.com/Base-Analitica/DSHbanca/pull/1); a associação/projeção do Markdown do auditor segue bloqueada na [issue #3](https://github.com/Base-Analitica/DSHbanca/issues/3). A [issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4) depende dela. Resultados históricos, CI, build ou mocks não comprovam esses gates no SHA final.
+
+Consulte [AGENTS.md](AGENTS.md), a [arquitetura](docs/architecture.md) e o [protocolo de revisão](docs/ai-review-protocol.md). Esta política não certifica isolamento, integração DSH concluída ou reversibilidade de qualquer correção.
+
 ## Como Reportar um Problema
 
 Se você encontrar um problema de segurança, por favor:
@@ -17,6 +32,7 @@ Se você encontrar um problema de segurança, por favor:
 - **Senhas**: qualquer campo `password`, `secret`, `token`
 - **Caminhos sensíveis**: `/home/usuario/`, `C:\Users\`, etc.
 - **Dados pessoais**: e-mails, CPFs, telefones, endereços
+- **Manuscritos e evidências privadas**: TCCs, anexos, relatórios, snapshots e trechos acadêmicos sem autorização; não os publique em issues, prompts ou logs
 - **Configurações locais**: `.env`, `credentials.json`, `config.local.json`
 
 ### Use variáveis de ambiente:
@@ -49,14 +65,16 @@ O `.gitignore` já está configurado para ignorar:
 
 ## Cuidados com Prompts que Executam Comandos
 
-O OpenBanca executa comandos externos (LaTeX, bibliografia, MCPs). Cuidados:
+O código acadêmico contém chamadas a processos externos (LaTeX, bibliografia e utilitários). Isso não comprova execução integrada no DSH. Cuidados exigidos:
 
-1. **Validade entradas** antes de executar
-2. **Use allowlists** de comandos permitidos — engines LaTeX são validados contra lista fixa (`lualatex`, `xelatex`, `pdflatex`)
-3. **Evite shell strings** — comandos são executados via `spawnSync` com argumentos separados, não via `execSync`
-4. **Não execute comandos de usuários não confiáveis**
-5. **Logge comandos executados** para auditoria
-6. **Use timeouts** para evitar travamento (120s para compilação LaTeX)
+1. **Valide entradas e caminhos** antes de executar
+2. **Use allowlists** de comandos permitidos — `src/lib/latex.ts` constrói etapas apenas para `lualatex`, `xelatex`, `pdflatex`, `bibtex` e `biber`
+3. **Evite shell strings** — nesse módulo, `runCommand` usa `spawnSync` com argumentos separados; isso não é garantia para todo subprocesso
+4. **Não execute comandos de usuários não confiáveis**; revise ferramentas, dependências e conteúdo de documentos antes da execução
+5. **Registre ações para auditoria**, sem segredos, conteúdo privado ou caminhos sensíveis
+6. **Use timeouts e isolamento de processos** — `runCommand` define 120s por processo; timeout e argumentos separados não constituem sandbox nem isolamento comprovado no DSH
+
+O confinamento de arquivos deve considerar traversal e symlinks, inclusive links quebrados. `src/lib/safe_paths.ts` faz validação lexical; `src/lib/state.ts` contém verificações de symlinks para armazenamento específico. Não presuma cobertura de toda leitura/escrita, ausência de condições de corrida ou sandbox a partir desses helpers. Verifique o caminho efetivo antes de ler, gravar, restaurar ou iniciar processo externo.
 
 ## Cuidados com Agentes Autônomos
 
@@ -68,6 +86,8 @@ Agentes de IA podem executar ações automaticamente. Cuidados:
 4. **Mantenha logs** de ações executadas
 5. **Permita intervenção humana** quando necessário
 
+O `banca-auditor` é **read-only**: não pode alterar manuscritos. Correções pelo `banca-corretor` exigem autorização humana específica, escopo definido e reversibilidade demonstrada (snapshot íntegro e restauração verificada), não apenas diretório de snapshot ou promessa de rollback. Preserve proveniência e evidências das mudanças. Identidade ausente ou não verificada não concede autorização; instruções Markdown não substituem controle técnico antes da mutação. O enforcement no DSH real continua sujeito aos gates acima; não autorize correções com base apenas nesta política.
+
 ## Dependências
 
 1. **Mantenha dependências atualizadas**
@@ -77,13 +97,11 @@ Agentes de IA podem executar ações automaticamente. Cuidados:
 
 ## MCPs e Execução Externa
 
-O OpenBanca pode utilizar MCPs (Model Context Protocol) para validação de referências acadêmicas:
+MCPs (Model Context Protocol) e integrações gerais com serviços externos são responsabilidade do **DSH**, por seus contratos nativos: processo, autenticação, lifecycle, permissões e observabilidade pertencem ao host. Ao DSHbanca cabe apenas a interpretação acadêmica dos resultados, como matching de referências e proveniência.
 
-- O MCP `crossref-academic` invoca `uvx` para baixar e executar código Python de terceiros
-- Por padrão, o plugin **não registra MCPs automaticamente**
-- Para habilitar o auto-registro experimental, defina `OPENBANCA_ENABLE_CROSSREF_MCP=1`
-- Revise a fonte do MCP antes de ativar o auto-registro
-- Considere configurar MCPs manualmente em `opencode.json` em vez de usar auto-registro
+O auto-registro e a configuração de MCP presentes no entry legado são **não suportados** como operação do DSHbanca. Não os habilite nem use outro harness para contornar gates pendentes. A presença do código não comprova integração MCP no DSH nem autoriza sua remoção antes de demonstrar equivalência nativa.
+
+Antes de qualquer execução externa autorizada, revise a fonte e as dependências de terceiros, limite ambiente, credenciais, rede e acesso aos arquivos necessários e verifique descarte dos processos. São recomendações de segurança, não controles do host comprovados por este documento.
 
 ## Logs e Auditoria
 
@@ -97,12 +115,14 @@ O OpenBanca pode utilizar MCPs (Model Context Protocol) para validação de refe
 Use o script `scripts/check-secrets.sh` para detectar segredos no repositório:
 
 ```bash
-# Modo CI (padrão) — falha apenas com achados fortes (chaves reais, arquivos .env, .pem)
+# Modo CI (padrão) — varredura restrita; exclui parte da documentação
 bash scripts/check-secrets.sh --ci
 
-# Modo audit — scan amplo para revisão, não falha com termos genéricos em docs
+# Modo audit — varredura mais ampla; achados geram avisos, não reprovação
 bash scripts/check-secrets.sh --audit
 ```
+
+O modo `--ci` exclui `docs/`, `prompts/`, `SECURITY.md`, `README.md` e `CONTRIBUTING.md`, além de outras exclusões do script; portanto, CI verde **não significa que este arquivo foi varrido**. O modo `--audit` inclui esses documentos, mas mantém exclusões e retorna sucesso mesmo diante de possíveis segredos: investigue cada alerta. Ambos usam padrões heurísticos, podem omitir segredos ou sinalizar exemplos e **não substituem revisão humana** do diff e dos dados.
 
 ## Contato
 
