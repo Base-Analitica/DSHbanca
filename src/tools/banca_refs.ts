@@ -1,14 +1,13 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { existsSync, readFileSync } from "node:fs"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig, getMcpCommand } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { parseBibtex, bibEntryToRef } from "../lib/bibtex"
 import { resolveRef } from "../lib/provider_chain"
 import { RefCache } from "../lib/cache"
-const z = tool.schema
-
-export const bancaRefs = tool({
+import { saveReport } from "../lib/reports"
+export const bancaRefs = defineBancaTool({
   description: "Validate references via MCP (primary) → REST → cache chain. Reports provider used per reference.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
@@ -79,10 +78,7 @@ export const bancaRefs = tool({
       networkPending > 0 ? `\n⚠ ${networkPending} refs pending — network was unavailable during validation. Run \`/banca:refs\` again with network access.` : "",
     ]
 
-    const reportDir = join(root, ".banca", "reports")
-    mkdirSync(reportDir, { recursive: true })
-    const reportPath = join(reportDir, `refs-${Date.now()}.md`)
-    writeFileSync(reportPath, lines.filter(Boolean).join("\n"), "utf-8")
+    const reportPath = saveReport(root, `refs-${Date.now()}.md`, lines.filter(Boolean).join("\n"))
 
     const baseMessage = [
       `References: ${entries.length}`,

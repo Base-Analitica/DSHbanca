@@ -18,7 +18,7 @@ const EXPECTED_SKILLS = [
 ];
 
 describe("Skills Validation", () => {
-  const versionedSkillsDir = join(__dirname, "..", "assets", "opencode", "skills");
+  const versionedSkillsDir = join(__dirname, "..", "assets", "dsh", "skills");
 
   test("1 & 2. all versioned skills are valid and names match directories", () => {
     const errors = validateAllSkills(versionedSkillsDir);
@@ -214,7 +214,7 @@ describe("Skills Validation", () => {
         const installed = installAssets(testProject, true);
         expect(installed.length).toBeGreaterThan(0);
 
-        const installedSkillsDir = join(testProject, ".opencode", "skills");
+        const installedSkillsDir = join(testProject, ".dsh", "skills");
         expect(existsSync(installedSkillsDir)).toBe(true);
 
         // Comprovar exatamente os 8 diretórios
@@ -242,7 +242,7 @@ describe("Skills Validation", () => {
         const p = mkdtempSync(join(tmpdir(), 'copied-skills-'));
         try {
             installAssets(p, true);
-            const installedSkillsDir = join(p, ".opencode", "skills");
+            const installedSkillsDir = join(p, ".dsh", "skills");
             const errors = validateAllSkills(installedSkillsDir);
             expect(errors).toHaveLength(0);
         } finally {
@@ -258,12 +258,12 @@ describe("Skills Validation", () => {
             const installed = installAssets(fallbackProject, true, nonExistentDir);
             expect(installed.length).toBeGreaterThan(0);
 
-            const installedSkillsDir = join(fallbackProject, ".opencode", "skills");
+            const installedSkillsDir = join(fallbackProject, ".dsh", "skills");
             const errors = validateAllSkills(installedSkillsDir);
             expect(errors).toHaveLength(0);
 
             // Compare each installed fallback SKILL.md with the versioned one
-            const versionedSkillsDir = join(__dirname, "..", "assets", "opencode", "skills");
+            const versionedSkillsDir = join(__dirname, "..", "assets", "dsh", "skills");
             for (const skill of EXPECTED_SKILLS) {
                 const fallbackSkillPath = join(installedSkillsDir, skill, "SKILL.md");
                 const versionedSkillPath = join(versionedSkillsDir, skill, "SKILL.md");
@@ -285,7 +285,7 @@ describe("Skills Validation", () => {
   describe("CLI Execution", () => {
     test("valid directory exits with 0", () => {
         const result = spawnSync("bun", ["run", "scripts/validate-skills.ts"], {
-            env: { ...process.env, SKILLS_DIR: join(__dirname, "..", "assets", "opencode", "skills") }
+            env: { ...process.env, SKILLS_DIR: join(__dirname, "..", "assets", "dsh", "skills") }
         });
         expect(result.status).toBe(0);
     });

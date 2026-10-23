@@ -1,14 +1,15 @@
-import { existsSync, readFileSync, mkdirSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
-import { loadState, addIteration, addSnapshot } from "../lib/state"
+import { loadState, addIteration } from "../lib/state"
+import { createSnapshot, SnapshotCaptureError, SnapshotConflictError } from "../lib/snapshot"
 import { generateReport, saveReport } from "../lib/reports"
 import { analyzeCitationDensity } from "../lib/citation"
-const z = tool.schema
-
-export const bancaLoop = tool({
+import { ensureRealDirInsideRoot, PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
+export const bancaLoop = defineBancaTool({
   description: "Runs an assisted loop step (checks target, takes snapshot, audits citations, prepares next steps). Implementation is preparatory/assisted and does not run autonomous corrections.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
@@ -69,16 +70,38 @@ export const bancaLoop = tool({
       ].join("\n")
     }
 
-    // Phase: snapshot
+    // Phase: snapshot. The central createSnapshot claims a collision-free
+    // label (internal labels may collide within one millisecond) and registers
+    // the recovery point only after the marker/manifest were completed. A loop
+    // snapshot is an explicit `marker`: a process milestone without restorable
+    // files, never presented as a manuscript recovery point.
     const snapLabel = `loop-${Date.now()}`
-    const snapDir = join(root, ".banca", "snapshots", snapLabel)
-    mkdirSync(snapDir, { recursive: true })
-    addSnapshot(root, snapLabel, scoreBefore)
+    let loopSnapshotLabel: string
+    try {
+      const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
+      resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
+      loopSnapshotLabel = createSnapshot({
+        root,
+        snapshotsDir,
+        label: snapLabel,
+        candidates: [],
+        labelPolicy: "unique",
+        register: true,
+        scoreBefore,
+        kind: "marker",
+      }).label
+    } catch (err) {
+      if (err instanceof PathTraversalError) return "blocked: workspace state paths escape project root"
+      if (err instanceof SnapshotConflictError || err instanceof SnapshotCaptureError) {
+        return "blocked: loop snapshot failed — iteration not recorded"
+      }
+      throw err
+    }
 
     const results: string[] = [
       `Loop iteration`,
       `Score: ${scoreBefore ?? "—"} → target ${target}`,
-      `Snapshot: ${snapLabel}`,
+      `Snapshot: ${loopSnapshotLabel}`,
       `Citations: ${citation.citedParagraphs}/${citation.totalParagraphs} (${(100 - citation.percentWithoutCitation).toFixed(1)}%)`,
     ]
 
@@ -87,15 +110,15 @@ export const bancaLoop = tool({
     }
 
     // save report
-    const report = generateReport(`LOOP — ${snapLabel}`, [
+    const report = generateReport(`LOOP — ${loopSnapshotLabel}`, [
       { title: "Context", body: `Score before: ${scoreBefore ?? "—"}\nTarget: ${target}\nCitations: ${citation.citedParagraphs}/${citation.totalParagraphs}` },
       { title: "Next Steps", body: "Run /banca:auditar for detailed findings, then /banca:corrigir with specific corrections." },
     ])
-    saveReport(root, `loop-${snapLabel}.md`, report)
+    saveReport(root, `loop-${loopSnapshotLabel}.md`, report)
 
     addIteration(root, "loop", scoreBefore, currentScore, "ok")
 
-    results.push(`Report: .banca/reports/loop-${snapLabel}.md`)
+    results.push(`Report: .banca/reports/loop-${loopSnapshotLabel}.md`)
 
     return results.join("\n")
   },

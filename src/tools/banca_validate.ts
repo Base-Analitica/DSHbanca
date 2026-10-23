@@ -1,8 +1,7 @@
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { validateConfig } from "../lib/config"
-const z = tool.schema
-
-export const bancaValidate = tool({
+export const bancaValidate = defineBancaTool({
   description: "Validate .banca/project.json against schema.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

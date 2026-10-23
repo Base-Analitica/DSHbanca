@@ -21,7 +21,7 @@ import { installAssets } from "../src/lib/install_assets"
 const VERSIONED_COMMANDS_DIR = join(
   process.cwd(),
   "assets",
-  "opencode",
+  "dsh",
   "commands",
 )
 
@@ -82,8 +82,8 @@ describe("command assets: banca-auditar", () => {
     const versionedInstalled = installVersioned(versionedRoot)
     const fallbackInstalled = installFallback(fallbackRoot)
 
-    const versionedPath = join(versionedRoot, ".opencode", "commands", AUDITAR)
-    const fallbackPath = join(fallbackRoot, ".opencode", "commands", AUDITAR)
+    const versionedPath = join(versionedRoot, ".dsh", "commands", AUDITAR)
+    const fallbackPath = join(fallbackRoot, ".dsh", "commands", AUDITAR)
     const sourcePath = join(VERSIONED_COMMANDS_DIR, AUDITAR)
 
     expect(existsSync(sourcePath)).toBe(true)
@@ -91,10 +91,10 @@ describe("command assets: banca-auditar", () => {
     expect(existsSync(fallbackPath)).toBe(true)
 
     expect(
-      versionedInstalled.some((p) => p.endsWith(join(".opencode", "commands", AUDITAR))),
+      versionedInstalled.some((p) => p.endsWith(join(".dsh", "commands", AUDITAR))),
     ).toBe(true)
     expect(
-      fallbackInstalled.some((p) => p.endsWith(join(".opencode", "commands", AUDITAR))),
+      fallbackInstalled.some((p) => p.endsWith(join(".dsh", "commands", AUDITAR))),
     ).toBe(true)
 
     const source = readNormalized(sourcePath)
@@ -161,10 +161,10 @@ describe("command assets: banca-auditar", () => {
     installFallback(fallbackRoot)
 
     const installedVersioned = readNormalized(
-      join(versionedRoot, ".opencode", "commands", HELP),
+      join(versionedRoot, ".dsh", "commands", HELP),
     )
     const installedFallback = readNormalized(
-      join(fallbackRoot, ".opencode", "commands", HELP),
+      join(fallbackRoot, ".dsh", "commands", HELP),
     )
 
     expect(installedVersioned).toBe(sourceHelp)
@@ -181,7 +181,7 @@ describe("command assets: banca-auditar", () => {
       const dir =
         root === VERSIONED_COMMANDS_DIR
           ? VERSIONED_COMMANDS_DIR
-          : join(root, ".opencode", "commands")
+          : join(root, ".dsh", "commands")
       const files = readdirSync(dir)
       for (const name of files) {
         expect(name).not.toMatch(/:/)
@@ -203,7 +203,7 @@ describe("command assets: banca-auditar", () => {
 
     for (const root of [versionedRoot, fallbackRoot]) {
       const content = readNormalized(
-        join(root, ".opencode", "commands", AUDITAR),
+        join(root, ".dsh", "commands", AUDITAR),
       )
       const fm = parseFrontmatter(content)
       expect(fm).toMatch(/^\s*agent:\s*banca-auditor\s*$/m)

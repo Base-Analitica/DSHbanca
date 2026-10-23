@@ -434,8 +434,8 @@ describe("Integration — path traversal safety", () => {
     writeFileSync(join(testRoot, ".env"), "SECRET=123")
     mkdirSync(join(testRoot, ".banca", "cache"), { recursive: true })
     writeFileSync(join(testRoot, ".banca", "cache", "refs.json"), "{}")
-    mkdirSync(join(testRoot, ".opencode", "agents"), { recursive: true })
-    writeFileSync(join(testRoot, ".opencode", "agents", "x.md"), "agent")
+    mkdirSync(join(testRoot, ".dsh", "agents"), { recursive: true })
+    writeFileSync(join(testRoot, ".dsh", "agents", "x.md"), "agent")
 
     const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
     const result = await bancaSnapshot.execute({
@@ -448,7 +448,7 @@ describe("Integration — path traversal safety", () => {
     expect(existsSync(join(snapDir, "main.tex"))).toBe(true)
     expect(existsSync(join(snapDir, ".env"))).toBe(false)
     expect(existsSync(join(snapDir, ".banca", "cache", "refs.json"))).toBe(false)
-    expect(existsSync(join(snapDir, ".opencode", "agents", "x.md"))).toBe(false)
+    expect(existsSync(join(snapDir, ".dsh", "agents", "x.md"))).toBe(false)
   })
 })
 
@@ -573,7 +573,7 @@ describe("Integration — Auditoria Extrema Fixes", () => {
     const installed = installAssets(testRoot, true)
     expect(installed.length).toBeGreaterThan(0)
     // Check if the agent file is copied
-    const agentPath = join(testRoot, ".opencode", "agents", "banca-loop.md")
+    const agentPath = join(testRoot, ".dsh", "agents", "banca-loop.md")
     expect(existsSync(agentPath)).toBe(true)
     expect(readFileSync(agentPath, "utf-8")).toContain("Orquestra etapa assistida")
   })

@@ -1,5 +1,6 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs"
+import { readFileSync, existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { ensureRealDirInsideRoot, prepareRealPathForWrite } from "./safe_paths"
 
 export interface ProjectConfig {
   version: number
@@ -174,14 +175,14 @@ export function validateConfig(projectRoot: string): { valid: boolean; errors: s
 
 export function saveConfig(projectRoot: string, config: Required<ProjectConfig> | ProjectConfig): void {
   const defaults = DEFAULTS as Required<ProjectConfig>
-  writeFileSync(configPath(projectRoot), JSON.stringify({ ...config, analysis: sanitizeAnalysis(config.analysis, defaults.analysis) }, null, 2), "utf-8")
+  const target = prepareRealPathForWrite(projectRoot, configPath(projectRoot))
+  writeFileSync(target, JSON.stringify({ ...config, analysis: sanitizeAnalysis(config.analysis, defaults.analysis) }, null, 2), "utf-8")
 }
 
 export function ensureBancaDir(projectRoot: string): void {
   const d = getProjectDir(projectRoot)
   for (const sub of ["", "reports", "context", "snapshots", "cache"]) {
-    const p = join(d, sub)
-    if (!existsSync(p)) mkdirSync(p, { recursive: true })
+    ensureRealDirInsideRoot(projectRoot, join(d, sub))
   }
 }
 

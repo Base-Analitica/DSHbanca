@@ -9,7 +9,7 @@ import {
   type Stats,
 } from "node:fs"
 import { join, dirname, resolve } from "node:path"
-import { resolveInsideRoot } from "./safe_paths"
+import { resolveInsideRoot, prepareRealPathForWrite } from "./safe_paths"
 import {
   AnalysisCheckpointError,
   type AnalysisCheckpoint,
@@ -54,9 +54,7 @@ export function loadState(projectRoot: string): ProjectState {
 }
 
 export function saveState(projectRoot: string, state: ProjectState): void {
-  const p = getStatePath(projectRoot)
-  const dir = dirname(p)
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const p = prepareRealPathForWrite(projectRoot, getStatePath(projectRoot))
   writeFileSync(p, JSON.stringify(state, null, 2), "utf-8")
 }
 
@@ -75,7 +73,13 @@ export function addIteration(
 
 export function addSnapshot(projectRoot: string, label: string, scoreBefore: number | null): string {
   const state = loadState(projectRoot)
-  const id = `snap-${Date.now()}`
+  // Recovery-point identity must stay unique even when several snapshots are
+  // registered within the same millisecond (frozen tests, fast internal
+  // producers). Never reuse an id already present in the registry.
+  const base = `snap-${Date.now()}`
+  let id = base
+  let n = 1
+  while (state.snapshots.some((s) => s.id === id)) id = `${base}-${++n}`
   state.snapshots.push({ id, label, createdAt: new Date().toISOString(), scoreBefore })
   saveState(projectRoot, state)
   return id

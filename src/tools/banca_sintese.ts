@@ -9,7 +9,8 @@
  * raw host exception messages, absolute paths, claim, or evidence content.
  */
 
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { loadCanonicalLatexManuscript } from "../lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../lib/analysis_coverage"
@@ -27,7 +28,6 @@ import {
   loadAnalysisFindings,
 } from "../lib/state"
 
-const z = tool.schema
 
 function formatError(code: string, message: string): string {
   return [
@@ -37,7 +37,7 @@ function formatError(code: string, message: string): string {
   ].join("\n")
 }
 
-export const bancaSintese = tool({
+export const bancaSintese = defineBancaTool({
   description:
     "Load the live exhaustive plan with the persisted complete checkpoint and " +
     "findings store, then return validated global analysis synthesis input JSON. " +

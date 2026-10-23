@@ -12,7 +12,8 @@
  * re-sanitize diagnostics or publish raw exception messages.
  */
 
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { loadCanonicalLatexManuscript } from "../lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../lib/analysis_coverage"
@@ -32,8 +33,6 @@ import {
   saveAnalysisFindings,
   type AnalysisFindingsStoreV1,
 } from "../lib/state"
-
-const z = tool.schema
 
 /** Stable receipt kind/version for successful batch finding validation + persistence. */
 export const AUDIT_RECEIPT_KIND = "openbanca-audit-receipt-v2" as const
@@ -98,7 +97,7 @@ function formatError(code: string, message: string): string {
   ].join("\n")
 }
 
-export const bancaAuditar = tool({
+export const bancaAuditar = defineBancaTool({
   description:
     "Validate and persist findings for one exhaustive canonical analysis batch. " +
     "Returns a structured receipt; does not score, advance checkpoint, or run a model.",

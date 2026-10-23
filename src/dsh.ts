@@ -1,9 +1,13 @@
 import { readdir, readFile } from "node:fs/promises"
+import { realpathSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
+import { z } from "zod"
+import { PathTraversalError, resolveRealInsideRoot } from "./lib/safe_paths.js"
+import { loadBancaTools } from "./lib/tools.js"
 
 export const name = "dshbanca"
-export const inject = ["skills"]
+export const inject = ["skills", "tools"]
 
 const PACKAGED_SKILL_RANK = 550
 const SOURCE = "custom"
@@ -80,7 +84,144 @@ async function discoverCandidates(skillsRoot: string, signal?: AbortSignal) {
   return candidates
 }
 
-export function apply(ctx: any) {
+/** Workspace-mutating tools denied to verified auditor agents. */
+const AUDITOR_DENIED_TOOLS = new Set([
+  "banca_init",
+  "banca_corrigir",
+  "banca_snapshot",
+  "banca_compile",
+  "banca_restore",
+  "banca_loop",
+])
+
+/** Tools that alter or revert the author's manuscript. */
+const MANUSCRIPT_MUTATING_TOOLS = new Set(["banca_corrigir", "banca_restore"])
+
+const AUDITOR_PRESET_PREFIX = "banca-auditor"
+const CORRECTOR_PRESET_PREFIX = "banca-corretor"
+
+/**
+ * Live preset composition, when the host exposes it. `agentPreset` in the
+ * session header is a durable, creation-time value (delegated sessions inherit
+ * the parent's preset), while the live composition is authoritative at
+ * dispatch time. Both sources are deny-monotonic: any source that identifies
+ * an auditor denies.
+ */
+function liveComposedPreset(exec: any): string | undefined {
+  try {
+    const agentCtx = exec?.agent?.ctx
+    const presets = agentCtx?.get?.("agentPresets")
+    const id = presets?.composedPreset?.(agentCtx)
+    return typeof id === "string" ? id : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function presetCandidates(exec: any): string[] {
+  const header = exec?.agent?.session?.header
+  const candidates = [liveComposedPreset(exec), header?.agentPreset]
+  return candidates.filter((p): p is string => typeof p === "string")
+}
+
+/**
+ * Academic tool policy for the native guard (and the executor double-check):
+ *
+ * - verified auditor lineage (`banca-auditor*`): read-only; workspace-mutating
+ *   tools are denied.
+ * - delegated sessions (`origin: "subagent"`) without a verified
+ *   `banca-corretor*` preset: manuscript mutation is denied. The absence of a
+ *   verifiable identity never grants authorization.
+ * - top-level sessions are not gated here: the host sandbox/approval policy
+ *   remains authoritative.
+ *
+ * The guard is deny-only and total: it never throws and never force-allows.
+ */
+function guardDenyReason(toolName: string | undefined, exec: any): string | undefined {
+  if (typeof toolName !== "string") return undefined
+  const presets = presetCandidates(exec)
+  const origin = exec?.agent?.session?.header?.origin
+
+  if (presets.some((p) => p.startsWith(AUDITOR_PRESET_PREFIX))) {
+    if (AUDITOR_DENIED_TOOLS.has(toolName)) {
+      return `DSHbanca guard: tool "${toolName}" is denied for auditor agents — read-only enforcement`
+    }
+    return undefined
+  }
+
+  if (origin === "subagent" && !presets.some((p) => p.startsWith(CORRECTOR_PRESET_PREFIX))) {
+    if (MANUSCRIPT_MUTATING_TOOLS.has(toolName)) {
+      return `DSHbanca guard: tool "${toolName}" is denied for subagents without a verified banca-corretor preset — manuscript mutation requires the corrector role`
+    }
+  }
+
+  return undefined
+}
+
+function resolveWorkspaceRoot(exec: any): string {
+  const cwd = exec?.agent?.session?.header?.cwd
+  if (typeof cwd !== "string" || cwd === "") {
+    throw new PathTraversalError("DSHbanca requires a session workspace; no cwd in session header")
+  }
+  try {
+    return realpathSync(cwd)
+  } catch {
+    throw new PathTraversalError("session workspace is not accessible")
+  }
+}
+
+export async function apply(ctx: any) {
+  const definitions = await loadBancaTools()
+
+  for (const [toolName, definition] of Object.entries(definitions)) {
+    const schema = z.object(definition.args)
+    const { $schema, ...parameters } = z.toJSONSchema(schema, { io: "input" })
+    ctx.tools.register({
+      name: toolName,
+      description: definition.description,
+      parameters,
+      output: {
+        schema: { type: "string" },
+        render: (_args: unknown, value: string) => [{ type: "text", text: value }],
+      },
+      async execute(input: unknown, exec: any) {
+        exec.signal.throwIfAborted()
+
+        const denied = guardDenyReason(toolName, exec)
+        if (denied) {
+          throw new Error(denied)
+        }
+
+        const args = schema.parse(input)
+        const root = resolveWorkspaceRoot(exec)
+
+        let directory: string
+        if (args.projectRoot !== undefined && args.projectRoot !== "") {
+          try {
+            directory = resolveRealInsideRoot(root, args.projectRoot)
+          } catch (err) {
+            if (err instanceof PathTraversalError) {
+              throw new PathTraversalError(
+                `tool "${toolName}" rejected a projectRoot outside the workspace`,
+              )
+            }
+            throw err
+          }
+        } else {
+          directory = root
+        }
+
+        const result = await definition.execute(
+          { ...args, projectRoot: directory } as any,
+          { directory, worktree: directory, abort: exec.signal } as any,
+        )
+        return typeof result === "string" ? result : result.output
+      },
+    })
+  }
+
+  ctx.tools.guard((exec: any) => guardDenyReason(exec?.name ?? exec?.tool?.name, exec))
+
   const skillsRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "skills")
   if (ctx.skills?.registerProvider) {
     ctx.skills.registerProvider(() => ({
