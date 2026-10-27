@@ -1,270 +1,114 @@
-# Guia de Uso
+# Guia de uso e estado operacional do DSHbanca
 
-## Visão Geral
+## Visão geral e limites
 
-O OpenBanca fornece 15 ferramentas que cobrem o ciclo completo de gestão de trabalhos acadêmicos:
+O **DSHbanca** é uma camada acadêmica experimental para o **DSH (DeepSeek Harness)**, seu único harness, com integração declarada via **Cordis**. O DSH é responsável por runtime, modelos e autenticação, sessões, identidade/lifecycle de agentes, dispatch, permissões, plugins, skills e configuração do ambiente. O DSHbanca cuida de manuscrito, cobertura por lotes, checkpoints, rubricas, findings com proveniência, validações, snapshots e guardrails acadêmicos.
 
-1. **Inicialização**: Configurar o projeto
-2. **Auditoria**: Avaliar qualidade em 4 eixos
-3. **Correção**: Aplicar melhorias com proteção
-4. **Validação**: Verificar referências e estrutura
-5. **Compilação**: Gerar PDF via LaTeX
-6. **Monitoramento**: Acompanhar progresso
+Essa divisão é normativa, não prova de funcionamento. Consulte o [README](../README.md), a [governança](../AGENTS.md), a [arquitetura](architecture.md) e o [protocolo de revisão](ai-review-protocol.md). OpenBanca/OpenCode pertence a outro projeto; referências a esse harness no código são **legado não suportado**, não compatibilidade dual nem fallback operacional do DSHbanca.
 
-## Fluxo Básico
+## O que está disponível e o que falta provar
 
-```
-/banca:init → /banca:auditar → /banca:corrigir → /banca:compile → /banca:status
-```
+Referência desta revisão: `origin/master` em `66049be57123ddd5ff7d0dec3c3cba2d5db36f4f`. Estados de PRs e issues abaixo são os consultados em 22/10/2026; revalide-os antes de usar uma revisão posterior.
 
-## Comandos Detalhados
+| Nível | Estado verificado | Limite |
+|---|---|---|
+| Código na master | [Pacote](../package.json) experimental `0.1.0`, `private: true`, `UNLICENSED`; export `./dsh` e [patch Cordis](../cordis.patch.yml) apontando para `dshbanca/dsh`. O [entry DSH](../src/dsh.ts) registra provider de skills quando o serviço existe. | Não comprova carregamento ou discovery no host. Não há registro de tools nem guard DSH nesse entry na base. |
+| Inventário na master | **16 módulos de ferramentas** em [src/tools](../src/tools/), expostos pelo [entry principal](../src/index.ts), ainda baseado em `@opencode-ai/plugin` (legado não suportado); **8 skills** em [skills](../skills/). | Módulos e arquivos Markdown não provam invocação nativa, associação ao Agent ou projeção de instruções. |
+| Proposta não incorporada | A [PR #1](https://github.com/Base-Analitica/DSHbanca/pull/1), draft/`CHANGES_REQUESTED`, HEAD consultado `c6e7bd5`, propõe tools via `ctx.tools`, guard read-only, preset do auditor e gate de perfil DSH. | Não é funcionalidade disponível na master. Resultados históricos valem somente para o SHA e as etapas observados. |
+| Testes unitários e CI | Há testes de [checkpoints](../tests/analysis_checkpoint.test.ts), [findings](../tests/analysis_findings.test.ts) e [entrada de síntese](../tests/analysis_synthesis.test.ts). A [CI](../.github/workflows/ci.yml) executa typecheck, build, testes e validações. | Testes isolados demonstram os casos exercitados; CI convencional não comprova DSH real, modelo ou qualidade acadêmica. |
+| E2E DSH real no SHA final | **Não comprovado.** A [issue #3](https://github.com/Base-Analitica/DSHbanca/issues/3) segue bloqueada para consumo do Markdown do auditor; a [#4](https://github.com/Base-Analitica/DSHbanca/issues/4), sobre decisões por opções, depende dela. | Arquivo instalado, nome de preset e registro declarado não são prova de execução. |
 
-### `/banca:init`
+**Ainda não existe procedimento funcional validado de instalação e invocação dessas operações no DSH a recomendar.** Este guia não fornece slash commands nem inventa CLI do host. O preparo abaixo não instala funcionalmente o plugin. A integração DSH permanece pendente, inclusive no SHA final desta correção documental ([issue #15](https://github.com/Base-Analitica/DSHbanca/issues/15)).
 
-Inicializa o projeto criando `.banca/` e `.opencode/`.
+## 1. Preparar o repositório localmente
 
-```bash
-/banca:init
-```
-
-**Parâmetros opcionais:**
-- `projectRoot`: Diretório raiz do projeto (padrão: cwd)
-- `force`: Sobrescrever configuração existente
-
-**Saída esperada (aproximada/dinâmica):**
-```
-✓ .banca/ + config + state
-✓ X assets installed
-```
-
-### `/banca:auditar`
-
-Executa auditoria nos 4 eixos e gera nota integrada.
+Siga o [guia de instalação](install.md) e seus [detalhes e limites](installation.md). Para desenvolvimento local, com Git e Bun disponíveis:
 
 ```bash
-/banca:auditar
+git clone https://github.com/Base-Analitica/DSHbanca.git
+cd DSHbanca
+bun install --frozen-lockfile
+bun run build
 ```
 
-**Parâmetros opcionais:**
-- `projectRoot`: Diretório raiz do projeto
-- `save`: Salvar relatório em `.banca/reports/`
+Clone e resolução de dependências podem exigir rede; esse preparo não exige iniciar DSH, modelo, credenciais de provedor, MCP externo ou compilação LaTeX. A versão mínima de DSH não foi validada. O pacote não está publicado oficialmente.
 
-**Saída esperada:**
-```
-## AUDIT RESULT
-ABNT:       7.0  (3 findings)
-Citações:   6.5  (2 findings)
-Conteúdo:   8.0  (1 findings)
-Estilo:     7.5  (2 findings)
----
-Média: 7.25
-Trava(s): >30%_paragrafos_sem_citacao_4.0
-**Final: 4.0**
-✗ REPROVADO
-```
+Antes de executar testes, leia o [fluxo de terminal](terminal-agent-workflow.md) e os scripts reais. **Não rode a suíte integral sem preflight:** o teste E2E legado pode resolver outro harness automaticamente, copiar autenticação do host e solicitar modelo. Se a segurança não puder ser demonstrada, registre o gate integral como `BLOCKED` e selecione explicitamente apenas testes seguros. CI verde não remove esse bloqueio.
 
-### `/banca:corrigir`
+## 2. Entender as operações acadêmicas existentes
 
-Aplica correções ao manuscrito com guardrails.
+Os nomes `banca_*` abaixo identificam módulos/contratos de código, **não comandos CLI nem tools comprovadamente disponíveis no DSH**. Em geral recebem `projectRoot` opcional, ou usam o diretório do contexto. Exigem configuração e arquivos compatíveis com a operação; verifique o schema de cada módulo. Não execute sobre manuscrito real sem autorização.
 
-```bash
-/banca:corrigir
-```
+### Preparação e acompanhamento
 
-**Parâmetros:**
-- `projectRoot`: Diretório raiz do projeto
-- `corrections`: Array de correções `[{file, oldText, newText}]`
-- `skipSnapshot`: Pular snapshot (não recomendado)
+| Operação e fonte | Comportamento no código e pré-requisitos |
+|---|---|
+| [banca_init](../src/tools/banca_init.ts) | Cria configuração/estado acadêmico sob `.banca/`, procura engines LaTeX e chama o instalador de assets **legado não suportado**. Não é instalador DSH validado. `force` permite sobrescrita no código, não concede autorização humana. |
+| [banca_validate](../src/tools/banca_validate.ts) | Valida a configuração do projeto contra seu schema; não valida integração nem qualidade acadêmica. |
+| [banca_status](../src/tools/banca_status.ts) | Mostra configuração, arquivos, relatórios e estado persistido. Score/estado não são prova de cobertura ou aprovação. |
+| [banca_checklist](../src/tools/banca_checklist.ts) | Confere presença de arquivos e marcadores LaTeX, como resumo e sumário. Não certifica entrega institucional. |
 
-**Guardrails:**
-- Bloqueia correções em arquivos imutáveis (`immutableFacts`)
-- Bloqueia correções em caminhos protegidos (`protectedPaths`)
-- Cria snapshot antes de aplicar (a menos que `skipSnapshot=true`)
+### Auditoria por lotes e entrada de síntese
 
-### `/banca:refs`
+| Operação e fonte | Comportamento no código e pré-requisitos |
+|---|---|
+| [banca_context](../src/tools/banca_context.ts) | Carrega o manuscrito canônico e plano exaustivo, persiste checkpoint/context pack e seleciona o próximo lote. Omitir `completedBatchId` retoma sem avançar; fornecê-lo registra conclusão. Esse registro não comprova leitura ou análise acadêmica. |
+| [banca_auditar](../src/tools/banca_auditar.ts) | Exige `manuscriptFingerprint`, `batchId` e `findings` do plano atual; valida proveniência e persiste findings por lote. Não executa modelo, não calcula nota, não avança checkpoint nem faz síntese. |
+| [banca_sintese](../src/tools/banca_sintese.ts) | Read-only: exige plano atual, checkpoint persistido completo e findings compatíveis; retorna JSON de **entrada** de síntese global. Não produz síntese semântica, score ou parecer e não chama modelo. |
 
-Valida referências bibliográficas via cadeia MCP → REST → cache.
+Sequência conceitual do protocolo, **não receita de execução DSH validada**:
 
-```bash
-/banca:refs
-```
+1. Verificar configuração, includes, bibliografia, diagnósticos e fingerprint do manuscrito canônico; não omitir trechos por conveniência.
+2. Obter o lote com `banca_context`, ler integralmente o conteúdo e registrar apenas findings sustentados por arquivo, linhas, seção e evidência reais.
+3. Submeter findings por `banca_auditar`; só registrar conclusão do lote depois de leitura, análise e persistência bem-sucedidas. Repetir para todos os lotes, sem saltos.
+4. Somente após **cobertura integral comprovada**, solicitar a entrada por `banca_sintese`. `partial`/`blocked`, leitura incompleta, fingerprint incompatível, erro ou dados insuficientes impedem síntese conclusiva.
+5. O JSON validado é insumo, não parecer: análise relacional e revisão acadêmica humana continuam distintas da validação estrutural. Checkpoint a 100% sozinho não prova execução de modelo nem qualidade da análise.
 
-**Parâmetros opcionais:**
-- `projectRoot`: Diretório raiz do projeto
+A [skill banca-avaliacao](../skills/banca-avaliacao/SKILL.md) descreve o protocolo. Sua existência não comprova que o DSH o carregou ou executou.
 
-**Saída esperada:**
-Gera "certidão de referências" com status de cada referência. Se o MCP não estiver habilitado, a saída conterá o aviso: `MCP não habilitado, validação segue por fallback.`
+### Correção autorizada e proteção
 
-### `/banca:ia`
+| Operação e fonte | Comportamento no código e pré-requisitos |
+|---|---|
+| [banca_corrigir](../src/tools/banca_corrigir.ts) | Recebe `corrections` com `file`, `oldText`, `newText`; verifica caminhos, `immutableFacts`, `protectedPaths` e caminhos permitidos. Substitui todas as ocorrências; `expectedOccurrences` divergente emite aviso, mas não impede a substituição. Cria cópias prévias salvo `skipSnapshot`; eventual regressão de índice é aviso/estado de falha, **não rollback automático**. |
+| [banca_snapshot](../src/tools/banca_snapshot.ts) | Copia arquivos do manuscrito resolvidos pela configuração e registra snapshot no estado. Não é backup integral do projeto nem prova de reversibilidade. |
+| [banca_restore](../src/tools/banca_restore.ts) | Sem `snapshotId`, lista snapshots; com ID e sem `confirm`, apresenta dry-run. Com `confirm: true`, cria backup prévio e substitui arquivos selecionados conforme a configuração. Exige inspeção e autorização específica; dry-run/backup não garantem restauração íntegra. |
+| [banca_contract](../src/tools/banca_contract.ts) | Resume correções declaradas e indicadores de proteção/estado; pode salvar relatório com `save`. Não substitui revisão do diff nem prova de aplicação correta. |
+| [banca_loop](../src/tools/banca_loop.ts) | Etapa preparatória/assistida sobre densidade de citações, com estado/relatório e detecção de estagnação/oscilação. No ramo de snapshot cria diretório e registro, sem copiar o manuscrito. Não executa correções/compilação autonomamente nem é um segundo harness. |
 
-Detecta padrões heurísticos de IA no texto.
+O **auditor é read-only quanto ao manuscrito**; persistir findings/contexto acadêmico não autoriza corrigir o texto. O corretor exige autorização humana específica, com alterações delimitadas. Essa é a fronteira normativa: o enforcement nativo DSH é proposto na PR #1, não comprovado na master. Markdown não substitui controle de acesso; identidade ausente ou não verificada não concede permissão mutante.
 
-```bash
-/banca:ia
-```
+`skipSnapshot`, `force`, `confirm` ou uma escolha de UI **não são autorização implícita** para mutação, destruição ou mudança de rubrica. Snapshot só deve ser declarado restaurável após prova de reversibilidade correspondente. Revise diff, arquivos protegidos e resultados; não trate um índice estável como integridade demonstrada.
 
-**Parâmetros:**
-- `projectRoot`: Diretório raiz do projeto
-- `forceRegex`: Forçar uso de regex (padrão)
+### Referências, similaridade, IA e compilação
 
-**Saída esperada:**
-```
-risk=medium patterns=5 files=3
-```
+| Operação e fonte | Comportamento no código e pré-requisitos |
+|---|---|
+| [banca_refs](../src/tools/banca_refs.ts) | Lê BibTeX e usa cadeia MCP → REST → cache, registrando provedor/evidência no relatório. É implementação existente, **não integração MCP DSH validada**. Pode acessar rede/processos; não é orientação para configurar MCP externo. Lifecycle, autenticação e integrações gerais pertencem ao host. |
+| [banca_ia](../src/tools/banca_ia.ts) | Triagem heurística; pode tentar Python quando disponível ou usar regex. `forceRegex` evita a tentativa Python. Resultado de risco/confiança **não comprova autoria** nem justifica reprovação. |
+| [banca_plagio](../src/tools/banca_plagio.ts) | Interpreta relatório CopySpider existente (`reportPath` dentro de `projectRoot`); PDF depende de `pdftotext`. Classificações ENTREVISTAR/REESCREVER/PULAR são triagem de similaridade, não veredito de plágio nem autorização para reescrever. |
+| [banca_compile](../src/tools/banca_compile.ts) | Usa configuração de compilação habilitada, engines LaTeX/BibTeX permitidas e instaladas e arquivos válidos. Inicia processos externos; compilação real não foi validada de ponta a ponta no DSH nesta base. PDF compilado não prova conformidade ou mérito acadêmico. |
 
-### `/banca:plagio`
+As **8 skills empacotadas** são: `banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias` e `banca-revisor`. São instruções acadêmicas em [skills](../skills/), não oito fluxos DSH demonstrados. A entrevista da grille não comprova implementação de decisões por opções (issue #4).
 
-Parseia o relatório do CopySpider (HTML ou PDF), classifica o nível de similaridade por severidade e mapeia para o manuscrito.
+## 3. Interpretar resultados sem substituir a banca
 
-```bash
-/banca:plagio --reportPath <caminho>
-```
+- Rubricas, índices de citação, notas/metas internas e heurísticas auxiliam revisão; **não equivalem à avaliação oficial**, nota, aprovação ou reprovação de banca. ABNT, citações, conteúdo e estilo são dimensões de revisão, não um resultado acadêmico automático de `banca_auditar`.
+- Exemplo apenas interpretativo: se há lotes pendentes ou diagnóstico `partial`/`blocked`, o resultado é **análise incompleta, sem parecer integral**; não se emite nota conclusiva. Mesmo uma entrada de síntese válida não é avaliação institucional.
+- Não invente referências, DOI, citações, findings, linhas ou evidências. Falha de rede, correspondência parcial ou ausência de confirmação devem permanecer explicitamente não verificadas.
+- Detector de IA e similaridade são sinais metodológicos sujeitos a revisão humana. Não inferir autoria, fraude ou mérito a partir deles.
+- Este guia não altera rubricas, critérios institucionais, scoring ou regras acadêmicas. Decisões e mudanças nessas áreas exigem autorização humana registrada.
 
-**Parâmetros:**
-- `reportPath`: Caminho para o relatório CopySpider (HTML ou PDF). Se relativo, resolvido no `projectRoot`. Se absoluto, deve residir estritamente dentro do `projectRoot`.
-- `projectRoot`: Diretório raiz do projeto (opcional).
+## Dificuldades comuns e resposta segura
 
-**Saída esperada:**
-Gera um relatório de plágio detalhado listando fontes suspeitas sob as categorias ENTREVISTAR, REESCREVER e PULAR.
+| Situação | O que conferir sem contornar proteções |
+|---|---|
+| Arquivo principal ou bibliografia ausente | Conferir caminhos configurados e arquivos autorizados; resolver diagnósticos antes de avançar cobertura. |
+| Plano bloqueado, leitura incompleta ou fingerprint divergente | Interromper, preservar evidência e resolver a causa. Não fabricar findings nem marcar lotes como analisados para liberar síntese. |
+| Arquivo imutável ou caminho protegido | Preservar o bloqueio e pedir decisão ao responsável; não remover proteção para concluir a correção. |
+| Configuração já existente | Inspecionar e preservar o estado; não sobrescrever automaticamente com `force`. |
+| Referência não verificada ou provedor indisponível | Registrar a limitação e manter a referência pendente. Não configurar outro harness nem inventar DOI. |
+| Engine LaTeX indisponível | Registrar compilação não executada; preparo TypeScript não instala TeX nem valida PDF. |
+| Tool/skill/agente não aparece no DSH | Não inferir disponibilidade pelos arquivos. Consultar instalação, PR #1 e issue #3; não há procedimento funcional validado neste guia. |
 
-### `/banca:loop`
-
-Executa etapa assistida de preparação do loop de correção.
-
-```bash
-/banca:loop correcao-continua
-```
-
-**Comportamento:**
-Avalia a meta de nota integrada com base nas citações, cria um snapshot de segurança automático e gera um relatório com os próximos passos recomendados. O loop é **preparatório/assistido**, exigindo que o usuário ou o agente orquestrador execute manualmente `/banca:auditar` e `/banca:corrigir` sequencialmente. Não realiza alterações de arquivos nem compilação de forma autônoma.
-
-**Circuit breaker:** Interrompe a iteração se detectar estagnação (3 iterações seguidas com a mesma nota) ou oscilação de notas.
-
-### `/banca:snapshot`
-
-Cria snapshot do estado atual do manuscrito.
-
-```bash
-/banca:snapshot
-```
-
-### `/banca:restore`
-
-Restaura o projeto a partir de um snapshot. Por padrão, opera de forma segura executando apenas um dry-run.
-
-```bash
-/banca:restore
-```
-
-**Parâmetros opcionais:**
-- `snapshotId`: ID ou label do snapshot a ser restaurado. Se ausente, lista os snapshots disponíveis.
-- `confirm`: Se `true`, realiza a restauração de fato; caso contrário, realiza dry-run de simulação.
-- `projectRoot`: Diretório raiz do projeto.
-
-**Segurança:**
-- Quando executado com `confirm: true`, cria automaticamente um snapshot de backup `pre-restore-<timestamp>` antes de alterar qualquer arquivo.
-- Restaura apenas os arquivos correspondentes à configuração real do manuscrito (usando `resolveManuscriptPaths()`).
-
-### `/banca:compile`
-
-Compila o manuscrito LaTeX.
-
-```bash
-/banca:compile
-```
-
-**Requer:** LaTeX instalado (lualatex, xelatex ou pdflatex).
-
-### `/banca:checklist`
-
-Gera checklist de entrega.
-
-```bash
-/banca:checklist
-```
-
-### `/banca:validate`
-
-Valida o arquivo `project.json`.
-
-```bash
-/banca:validate
-```
-
-### `/banca:contract`
-
-Gera contrato pós-correção.
-
-```bash
-/banca:contract
-```
-
-### `/banca:context`
-
-Gera context pack para LLM.
-
-```bash
-/banca:context
-```
-
-### `/banca:status`
-
-Mostra estado atual do projeto.
-
-```bash
-/banca:status
-```
-
-## Exemplo Prático: Workflow Completo
-
-### 1. Inicializar projeto
-
-```bash
-/banca:init
-```
-
-### 2. Escrever o manuscrito
-
-Escreva seu `main.tex` e capítulos em `capitulos/`.
-
-### 3. Rodar auditoria
-
-```bash
-/banca:auditar
-```
-
-Anote a nota e os problemas encontrados.
-
-### 4. Corrigir problemas
-
-```bash
-/banca:corrigir
-```
-
-Aplique as correções sugeridas pela auditoria.
-
-### 5. Compilar
-
-```bash
-/banca:compile
-```
-
-Gere o PDF.
-
-### 6. Verificar progresso
-
-```bash
-/banca:status
-```
-
-Repita passos 3-6 até atingir a nota desejada.
-
-## Erros Comuns
-
-| Erro | Causa | Solução |
-|------|-------|---------|
-| `main.tex not found` | Arquivo não existe | Verifique `manuscript.main` em `project.json` |
-| `blocked — immutable` | Tentou editar arquivo imutável | Remova do `immutableFacts` ou edite outro arquivo |
-| `skipped — exists` | Projeto já inicializado | Use `--force` para sobrescrever |
-| `MCP not available` | MCP não configurado | Configure o MCP em `opencode.json` |
-| `LaTeX not found` | LaTeX não instalado | Instale TeX Live ou desabilite compilação |
+Para prioridades e pendências, consulte o [roadmap](../ROADMAP.md). Revisão humana e E2E autorizado, com SHA identificado, são necessários antes de ampliar alegações de integração.

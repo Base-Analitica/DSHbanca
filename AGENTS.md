@@ -1,160 +1,110 @@
-# Instruções para Agentes
+# Governança de agentes para o DSHbanca
 
-Estas regras se aplicam a qualquer agente que revise código, crie issues, implemente correções ou altere o backlog do OpenBanca.
+Estas regras orientam revisão de código, implementação, testes, documentação e manutenção de issues do repositório Base-Analitica/DSHbanca. O escopo de produto é exclusivamente acadêmico e integrado ao DeepSeek Harness (DSH).
 
 ## Antes de agir
 
-1. Leia `docs/ai-review-protocol.md`.
-2. Leia `docs/issue-labeling-policy.md` antes de criar, editar, priorizar ou fechar issues.
-3. Consulte `.github/labels.yml`; ele é a fonte de verdade dos labels permitidos.
-4. Avalie apenas o estado real do código e da documentação. Não trate intenção, comentários ou arquivos copiados como prova de funcionamento.
-5. Quando a tarefa depender do OpenCode no Jules, leia `docs/jules-opencode-environment.md` e execute o preflight documentado antes de testar.
-6. Antes de aplicar ou remover o label `jules`, leia `docs/jules-dispatch-protocol.md`.
-7. Antes de preparar qualquer tarefa para o Jules, leia `docs/jules-task-sizing.md` e confirme que a issue é uma folha pequena e verificável.
-8. Antes de codar com um agente de IA no terminal, leia `docs/terminal-agent-workflow.md` e siga o preflight, o fluxo de branch, os testes e o relatório de evidência ali definidos.
+1. Leia esta governança e `docs/terminal-agent-workflow.md` antes de editar.
+2. Leia `docs/ai-review-protocol.md` para o processo geral de revisão. Se ele divergir desta arquitetura quanto ao harness, compatibilidade ou validação, trate a afirmação divergente como dívida documental, não como autorização técnica.
+3. Leia `docs/issue-labeling-policy.md` e consulte `.github/labels.yml` antes de criar, editar, priorizar ou fechar issues. Esses arquivos continuam sendo a fonte atual dos nomes de labels, apesar de conterem nomenclatura legada que precisa de tratamento em trabalho documental separado. Não invente nem renomeie labels nesta tarefa.
+4. Leia a issue completa, os comentários relevantes, a PR de destino e seus checks. Confirme o escopo e o estado real do código no SHA em que trabalhará.
+5. Antes de tocar uma integração DSH, verifique a versão efetivamente instalada do DSH, Cordis e pacotes relacionados, além das assinaturas públicas que o código usará. Não deduza APIs a partir de exemplos de outra versão.
+6. Registre branch, SHA inicial, base autorizada, merge-base, runtime e alterações locais preexistentes. Preserve todo trabalho alheio.
+7. Antes de executar testes, inspecione os scripts em `package.json`, os workflows de CI e o próprio caminho de execução para identificar subprocessos, rede, credenciais e inferência.
 
-## Invariante arquitetural: OpenCode é o harness
+## Invariante arquitetural: DSH é o único harness
 
-Conforme a decisão vinculante da [issue #64](https://github.com/RenyEnnos/openbanca/issues/64), o OpenBanca é um plugin/camada de domínio acadêmico executado sobre o OpenCode. O OpenCode é o harness e fornece:
+O DSH é o único harness deste repositório. Cordis é a integração nativa do plugin com o host. O DSH é proprietário das capacidades gerais do harness, incluindo runtime, modelos e autenticação de provedores, sessões, identidade e lifecycle de agentes, tool dispatch, permissões, skills, plugins e configuração do ambiente.
 
-- modelos, autenticação e integração geral com provedores;
-- sessões, histórico e contexto conversacional geral;
-- agents, subagents, tool loop e delegação;
-- commands e permissões;
-- configuração e lifecycle de MCPs.
+O DSHbanca é responsável pela camada acadêmica específica do projeto, incluindo:
 
-O OpenBanca é responsável somente pela camada acadêmica:
-
-- representação canônica do manuscrito e segmentação/cobertura por lotes;
-- rubricas e perfis institucionais;
-- findings estruturados, proveniência e fingerprints;
+- representação e ingestão do manuscrito acadêmico;
+- cobertura, segmentação e proveniência por lote;
+- checkpoints e estado acadêmico do projeto;
+- rubricas, findings estruturados e fingerprints;
 - validações acadêmicas determinísticas e guardrails de correção;
-- snapshots, changesets e estado específico do projeto;
-- tools acadêmicas consumidas pelo OpenCode.
+- snapshots, changesets e contratos acadêmicos;
+- ferramentas acadêmicas consumidas pelo DSH.
 
-### Preflight host-first obrigatório
+Essa separação é normativa, mas não prova que todos os fluxos estejam integrados ou executáveis. A documentação deve distinguir código presente, comportamento unitário, integração observada no DSH real e comportamento dependente de modelo.
 
-Antes de criar qualquer cliente, adapter, runtime, servidor, subprocesso permanente ou integração, o agente deve responder no relatório da tarefa:
+### Preflight obrigatório host-first
 
-1. O OpenCode já fornece essa capacidade?
-2. Qual API, SDK, configuração, agent, skill, command, tool ou integração do OpenCode foi verificada?
-3. Qual lacuna concreta do host permanece?
-4. Por que a implementação pertence especificamente ao domínio acadêmico?
-5. Como o componente será impedido de evoluir para infraestrutura geral?
-6. Qual evidência E2E em OpenCode real comprova a necessidade?
-7. Qual será o plano de remoção ou migração se o OpenCode passar a fornecer a capacidade?
+Antes de criar cliente, adapter, runtime, servidor, subprocesso persistente, controlador de sessão, executor de agentes, permission engine ou integração, responda no relatório:
 
-Sem uma lacuna concreta e documentada, a implementação deve usar o OpenCode. O relatório deve ainda identificar, para cada integração, o proprietário do lifecycle, ambiente, credenciais, fallback e evidência E2E.
+1. Qual versão instalada do DSH/Cordis foi inspecionada?
+2. Qual API, SDK, serviço, plugin, configuração ou lifecycle nativo foi verificado, com pacote e assinatura?
+3. Qual lacuna concreta permanece no host, reproduzida no ambiente real?
+4. Por que a solução pertence ao domínio acadêmico do DSHbanca?
+5. Como o escopo impede que o componente vire infraestrutura geral ou um segundo harness?
+6. Qual evidência real do DSH, em SHA identificado, comprova a necessidade e o resultado?
+7. Quem possui lifecycle, ambiente, credenciais e fallback? Qual plano de remoção existe se o host cobrir a lacuna?
 
-### MCPs, agents e modelos
+Sem lacuna concreta, use a API nativa do DSH. Se o contrato não estiver disponível ou não puder ser verificado, registre `BLOCKED`. Não invente APIs nem substitua uma funcionalidade do host por mocks apresentados como integração.
 
-MCPs devem ser configurados e gerenciados pelo OpenCode por padrão. Processo, autenticação, lifecycle, observabilidade e chamadas genéricas pertencem ao host. O OpenBanca pode implementar apenas comportamento acadêmico sobre resultados, como matching de referências, normalização de metadados, cache acadêmico, TTL/invalidação, classificação de correspondência e interpretação/persistência de evidências.
+### Plugins, tools, skills e agentes
 
-Não criar nem ampliar cliente MCP genérico dentro do OpenBanca. Um adapter MCP interno só pode existir como exceção temporária, com lacuna comprovada do OpenCode, escopo acadêmico específico, teste E2E real, limites de segurança e plano de migração. O `src/lib/mcp_client.ts` não deve ser removido ou refatorado nesta regra documental.
+- Use Cordis e as APIs públicas do DSH para declarar, compor e registrar funcionalidades acadêmicas.
+- Não implemente loop de agente, seleção ou roteamento geral de modelos, autenticação direta em provedores, gerenciamento de sessões paralelo, permission engine, catálogo de agentes ou lifecycle de plugins próprio.
+- Um arquivo em `assets/`, uma cópia instalada, uma declaração com nome conhecido ou um teste de registro não prova descoberta, associação ao agente nem uso pelo host. Valide cada etapa no DSH real quando a alegação depender dela.
+- O ciclo de vida de ferramentas, agentes, sessões e plugins pertence ao DSH/Cordis. O plugin não deve reter processos ou recursos fora do contrato nativo.
+- MCPs e integrações gerais com provedores são geridos pelo host. Não crie nem amplie cliente MCP genérico no DSHbanca. Lógica acadêmica sobre resultados, como normalização, matching, classificação ou proveniência, pode permanecer no domínio do plugin quando houver justificativa específica.
 
-O OpenBanca não deve implementar seleção ou roteamento geral de modelos, autenticação direta em provedores de LLM, sessão/conversa paralela, agent loop genérico, executor autônomo de subagents, permission engine próprio ou sistema de commands paralelo. `banca_loop` não deve se transformar em um segundo harness; a coordenação de auditoria, correção, compilação, referências e revisão deve usar agents, skills, commands, tools, sessões e permissões do OpenCode.
+### Identidade e segurança acadêmica
 
-Embeddings locais com modelos pequenos e classificadores/rerankers locais são possibilidades futuras auxiliares para memória, recuperação e deduplicação, somente após benchmark e decisão explícita do mantenedor. Não são prioridade do roadmap imediato, não podem substituir a cobertura exaustiva do manuscrito, decidir quais partes do TCC deixar de analisar, criar servidor autônomo, roteador geral de modelos ou segundo harness, e não devem ser implementados nesta tarefa.
+- O perfil `banca-auditor` é read-only. O perfil `banca-corretor` é o caminho acadêmico destinado a alterações autorizadas. A identidade precisa vir do DSH e ser validada no dispatch, não de texto livre ou campo artificial do teste.
+- A ausência de identidade confiável, preset não verificado ou delegação sem papel corretor não concede autorização para alterar o manuscrito.
+- Negativas de segurança precisam ocorrer antes do corpo da ferramenta. Teste com argumentos válidos e registre a classificação da negação, hashes dos arquivos protegidos, estado persistente e teardown.
+- Instruções Markdown orientam um agente, mas não substituem enforcement técnico. Só declare conteúdo como carregado quando a associação e projeção forem observadas no host real. Não eleve silenciosamente texto a papel de sistema ou autoridade superior.
+- Mudanças no trust model, nas permissões, na identidade, nas atribuições de agentes ou nas proteções read-only exigem decisão humana registrada antes da implementação.
+- Correções acadêmicas, alterações de rubricas, scoring, nota, aprovação, reprovação ou interpretação institucional exigem autorização humana explícita e escopo definido. Não use manuscritos reais para testes sem autorização.
 
-## Agentes de IA no terminal
+## Evidência e validação
 
-O procedimento operacional independente de fornecedor está em `docs/terminal-agent-workflow.md`. Esse manual não substitui este arquivo nem os protocolos especializados.
+Classifique cada resultado sem promover evidência inferior:
 
-Antes de editar, o agente deve:
+| Nível | Comprova | Não comprova |
+|---|---|---|
+| Inspeção de código/configuração | APIs declaradas, configuração e fluxo pretendido | Execução ou descoberta pelo DSH |
+| Typecheck e build | Tipos e compilação naquele SHA | Correção funcional ou integração |
+| Unitário | Comportamento isolado coberto pelo teste | Host real |
+| Mock ou fixture | Contrato simulado e casos controlados | DSH/Cordis real |
+| DSH real sem modelo | Descoberta, lifecycle, dispatch, permissões e ferramentas exercitadas no host, se observados | Inferência, qualidade de resposta ou juízo acadêmico do modelo |
+| Modelo real | Apenas o comportamento dependente do modelo no ambiente e configuração registrados | Generalização para outros modelos ou projetos |
 
-- ler `docs/terminal-agent-workflow.md`;
-- registrar branch, SHA, base autorizada da PR (`BASE_REF`, em geral `origin/master`), merge-base, versões de Node/Bun e alterações locais preexistentes;
-- preservar mudanças locais fora do escopo;
-- trabalhar na branch da tarefa (branch dedicada nova **ou** branch de PR existente, conforme o contrato);
-- não criar branch ou PR duplicada quando o trabalho já pertence a uma PR;
-- não fazer push direto em `master` nem force push sem autorização humana explícita;
-- revisar o diff local com `git --no-pager` e, no HEAD final, o range completo `"$BASE_REF"...HEAD`;
-- descobrir e executar testes compatíveis com os arquivos alterados e com `package.json` / CI;
-- classificar evidência por nível (inspeção, unitário, integração, OpenCode real, modelo real);
-- classificar fases externas como `PASS`, `FAIL` ou `BLOCKED`;
-- registrar honestamente testes não executados.
+- Use `PASS`, `FAIL` ou `BLOCKED` por gate. `BLOCKED` significa que o caminho exigido não foi executado, não que passou.
+- Antes de usar um modelo, enviar prompt, autenticar provedor ou incorrer em custo, obtenha autorização humana específica para esse teste. O comportamento padrão é não usar credenciais nem fazer inferência.
+- Verifique `package.json`, CI e testes antes de `bun test`. Não execute testes de integração capazes de iniciar harnesses, rede ou modelos sem demonstrar isolamento e autorização.
+- Registre SHA, comando, exit code, evidência observada, versão do DSH/Cordis quando aplicável, limitações e teardown.
+- Um E2E DSH real é obrigatório para alegações de integração ou enforcement pelo host. CI convencional, build, fixture e histórico de outro SHA não o substituem.
 
-Não substitua execução real por mock, build, plano, catálogo de modelos, arquivo em disco ou relato do agente. A suíte baseline atual do CI está documentada no fluxo terminal e em `.github/workflows/ci.yml`; confirme os scripts reais antes de declarar validação.
+## Issues, labels e autonomia
 
-## Labels obrigatórios
+Todo issue aberto deve manter, segundo a política e a fonte de labels vigentes:
 
-Todo issue aberto deve possuir:
+- exatamente um tipo entre `bug`, `enhancement` e `documentation`;
+- exatamente uma prioridade entre `priority:p0` e `priority:p3`;
+- uma ou duas áreas existentes;
+- labels operacionais apenas quando os critérios estiverem comprovados.
 
-- exatamente um tipo: `bug`, `enhancement` ou `documentation`;
-- exatamente uma prioridade: `priority:p0` a `priority:p3`;
-- uma ou duas áreas `area:*`;
-- labels operacionais somente quando seus critérios forem atendidos;
-- o label de automação `jules` somente quando o protocolo de despacho estiver integralmente atendido.
+Não invente labels. Não altere prioridade sem comentário com evidência e impacto residual.
 
-Não invente labels.
+- `agent:ready` significa que a tarefa pode ser executada sem decisão adicional.
+- `agent:blocked` exige bloqueio concreto e condição de desbloqueio documentados.
+- `needs:human-decision` impede escolher silenciosamente entre opções de produto, arquitetura, política ou risco.
+- `needs:e2e` impede fechar o issue sem a evidência real solicitada.
 
-Não altere prioridade silenciosamente. Qualquer mudança de prioridade deve ser justificada em comentário com evidência e impacto residual.
+A taxonomia de labels ainda contém nomes históricos de outro harness. Ela não altera o invariante DSH-only e deve ser atualizada em trabalho separado, sem criar labels nesta tarefa.
 
-## Limites de autonomia
+## Branches, revisão e segurança
 
-- `agent:ready`: o trabalho pode ser executado sem nova decisão de produto.
-- `agent:blocked`: não implemente até o bloqueio documentado ser removido.
-- `needs:human-decision`: investigue e proponha opções, mas não escolha silenciosamente pela pessoa responsável.
-- `needs:e2e`: não feche o issue sem evidência da validação real solicitada.
-- `jules`: gatilho de execução, não sinal de prontidão; não aplicar sem `agent:ready` nem manter diante de bloqueio ou decisão pendente.
-
-## Despacho ao Jules
-
-O label `jules` inicia uma tarefa automática do Google Jules a partir da issue. Antes de aplicá-lo:
-
-- confirme que a issue está corretamente triada e possui `agent:ready`;
-- confirme que não possui `agent:blocked` nem `needs:human-decision`;
-- confirme que é uma issue-folha, não uma issue-mãe, tracking issue ou plano amplo de migração;
-- aplique a política de `docs/jules-task-sizing.md`; tarefas com quatro ou mais pontos de complexidade devem ser divididas;
-- use como padrão um único componente, até três arquivos de produção esperados, até 250 linhas de produção alteradas e até seis comportamentos independentes;
-- exceções de tamanho exigem justificativa humana registrada antes do despacho;
-- verifique que não existe tarefa do Jules ou PR aberta já vinculada;
-- transforme o **corpo da issue** no contrato executável completo, curto e específico, com evidência, escopo, critérios, testes, riscos, branch-base e destino da PR;
-- não trate comentários como parte garantida do prompt inicial do despacho por label;
-- finalize e releia o corpo da issue antes de aplicar `jules`; nunca aplique o label primeiro e publique o contrato depois;
-- use comentários somente para decisões, evidência, bloqueios, desbloqueios e auditoria;
-- depois que o bot confirmar o início, não presuma que editar o corpo ou comentar atualizará a tarefa já criada;
-- referencie regras permanentes em vez de copiar blocos extensos de governança em todo prompt;
-- use `master` como branch-base por padrão; PR empilhada exige autorização humana explícita e base exata;
-- não use o label para correções de uma PR existente; nesse caso, instrua `@jules` na própria PR;
-- remova o label se os pré-requisitos deixarem de ser verdadeiros.
-
-Consulte `docs/jules-dispatch-protocol.md` para o fluxo completo e `docs/jules-task-sizing.md` para decomposição e limites.
-
-## Testes com OpenCode no Jules
-
-O Initial Setup do Jules disponibiliza o binário do OpenCode para testes de integração, mas cada tarefa deve confirmar o ambiente atual antes de usá-lo.
-
-Regras obrigatórias:
-
-- execute o preflight para resolver `OPENCODE_BIN` e use `"$OPENCODE_BIN" --version` no início da tarefa;
-- registre branch e SHA efetivamente testados;
-- não trate a versão histórica documentada como garantia da versão atual;
-- use projeto temporário para testes diagnósticos quando possível;
-- não reinstale o OpenCode dentro da tarefa quando o problema for ausência do snapshot; classifique como falha de ambiente;
-- não use `OPENCODE_API_KEY` em testes que não dependem de modelo;
-- nunca imprima, versione ou grave credenciais em logs;
-- diferencie claramente teste do instalador, teste do parser/OpenCode e teste comportamental com LLM;
-- não declare descoberta de skills aprovada quando a inicialização tiver falhado antes da listagem.
-
-Consulte `docs/jules-opencode-environment.md` para o procedimento completo e a evidência histórica.
-
-## Escrita e segurança
-
-- Não modifique arquivos fora do escopo do issue.
-- Não faça push direto na branch padrão quando uma branch e PR forem apropriados.
-- Não execute restore, rollback, publicação, release ou migração destrutiva sem política explícita.
-- Não exponha tokens, caminhos privados, manuscritos ou conteúdo sensível em issues e logs.
-- Não declare testes, integração com OpenCode, MCP ou compilação como aprovados sem execução comprovada.
+- Trabalhe na branch e PR autorizadas. Para trabalho novo, parta de `origin/master` atualizada e crie uma única branch dedicada e, quando solicitado, uma PR draft.
+- Não crie PR duplicada para correção que pertence a uma PR existente. Não faça push direto em `master`, force-push, merge, release ou publicação sem autorização explícita.
+- Use worktree separado quando mudanças locais preexistentes puderem ser afetadas. Não execute `git reset --hard`, `git clean -fd` nem restore destrutivo como atalho.
+- Modifique apenas arquivos do escopo. Faça stage explícito dos arquivos autorizados e revise o diff local e o range completo `BASE_REF...HEAD` antes de publicar.
+- Não exponha tokens, chaves, credenciais, conteúdo de `.env`, caminhos privados, dados pessoais ou manuscritos reais em terminal, logs, issues, commits ou PRs.
+- Não altere workflow, proteção de GitHub, dependências, licença, rubrica ou política de acesso fora do escopo autorizado.
 
 ## Fechamento de issues
 
-Ao fechar um issue, registre:
-
-- o que mudou;
-- commit ou PR relevante;
-- testes executados;
-- limitações e itens não validados;
-- acompanhamento necessário.
-
-Se apenas parte do problema foi resolvida, mantenha o issue aberto ou crie um issue de acompanhamento claramente vinculado.
+Antes de fechar um issue, registre o que mudou, commit/PR, testes e códigos de saída, limites não validados e acompanhamento necessário. Se parte do problema continuar aberta ou bloqueada, mantenha o issue aberto para revisão humana.
