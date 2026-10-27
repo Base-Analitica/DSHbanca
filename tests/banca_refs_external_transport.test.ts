@@ -6,12 +6,11 @@ import * as childProcess from "node:child_process"
 import { McpClient } from "../src/lib/mcp_client"
 import { RefCache } from "../src/lib/cache"
 
-describe("banca_refs external transport confinement (Issue #29)", () => {
+describe("banca_refs external transport and academic classification (Issue #29)", () => {
   let projectDir: string
   let originalFetch: typeof globalThis.fetch
   let fetchCalls: Array<{ url: string; options?: any }>
   let mcpStartSpy: any
-  let spawnSpy: any
 
   beforeEach(() => {
     projectDir = join(tmpdir(), `dshbanca-refs-test-${Date.now()}-${Math.random().toString(36).slice(2)}`)
@@ -79,75 +78,21 @@ describe("banca_refs external transport confinement (Issue #29)", () => {
     } catch {}
   })
 
-  test("zero REST fetch and zero MCP spawn on uncached references", async () => {
+  test("Cenário A: single uncached ref must be blocked, not counted as Not found, and Avg Score must not be 0/100", async () => {
     const { bancaRefs } = await import("../src/tools/banca_refs")
     const result = await bancaRefs.execute({ projectRoot: projectDir }, { directory: projectDir } as any)
+    const text = String(result)
 
     expect(fetchCalls.length).toBe(0)
     expect(mcpStartSpy).not.toHaveBeenCalled()
-    expect(String(result)).toContain("blocked: external reference provider is not available in DSH")
-    expect(String(result)).toContain("Blocked (external provider unavailable): 1")
+    expect(text).toContain("blocked: external reference provider is not available in DSH")
+    expect(text).toContain("Blocked (external provider unavailable): 1")
+    expect(text).not.toContain("Not found:")
+    expect(text).not.toContain("Avg Score: 0/100")
+    expect(text).toContain("Avg Score: N/A")
   })
 
-  test("zero McpClient start even when legacy OPENBANCA_ENABLE_CROSSREF_MCP=1 is set", async () => {
-    process.env.OPENBANCA_ENABLE_CROSSREF_MCP = "1"
-    writeFileSync(
-      join(projectDir, ".banca", "project.json"),
-      JSON.stringify({
-        version: 1,
-        manuscript: {
-          format: "latex",
-          root: ".",
-          main: "main.tex",
-          bib: "referencias.bib",
-          chapters: [],
-          outputDir: "trabalhos",
-        },
-        mcp: {
-          crossrefAcademicEnabled: true,
-        },
-      }),
-      "utf-8",
-    )
-
-    const { bancaRefs } = await import("../src/tools/banca_refs")
-    const result = await bancaRefs.execute({ projectRoot: projectDir }, { directory: projectDir } as any)
-
-    expect(mcpStartSpy).not.toHaveBeenCalled()
-    expect(fetchCalls.length).toBe(0)
-    expect(String(result)).toContain("blocked: external reference provider is not available in DSH")
-  })
-
-  test("local cache validation works deterministically with zero network and zero spawn", async () => {
-    const cache = new RefCache(projectDir)
-    cache.set("silva2024", "10.1000/182", {
-      key: "silva2024",
-      found: true,
-      score: 95,
-      status: "verificada",
-      matchedBy: "doi",
-      metadata: {
-        key: "silva2024",
-        title: "Pesquisa Academica e Integridade",
-        authors: ["Silva, Joao"],
-        year: 2024,
-        doi: "10.1000/182",
-      },
-      evidence: "Verified via pre-seeded cache entry",
-    })
-
-    const { bancaRefs } = await import("../src/tools/banca_refs")
-    const result = await bancaRefs.execute({ projectRoot: projectDir }, { directory: projectDir } as any)
-
-    expect(fetchCalls.length).toBe(0)
-    expect(mcpStartSpy).not.toHaveBeenCalled()
-    expect(String(result)).not.toContain("blocked:")
-    expect(String(result)).toContain("Verified: 1")
-    expect(String(result)).toContain("cache=1")
-    expect(String(result)).toContain("Avg Score: 95/100")
-  })
-
-  test("mixed bib file: cached entries verify, uncached entries fail-closed without inventing metadata", async () => {
+  test("Cenário B: mixed cached and blocked refs excludes blocked from average and from Not found", async () => {
     writeFileSync(
       join(projectDir, "referencias.bib"),
       `@article{cached2023,
@@ -184,13 +129,77 @@ describe("banca_refs external transport confinement (Issue #29)", () => {
 
     const { bancaRefs } = await import("../src/tools/banca_refs")
     const result = await bancaRefs.execute({ projectRoot: projectDir }, { directory: projectDir } as any)
+    const text = String(result)
 
     expect(fetchCalls.length).toBe(0)
     expect(mcpStartSpy).not.toHaveBeenCalled()
+    expect(text).toContain("blocked: external reference provider is not available in DSH")
+    expect(text).toContain("Verified: 1")
+    expect(text).toContain("Blocked (external provider unavailable): 1")
+    expect(text).not.toContain("Not found:")
+    expect(text).not.toContain("Avg Score: 47/100")
+    expect(text).not.toContain("Avg Score: 48/100")
+    expect(text).toContain("Avg Score: 95/100")
+    expect(text).toContain("Evaluated: 1/2")
+  })
+
+  test("Cenário C: all cached references verify without blocked status and with consistent average", async () => {
+    const cache = new RefCache(projectDir)
+    cache.set("silva2024", "10.1000/182", {
+      key: "silva2024",
+      found: true,
+      score: 95,
+      status: "verificada",
+      matchedBy: "doi",
+      metadata: {
+        key: "silva2024",
+        title: "Pesquisa Academica e Integridade",
+        authors: ["Silva, Joao"],
+        year: 2024,
+        doi: "10.1000/182",
+      },
+      evidence: "Verified via pre-seeded cache entry",
+    })
+
+    const { bancaRefs } = await import("../src/tools/banca_refs")
+    const result = await bancaRefs.execute({ projectRoot: projectDir }, { directory: projectDir } as any)
+    const text = String(result)
+
+    expect(fetchCalls.length).toBe(0)
+    expect(mcpStartSpy).not.toHaveBeenCalled()
+    expect(text).not.toContain("blocked:")
+    expect(text).toContain("Verified: 1")
+    expect(text).toContain("cache=1")
+    expect(text).toContain("Avg Score: 95/100")
+    expect(text).toContain("Evaluated: 1/1")
+  })
+
+  test("Cenário D: legacy OPENBANCA_ENABLE_CROSSREF_MCP triggers zero MCP spawn and zero fetch", async () => {
+    process.env.OPENBANCA_ENABLE_CROSSREF_MCP = "1"
+    writeFileSync(
+      join(projectDir, ".banca", "project.json"),
+      JSON.stringify({
+        version: 1,
+        manuscript: {
+          format: "latex",
+          root: ".",
+          main: "main.tex",
+          bib: "referencias.bib",
+          chapters: [],
+          outputDir: "trabalhos",
+        },
+        mcp: {
+          crossrefAcademicEnabled: true,
+        },
+      }),
+      "utf-8",
+    )
+
+    const { bancaRefs } = await import("../src/tools/banca_refs")
+    const result = await bancaRefs.execute({ projectRoot: projectDir }, { directory: projectDir } as any)
+
+    expect(mcpStartSpy).not.toHaveBeenCalled()
+    expect(fetchCalls.length).toBe(0)
     expect(String(result)).toContain("blocked: external reference provider is not available in DSH")
-    expect(String(result)).toContain("Verified: 1")
-    expect(String(result)).toContain("Blocked (external provider unavailable): 1")
-    expect(String(result)).toContain("cache=1")
-    expect(String(result)).toContain("none=1")
   })
 })

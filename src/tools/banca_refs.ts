@@ -39,8 +39,14 @@ export const bancaRefs = defineBancaTool({
 
     if (entries.length === 0) return "no entries found in bib file"
 
-    const cache = new RefCache(root)
-    const results: Array<{ key: string; score: number; status: string; provider: string; evidence: string }> = []
+    const results: Array<{
+      key: string
+      score: number
+      status: string
+      provider: string
+      evidence: string
+      resultStatus: string
+    }> = []
 
     for (const entry of entries) {
       const ref = bibEntryToRef(entry)
@@ -50,7 +56,8 @@ export const bancaRefs = defineBancaTool({
       const statusIcon =
         result.status === "verificada" ? "✓" :
         result.status === "parcial" ? "~" :
-        result.status === "suspeita" ? "?" : "✗"
+        result.status === "suspeita" ? "?" :
+        result.status === "bloqueada" ? "⊘" : "✗"
 
       results.push({
         key: ref.key,
@@ -58,23 +65,45 @@ export const bancaRefs = defineBancaTool({
         status: `${statusIcon} ${result.status}`,
         provider,
         evidence: result.evidence || result.error || "",
+        resultStatus: result.status,
       })
     }
 
-    const totalScore = results.reduce((s, r) => s + r.score, 0)
-    const avgScore = results.length > 0 ? Math.round(totalScore / results.length) : 0
-    const verified = results.filter((r) => r.status.startsWith("✓")).length
-    const notFound = results.filter((r) => r.status.startsWith("✗")).length
-    const blockedCount = results.filter((r) => r.evidence.includes("blocked")).length
+    const verified = results.filter((r) => r.resultStatus === "verificada").length
+    const notFound = results.filter((r) => r.resultStatus === "nao_encontrada").length
+    const blockedCount = results.filter((r) => r.resultStatus === "bloqueada" || r.evidence.includes("blocked")).length
+
+    // Evaluated references are those that were actually verified or evaluated (not blocked)
+    const evaluatedResults = results.filter((r) => r.resultStatus !== "bloqueada" && !r.evidence.includes("blocked"))
+    const totalEvaluated = evaluatedResults.length
+    const avgScore = totalEvaluated > 0
+      ? Math.round(evaluatedResults.reduce((s, r) => s + r.score, 0) / totalEvaluated)
+      : null
+    const avgScoreText = avgScore !== null ? `${avgScore}/100` : "N/A"
 
     const providerCounts: Record<string, number> = {}
     for (const r of results) {
       providerCounts[r.provider] = (providerCounts[r.provider] || 0) + 1
     }
 
+    let summaryVerdict = ""
+    if (blockedCount === entries.length) {
+      summaryVerdict = "**No references could be evaluated (external provider blocked; cache empty).**"
+    } else if (blockedCount > 0) {
+      summaryVerdict = `**Partial evaluation: ${totalEvaluated}/${entries.length} evaluated (${blockedCount} blocked). Review matches.**`
+    } else if (avgScore !== null && avgScore >= 90) {
+      summaryVerdict = "**All references verified.**"
+    } else if (avgScore !== null && avgScore >= 70) {
+      summaryVerdict = "**Most references verified. Review partial matches.**"
+    } else if (avgScore !== null && avgScore >= 50) {
+      summaryVerdict = "**Several references need attention.**"
+    } else {
+      summaryVerdict = "**Many references could not be verified.**"
+    }
+
     const lines = [
       `# Reference Validation — ${new Date().toISOString()}`,
-      `Total: ${entries.length}  |  Avg Score: ${avgScore}/100`,
+      `Total: ${entries.length}  |  Evaluated: ${totalEvaluated}/${entries.length}  |  Avg Score: ${avgScoreText}`,
       `Verified: ${verified}  |  Not found: ${notFound}  |  Blocked (no DSH provider): ${blockedCount}`,
       "",
       `## Providers Used`,
@@ -83,12 +112,9 @@ export const bancaRefs = defineBancaTool({
       `## Results`,
       "| Key | Score | Status | Provider | Evidence |",
       "|-----|-------|--------|----------|----------|",
-      ...results.map((r) => `| ${r.key} | ${r.score} | ${r.status} | ${r.provider} | ${r.evidence.slice(0, 80)} |`),
+      ...results.map((r) => `| ${r.key} | ${r.resultStatus === "bloqueada" ? "N/A" : r.score} | ${r.status} | ${r.provider} | ${r.evidence.slice(0, 80)} |`),
       "",
-      avgScore >= 90 ? "**All references verified.**" :
-      avgScore >= 70 ? "**Most references verified. Review partial matches.**" :
-      avgScore >= 50 ? "**Several references need attention.**" :
-      "**Many references could not be verified.**",
+      summaryVerdict,
       blockedCount > 0 ? `\n⚠ ${blockedCount} refs blocked — external reference lookup requires a native DSH provider, which is not available in DSH 0.2.0-rc.2.` : "",
     ]
 
@@ -96,7 +122,8 @@ export const bancaRefs = defineBancaTool({
 
     const baseMessage = [
       `References: ${entries.length}`,
-      `Avg Score: ${avgScore}/100`,
+      `Evaluated: ${totalEvaluated}/${entries.length}`,
+      `Avg Score: ${avgScoreText}`,
       `Verified: ${verified}`,
       notFound > 0 ? `Not found: ${notFound}` : null,
       blockedCount > 0 ? `Blocked (external provider unavailable): ${blockedCount}` : null,

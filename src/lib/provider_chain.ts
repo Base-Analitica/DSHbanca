@@ -80,7 +80,7 @@ export async function resolveRef(
     key: ref.key,
     found: false,
     score: 0,
-    status: "nao_encontrada",
+    status: "bloqueada",
     matchedBy: "none",
     evidence: "external reference lookup blocked — no native DSH provider available",
     error: "external_transport_blocked",
