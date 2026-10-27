@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync } from "node:fs"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig, getMcpCommand } from "../lib/config"
@@ -7,6 +7,7 @@ import { parseBibtex, bibEntryToRef } from "../lib/bibtex"
 import { resolveRef } from "../lib/provider_chain"
 import { RefCache } from "../lib/cache"
 import { saveReport } from "../lib/reports"
+import { PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
 export const bancaRefs = defineBancaTool({
   description: "Validate references via MCP (primary) → REST → cache chain. Reports provider used per reference.",
   args: {
@@ -17,9 +18,23 @@ export const bancaRefs = defineBancaTool({
     const config = loadConfig(root)
     const paths = resolveManuscriptPaths(root, config)
 
-    if (!existsSync(paths.bib)) return `bib not found: ${paths.bib}`
+    let bibStat = null
+    try {
+      bibStat = lstatSync(paths.bib)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new PathTraversalError("failed to inspect a workspace path component")
+      }
+    }
 
-    const content = readFileSync(paths.bib, "utf-8")
+    if (!bibStat) return `bib not found: ${paths.bib}`
+
+    const canonicalBib = resolveRealInsideRoot(root, paths.bib)
+    if (!existsSync(canonicalBib) || !lstatSync(canonicalBib).isFile()) {
+      return `bib not found: ${paths.bib}`
+    }
+
+    const content = readFileSync(canonicalBib, "utf-8")
     const entries = parseBibtex(content)
 
     if (entries.length === 0) return "no entries found in bib file"

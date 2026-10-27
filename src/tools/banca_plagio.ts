@@ -1,9 +1,9 @@
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync } from "node:fs"
 import { join, isAbsolute, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
-import { resolveInsideRoot, assertInsideRoot } from "../lib/safe_paths"
+import { resolveRealInsideRoot } from "../lib/safe_paths"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { saveReport } from "../lib/reports"
@@ -66,15 +66,9 @@ export const bancaPlagio = defineBancaTool({
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory
     
-    let finalReportPath: string
-    if (isAbsolute(args.reportPath)) {
-      assertInsideRoot(root, args.reportPath)
-      finalReportPath = resolve(args.reportPath)
-    } else {
-      finalReportPath = resolveInsideRoot(root, args.reportPath)
-    }
+    const finalReportPath = resolveRealInsideRoot(root, args.reportPath)
 
-    if (!existsSync(finalReportPath)) return "report not found"
+    if (!existsSync(finalReportPath) || !lstatSync(finalReportPath).isFile()) return "report not found"
 
     const config = loadConfig(root)
     const paths = resolveManuscriptPaths(root, config)

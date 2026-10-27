@@ -491,3 +491,198 @@ describe("symlink confinement — workspace persistence", () => {
     expect(existsSync(join(project, ".banca", "analysis"))).toBe(true)
   })
 })
+
+describe("symlink confinement — banca_plagio read origin", () => {
+  stest("denies relative symlink to external HTML report before reading", async () => {
+    const { bancaPlagio } = await import("../src/tools/banca_plagio")
+    const secretContent = "<table><tr><td>outside_secret.tex</td><td>95</td><td>90</td><td>secret</td></tr></table>"
+    writeTree(external, { "report.html": secretContent })
+    symlinkSync(join(external, "report.html"), join(project, "evidence.html"), "file")
+    const beforeExternal = snapshotTree(external)
+
+    let error: unknown = null
+    try {
+      await bancaPlagio.execute({ projectRoot: project, reportPath: "evidence.html" }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(external)
+    expect(String((error as Error).message)).not.toContain("outside_secret.tex")
+    expect(snapshotTree(external)).toEqual(beforeExternal)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("denies absolute symlink to external HTML report before reading", async () => {
+    const { bancaPlagio } = await import("../src/tools/banca_plagio")
+    writeTree(external, { "report.html": "<table><tr><td>sec.tex</td><td>90</td><td>85</td><td>x</td></tr></table>" })
+    symlinkSync(join(external, "report.html"), join(project, "evidence_abs.html"), "file")
+
+    let error: unknown = null
+    try {
+      await bancaPlagio.execute({ projectRoot: project, reportPath: join(project, "evidence_abs.html") }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(external)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("denies broken symlink reportPath before reading", async () => {
+    const { bancaPlagio } = await import("../src/tools/banca_plagio")
+    symlinkSync(join(base, "missing", "gone.html"), join(project, "broken.html"), "file")
+
+    let error: unknown = null
+    try {
+      await bancaPlagio.execute({ projectRoot: project, reportPath: "broken.html" }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(base)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("denies symlink to external PDF report before invoking pdftotext", async () => {
+    const { bancaPlagio } = await import("../src/tools/banca_plagio")
+    writeTree(external, { "doc.pdf": "%PDF-1.4 dummy" })
+    symlinkSync(join(external, "doc.pdf"), join(project, "evidence.pdf"), "file")
+    const beforeExternal = snapshotTree(external)
+
+    let error: unknown = null
+    try {
+      await bancaPlagio.execute({ projectRoot: project, reportPath: "evidence.pdf" }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(external)
+    expect(snapshotTree(external)).toEqual(beforeExternal)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("allows internal symlink to legitimate internal HTML report", async () => {
+    const { bancaPlagio } = await import("../src/tools/banca_plagio")
+    const internalContent = "<table><tr><td>capitulo1.tex</td><td>10</td><td>15</td><td>ok</td></tr></table>"
+    writeTree(project, {
+      "reports_dir/real_report.html": internalContent,
+      "main.tex": "\\documentclass{article}\\begin{document}Ola\\end{document}",
+    })
+    symlinkSync(join(project, "reports_dir", "real_report.html"), join(project, "sym_report.html"), "file")
+
+    const result = await bancaPlagio.execute({ projectRoot: project, reportPath: "sym_report.html" }, { directory: project } as any)
+    expect(String(result)).toContain("Plágio — Report")
+    expect(String(result)).toContain("capitulo1.tex")
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(true)
+  })
+})
+
+describe("symlink confinement — banca_ia read origin", () => {
+  stest("denies external symlink main.tex before reading", async () => {
+    const { bancaIa } = await import("../src/tools/banca_ia")
+    const secretContent = "Ademais, é imperativo que o segredo externo permaneça confidencial sobremaneira."
+    writeTree(external, { "outside_main.tex": secretContent })
+    symlinkSync(join(external, "outside_main.tex"), join(project, "main.tex"), "file")
+    const beforeExternal = snapshotTree(external)
+
+    let error: unknown = null
+    try {
+      await bancaIa.execute({ projectRoot: project, forceRegex: true }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(external)
+    expect(String((error as Error).message)).not.toContain("segredo externo")
+    expect(snapshotTree(external)).toEqual(beforeExternal)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("denies broken symlink main.tex before reading", async () => {
+    const { bancaIa } = await import("../src/tools/banca_ia")
+    symlinkSync(join(base, "missing", "broken_main.tex"), join(project, "main.tex"), "file")
+
+    let error: unknown = null
+    try {
+      await bancaIa.execute({ projectRoot: project, forceRegex: true }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(base)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("allows internal symlink to legitimate internal main.tex", async () => {
+    const { bancaIa } = await import("../src/tools/banca_ia")
+    writeTree(project, {
+      "texto/real_main.tex": "\\documentclass{article}\\begin{document}\nAdemais, é imperativo que testemos internamente.\n\\end{document}",
+    })
+    symlinkSync(join(project, "texto", "real_main.tex"), join(project, "main.tex"), "file")
+
+    const result = await bancaIa.execute({ projectRoot: project, forceRegex: true }, { directory: project } as any)
+    expect(String(result)).toContain("IA Detection Report")
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(true)
+  })
+})
+
+describe("symlink confinement — banca_refs read origin", () => {
+  stest("denies external symlink referencias.bib before reading", async () => {
+    const { bancaRefs } = await import("../src/tools/banca_refs")
+    const secretBib = "@article{secret_external_key_2026, author={Classified}, title={Confidential Document}, year={2026}}"
+    writeTree(external, { "outside_refs.bib": secretBib })
+    writeTree(project, { "main.tex": "\\documentclass{article}\\begin{document}Texto\\end{document}" })
+    symlinkSync(join(external, "outside_refs.bib"), join(project, "referencias.bib"), "file")
+    const beforeExternal = snapshotTree(external)
+
+    let error: unknown = null
+    try {
+      await bancaRefs.execute({ projectRoot: project }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(external)
+    expect(String((error as Error).message)).not.toContain("secret_external_key_2026")
+    expect(snapshotTree(external)).toEqual(beforeExternal)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("denies broken symlink referencias.bib before reading", async () => {
+    const { bancaRefs } = await import("../src/tools/banca_refs")
+    writeTree(project, { "main.tex": "\\documentclass{article}\\begin{document}Texto\\end{document}" })
+    symlinkSync(join(base, "missing", "broken_refs.bib"), join(project, "referencias.bib"), "file")
+
+    let error: unknown = null
+    try {
+      await bancaRefs.execute({ projectRoot: project }, { directory: project } as any)
+    } catch (err) {
+      error = err
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String((error as Error).message)).not.toContain(base)
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
+  })
+
+  stest("allows internal symlink to legitimate internal referencias.bib", async () => {
+    const { bancaRefs } = await import("../src/tools/banca_refs")
+    writeTree(project, {
+      "main.tex": "\\documentclass{article}\\begin{document}Texto\\end{document}",
+      "bibliografia/real.bib": "@article{silva2021, author={Silva, J.}, title={Estudo Academico}, year={2021}}",
+    })
+    symlinkSync(join(project, "bibliografia", "real.bib"), join(project, "referencias.bib"), "file")
+
+    const result = await bancaRefs.execute({ projectRoot: project }, { directory: project } as any)
+    expect(String(result)).toContain("References:")
+    expect(existsSync(join(project, ".banca", "reports"))).toBe(true)
+  })
+})

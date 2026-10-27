@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 import { z } from "zod"
@@ -6,7 +6,7 @@ import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { saveReport } from "../lib/reports"
-import { assertInsideRoot } from "../lib/safe_paths"
+import { PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
 const PATTERNS: RegExp[] = [
   /(ademais|outrossim|destarte|sobremaneira|conquanto|tampouco)\b/gi,
   /(é imperativo|é crucial|é fundamental|é mister) que\b/gi,
@@ -74,7 +74,25 @@ export const bancaIa = defineBancaTool({
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory
     const paths = resolveManuscriptPaths(root, loadConfig(root))
-    const files = [paths.main, ...paths.chapters].filter((f) => existsSync(f))
+    const rawFiles = [paths.main, ...paths.chapters]
+    const files: Array<{ file: string; canonical: string }> = []
+
+    for (const file of rawFiles) {
+      let st
+      try {
+        st = lstatSync(file)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          continue
+        }
+        throw new PathTraversalError("failed to inspect a workspace path component")
+      }
+      const canonical = resolveRealInsideRoot(root, file)
+      if (!existsSync(canonical) || !lstatSync(canonical).isFile()) {
+        continue
+      }
+      files.push({ file, canonical })
+    }
 
     if (files.length === 0) return "no manuscript files found"
 
@@ -85,13 +103,12 @@ export const bancaIa = defineBancaTool({
     let totalRisk = 0
     let fileCount = 0
 
-    for (const file of files) {
-      assertInsideRoot(root, file)
-      const content = readFileSync(file, "utf-8")
+    for (const { file, canonical } of files) {
+      const content = readFileSync(canonical, "utf-8")
       const name = file.replace(root, "").replace(/^\//, "")
 
       if (pythonAvailable) {
-        const result = runPythonEnsemble(file, __dirname)
+        const result = runPythonEnsemble(canonical, __dirname)
         if (result && result.confidence > 0) {
           const riskLabel = result.risk > 0.5 ? "high" : result.risk > 0.2 ? "moderate" : "low"
           const confidence = result.confidence
