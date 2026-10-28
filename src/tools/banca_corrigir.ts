@@ -12,6 +12,7 @@ import {
 } from "../lib/safe_paths"
 import {
   createSnapshot,
+  destinationIdentityConflict,
   lexicalProjectPath,
   logicalProjectRel,
   SnapshotCaptureError,
@@ -50,11 +51,14 @@ export const bancaCorrigir = defineBancaTool({
     // Canonical preflight: resolve every destination to its real path before
     // any snapshot or write. Symlinks escaping the workspace block the batch.
     const prepared: Array<{ file: string; abs: string; relPath: string }> = []
+    const logicals: string[] = []
     for (const c of corrections) {
       try {
         const abs = resolveRealInsideRoot(root, c.file)
         const relPath = toPosixPath(relative(realWorkspaceRoot(root), abs))
         prepared.push({ file: c.file, abs, relPath })
+        const lexical = lexicalProjectPath(root, c.file)
+        logicals.push(logicalProjectRel(root, lexical))
       } catch {
         return `blocked: ${c.file} escapes project root`
       }
@@ -62,6 +66,15 @@ export const bancaCorrigir = defineBancaTool({
 
     if (args.skipSnapshot) {
       return "blocked: skipSnapshot is not permitted in public correction workflow"
+    }
+
+    // Physical destination identity preflight (P1 reversibility): verify the
+    // entire batch for physical collisions (symlink aliases, hard links, duplicate
+    // targets, or identity incompatibilities) before creating any snapshot or
+    // mutating any file.
+    const conflict = destinationIdentityConflict(root, logicals)
+    if (conflict !== null) {
+      return `blocked: ${conflict}`
     }
 
     // Workspace persistence paths this tool will touch must also be internal.
