@@ -1,0 +1,8 @@
+{
+  "scenario": "tampered_counter",
+  "description": "Adulteração no contador de lotes concluídos sem atualização dos caracteres correspondentes.",
+  "tamper": {
+    "completedBatches": 1
+  },
+  "expectedErrorCode": "tampered_checkpoint"
+}

@@ -1,0 +1,12 @@
+{
+  "scenario": "provenance_mismatch",
+  "description": "Finding acadêmico emitido com batchId do lote 0 mas linhas e arquivo originários do lote 1.",
+  "targetBatchIndex": 0,
+  "provenanceBatchIndex": 1,
+  "category": "metodologia",
+  "severity": "warning",
+  "claim": "Reivindicação metodológica associada a lote incorreto",
+  "evidence": "Trecho textual pertencente ao lote subsequente",
+  "sectionId": "sec-subsecao-divergente",
+  "expectedErrorCode": "line_range_not_covered"
+}
