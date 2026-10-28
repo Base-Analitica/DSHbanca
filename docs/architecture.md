@@ -57,6 +57,17 @@ Os seguintes módulos acadêmicos existem na base. A descrição indica o escopo
 
 A arquitetura acadêmica deve preservar cobertura do manuscrito, proveniência, checkpoints, rubricas, findings, fingerprints, integridade dos snapshots e guardrails. Não altere protocolo por lotes, scoring, rubricas ou semântica de restore para facilitar integração. Detecção de IA, plágio e similaridade são sinais metodológicos, não vereditos absolutos.
 
+### Níveis de validação e distinção do corpus sintético
+
+Para manter a integridade metodológica, a arquitetura distingue rigorosamente os níveis de teste e evidência:
+- **Corpus sintético (`tests/fixtures/academic-coverage/v1/`)**: validação mecânica e determinística de contratos de particionamento, contagem UTF-16, invariância de checkpoints, gates de síntese e proveniência de findings. Não utiliza trabalhos reais nem dados sensíveis.
+- **Testes unitários (`bun test`)**: exercitam contratos isolados de funções e tipos TypeScript em runtime local.
+- **LaTeX real**: compilação por motores TeX (`lualatex`, etc.), que valida apenas a tipografia e integridade estrutural do documento TeX.
+- **DSH real sem modelo**: valida integração de host (Cordis, descoberta, dispatch, permissões) observada no ambiente real.
+- **Modelo de IA**: inferência probabilística sob custo e prompt controlado; requer autorização explícita.
+- **Avaliação humana**: juízo institucional soberano sobre qualidade acadêmica e mérito científico, que nenhuma automação ou corpus substitui.
+
+
 ## Discovery, identidade e autoridade
 
 A prova de um asset/agente é uma cadeia: fonte canônica → empacotamento/instalação → discovery pelo host → composição/associação ao Agent → conteúdo projetado no contexto correto → dispatch/comportamento exigido. Cada etapa requer evidência própria.

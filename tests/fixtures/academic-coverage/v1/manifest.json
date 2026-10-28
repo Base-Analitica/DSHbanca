@@ -1,0 +1,487 @@
+{
+  "$schema": "./schema.json",
+  "version": "academic-coverage-corpus-v1",
+  "description": "Corpus acadêmico sintético versionado para testes de regressão dos contratos determinísticos de cobertura, checkpoints, retomada e síntese.",
+  "metadata": {
+    "totalCases": 10,
+    "categories": {
+      "correct": 1,
+      "boundary": 4,
+      "defective": 4,
+      "ambiguous": 1
+    },
+    "deterministicRulesEvaluated": [
+      "canonical_loader_integrity",
+      "exhaustive_coverage_bounds",
+      "checkpoint_deterministic_resume_and_tamper",
+      "synthesis_gate_closed_on_partial_or_blocked",
+      "finding_provenance_and_plan_binding"
+    ]
+  },
+  "cases": [
+    {
+      "id": "case_01_canonical_valid",
+      "name": "Canonical Valid Multi-file Manuscript",
+      "category": "correct",
+      "path": "cases/case-01-canonical-valid",
+      "description": "Manuscrito canônico sintético com múltiplos arquivos incluídos validamente sem ciclos.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": ["capitulos/*.tex"],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 300
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "complete",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 100,
+          "minBatches": 2
+        },
+        "checkpoint": {
+          "resumesCleanly": true,
+          "finalState": "complete"
+        },
+        "synthesis": {
+          "allowed": true
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "negative_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_02_oversized_span",
+      "name": "Oversized Span Partitioning Without Work Truncation",
+      "category": "boundary",
+      "path": "cases/case-02-oversized-span",
+      "description": "Span único contínuo cujo comprimento excede maxCharactersPerBatch; deve ser dividido em lotes delimitados sem perda de texto.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 250
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "complete",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 100,
+          "minBatches": 3
+        },
+        "checkpoint": {
+          "resumesCleanly": true,
+          "finalState": "complete"
+        },
+        "synthesis": {
+          "allowed": true
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "negative_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_03_utf16_surrogates",
+      "name": "UTF-16 Surrogate Boundary Safety",
+      "category": "boundary",
+      "path": "cases/case-03-utf16-surrogates",
+      "description": "Manuscrito com símbolos nos planos suplementares UTF-16; garante que divisões de lote não rompam pares de surrogates.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 180
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "complete",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 100,
+          "minBatches": 2
+        },
+        "checkpoint": {
+          "resumesCleanly": true,
+          "finalState": "complete"
+        },
+        "synthesis": {
+          "allowed": true
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "negative_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_04_missing_include_blocked",
+      "name": "Missing Include Fails Closed",
+      "category": "defective",
+      "path": "cases/case-04-missing-include-blocked",
+      "description": "Inclusão de arquivo inexistente que invalida a completude do manuscrito e bloqueia cobertura e síntese.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 300
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": false,
+          "hasFingerprint": false,
+          "expectedDiagnosticCode": "include_not_found"
+        },
+        "coverage": {
+          "status": "blocked",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 0,
+          "batchCount": 0
+        },
+        "checkpoint": {
+          "resumesCleanly": false,
+          "finalState": "blocked"
+        },
+        "synthesis": {
+          "allowed": false,
+          "expectedErrorCode": "blocked_plan"
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "positive_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_05_include_cycle_defect",
+      "name": "Circular Include Loop Detected",
+      "category": "defective",
+      "path": "cases/case-05-include-cycle-defect",
+      "description": "Ciclo mútuo de inclusões LaTeX que deve ser interrompido e reportado como falha bloqueante.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 300
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": false,
+          "hasFingerprint": false,
+          "expectedDiagnosticCode": "include_cycle"
+        },
+        "coverage": {
+          "status": "blocked",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 0,
+          "batchCount": 0
+        },
+        "checkpoint": {
+          "resumesCleanly": false,
+          "finalState": "blocked"
+        },
+        "synthesis": {
+          "allowed": false,
+          "expectedErrorCode": "blocked_plan"
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "positive_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_06_budget_exceeded_partial",
+      "name": "Prefix Coverage Budget Exceeded Partial Status",
+      "category": "boundary",
+      "path": "cases/case-06-budget-exceeded-partial",
+      "description": "Planejamento por prefixo com orçamento deliberadamente inferior ao total da obra.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 300
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "partial",
+          "strategy": "ordered-source-spans-prefix-v1",
+          "omissionReason": "budget_exceeded"
+        },
+        "checkpoint": {
+          "resumesCleanly": true,
+          "finalState": "running"
+        },
+        "synthesis": {
+          "allowed": false,
+          "expectedErrorCode": "incomplete_coverage"
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "negative_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_07_tampered_checkpoint",
+      "name": "Tampered Checkpoint Progression Rejection",
+      "category": "defective",
+      "path": "cases/case-07-tampered-checkpoint",
+      "description": "Checkpoint com adulteração nos contadores ou tentativa de conclusão fora de ordem estrita.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 100
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "complete",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 100,
+          "minBatches": 2
+        },
+        "checkpoint": {
+          "resumesCleanly": false,
+          "expectedErrorCode": "tampered_checkpoint"
+        },
+        "synthesis": {
+          "allowed": false,
+          "expectedErrorCode": "tampered_checkpoint"
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "positive_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_08_finding_provenance_tamper",
+      "name": "Finding Provenance and Plan Binding Violation",
+      "category": "defective",
+      "path": "cases/case-08-finding-provenance-tamper",
+      "description": "Finding acadêmico emitido com linha ou arquivo fora do lote de cobertura correspondente.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 100
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "complete",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 100,
+          "minBatches": 2
+        },
+        "checkpoint": {
+          "resumesCleanly": true,
+          "finalState": "complete"
+        },
+        "synthesis": {
+          "allowed": false,
+          "expectedErrorCode": "invalid_findings"
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "positive_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_09_serialized_resume_clean",
+      "name": "Deterministic Serialized Checkpoint Multi-turn Resume",
+      "category": "boundary",
+      "path": "cases/case-09-serialized-resume-clean",
+      "description": "Retomada determinística de múltiplos lotes serializados em JSON sem omissão e sem duplicação.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 100
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "complete",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 100,
+          "minBatches": 3
+        },
+        "checkpoint": {
+          "resumesCleanly": true,
+          "finalState": "complete"
+        },
+        "synthesis": {
+          "allowed": true
+        },
+        "classification": {
+          "scorable": true,
+          "groundTruth": "negative_for_defect",
+          "isAmbiguous": false
+        }
+      }
+    },
+    {
+      "id": "case_10_ambiguous_unclassified",
+      "name": "Ambiguous Subjective Commentary Outside Deterministic Rules",
+      "category": "ambiguous",
+      "path": "cases/case-10-ambiguous-unclassified",
+      "description": "Manuscrito com anotações abertas sem regra determinística objetiva; tratado como não-pontuável.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 200
+        }
+      },
+      "expected": {
+        "loader": {
+          "complete": true,
+          "hasFingerprint": true,
+          "diagnosticsCount": 0
+        },
+        "coverage": {
+          "status": "complete",
+          "strategy": "ordered-source-spans-exhaustive-v1",
+          "coveragePercent": 100,
+          "minBatches": 2
+        },
+        "checkpoint": {
+          "resumesCleanly": true,
+          "finalState": "complete"
+        },
+        "synthesis": {
+          "allowed": true
+        },
+        "classification": {
+          "scorable": false,
+          "groundTruth": "unscoreable",
+          "isAmbiguous": true
+        }
+      }
+    }
+  ]
+}
