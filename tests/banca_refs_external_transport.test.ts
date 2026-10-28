@@ -174,6 +174,38 @@ describe("banca_refs external transport and academic classification (Issue #29)"
     expect(text).toContain("Evaluated: 1/1")
   })
 
+  test("RED reproduction: verified ref with 'blocked' in evidence string must not be classified as blocked", async () => {
+    const cache = new RefCache(projectDir)
+    cache.set("silva2024", "10.1000/182", {
+      key: "silva2024",
+      found: true,
+      score: 95,
+      status: "verificada",
+      matchedBy: "doi",
+      metadata: {
+        key: "silva2024",
+        title: "Pesquisa Academica e Integridade",
+        authors: ["Silva, Joao"],
+        year: 2024,
+        doi: "10.1000/182",
+      },
+      evidence: "Verified by human after previous lookup was blocked",
+    })
+
+    const { bancaRefs } = await import("../src/tools/banca_refs")
+    const result = await bancaRefs.execute({ projectRoot: projectDir }, { directory: projectDir } as any)
+    const text = String(result)
+
+    expect(fetchCalls.length).toBe(0)
+    expect(mcpStartSpy).not.toHaveBeenCalled()
+    // Must NOT contain global blocked warning
+    expect(text).not.toContain("blocked:")
+    expect(text).not.toContain("Blocked (external provider unavailable)")
+    expect(text).toContain("Verified: 1")
+    expect(text).toContain("Evaluated: 1/1")
+    expect(text).toContain("Avg Score: 95/100")
+  })
+
   test("Cenário D: legacy OPENBANCA_ENABLE_CROSSREF_MCP triggers zero MCP spawn and zero fetch", async () => {
     process.env.OPENBANCA_ENABLE_CROSSREF_MCP = "1"
     writeFileSync(

@@ -71,10 +71,10 @@ export const bancaRefs = defineBancaTool({
 
     const verified = results.filter((r) => r.resultStatus === "verificada").length
     const notFound = results.filter((r) => r.resultStatus === "nao_encontrada").length
-    const blockedCount = results.filter((r) => r.resultStatus === "bloqueada" || r.evidence.includes("blocked")).length
+    const blockedCount = results.filter((r) => r.resultStatus === "bloqueada").length
 
     // Evaluated references are those that were actually verified or evaluated (not blocked)
-    const evaluatedResults = results.filter((r) => r.resultStatus !== "bloqueada" && !r.evidence.includes("blocked"))
+    const evaluatedResults = results.filter((r) => r.resultStatus !== "bloqueada")
     const totalEvaluated = evaluatedResults.length
     const avgScore = totalEvaluated > 0
       ? Math.round(evaluatedResults.reduce((s, r) => s + r.score, 0) / totalEvaluated)
