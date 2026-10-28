@@ -49,3 +49,12 @@ Para os casos com regra objetiva fechada:
 - **Positivo**: detecção de defeito ou inconformidade estrutural (casos 4, 5, 7, 8).
 - **Negativo**: conformidade com os contratos determinísticos (casos 1, 2, 3, 6, 9).
 - **Ambíguo**: casos subjetivos ou não classificáveis por contrato puramente determinístico (caso 10) são mantidos fora da matriz binária para evitar inflação artificial de taxas de precisão.
+
+### Avaliação Observada e Invariante de Sensibilidade
+
+A matriz de confusão não infere detecção pelo identificador (`caseDef.id`) ou metadado da fixture. Cada caso é submetido à execução efetiva do seu validador determinístico correspondente:
+- Casos de manuscrito (04 e 05): avaliados pela integridade canônica do loader (`loadCanonicalLatexManuscript`).
+- Caso 07: submetido à validação de checkpoint desserializado (`nextAnalysisBatch`), onde adulterações geram `AnalysisCheckpointError`.
+- Caso 08: submetido à validação de proveniência de finding (`createAnalysisFinding`), onde violações de linha/lote geram `AnalysisFindingError`.
+- Caso 06: validação do status `partial` da estratégia prefixada (`planAnalysisCoverage`). O contrato da API `createGlobalAnalysisSynthesisInput` restringe-se a planos exaustivos (`ExhaustiveAnalysisPlan`), de modo que planos de prefixo são inelegíveis para síntese global por desenho contratual.
+- Testes negativos de sensibilidade provam que mutações ou supressões de detecção produzem imediatamente Falsos Negativos (FN) e derrubam as taxas da matriz, eliminando resultados artificiais de 100%.

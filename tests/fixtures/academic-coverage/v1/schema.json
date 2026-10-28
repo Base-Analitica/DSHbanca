@@ -15,7 +15,16 @@
       "required": ["totalCases", "categories", "deterministicRulesEvaluated"],
       "properties": {
         "totalCases": { "type": "integer", "minimum": 1 },
-        "categories": { "type": "object" },
+        "categories": {
+          "type": "object",
+          "required": ["correct", "boundary", "defective", "ambiguous"],
+          "properties": {
+            "correct": { "type": "integer", "minimum": 0 },
+            "boundary": { "type": "integer", "minimum": 0 },
+            "defective": { "type": "integer", "minimum": 0 },
+            "ambiguous": { "type": "integer", "minimum": 0 }
+          }
+        },
         "deterministicRulesEvaluated": {
           "type": "array",
           "items": { "type": "string" }
@@ -36,8 +45,99 @@
           },
           "path": { "type": "string" },
           "description": { "type": "string" },
-          "config": { "type": "object" },
-          "expected": { "type": "object" }
+          "config": {
+            "type": "object",
+            "required": ["manuscript", "analysis"],
+            "properties": {
+              "manuscript": {
+                "type": "object",
+                "required": ["format", "root", "main", "bib", "chapters", "outputDir"],
+                "properties": {
+                  "format": { "type": "string", "enum": ["latex"] },
+                  "root": { "type": "string" },
+                  "main": { "type": "string" },
+                  "bib": { "type": "string" },
+                  "chapters": { "type": "array", "items": { "type": "string" } },
+                  "outputDir": { "type": "string" }
+                }
+              },
+              "analysis": {
+                "type": "object",
+                "required": ["coverageMode", "maxCharactersPerBatch"],
+                "properties": {
+                  "coverageMode": { "type": "string", "enum": ["exhaustive"] },
+                  "maxCharactersPerBatch": { "type": "integer", "minimum": 1 }
+                }
+              }
+            }
+          },
+          "expected": {
+            "type": "object",
+            "required": ["loader", "coverage", "checkpoint", "synthesis", "classification"],
+            "properties": {
+              "loader": {
+                "type": "object",
+                "required": ["complete", "hasFingerprint"],
+                "properties": {
+                  "complete": { "type": "boolean" },
+                  "hasFingerprint": { "type": "boolean" },
+                  "diagnosticsCount": { "type": "integer", "minimum": 0 },
+                  "expectedDiagnosticCode": { "type": "string" }
+                }
+              },
+              "coverage": {
+                "type": "object",
+                "required": ["status", "strategy"],
+                "properties": {
+                  "status": { "type": "string", "enum": ["complete", "partial", "blocked"] },
+                  "strategy": {
+                    "type": "string",
+                    "enum": ["ordered-source-spans-exhaustive-v1", "ordered-source-spans-prefix-v1"]
+                  },
+                  "coveragePercent": { "type": "number", "minimum": 0, "maximum": 100 },
+                  "minBatches": { "type": "integer", "minimum": 0 },
+                  "batchCount": { "type": "integer", "minimum": 0 },
+                  "omissionReason": {
+                    "type": "string",
+                    "enum": ["budget_exceeded", "manuscript_incomplete"]
+                  }
+                }
+              },
+              "checkpoint": {
+                "type": "object",
+                "required": ["resumesCleanly"],
+                "properties": {
+                  "resumesCleanly": { "type": "boolean" },
+                  "finalState": {
+                    "type": "string",
+                    "enum": ["complete", "running", "pending", "blocked"]
+                  },
+                  "expectedErrorCode": { "type": "string" }
+                }
+              },
+              "synthesis": {
+                "type": "object",
+                "required": ["allowed"],
+                "properties": {
+                  "allowed": { "type": "boolean" },
+                  "expectedErrorCode": { "type": "string" },
+                  "inapplicableReason": { "type": "string" }
+                }
+              },
+              "classification": {
+                "type": "object",
+                "required": ["scorable", "groundTruth", "isAmbiguous"],
+                "properties": {
+                  "scorable": { "type": "boolean" },
+                  "groundTruth": {
+                    "type": "string",
+                    "enum": ["positive_for_defect", "negative_for_defect", "unscoreable"]
+                  },
+                  "isAmbiguous": { "type": "boolean" }
+                }
+              }
+            }
+          }
         }
       }
     }

@@ -283,12 +283,13 @@
           "omissionReason": "budget_exceeded"
         },
         "checkpoint": {
-          "resumesCleanly": true,
-          "finalState": "running"
+          "resumesCleanly": false,
+          "expectedErrorCode": "inapplicable_for_prefix_plan"
         },
         "synthesis": {
           "allowed": false,
-          "expectedErrorCode": "incomplete_coverage"
+          "inapplicableReason": "prefix_plan_not_synthesizable",
+          "expectedErrorCode": "contract_inapplicable_for_prefix_plan"
         },
         "classification": {
           "scorable": true,
