@@ -574,7 +574,6 @@ export async function apply(ctx) {
     const beforeCorrection = await readFile(join(workspace, "main.tex"), "utf8");
     const setupCorrectionArgs = {
       corrections: [{ file: "main.tex", oldText: "BASELINE_SENTINEL", newText: "CURRENT_SENTINEL" }],
-      skipSnapshot: true,
     };
     const setupCorrection = await runTool(ctx, "dshbanca-e2e-setup-correction", "banca_corrigir", setupCorrectionArgs, agent);
     const currentText = await readFile(join(workspace, "main.tex"), "utf8");
@@ -670,7 +669,6 @@ export async function apply(ctx) {
 
     const correctionArgs = {
       corrections: [{ file: "main.tex", oldText: "CURRENT_SENTINEL", newText: "AUDITOR_MUTATION_MUST_NOT_RUN" }],
-      skipSnapshot: true,
     };
     const restoreArgs = { snapshotId: restoreLabel, confirm: true };
     const deniedBefore = await inventory(workspace);

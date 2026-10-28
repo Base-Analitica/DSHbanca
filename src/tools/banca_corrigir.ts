@@ -60,12 +60,14 @@ export const bancaCorrigir = defineBancaTool({
       }
     }
 
+    if (args.skipSnapshot) {
+      return "blocked: skipSnapshot is not permitted in public correction workflow"
+    }
+
     // Workspace persistence paths this tool will touch must also be internal.
     try {
       resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
-      if (!args.skipSnapshot) {
-        resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))
-      }
+      resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))
     } catch {
       return `blocked: workspace state paths escape project root`
     }
@@ -80,40 +82,39 @@ export const bancaCorrigir = defineBancaTool({
       }
     }
 
-    // snapshot
-    if (!args.skipSnapshot) {
-      const snapLabel = `pre-${Date.now()}`
-      try {
-        const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
-        // Logical identity: the snapshot keys the correction target by its
-        // project-declared path, not by the canonical path a symlink resolves to.
-        const candidates = corrections.map((c) => {
-          const lexical = lexicalProjectPath(root, c.file)
-          return { logical: logicalProjectRel(root, lexical), abs: lexical }
-        })
-        // Internal labels may collide within one millisecond: the central
-        // createSnapshot picks the first free `-N` suffix and never reuses an
-        // existing snapshot directory or manifest. Pre-correction snapshots
-        // stay unregistered (workspace-only recovery point, as before) and are
-        // declared `partial`: they capture only the files this correction will
-        // touch, so they are never announced as full recovery points (the
-        // physical destination policy still applies to their own contents).
-        createSnapshot({
-          root,
-          snapshotsDir,
-          label: snapLabel,
-          candidates,
-          labelPolicy: "unique",
-          register: false,
-          kind: "partial",
-        })
-      } catch (err) {
-        if (err instanceof PathTraversalError) return `blocked: workspace state paths escape project root`
-        if (err instanceof SnapshotConflictError || err instanceof SnapshotCaptureError) {
-          return `blocked: pre-correction snapshot failed — no manuscript file was modified`
-        }
-        throw err
+    // snapshot: mandatory, registered in state.snapshots, declared partial
+    const snapLabel = `pre-${Date.now()}`
+    try {
+      const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
+      // Logical identity: the snapshot keys the correction target by its
+      // project-declared path, not by the canonical path a symlink resolves to.
+      const candidates = corrections.map((c) => {
+        const lexical = lexicalProjectPath(root, c.file)
+        return { logical: logicalProjectRel(root, lexical), abs: lexical }
+      })
+      // Internal labels may collide within one millisecond: the central
+      // createSnapshot picks the first free `-N` suffix and never reuses an
+      // existing snapshot directory or manifest. Pre-correction snapshots
+      // are registered in state.snapshots (accessible via banca_restore) and are
+      // declared `partial`: they capture only the files this correction will
+      // touch, so they are never announced as full recovery points (the
+      // physical destination policy still applies to their own contents).
+      createSnapshot({
+        root,
+        snapshotsDir,
+        label: snapLabel,
+        candidates,
+        labelPolicy: "unique",
+        register: true,
+        scoreBefore: args.previousScore ?? null,
+        kind: "partial",
+      })
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: workspace state paths escape project root`
+      if (err instanceof SnapshotConflictError || err instanceof SnapshotCaptureError) {
+        return `blocked: pre-correction snapshot failed — no manuscript file was modified`
       }
+      throw err
     }
 
     const results: string[] = []

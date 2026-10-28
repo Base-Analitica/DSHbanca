@@ -782,8 +782,8 @@ describe("snapshot label immutability (P1-B)", () => {
       expect(existsSync(manifestPathOf(project, "pre-1700000001000-2"))).toBe(true)
       expect(readFileSync(join(project, "main.tex"), "utf8")).toBe("POST-B")
 
-      // pre-correction snapshots remain unregistered (public semantics kept)
-      expect(stateLabels(project)).toEqual([])
+      // pre-correction snapshots are registered in state.snapshots
+      expect(stateLabels(project)).toEqual(["pre-1700000001000", "pre-1700000001000-2"])
     })
   })
 

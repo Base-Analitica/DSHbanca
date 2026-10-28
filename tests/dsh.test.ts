@@ -141,13 +141,13 @@ if (!runtime) {
     assert.equal(existsSync(join(guardRoot, '.banca', 'context')), true);
 
     // 4. verified corrector mutates the manuscript through the same pipeline
-    const rFix = await runtime.execute({ callId:'g6', name:'banca_corrigir', arguments:{ corrections:[{file:'main.tex', oldText:'alpha', newText:'omega'}], skipSnapshot: true }, agent: corrector, signal: signal() });
+    const rFix = await runtime.execute({ callId:'g6', name:'banca_corrigir', arguments:{ corrections:[{file:'main.tex', oldText:'alpha', newText:'omega'}] }, agent: corrector, signal: signal() });
     assert.equal(rFix.isError, false, JSON.stringify(rFix));
     assert.equal(readFileSync(join(guardRoot, 'main.tex'), 'utf8'), 'omega beta');
 
     // 5. delegated agent without verifiable identity may not mutate the manuscript
     writeFileSync(join(guardRoot, 'main.tex'), 'alpha beta');
-    const rAnon = await runtime.execute({ callId:'g7', name:'banca_corrigir', arguments:{ corrections:[{file:'main.tex', oldText:'alpha', newText:'omega'}], skipSnapshot: true }, agent: agentOf({ origin:'subagent' }), signal: signal() });
+    const rAnon = await runtime.execute({ callId:'g7', name:'banca_corrigir', arguments:{ corrections:[{file:'main.tex', oldText:'alpha', newText:'omega'}] }, agent: agentOf({ origin:'subagent' }), signal: signal() });
     assert.equal(rAnon.isError, true, JSON.stringify(rAnon));
     assert.match(rAnon.content[0].text, /corretor/);
     assert.equal(readFileSync(join(guardRoot, 'main.tex'), 'utf8'), 'alpha beta');

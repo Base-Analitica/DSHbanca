@@ -504,11 +504,10 @@ describe("snapshot kind semantics", () => {
     expect(manifest.kind).toBe("partial")
     expect(manifest.files.map((f: any) => f.logical)).toEqual(["capitulos/cap1.tex"])
 
-    // pre-correction snapshots are not advertised as public recovery points
-    expect(stateLabels(project)).toEqual([])
+    // pre-correction snapshots are registered in state.snapshots
+    expect(stateLabels(project)).toEqual([partialLabel])
 
-    // even when used for a controlled recovery, the partial nature is explicit
-    addSnapshot(project, partialLabel, null)
+    // when used for a controlled recovery, the partial nature is explicit
     write(project, "capitulos/cap1.tex", "CAP-V3")
     const restore = await bancaRestore.execute({ projectRoot: project, snapshotId: partialLabel, confirm: true }, {} as any)
     const text = String(restore)
