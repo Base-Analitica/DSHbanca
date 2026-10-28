@@ -536,4 +536,106 @@ describe("Issue #30: banca_corrigir and banca_restore reversibility", () => {
     expect(sha256(restoredMain)).toBe(hashOrig)
     expect(sha256(restoredCap)).toBe(hashOrig)
   })
+
+  test("Cenário J (RED obrigatório) — Undeclared internal hard link alias is blocked before snapshot and write", async () => {
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const { loadState } = await import("../src/lib/state")
+    const { linkSync, statSync } = await import("node:fs")
+
+    mkdirSync(join(project, "capitulos"), { recursive: true })
+    const contentA = "\\documentclass{article}\n\\begin{document}\nINTERNAL_HARD_A\n\\end{document}\n"
+    const hashA = sha256(contentA)
+    writeFileSync(join(project, "main.tex"), contentA, "utf-8")
+    linkSync(join(project, "main.tex"), join(project, "capitulos", "alias.tex"))
+
+    expect(statSync(join(project, "main.tex")).nlink).toBe(2)
+    expect(statSync(join(project, "capitulos", "alias.tex")).nlink).toBe(2)
+
+    const stateBefore = loadState(project)
+    expect(stateBefore.snapshots.length).toBe(0)
+
+    const result = await bancaCorrigir.execute(
+      {
+        projectRoot: project,
+        corrections: [{ file: "main.tex", oldText: "INTERNAL_HARD_A", newText: "INTERNAL_HARD_B" }],
+      },
+      {} as any,
+    )
+
+    // MUST be blocked
+    expect(String(result)).toContain("blocked:")
+    expect(String(result)).toContain("has multiple hard links")
+
+    // Both files must retain original content and hash
+    const currentMain = readFileSync(join(project, "main.tex"), "utf-8")
+    const currentAlias = readFileSync(join(project, "capitulos", "alias.tex"), "utf-8")
+    expect(currentMain).toBe(contentA)
+    expect(currentAlias).toBe(contentA)
+    expect(sha256(currentMain)).toBe(hashA)
+    expect(sha256(currentAlias)).toBe(hashA)
+
+    // Zero snapshots and zero iterations
+    const stateAfter = loadState(project)
+    expect(stateAfter.snapshots.length).toBe(0)
+    expect(stateAfter.iterations.length).toBe(0)
+
+    // Vault has no snapshots
+    const snapshotsDir = join(project, ".banca", "snapshots")
+    if (existsSync(snapshotsDir)) {
+      const snapDirs = readdirSync(snapshotsDir).filter((d) => d.startsWith("pre-"))
+      expect(snapDirs.length).toBe(0)
+    }
+  })
+
+  test("Cenário K (RED obrigatório) — External hard link alias outside workspace is blocked before snapshot and write", async () => {
+    const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
+    const { loadState } = await import("../src/lib/state")
+    const { linkSync, statSync } = await import("node:fs")
+
+    const outsideDir = join(base, "outside")
+    mkdirSync(outsideDir, { recursive: true })
+
+    const contentA = "\\documentclass{article}\n\\begin{document}\nEXTERNAL_HARD_A\n\\end{document}\n"
+    const hashA = sha256(contentA)
+    writeFileSync(join(project, "main.tex"), contentA, "utf-8")
+    linkSync(join(project, "main.tex"), join(outsideDir, "external.tex"))
+
+    expect(statSync(join(project, "main.tex")).nlink).toBe(2)
+    expect(statSync(join(outsideDir, "external.tex")).nlink).toBe(2)
+
+    const stateBefore = loadState(project)
+    expect(stateBefore.snapshots.length).toBe(0)
+
+    const result = await bancaCorrigir.execute(
+      {
+        projectRoot: project,
+        corrections: [{ file: "main.tex", oldText: "EXTERNAL_HARD_A", newText: "EXTERNAL_HARD_B" }],
+      },
+      {} as any,
+    )
+
+    // MUST be blocked
+    expect(String(result)).toContain("blocked:")
+    expect(String(result)).toContain("has multiple hard links")
+
+    // Both files must retain original content and hash
+    const currentMain = readFileSync(join(project, "main.tex"), "utf-8")
+    const currentOutside = readFileSync(join(outsideDir, "external.tex"), "utf-8")
+    expect(currentMain).toBe(contentA)
+    expect(currentOutside).toBe(contentA)
+    expect(sha256(currentMain)).toBe(hashA)
+    expect(sha256(currentOutside)).toBe(hashA)
+
+    // Zero snapshots and zero iterations
+    const stateAfter = loadState(project)
+    expect(stateAfter.snapshots.length).toBe(0)
+    expect(stateAfter.iterations.length).toBe(0)
+
+    // Vault has no snapshots
+    const snapshotsDir = join(project, ".banca", "snapshots")
+    if (existsSync(snapshotsDir)) {
+      const snapDirs = readdirSync(snapshotsDir).filter((d) => d.startsWith("pre-"))
+      expect(snapDirs.length).toBe(0)
+    }
+  })
 })

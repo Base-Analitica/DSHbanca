@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
@@ -75,6 +75,26 @@ export const bancaCorrigir = defineBancaTool({
     const conflict = destinationIdentityConflict(root, logicals)
     if (conflict !== null) {
       return `blocked: ${conflict}`
+    }
+
+    // Hard link alias preflight: refuse regular files with nlink > 1.
+    // If a destination shares its inode with other directory entries (whether
+    // inside or outside the workspace), in-place modification would alter
+    // unlisted/unauthorized files and break reversibility (restore by rename
+    // detaches the inode, leaving aliases permanently corrupted).
+    for (let i = 0; i < corrections.length; i++) {
+      const c = corrections[i]
+      const p = prepared[i]
+      try {
+        const st = lstatSync(p.abs)
+        if (st.isFile() && st.nlink > 1) {
+          return `blocked: ${c.file} has multiple hard links (nlink: ${st.nlink}) — writing would alter uncontrolled aliases`
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+          return `blocked: destination for ${c.file} is not accessible`
+        }
+      }
     }
 
     // Workspace persistence paths this tool will touch must also be internal.
@@ -187,8 +207,15 @@ export const bancaCorrigir = defineBancaTool({
       try {
         // re-resolve immediately before writing to narrow the TOCTOU window
         target = resolveRealInsideRoot(root, p.abs)
-      } catch {
-        return `blocked: ${c.file} escapes project root`
+        const st = lstatSync(target)
+        if (st.isFile() && st.nlink > 1) {
+          return `blocked: ${c.file} has multiple hard links (nlink: ${st.nlink}) — writing would alter uncontrolled aliases`
+        }
+      } catch (err) {
+        if (err instanceof PathTraversalError) {
+          return `blocked: ${c.file} escapes project root`
+        }
+        return `blocked: destination for ${c.file} is not accessible`
       }
       writeFileSync(target, updated, "utf-8")
       results.push(
