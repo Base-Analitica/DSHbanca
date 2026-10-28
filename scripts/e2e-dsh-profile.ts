@@ -1097,7 +1097,12 @@ async function main(): Promise<void> {
     fail(`Cached pnpm cannot execute offline: ${safeOutput(pnpmCheck)}`, "BLOCKED")
     return
   }
-  report.versions.pnpm = pnpmCheck.stdout.trim().split(/\r?\n/)[0] ?? null
+  const reportedVersion = pnpmCheck.stdout.trim().split(/\r?\n/)[0] ?? null
+  if (!reportedVersion || reportedVersion !== pnpmResolution.declaredVersion) {
+    fail(`pnpm --version execution reported "${reportedVersion}", which does not match verified manifest version "${pnpmResolution.declaredVersion}"`, "BLOCKED")
+    return
+  }
+  report.versions.pnpm = reportedVersion
 
   const dshHomeFromContract = join(dirs.dshHome, "profiles")
   ensureInside(scratch, dshHomeFromContract)

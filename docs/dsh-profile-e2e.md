@@ -55,7 +55,7 @@ O relatório sanitizado registra SHA do repositório, versões, preset composto,
 
 - DSH real no `PATH` ou `DSH_BIN` apontando para um executável existente.
 - Node e Bun no `PATH`.
-- Cópia do pnpm disponível no cache Corepack offline ou `PNPM_BIN` apontando para um executável pnpm legítimo (binário nativo como `pnpm-native` ou entrypoint JavaScript `.cjs`/`.mjs`).
+- Cópia do pnpm disponível no cache Corepack offline ou `PNPM_BIN` apontando para uma distribuição pnpm legítima (binário nativo como `pnpm-native` ou entrypoint JavaScript `.cjs`/`.mjs` com manifesto de pacote `pnpm` verificado e confinado).
 - Dependências do checkout instaladas pelo fluxo normal.
 
 Cada execução cria um diretório aleatório com permissões restritas e coloca `DSH_HOME`, `HOME`, `TMPDIR`, diretórios XDG, caches npm/Corepack, store pnpm e perfil DSH nesse sandbox. `DSH_TELEMETRY_MODE=DISABLED`, `pnpm --offline` e `COREPACK_ENABLE_NETWORK=0` evitam telemetria e downloads. O perfil usa stdin EOF, não envia solicitações JSON-RPC do SDK e nunca inicia modelo. O gate também compara o estado Git do checkout antes e depois da execução.

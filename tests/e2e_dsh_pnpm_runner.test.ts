@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
@@ -295,5 +295,177 @@ describe("DSH runner pnpm 12 native and JS CLI support (Issue #32)", () => {
       // In bare CI environments without provisioned Corepack cache or PNPM_BIN, fails closed safely
       expect(hostResolution).toBeUndefined()
     }
+  })
+
+  describe("Package identity and provenance verification (Issue #32 P1)", () => {
+    test("rejects arbitrary JavaScript script without package.json manifest", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-unrelated-"))
+      try {
+        const unrelatedJs = join(tempDir, "unrelated.js")
+        writeFileSync(unrelatedJs, "console.log('12.14.0');\n")
+
+        // 1. resolvePnpmCandidate must reject unmanifested JS
+        const candidate = resolvePnpmCandidate(unrelatedJs, "pnpm_bin")
+        expect(candidate).toBeUndefined()
+
+        // 2. findPnpmCli with PNPM_BIN pointing to it must return undefined
+        const fromEnv = findPnpmCli({ pnpmBin: unrelatedJs })
+        expect(fromEnv).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects script when package.json name is not 'pnpm'", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-wrong-pkg-"))
+      try {
+        writeFileSync(join(tempDir, "package.json"), JSON.stringify({ name: "not-pnpm", version: "12.14.0" }))
+        const script = join(tempDir, "pnpm.cjs")
+        writeFileSync(script, "console.log('12.14.0');\n")
+
+        expect(resolvePnpmCandidate(script, "pnpm_bin")).toBeUndefined()
+        expect(findPnpmCli({ pnpmBin: script })).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects native ELF binary when not part of a verified pnpm package", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-orphan-elf-"))
+      try {
+        const elfFile = join(tempDir, "custom-elf")
+        writeFileSync(elfFile, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]))
+        chmodSync(elfFile, 0o755)
+
+        expect(resolvePnpmCandidate(elfFile, "pnpm_bin")).toBeUndefined()
+        expect(findPnpmCli({ pnpmBin: elfFile })).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects Corepack cache entry when package.json version disagrees with directory version", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-version-mismatch-"))
+      try {
+        const pnpmRoot = join(tempDir, "v1", "pnpm")
+        const v12Dir = join(pnpmRoot, "12.14.0")
+        mkdirSync(v12Dir, { recursive: true })
+        // Directory claims 12.14.0, but manifest says 9.15.9
+        writeFileSync(join(v12Dir, "package.json"), JSON.stringify({ name: "pnpm", version: "9.15.9" }))
+        const nativeBin = join(v12Dir, "pnpm-native")
+        writeFileSync(nativeBin, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]))
+        chmodSync(nativeBin, 0o755)
+
+        const result = findPnpmCli({ corepackHome: tempDir })
+        expect(result).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects candidate when entrypoint is outside the verified package root", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-outside-root-"))
+      try {
+        const pkgDir = join(tempDir, "pnpm-pkg")
+        const outsideDir = join(tempDir, "outside")
+        mkdirSync(pkgDir, { recursive: true })
+        mkdirSync(outsideDir, { recursive: true })
+
+        writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "pnpm", version: "12.14.0" }))
+        const outsideScript = join(outsideDir, "outside.js")
+        writeFileSync(outsideScript, "console.log('outside');\n")
+
+        expect(resolvePnpmCandidate(outsideScript, "pnpm_bin")).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects invalid PNPM_BIN without falling back even when valid Corepack cache exists", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-no-fallback-"))
+      try {
+        // Create valid cache entry
+        const pnpmRoot = join(tempDir, "v1", "pnpm")
+        const v12Dir = join(pnpmRoot, "12.14.0")
+        mkdirSync(v12Dir, { recursive: true })
+        writeFileSync(join(v12Dir, "package.json"), JSON.stringify({ name: "pnpm", version: "12.14.0" }))
+        const nativeBin = join(v12Dir, "pnpm-native")
+        writeFileSync(nativeBin, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]))
+        chmodSync(nativeBin, 0o755)
+
+        // Point PNPM_BIN to a non-existent or invalid file
+        const invalidBin = join(tempDir, "fake.js")
+        writeFileSync(invalidBin, "console.log('fake');\n")
+
+        const result = findPnpmCli({ pnpmBin: invalidBin, corepackHome: tempDir })
+        expect(result).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects package with missing or empty version field", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-empty-version-"))
+      try {
+        writeFileSync(join(tempDir, "package.json"), JSON.stringify({ name: "pnpm", version: "" }))
+        const script = join(tempDir, "bin", "pnpm.cjs")
+        mkdirSync(join(tempDir, "bin"), { recursive: true })
+        writeFileSync(script, "console.log('empty version');\n")
+
+        expect(resolvePnpmCandidate(script, "pnpm_bin")).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects package with malformed package.json syntax", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-malformed-json-"))
+      try {
+        writeFileSync(join(tempDir, "package.json"), "{ invalid json: true, ")
+        const script = join(tempDir, "bin", "pnpm.cjs")
+        mkdirSync(join(tempDir, "bin"), { recursive: true })
+        writeFileSync(script, "console.log('malformed');\n")
+
+        expect(resolvePnpmCandidate(script, "pnpm_bin")).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects arbitrary internal script not declared in official entrypoints or bin field", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-arbitrary-entry-"))
+      try {
+        writeFileSync(join(tempDir, "package.json"), JSON.stringify({ name: "pnpm", version: "12.14.0", bin: { pnpm: "pnpm" } }))
+        const arbitraryScript = join(tempDir, "subfolder", "random.js")
+        mkdirSync(join(tempDir, "subfolder"), { recursive: true })
+        writeFileSync(arbitraryScript, "console.log('random');\n")
+
+        expect(resolvePnpmCandidate(arbitraryScript, "pnpm_bin")).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
+
+    test("rejects symlink inside package root pointing to outside target", () => {
+      if (process.platform === "win32") return
+      const tempDir = mkdtempSync(join(tmpdir(), "pnpm-test-symlink-escape-"))
+      try {
+        const pkgDir = join(tempDir, "pkg")
+        const outsideDir = join(tempDir, "outside")
+        mkdirSync(pkgDir, { recursive: true })
+        mkdirSync(outsideDir, { recursive: true })
+
+        writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "pnpm", version: "12.14.0" }))
+        const outsideTarget = join(outsideDir, "target.js")
+        writeFileSync(outsideTarget, "console.log('outside target');\n")
+
+        const symlinkPath = join(pkgDir, "pnpm.cjs")
+        symlinkSync(outsideTarget, symlinkPath)
+
+        expect(resolvePnpmCandidate(symlinkPath, "pnpm_bin")).toBeUndefined()
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    })
   })
 })
