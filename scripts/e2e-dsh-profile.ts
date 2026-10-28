@@ -32,6 +32,13 @@ import {
   validateProfileEvidence,
   validatePresetReferences,
 } from "./lib/dsh-profile-e2e-contract.js"
+import {
+  buildPnpmCommand,
+  findPnpmCli,
+  isOfflineMissingPnpmError,
+  renderPnpmWrapper,
+  shellQuote,
+} from "./lib/dsh-profile-e2e-pnpm.js"
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH?.trim()
@@ -225,29 +232,6 @@ async function validateNativePresetConfig(dshExecutable: string) {
   }
 }
 
-function findPnpmCli(): string | undefined {
-  const roots = new Set<string>()
-  if (process.env.COREPACK_HOME) roots.add(resolve(process.env.COREPACK_HOME))
-  roots.add(join(homedir(), ".cache", "node", "corepack"))
-  roots.add(join(homedir(), ".cache", "corepack"))
-  for (const root of roots) {
-    const pnpmRoot = join(root, "v1", "pnpm")
-    if (!existsSync(pnpmRoot)) continue
-    for (const version of readdirSync(pnpmRoot).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) {
-      const candidate = join(pnpmRoot, version, "bin", "pnpm.cjs")
-      if (existsSync(candidate)) return realpathSync(candidate)
-    }
-  }
-  const direct = findExecutable("pnpm", process.env.PNPM_BIN)
-  if (!direct) return undefined
-  const resolved = realpathSync(direct)
-  if (resolved.endsWith("pnpm.cjs")) return resolved
-  return undefined
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`
-}
 
 function run(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe" } ): Promise<CommandResult> {
   return new Promise((resolveResult) => {
@@ -1101,12 +1085,13 @@ async function main(): Promise<void> {
     fail("Node or Bun executable is missing from PATH", "BLOCKED")
     return
   }
-  const pnpmCli = findPnpmCli()
-  if (!pnpmCli) {
-    fail("No cached pnpm CLI is available for offline execution; provision pnpm in Corepack cache or set PNPM_BIN to a real pnpm.cjs file", "BLOCKED")
+  const pnpmResolution = findPnpmCli()
+  if (!pnpmResolution) {
+    fail("No cached pnpm CLI is available for offline execution; provision pnpm (native binary or JS CLI) in Corepack cache or set PNPM_BIN to a valid pnpm executable", "BLOCKED")
     return
   }
-  const pnpmCheck = await run(nodeExecutable, [pnpmCli, "--version"], { cwd: repositoryRoot, env, timeoutMs: 10_000 })
+  const pnpmCmd = buildPnpmCommand(pnpmResolution, nodeExecutable, ["--version"])
+  const pnpmCheck = await run(pnpmCmd.command, pnpmCmd.args, { cwd: repositoryRoot, env, timeoutMs: 10_000 })
   report.stages.pnpmVersionExitCode = pnpmCheck.exitCode
   if (pnpmCheck.exitCode !== 0) {
     fail(`Cached pnpm cannot execute offline: ${safeOutput(pnpmCheck)}`, "BLOCKED")
@@ -1168,7 +1153,7 @@ async function main(): Promise<void> {
     fail("The DSH profile E2E gate currently requires a POSIX host for process-group timeout cleanup", "BLOCKED")
     return
   }
-  writeFileSync(pnpmWrapper, `#!/bin/sh\nexec ${shellQuote(nodeExecutable)} ${shellQuote(pnpmCli)} "$@"\n`, { mode: 0o700 })
+  writeFileSync(pnpmWrapper, renderPnpmWrapper(pnpmResolution, nodeExecutable), { mode: 0o700 })
   chmodSync(pnpmWrapper, 0o700)
 
   const build = await run(bunExecutable, ["run", "build"], { cwd: repositoryRoot, env, timeoutMs })
@@ -1181,7 +1166,7 @@ async function main(): Promise<void> {
   const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env, timeoutMs })
   report.stages.nativeBundleInstall = { exitCode: add.exitCode, timedOut: add.timedOut }
   if (add.exitCode !== 0 || add.timedOut) {
-    const offlineMissing = /ERR_PNPM_NO_OFFLINE_TARBALL|ERR_PNPM_FETCH|no matching version.*found offline|not available in the store/i.test(`${add.stderr}\n${add.stdout}`)
+    const offlineMissing = isOfflineMissingPnpmError(`${add.stderr}\n${add.stdout}`)
     fail(`DSH native offline bundle installation ${offlineMissing ? "is BLOCKED by a missing offline dependency" : "failed"}: ${safeOutput(add)}`, offlineMissing ? "BLOCKED" : "FAIL")
     return
   }

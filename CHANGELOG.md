@@ -9,6 +9,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Corrigido
 
+- Runner E2E nativo DSH (`scripts/e2e-dsh-profile.ts`): compatibilidade com pnpm 12 nativo (`pnpm-native`) e entrypoints JavaScript (`.cjs`/`.mjs`), validação fail-closed de executável e rejeição do dispatcher Corepack (#32).
 - Integração nativa DSH registra as 16 ferramentas `banca_*`, com schemas, validação e diretório da sessão; catálogo compartilhado com OpenCode e regressão do bundle compilado.
 - `banca_corrigir`: substituição agora usa `replaceAll` em vez de `replace` (string), que substituía apenas a primeira ocorrência — correções repetidas no manuscrito eram silenciosamente dropadas
 - `banca_corrigir`: adicionado campo opcional `expectedOccurrences` no schema de correção; quando o count real difere do esperado, um warning `⚠` é emitido no resultado
