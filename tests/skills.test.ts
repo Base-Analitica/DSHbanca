@@ -763,11 +763,11 @@ describe("Skills Validation", () => {
       }
     });
 
-    test("K. Pacote isolado de produção: resolução de yaml, instalação válida e preflight fail-closed", () => {
+    test("K. Pacote isolado de produção: resolução offline sem rede, instalação válida e preflight fail-closed", () => {
       const packDir = tempDir("case-k-pack-");
       const extractDir = tempDir("case-k-extract-");
 
-      // 1. Empacotar via npm pack --offline
+      // 1. Empacotar via npm pack --ignore-scripts --offline
       const packRes = spawnSync("npm", [
         "pack",
         "--ignore-scripts",
@@ -778,6 +778,7 @@ describe("Skills Validation", () => {
       ], {
         cwd: join(__dirname, ".."),
         encoding: "utf8",
+        timeout: 15000,
       });
       expect(packRes.status).toBe(0);
 
@@ -786,7 +787,10 @@ describe("Skills Validation", () => {
       expect(existsSync(tarballPath)).toBe(true);
 
       // 2. Extrair tarball no diretório isolado
-      const tarRes = spawnSync("tar", ["-xzf", tarballPath, "-C", extractDir], { encoding: "utf8" });
+      const tarRes = spawnSync("tar", ["-xzf", tarballPath, "-C", extractDir], {
+        encoding: "utf8",
+        timeout: 10000,
+      });
       expect(tarRes.status).toBe(0);
 
       const pkgRoot = join(extractDir, "package");
@@ -797,16 +801,39 @@ describe("Skills Validation", () => {
       expect(pkgJson.dependencies?.yaml).toBe("2.7.0");
       expect(pkgJson.devDependencies?.yaml).toBeUndefined();
 
-      // 4. Instalar estritamente apenas dependências de produção no ambiente isolado
-      const installRes = spawnSync("bun", ["install", "--production"], {
+      // Copiar bun.lock para permitir instalação estritamente offline congelada
+      writeFileSync(join(pkgRoot, "bun.lock"), readFileSync(join(__dirname, "..", "bun.lock")));
+
+      // 4. Instalar estritamente apenas dependências de produção de forma offline, sem scripts externos e com timeout
+      const installRes = spawnSync("bun", [
+        "install",
+        "--production",
+        "--frozen-lockfile",
+        "--offline",
+        "--ignore-scripts",
+      ], {
         cwd: pkgRoot,
         encoding: "utf8",
+        timeout: 15000,
       });
+
+      if (installRes.status !== 0 && installRes.stderr?.includes("is not in the cache")) {
+        throw new Error(
+          "BLOCKED: Cache offline local do Bun não contém yaml@2.7.0 ou zod@4.1.8. Provisione com 'bun install' antes da execução hermética."
+        );
+      }
       expect(installRes.status).toBe(0);
+
+      // Confirmar que apenas dependências de produção estão presentes em node_modules
+      const nodeModulesDir = join(pkgRoot, "node_modules");
+      expect(existsSync(join(nodeModulesDir, "yaml"))).toBe(true);
+      expect(existsSync(join(nodeModulesDir, "zod"))).toBe(true);
+      expect(existsSync(join(nodeModulesDir, "typescript"))).toBe(false);
+      expect(existsSync(join(nodeModulesDir, "@types"))).toBe(false);
 
       // 5. Executar Node.js nativo para testar resolução de yaml, importação e fail-closed
       const nodeTestScript = `
-        import { existsSync, readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+        import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
         import { join, resolve } from "node:path";
 
         // Import do validador e instalador
@@ -871,9 +898,63 @@ describe("Skills Validation", () => {
       const nodeRun = spawnSync("node", ["--input-type=module", "-e", nodeTestScript], {
         cwd: pkgRoot,
         encoding: "utf8",
+        timeout: 15000,
       });
       expect(nodeRun.status).toBe(0);
       expect(nodeRun.stdout).toContain("CASE_K_NODE_SUCCESS");
+    });
+
+    test("L. Resguardo hermético de empacotamento: ausência de cache fail-closed sem rede, scripts ignorados e timeout efetivo", () => {
+      // 1. Caso sem cache: ausência de cache é detectada imediatamente sem acessar rede
+      const emptyCacheDir = tempDir("empty-cache-");
+      const testPkgDir = tempDir("test-pkg-no-cache-");
+      writeFileSync(join(testPkgDir, "package.json"), readFileSync(join(__dirname, "..", "package.json")));
+      writeFileSync(join(testPkgDir, "bun.lock"), readFileSync(join(__dirname, "..", "bun.lock")));
+
+      const offlineNoCacheRes = spawnSync("bun", [
+        "install",
+        "--production",
+        "--frozen-lockfile",
+        "--offline",
+        "--ignore-scripts",
+      ], {
+        cwd: testPkgDir,
+        encoding: "utf8",
+        env: { ...process.env, BUN_INSTALL_CACHE_DIR: emptyCacheDir },
+        timeout: 10000,
+      });
+      expect(offlineNoCacheRes.status).not.toBe(0);
+      expect(offlineNoCacheRes.stderr).toContain("is not in the cache");
+
+      // 2. Caso com scripts de dependências: flag --ignore-scripts impede execução de hooks externos
+      const testScriptsDir = tempDir("test-scripts-dir-");
+      const markerFile = join(testScriptsDir, "hook-executed.marker");
+      writeFileSync(join(testScriptsDir, "package.json"), JSON.stringify({
+        name: "test-scripts-check",
+        scripts: {
+          postinstall: `touch "${markerFile}"`
+        }
+      }));
+      const scriptRes = spawnSync("bun", [
+        "install",
+        "--ignore-scripts",
+        "--offline",
+      ], {
+        cwd: testScriptsDir,
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      expect(existsSync(markerFile)).toBe(false);
+
+      // 3. Caso com subprocesso travado: timeout bounded encerra o processo de forma controlada
+      const hangStart = Date.now();
+      const hangRes = spawnSync("node", ["-e", "setTimeout(() => {}, 60000)"], {
+        timeout: 200,
+        encoding: "utf8",
+      });
+      const elapsed = Date.now() - hangStart;
+      expect(elapsed).toBeLessThan(5000);
+      expect(hangRes.error?.name === "Error" || hangRes.signal === "SIGTERM" || hangRes.status !== 0).toBe(true);
     });
   });
 });

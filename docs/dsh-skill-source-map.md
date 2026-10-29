@@ -84,10 +84,11 @@ Antes de escrever qualquer arquivo ou criar diretórios no workspace do usuário
    - Se um arquivo de skill já existir no workspace e seu conteúdo diferir do canônico, o instalador rejeita a execução.
    - O argumento `force: true` **não** autoriza a destruição ou substituição de arquivos customizados pelo usuário.
    - Skills próprias ou customizadas pelo usuário no workspace são integralmente preservadas.
-6. **Resolução em Produção e Empacotamento**:
-   - O módulo de validação requer `yaml` em runtime. A biblioteca `yaml: 2.7.0` é promovida para `dependencies` no manifesto de produção, mantendo o lockfile `bun.lock` consistente e verificável em `bun install --frozen-lockfile`.
+6. **Resolução em Produção e Empacotamento Hermético**:
+   - O módulo de validação requer `yaml` em runtime. A biblioteca `yaml: 2.7.0` (já homologada no projeto sob licença permissiva ISC) foi promovida de `devDependencies` para `dependencies` no manifesto de produção, mantendo o lockfile `bun.lock` consistente e verificável em `bun install --frozen-lockfile`.
    - Ambientes que instalam apenas dependências de produção (`npm install --omit=dev` / `bun install --production`) resolvem `yaml` sem depender da árvore de desenvolvimento.
    - Imports relativos no código compilado utilizam extensões `.js` explícitas (`./safe_paths.js` e `./skill_validator.js`), garantindo conformidade com a especificação ESM do Node.js suportado pelo DSH.
+   - **Garantias Herméticas dos Testes**: Os testes de empacotamento em fixture (`tests/skills.test.ts` Casos K e L) operam estritamente com flags `--offline` e `--ignore-scripts`, com timeout explícito e bounded (≤ 15s) e suporte a execução sob namespace de rede sem rota externa (`unshare -Urn`), impedindo tentativas de conexão externa ou execução de scripts de terceiros durante a suíte padrão de testes. A ausência de cache local é detectada e tratada de modo fail-closed sem requisições de rede.
 
 ## 5. Procedimento de Reversibilidade
 
