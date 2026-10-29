@@ -30,9 +30,10 @@ flowchart TD
 
 | Componente | Arquivo | Modo de Consumo |
 |---|---|---|
+| **Módulo Canônico de Validação** | `src/lib/skill_validator.ts` | Parser YAML integral e schema estrito de validação compartilhado entre CLI e instalador. |
 | **DSH Skill Provider** | `src/dsh.ts` | Registra `ctx.skills.registerProvider` descobrindo `<packageRoot>/skills` em runtime e fornecendo os metadados e conteúdo diretamente ao serviço de skills do DSH. |
-| **Validador de Skills** | `scripts/validate-skills.ts` | Valida formatação, frontmatter YAML, tamanhos, convenções de nomenclatura e integridade dos arquivos a partir de `skills/`. |
-| **Instalador de Assets** | `src/lib/install_assets.ts` | Lê diretamente `<packageRoot>/skills/<nome>/SKILL.md` e gera cópias derivadas em `.dsh/skills/<nome>/SKILL.md` no workspace do projeto alvo. |
+| **Validador de Skills** | `scripts/validate-skills.ts` | CLI re-exporta o contrato de `src/lib/skill_validator.ts` para validação em CI e build. |
+| **Instalador de Assets** | `src/lib/install_assets.ts` | Valida integralmente com `validateSkillContent` e `validateAllSkills` antes de escrever cópias derivadas em `.dsh/skills/<nome>/SKILL.md` no workspace. |
 
 ### Espelho Versionado Legado (`assets/dsh/skills/`)
 
@@ -67,10 +68,12 @@ Antes de escrever qualquer arquivo ou criar diretórios no workspace do usuário
 1. **Validação da Raiz Canônica**:
    - Confirmação de existência e que `<packageRoot>/skills` é um diretório real e regular.
    - Rejeição de symlinks perigosos ou caminhos que escapem à raiz do pacote.
-2. **Validação Exaustiva das 8 Skills**:
+2. **Validação Exaustiva das 8 Skills via Contrato Canônico (`src/lib/skill_validator.ts`)**:
    - Exige a presença de todos os 8 diretórios obrigatórios.
    - Exige que cada `SKILL.md` seja um arquivo regular (não symlink e não diretório).
-   - Valida o frontmatter YAML: delimitação `---`, campo `name` correspondente ao diretório e regex `^[a-z0-9]+(-[a-z0-9]+)*$`, e `description` não-vazia.
+   - Valida integralmente a sintaxe YAML do frontmatter com parser completo (rejeitando sequências não terminadas, nós inválidos e formatações malformadas).
+   - Valida tipagem e regras estritas: `name` correspondente ao diretório e regex `^[a-z0-9]+(-[a-z0-9]+)*$`, `description` não-vazia (entre 1 e 1024 caracteres), campos opcionais `license`, `compatibility` e dicionário `metadata` com valores string.
+   - Rejeita qualquer duplicação de nomes de skills no diretório canônico antes de qualquer escrita.
 3. **Contenção e Destino Seguro**:
    - `resolveRealInsideRoot` valida contenção estrita dentro do workspace (`projectRoot`).
    - Bloqueio se `.dsh`, `.banca` ou `.dsh/skills` forem symlinks ou apontarem para fora.

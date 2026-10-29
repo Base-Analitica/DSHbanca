@@ -702,5 +702,65 @@ describe("Skills Validation", () => {
       const finalInventory = projectInventory(project);
       expect(finalInventory).toEqual(initialInventory);
     });
+
+    test("J. Preflight YAML estrito: rejeita YAML malformado sem escritas no workspace (src e dist)", () => {
+      const project = tempDir("case-j-yaml-project-");
+      const tempCanonical = tempDir("case-j-canonical-skills-");
+
+      // Copiar 8 skills válidas
+      for (const skill of EXPECTED_SKILLS) {
+        mkdirSync(join(tempCanonical, skill), { recursive: true });
+        writeFileSync(join(tempCanonical, skill, "SKILL.md"), readFileSync(join(canonicalSkillsDir, skill, "SKILL.md")));
+      }
+
+      // Injetar YAML sintaticamente inválido (unterminated sequence) em banca-avaliacao
+      const malformedYaml = "---\nname: banca-avaliacao\ndescription: valid\nmetadata: [unterminated\n---\n# body\n";
+      writeFileSync(join(tempCanonical, "banca-avaliacao", "SKILL.md"), malformedYaml);
+
+      // 1. Validador oficial rejeita a skill malformada
+      const valErrors = validateSkill(join(tempCanonical, "banca-avaliacao", "SKILL.md"), "banca-avaliacao");
+      expect(valErrors.length).toBeGreaterThan(0);
+      expect(valErrors.some((e: any) => e.message.includes("Invalid YAML frontmatter") || e.message.includes("YAML"))).toBe(true);
+
+      // 2 & 3. Instalador em src/ rejeita e workspace permanece intocado
+      const beforeSrc = projectInventory(project);
+      expect(() => {
+        installAssets(project, true, undefined, tempCanonical);
+      }).toThrow(/invalid.*frontmatter|YAML/i);
+      expect(projectInventory(project)).toEqual(beforeSrc);
+
+      // 4. O espelho versionado não mascara a falha (mesmo que default assets/dsh/skills exista)
+      const versionedSkillsDir = join(__dirname, "..", "assets", "dsh", "skills");
+      expect(existsSync(join(versionedSkillsDir, "banca-avaliacao", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(project, ".dsh"))).toBe(false);
+
+      // 6. Instalação em dist/ também rejeita igualmente sem modificar workspace
+      const distInstaller = join(__dirname, "..", "dist", "lib", "install_assets.js");
+      if (existsSync(distInstaller)) {
+        const distModule = require(distInstaller);
+        const beforeDist = projectInventory(project);
+        expect(() => {
+          distModule.installAssets(project, true, undefined, tempCanonical);
+        }).toThrow(/invalid.*frontmatter|YAML/i);
+        expect(projectInventory(project)).toEqual(beforeDist);
+      }
+
+      // 5. Oito skills válidas (restaurando banca-avaliacao) continuam sendo instaladas com sucesso
+      writeFileSync(
+        join(tempCanonical, "banca-avaliacao", "SKILL.md"),
+        readFileSync(join(canonicalSkillsDir, "banca-avaliacao", "SKILL.md")),
+      );
+      const installed = installAssets(project, true, undefined, tempCanonical);
+      expect(installed.length).toBeGreaterThan(0);
+
+      const installedSkillsDir = join(project, ".dsh", "skills");
+      for (const skill of EXPECTED_SKILLS) {
+        const installedPath = join(installedSkillsDir, skill, "SKILL.md");
+        expect(existsSync(installedPath)).toBe(true);
+        const installedHash = new Bun.CryptoHasher("sha256").update(readFileSync(installedPath)).digest("hex");
+        const canonicalHash = new Bun.CryptoHasher("sha256").update(readFileSync(join(canonicalSkillsDir, skill, "SKILL.md"))).digest("hex");
+        expect(installedHash).toBe(canonicalHash);
+      }
+    });
   });
 });

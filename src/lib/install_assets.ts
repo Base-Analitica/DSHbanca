@@ -2,6 +2,7 @@ import { existsSync, cpSync, lstatSync, readFileSync, readdirSync, writeFileSync
 import { join, dirname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
+import { validateSkillContent, validateAllSkills } from "./skill_validator"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -274,59 +275,6 @@ export const EXPECTED_CANONICAL_SKILLS = [
   "banca-revisor",
 ] as const
 
-interface SkillFrontmatterValidation {
-  valid: boolean
-  error?: string
-  name?: string
-  description?: string
-}
-
-function validateSkillFrontmatter(content: string, expectedName: string): SkillFrontmatterValidation {
-  if (!content.startsWith("---\n") && !content.startsWith("---\r\n")) {
-    return { valid: false, error: "Missing initial '---' delimiter" }
-  }
-  const match = content.match(/\n---(?:\r?\n|$)/)
-  if (!match) {
-    return { valid: false, error: "Frontmatter not closed" }
-  }
-  const startIndex = content.startsWith("---\n") ? 4 : 5
-  const endFrontmatter = match.index!
-  let frontmatter = content.substring(startIndex, endFrontmatter)
-  if (frontmatter.endsWith("\r")) frontmatter = frontmatter.slice(0, -1)
-
-  const lines = frontmatter.split("\n")
-  let name: string | undefined
-  let description: string | undefined
-
-  for (const line of lines) {
-    const nameMatch = /^name:\s*(.*)$/.exec(line.trim())
-    if (nameMatch) {
-      let val = nameMatch[1].trim()
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1)
-      }
-      name = val
-    }
-    const descMatch = /^description:\s*(.*)$/.exec(line.trim())
-    if (descMatch) {
-      let val = descMatch[1].trim()
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1)
-      }
-      description = val
-    }
-  }
-
-  if (!name) return { valid: false, error: "Missing 'name' in frontmatter" }
-  if (name !== expectedName) return { valid: false, error: `'name' in frontmatter (${name}) does not match directory name (${expectedName})` }
-  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name) || name.length < 1 || name.length > 64) {
-    return { valid: false, error: `Invalid skill name format: ${name}` }
-  }
-  if (!description || description.trim() === "") {
-    return { valid: false, error: "Missing or empty 'description' in frontmatter" }
-  }
-  return { valid: true, name, description }
-}
 
 const TEMPLATES: Record<string, string> = {
   "scorecard.md": `# Scorecard\n\n| Dimensão | Nota |\n|----------|------|\n| ABNT/Estrutura | 0.0 |\n| Citações/Fontes | 0.0 |\n| Conteúdo/Lógica | 0.0 |\n| Estilo Acadêmico | 0.0 |\n| **Final** | **0.0** |\n`,
@@ -405,11 +353,20 @@ export function installAssets(
     }
 
     const contentBuf = readFileSync(skillFile)
-    const validation = validateSkillFrontmatter(contentBuf.toString("utf8"), skillName)
-    if (!validation.valid) {
-      throw new Error(`canonical skill ${skillName}/SKILL.md has invalid frontmatter: ${validation.error}`)
+    const validationErrors = validateSkillContent(skillFile, contentBuf.toString("utf8"), skillName)
+    if (validationErrors.length > 0) {
+      throw new Error(
+        `canonical skill ${skillName}/SKILL.md has invalid frontmatter: ${validationErrors.map((e) => e.message).join("; ")}`
+      )
     }
     canonicalSkillContents.set(skillName, contentBuf)
+  }
+
+  const allSkillErrors = validateAllSkills(canonicalSkillsDir)
+  if (allSkillErrors.length > 0) {
+    throw new Error(
+      `canonical skills directory failed validation: ${allSkillErrors.map((e) => `${e.file}: ${e.message}`).join("; ")}`
+    )
   }
 
   const pluginAssetsDir = customAssetsDir || join(__dirname, "..", "..", "assets")
