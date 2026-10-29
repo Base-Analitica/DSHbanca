@@ -917,10 +917,10 @@ describe("Skills Validation", () => {
         "--frozen-lockfile",
         "--offline",
         "--ignore-scripts",
+        `--cache-dir=${emptyCacheDir}`,
       ], {
         cwd: testPkgDir,
         encoding: "utf8",
-        env: { ...process.env, BUN_INSTALL_CACHE_DIR: emptyCacheDir },
         timeout: 10000,
       });
       expect(offlineNoCacheRes.status).not.toBe(0);
