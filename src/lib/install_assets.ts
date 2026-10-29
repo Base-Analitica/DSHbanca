@@ -1,8 +1,8 @@
 import { existsSync, cpSync, lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, dirname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
-import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
-import { validateSkillContent, validateAllSkills } from "./skill_validator"
+import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths.js"
+import { validateSkillContent, validateAllSkills } from "./skill_validator.js"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)

@@ -762,5 +762,118 @@ describe("Skills Validation", () => {
         expect(installedHash).toBe(canonicalHash);
       }
     });
+
+    test("K. Pacote isolado de produção: resolução de yaml, instalação válida e preflight fail-closed", () => {
+      const packDir = tempDir("case-k-pack-");
+      const extractDir = tempDir("case-k-extract-");
+
+      // 1. Empacotar via npm pack --offline
+      const packRes = spawnSync("npm", [
+        "pack",
+        "--ignore-scripts",
+        "--offline",
+        "--pack-destination",
+        packDir,
+        "--json",
+      ], {
+        cwd: join(__dirname, ".."),
+        encoding: "utf8",
+      });
+      expect(packRes.status).toBe(0);
+
+      const [packInfo] = JSON.parse(packRes.stdout);
+      const tarballPath = join(packDir, packInfo.filename);
+      expect(existsSync(tarballPath)).toBe(true);
+
+      // 2. Extrair tarball no diretório isolado
+      const tarRes = spawnSync("tar", ["-xzf", tarballPath, "-C", extractDir], { encoding: "utf8" });
+      expect(tarRes.status).toBe(0);
+
+      const pkgRoot = join(extractDir, "package");
+      expect(existsSync(pkgRoot)).toBe(true);
+
+      // 3. Confirmar que package.json declara yaml em dependencies
+      const pkgJson = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8"));
+      expect(pkgJson.dependencies?.yaml).toBe("2.7.0");
+      expect(pkgJson.devDependencies?.yaml).toBeUndefined();
+
+      // 4. Instalar estritamente apenas dependências de produção no ambiente isolado
+      const installRes = spawnSync("bun", ["install", "--production"], {
+        cwd: pkgRoot,
+        encoding: "utf8",
+      });
+      expect(installRes.status).toBe(0);
+
+      // 5. Executar Node.js nativo para testar resolução de yaml, importação e fail-closed
+      const nodeTestScript = `
+        import { existsSync, readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+        import { join, resolve } from "node:path";
+
+        // Import do validador e instalador
+        const { validateSkill, validateSkillContent, validateAllSkills } = await import("./dist/lib/skill_validator.js");
+        if (typeof validateSkill !== "function" || typeof validateAllSkills !== "function") {
+          throw new Error("skill_validator export error");
+        }
+
+        const { installAssets } = await import("./dist/lib/install_assets.js");
+        if (typeof installAssets !== "function") {
+          throw new Error("installAssets export error");
+        }
+
+        const testProj = resolve("./test-workspace");
+        const testCanonical = resolve("./test-canonical");
+        mkdirSync(testProj, { recursive: true });
+        mkdirSync(testCanonical, { recursive: true });
+
+        const skills = [
+          "banca-avaliacao", "banca-correcao", "banca-detector-ia", "banca-grille",
+          "banca-plagio", "banca-planejador", "banca-referencias", "banca-revisor"
+        ];
+
+        // Copiar 8 skills válidas do pacote distribuído
+        for (const s of skills) {
+          mkdirSync(join(testCanonical, s), { recursive: true });
+          writeFileSync(join(testCanonical, s, "SKILL.md"), readFileSync(join("./skills", s, "SKILL.md")));
+        }
+
+        // Caso positivo: instala 8 skills
+        const installed = installAssets(testProj, true, undefined, testCanonical);
+        if (installed.length === 0) throw new Error("installAssets installed 0 assets");
+
+        for (const s of skills) {
+          const dest = join(testProj, ".dsh", "skills", s, "SKILL.md");
+          if (!existsSync(dest)) throw new Error("Missing installed skill: " + s);
+        }
+
+        // Caso negativo: preflight fail-closed em YAML malformado
+        const badProj = resolve("./test-bad-workspace");
+        mkdirSync(badProj, { recursive: true });
+        writeFileSync(
+          join(testCanonical, "banca-avaliacao", "SKILL.md"),
+          "---\\nname: banca-avaliacao\\ndescription: valid\\nmetadata: [unterminated\\n---\\n# body\\n"
+        );
+
+        let rejected = false;
+        try {
+          installAssets(badProj, true, undefined, testCanonical);
+        } catch (err) {
+          rejected = true;
+          if (!/invalid.*frontmatter|YAML/i.test(err.message)) {
+            throw new Error("Unexpected error message: " + err.message);
+          }
+        }
+        if (!rejected) throw new Error("Failed to reject malformed YAML in production package");
+        if (existsSync(join(badProj, ".dsh"))) throw new Error("Workspace modified on failure!");
+
+        console.log("CASE_K_NODE_SUCCESS");
+      `;
+
+      const nodeRun = spawnSync("node", ["--input-type=module", "-e", nodeTestScript], {
+        cwd: pkgRoot,
+        encoding: "utf8",
+      });
+      expect(nodeRun.status).toBe(0);
+      expect(nodeRun.stdout).toContain("CASE_K_NODE_SUCCESS");
+    });
   });
 });

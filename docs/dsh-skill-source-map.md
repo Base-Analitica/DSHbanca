@@ -84,6 +84,10 @@ Antes de escrever qualquer arquivo ou criar diretórios no workspace do usuário
    - Se um arquivo de skill já existir no workspace e seu conteúdo diferir do canônico, o instalador rejeita a execução.
    - O argumento `force: true` **não** autoriza a destruição ou substituição de arquivos customizados pelo usuário.
    - Skills próprias ou customizadas pelo usuário no workspace são integralmente preservadas.
+6. **Resolução em Produção e Empacotamento**:
+   - O módulo de validação requer `yaml` em runtime. A biblioteca `yaml: 2.7.0` é promovida para `dependencies` no manifesto de produção, mantendo o lockfile `bun.lock` consistente e verificável em `bun install --frozen-lockfile`.
+   - Ambientes que instalam apenas dependências de produção (`npm install --omit=dev` / `bun install --production`) resolvem `yaml` sem depender da árvore de desenvolvimento.
+   - Imports relativos no código compilado utilizam extensões `.js` explícitas (`./safe_paths.js` e `./skill_validator.js`), garantindo conformidade com a especificação ESM do Node.js suportado pelo DSH.
 
 ## 5. Procedimento de Reversibilidade
 

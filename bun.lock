@@ -5,12 +5,12 @@
     "": {
       "name": "@opencode/banca",
       "dependencies": {
+        "yaml": "2.7.0",
         "zod": "^4.1.8",
       },
       "devDependencies": {
         "@types/node": "20.19.43",
         "typescript": "5.9.3",
-        "yaml": "2.7.0",
       },
     },
   },
