@@ -2,7 +2,7 @@ import { describe, expect, test, beforeAll, afterAll, afterEach } from "bun:test
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
-import { readFileSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, mkdtempSync, symlinkSync } from "fs";
+import { readFileSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, mkdtempSync, symlinkSync, lstatSync } from "fs";
 import { validateSkill, validateAllSkills } from "../scripts/validate-skills";
 import { installAssets } from "../src/lib/install_assets";
 
@@ -46,9 +46,15 @@ describe("Skills Validation", () => {
     expect([...dirs].sort()).toEqual([...EXPECTED_SKILLS].sort());
   });
 
-  test("all mirror skills in assets/dsh/skills are valid", () => {
-    const errors = validateAllSkills(versionedSkillsDir);
-    expect(errors).toHaveLength(0);
+  test("mirror skills validation contract does not depend on physical assets/dsh/skills existence", () => {
+    // Se o espelho legado existir na árvore durante a fase de transição, ele deve ser válido
+    if (existsSync(versionedSkillsDir)) {
+      const errors = validateAllSkills(versionedSkillsDir);
+      expect(errors).toHaveLength(0);
+    }
+    // A validação da fonte canônica permanece autoritativa
+    const canonicalErrors = validateAllSkills(canonicalSkillsDir);
+    expect(canonicalErrors).toHaveLength(0);
   });
 
   describe("Invalid fixtures rejection", () => {
@@ -276,19 +282,22 @@ describe("Skills Validation", () => {
             const errors = validateAllSkills(installedSkillsDir);
             expect(errors).toHaveLength(0);
 
-            // Compare each installed fallback SKILL.md with the versioned one
-            const versionedSkillsDir = join(__dirname, "..", "assets", "dsh", "skills");
+            // Compare each installed fallback SKILL.md with the canonical one in skills/
             for (const skill of EXPECTED_SKILLS) {
                 const fallbackSkillPath = join(installedSkillsDir, skill, "SKILL.md");
-                const versionedSkillPath = join(versionedSkillsDir, skill, "SKILL.md");
+                const canonicalSkillPath = join(canonicalSkillsDir, skill, "SKILL.md");
 
                 expect(existsSync(fallbackSkillPath)).toBe(true);
-                expect(existsSync(versionedSkillPath)).toBe(true);
+                expect(existsSync(canonicalSkillPath)).toBe(true);
 
                 const fallbackContent = readFileSync(fallbackSkillPath, "utf-8").replace(/\r\n/g, "\n");
-                const versionedContent = readFileSync(versionedSkillPath, "utf-8").replace(/\r\n/g, "\n");
+                const canonicalContent = readFileSync(canonicalSkillPath, "utf-8").replace(/\r\n/g, "\n");
 
-                expect(fallbackContent).toBe(versionedContent);
+                expect(fallbackContent).toBe(canonicalContent);
+
+                const fallbackHash = new Bun.CryptoHasher("sha256").update(fallbackContent).digest("hex");
+                const canonicalHash = new Bun.CryptoHasher("sha256").update(canonicalContent).digest("hex");
+                expect(fallbackHash).toBe(canonicalHash);
             }
         } finally {
             rmSync(fallbackProject, { recursive: true, force: true });
@@ -394,11 +403,18 @@ describe("Skills Validation", () => {
       expect(validRes.status).toBe(0);
       expect(validRes.stdout).toContain("All skills are valid.");
 
-      // Override with mirror directory
+      // Override with synthetic valid directory (does not depend on legacy mirror presence)
+      const syntheticSkillsDir = join(cliFixturesDir, "synthetic-skills-override");
+      for (const skill of EXPECTED_SKILLS) {
+        const sDir = join(syntheticSkillsDir, skill);
+        mkdirSync(sDir, { recursive: true });
+        writeFileSync(join(sDir, "SKILL.md"), readFileSync(join(canonicalSkillsDir, skill, "SKILL.md")));
+      }
       const mirrorRes = runCli(repoRoot, {
-        SKILLS_DIR: join(repoRoot, "assets", "dsh", "skills"),
+        SKILLS_DIR: syntheticSkillsDir,
       });
       expect(mirrorRes.status).toBe(0);
+      expect(mirrorRes.stdout).toContain("All skills are valid.");
 
       // Override with non-existent directory
       const invalidRes = runCli(repoRoot, {
@@ -729,9 +745,27 @@ describe("Skills Validation", () => {
       }).toThrow(/invalid.*frontmatter|YAML/i);
       expect(projectInventory(project)).toEqual(beforeSrc);
 
-      // 4. O espelho versionado não mascara a falha (mesmo que default assets/dsh/skills exista)
-      const versionedSkillsDir = join(__dirname, "..", "assets", "dsh", "skills");
-      expect(existsSync(join(versionedSkillsDir, "banca-avaliacao", "SKILL.md"))).toBe(true);
+      // 4. Espelho (mesmo sintético válido) não mascara a falha de preflight da fonte canônica
+      const syntheticAssetsWithMirror = tempDir("synthetic-assets-valid-mirror-");
+      mkdirSync(join(syntheticAssetsWithMirror, "dsh", "agents"), { recursive: true });
+      mkdirSync(join(syntheticAssetsWithMirror, "dsh", "commands"), { recursive: true });
+      mkdirSync(join(syntheticAssetsWithMirror, "templates"), { recursive: true });
+      const defaultAssets = join(__dirname, "..", "assets");
+      for (const agent of readdirSync(join(defaultAssets, "dsh", "agents"))) {
+        writeFileSync(join(syntheticAssetsWithMirror, "dsh", "agents", agent), readFileSync(join(defaultAssets, "dsh", "agents", agent)));
+      }
+      for (const cmd of readdirSync(join(defaultAssets, "dsh", "commands"))) {
+        writeFileSync(join(syntheticAssetsWithMirror, "dsh", "commands", cmd), readFileSync(join(defaultAssets, "dsh", "commands", cmd)));
+      }
+      for (const tpl of readdirSync(join(defaultAssets, "templates"))) {
+        writeFileSync(join(syntheticAssetsWithMirror, "templates", tpl), readFileSync(join(defaultAssets, "templates", tpl)));
+      }
+      mkdirSync(join(syntheticAssetsWithMirror, "dsh", "skills", "banca-avaliacao"), { recursive: true });
+      writeFileSync(join(syntheticAssetsWithMirror, "dsh", "skills", "banca-avaliacao", "SKILL.md"), readFileSync(join(canonicalSkillsDir, "banca-avaliacao", "SKILL.md")));
+
+      expect(() => {
+        installAssets(project, true, syntheticAssetsWithMirror, tempCanonical);
+      }).toThrow(/invalid.*frontmatter|YAML/i);
       expect(existsSync(join(project, ".dsh"))).toBe(false);
 
       // 6. Instalação em dist/ também rejeita igualmente sem modificar workspace
@@ -912,6 +946,184 @@ describe("Skills Validation", () => {
       const elapsed = Date.now() - hangStart;
       expect(elapsed).toBeLessThan(5000);
       expect(hangRes.error?.name === "Error" || hangRes.signal === "SIGTERM" || hangRes.status !== 0).toBe(true);
+    });
+
+    test("L. Pacote sem espelho legado: funcionamento autônomo, instalador canônico e validação hermética", () => {
+      const packDir = tempDir("case-l-pack-");
+      const extractDir = tempDir("case-l-extract-");
+
+      // 1. Gerar pacote isolado via npm pack --ignore-scripts --offline
+      const packRes = spawnSync("npm", [
+        "pack",
+        "--ignore-scripts",
+        "--offline",
+        "--pack-destination",
+        packDir,
+        "--json",
+      ], {
+        cwd: join(__dirname, ".."),
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      expect(packRes.status).toBe(0);
+
+      const [packInfo] = JSON.parse(packRes.stdout);
+      const tarballPath = join(packDir, packInfo.filename);
+      expect(existsSync(tarballPath)).toBe(true);
+
+      const tarRes = spawnSync("tar", ["-xzf", tarballPath, "-C", extractDir], {
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      expect(tarRes.status).toBe(0);
+
+      const pkgRoot = join(extractDir, "package");
+      expect(existsSync(pkgRoot)).toBe(true);
+
+      // Simular a exclusão definitiva do espelho legado no pacote distribuído
+      const mirrorInPkg = join(pkgRoot, "assets", "dsh", "skills");
+      if (existsSync(mirrorInPkg)) {
+        rmSync(mirrorInPkg, { recursive: true, force: true });
+      }
+      expect(existsSync(mirrorInPkg)).toBe(false);
+
+      // 1. O pacote contém as oito skills canônicas
+      const pkgSkillsDir = join(pkgRoot, "skills");
+      expect(existsSync(pkgSkillsDir)).toBe(true);
+      for (const skill of EXPECTED_SKILLS) {
+        const skillPath = join(pkgSkillsDir, skill, "SKILL.md");
+        expect(existsSync(skillPath)).toBe(true);
+        expect(lstatSync(skillPath).isFile()).toBe(true);
+      }
+
+      // 2. O validador reconhece as oito skills
+      const valErrors = validateAllSkills(pkgSkillsDir);
+      expect(valErrors).toHaveLength(0);
+
+      // 3. O instalador funciona normalmente a partir da fonte canônica
+      const testWorkspace = tempDir("case-l-workspace-");
+      const installed = installAssets(testWorkspace, true, undefined, pkgSkillsDir);
+      expect(installed.length).toBeGreaterThan(0);
+      for (const skill of EXPECTED_SKILLS) {
+        expect(existsSync(join(testWorkspace, ".dsh", "skills", skill, "SKILL.md"))).toBe(true);
+      }
+
+      // 4. O fallback continua funcional mesmo quando assetsDir não existe
+      const fallbackWorkspace = tempDir("case-l-fallback-workspace-");
+      const fallbackInstalled = installAssets(
+        fallbackWorkspace,
+        true,
+        join(pkgRoot, "non-existent-assets-dir"),
+        pkgSkillsDir
+      );
+      expect(fallbackInstalled.length).toBeGreaterThan(0);
+      for (const skill of EXPECTED_SKILLS) {
+        expect(existsSync(join(fallbackWorkspace, ".dsh", "skills", skill, "SKILL.md"))).toBe(true);
+      }
+
+      // 5. Os arquivos instalados possuem hashes SHA-256 idênticos aos canônicos
+      const EXPECTED_HASHES: Record<string, string> = {
+        "banca-avaliacao": "60bdcd97061da7748f7d1f9d6d7999fd62afac9b1269bf089eb23da7aab7c85e",
+        "banca-correcao": "d0a05d3feb78f5ef05615a48892b3c5cdc88fc589b3fc2100f2d78a0a32d45c7",
+        "banca-detector-ia": "db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b",
+        "banca-grille": "c22d6bd6598117c491176fd1366c9c3974104bc3a349ebe791b1051f79682aa1",
+        "banca-plagio": "1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661",
+        "banca-planejador": "d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64",
+        "banca-referencias": "b5b73abbbae029adc82980b2045c705b091b1629a44d14efab92aa731008d36b",
+        "banca-revisor": "deb90fe58a8d334bddd9f4dc66810cb5c57621cc63bad313c44c199c042de798",
+      };
+
+      for (const skill of EXPECTED_SKILLS) {
+        const installedPath = join(testWorkspace, ".dsh", "skills", skill, "SKILL.md");
+        const canonicalPath = join(pkgSkillsDir, skill, "SKILL.md");
+        const installedHash = new Bun.CryptoHasher("sha256").update(readFileSync(installedPath)).digest("hex");
+        const canonicalHash = new Bun.CryptoHasher("sha256").update(readFileSync(canonicalPath)).digest("hex");
+
+        expect(installedHash).toBe(canonicalHash);
+        expect(installedHash).toBe(EXPECTED_HASHES[skill]);
+      }
+
+      // 6 & 7. Parser YAML funciona em Node ESM e produção não depende de devDependencies
+      writeFileSync(join(pkgRoot, "bun.lock"), readFileSync(join(__dirname, "..", "bun.lock")));
+      const installRes = spawnSync("bun", [
+        "install",
+        "--production",
+        "--frozen-lockfile",
+        "--offline",
+        "--ignore-scripts",
+      ], {
+        cwd: pkgRoot,
+        encoding: "utf8",
+        timeout: 15000,
+      });
+
+      if (installRes.status !== 0 && installRes.stderr?.includes("is not in the cache")) {
+        throw new Error(
+          "BLOCKED: Cache offline local do Bun não contém dependências de produção. Provisione com 'bun install' antes da execução hermética."
+        );
+      }
+      expect(installRes.status).toBe(0);
+
+      const nodeModulesDir = join(pkgRoot, "node_modules");
+      expect(existsSync(join(nodeModulesDir, "yaml"))).toBe(true);
+      expect(existsSync(join(nodeModulesDir, "zod"))).toBe(true);
+      expect(existsSync(join(nodeModulesDir, "typescript"))).toBe(false);
+      expect(existsSync(join(nodeModulesDir, "@types"))).toBe(false);
+
+      const nodeTestScript = `
+        import { existsSync, readFileSync, mkdirSync } from "node:fs";
+        import { join, resolve } from "node:path";
+        const { validateSkill, validateAllSkills } = await import("./dist/lib/skill_validator.js");
+        const errors = validateAllSkills("./skills");
+        if (errors.length !== 0) throw new Error("ESM validation failed: " + errors.length + " errors");
+
+        const { installAssets } = await import("./dist/lib/install_assets.js");
+        const esmWorkspace = resolve("./esm-workspace");
+        mkdirSync(esmWorkspace, { recursive: true });
+        const installed = installAssets(esmWorkspace, true);
+        if (installed.length === 0) throw new Error("ESM installAssets installed 0 assets");
+        if (!existsSync(join(esmWorkspace, ".dsh", "skills", "banca-avaliacao", "SKILL.md"))) {
+          throw new Error("Missing installed banca-avaliacao in ESM");
+        }
+        console.log("CASE_L_NODE_SUCCESS");
+      `;
+
+      const nodeRun = spawnSync("node", ["--input-type=module", "-e", nodeTestScript], {
+        cwd: pkgRoot,
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      expect(nodeRun.status).toBe(0);
+      expect(nodeRun.stdout).toContain("CASE_L_NODE_SUCCESS");
+
+      // 8. A ausência do espelho não provoca fallback silencioso para conteúdo embutido
+      const customModifiedDir = tempDir("case-l-custom-modified-skills-");
+      for (const skill of EXPECTED_SKILLS) {
+        const sDir = join(customModifiedDir, skill);
+        mkdirSync(sDir, { recursive: true });
+        let content = readFileSync(join(pkgSkillsDir, skill, "SKILL.md"), "utf8");
+        if (skill === "banca-avaliacao") {
+          content = content.replace("# Skill: Banca Avaliação", "# Skill: Banca Avaliação (Dynamic Custom Content)");
+        }
+        writeFileSync(join(sDir, "SKILL.md"), content);
+      }
+
+      const customWorkspace = tempDir("case-l-custom-workspace-");
+      installAssets(customWorkspace, true, undefined, customModifiedDir);
+      const customInstalledContent = readFileSync(
+        join(customWorkspace, ".dsh", "skills", "banca-avaliacao", "SKILL.md"),
+        "utf8"
+      );
+      expect(customInstalledContent).toContain("(Dynamic Custom Content)");
+
+      // Reversibilidade comprovada da fixture: restaurar o espelho na fixture sintética se necessário
+      mkdirSync(mirrorInPkg, { recursive: true });
+      for (const skill of EXPECTED_SKILLS) {
+        const sDir = join(mirrorInPkg, skill);
+        mkdirSync(sDir, { recursive: true });
+        writeFileSync(join(sDir, "SKILL.md"), readFileSync(join(pkgSkillsDir, skill, "SKILL.md")));
+      }
+      expect(existsSync(join(mirrorInPkg, "banca-avaliacao", "SKILL.md"))).toBe(true);
     });
   });
 });
