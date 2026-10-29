@@ -3,11 +3,16 @@ import {
   canonicalAuditorMarkdownSha256,
   canonicalAuditorMarkdownSha1,
   expectedTools,
+  expectedNativeSkills,
+  expectedNativeSkillProvider,
+  canonicalNativeSkills,
   failureExitCode,
   missingHostExitCode,
   passExitCode,
   validateAuditorMarkdownEvidence,
   classifyAuditorMarkdownStatus,
+  validateNativeSkillsEvidence,
+  classifyNativeSkillsStatus,
   classifyProfileGateStatuses,
   validateEvidence,
   validateProfileEvidence,
@@ -380,5 +385,164 @@ describe("DSH profile E2E evidence contract", () => {
     ],
   ])("%s", (_label, override, expectedError) => {
     expect(validateEvidence({ ...completeRuntime, ...override } as any)).toContain(expectedError)
+  })
+})
+
+const completeNativeSkillsEvidence = {
+  hostApiAvailable: true,
+  catalogComplete: true,
+  totalSkillsObserved: expectedNativeSkills.length,
+  allDiscovered: true,
+  allLoaded: true,
+  allIntegrityVerified: true,
+  skills: Object.fromEntries(
+    expectedNativeSkills.map((name) => [
+      name,
+      {
+        name,
+        provider: expectedNativeSkillProvider,
+        sourcePath: canonicalNativeSkills[name].sourcePath,
+        sourceSha256: canonicalNativeSkills[name].sourceSha256,
+        canonicalBodySha256: canonicalNativeSkills[name].bodySha256,
+        discovered: true,
+        loaded: true,
+        contentSha256: canonicalNativeSkills[name].bodySha256,
+        contentBytes: canonicalNativeSkills[name].bodyLength,
+        integrityVerified: true,
+      },
+    ]),
+  ),
+}
+
+describe("DSH native skills discovery and loading contract (#38)", () => {
+  test("accepts complete positive evidence for all eight native skills", () => {
+    expect(validateNativeSkillsEvidence(completeNativeSkillsEvidence)).toEqual([])
+    expect(classifyNativeSkillsStatus(completeNativeSkillsEvidence)).toBe("PASS")
+  })
+
+  test("reports BLOCKED when host API is unavailable or evidence is missing", () => {
+    expect(classifyNativeSkillsStatus(undefined)).toBe("BLOCKED")
+    expect(classifyNativeSkillsStatus({})).toBe("BLOCKED")
+    expect(classifyNativeSkillsStatus({ hostApiAvailable: false })).toBe("BLOCKED")
+  })
+
+  test("updates gate summary while preserving legacy gates", () => {
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      overallStatus: "PASS",
+      exitCode: 0,
+    })
+    expect(classifyProfileGateStatuses("PASS", "PASS", "BLOCKED")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+    expect(classifyProfileGateStatuses("PASS", "PASS", "FAIL")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "FAIL",
+      overallStatus: "FAIL",
+      exitCode: 1,
+    })
+    // Legacy 2-argument invocation remains identical
+    expect(classifyProfileGateStatuses("PASS", "BLOCKED")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+  })
+
+  test.each([
+    [
+      "1. Skill obrigatória ausente",
+      (() => {
+        const skills = { ...completeNativeSkillsEvidence.skills }
+        delete (skills as Record<string, unknown>)["banca-avaliacao"]
+        return { ...completeNativeSkillsEvidence, allDiscovered: false, skills }
+      })(),
+      'required skill "banca-avaliacao" was not discovered',
+    ],
+    [
+      "2. Catálogo incompleto",
+      { ...completeNativeSkillsEvidence, catalogComplete: false },
+      "native skill catalog discovery was incomplete",
+    ],
+    [
+      "3. Provider incorreto",
+      (() => {
+        const skills = {
+          ...completeNativeSkillsEvidence.skills,
+          "banca-correcao": {
+            ...completeNativeSkillsEvidence.skills["banca-correcao"],
+            provider: "dsh-skill-filesystem",
+          },
+        }
+        return { ...completeNativeSkillsEvidence, skills }
+      })(),
+      'skill "banca-correcao" provider is "dsh-skill-filesystem", expected "dshbanca"',
+    ],
+    [
+      "4. Skill descoberta, mas não carregável",
+      (() => {
+        const skills = {
+          ...completeNativeSkillsEvidence.skills,
+          "banca-detector-ia": {
+            ...completeNativeSkillsEvidence.skills["banca-detector-ia"],
+            loaded: false,
+            contentSha256: null,
+            integrityVerified: false,
+          },
+        }
+        return { ...completeNativeSkillsEvidence, allLoaded: false, allIntegrityVerified: false, skills }
+      })(),
+      'skill "banca-detector-ia" was discovered but could not be loaded',
+    ],
+    [
+      "5. Conteúdo carregado divergente",
+      (() => {
+        const skills = {
+          ...completeNativeSkillsEvidence.skills,
+          "banca-grille": {
+            ...completeNativeSkillsEvidence.skills["banca-grille"],
+            contentSha256: "sha256:tampered-body-content",
+            integrityVerified: false,
+          },
+        }
+        return { ...completeNativeSkillsEvidence, allIntegrityVerified: false, skills }
+      })(),
+      'skill "banca-grille" loaded content does not match canonical source',
+    ],
+    [
+      "6. Hash incompatível",
+      (() => {
+        const skills = {
+          ...completeNativeSkillsEvidence.skills,
+          "banca-plagio": {
+            ...completeNativeSkillsEvidence.skills["banca-plagio"],
+            sourceSha256: "sha256:tampered-source-file",
+          },
+        }
+        return { ...completeNativeSkillsEvidence, skills }
+      })(),
+      'canonical source hash for "banca-plagio" is invalid',
+    ],
+    [
+      "7. Operação abortada",
+      { ...completeNativeSkillsEvidence, aborted: true },
+      "native skill discovery or loading operation was aborted",
+    ],
+    [
+      "8. Relatório que declara PASS sem evidência real",
+      { hostApiAvailable: false, allDiscovered: true, allLoaded: true, allIntegrityVerified: true },
+      "native skills evidence lacks required host verification",
+    ],
+  ])("rejects negative test case: %s", (_label, evidence, expectedError) => {
+    expect(validateNativeSkillsEvidence(evidence)).toContain(expectedError)
+    expect(classifyNativeSkillsStatus(evidence)).toBe(evidence.hostApiAvailable === false ? "BLOCKED" : "FAIL")
   })
 })

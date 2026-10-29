@@ -34,6 +34,37 @@ O `--dump-config` confirma apenas a composição YAML. A execução real do hook
 
 O contrato e os testes negativos rejeitam arquivo ausente/adulterado, cópia divergente, descoberta ausente, preset vazio, nome de preset sem digest de conteúdo carregado, projeção não observada, vínculo sintético ou IDs Agent/Session divergentes. Esses testes locais validam apenas o contrato de evidência. Não substituem a integração real nem afirmam que o DSH carregou as instruções. Nenhuma cópia adicional, loader próprio, permissão ou alteração do trust model foi introduzida para contornar o limite do host.
 
+## Issue #38: descoberta e carregamento nativo das oito skills acadêmicas
+
+O DSH gerencia extensões e skills acadêmicas através do serviço nativo `ctx.skills` pertencente ao pacote `@deepseek-ai/dsh-skill` (versão inspecionada `0.2.0-rc.2`). O provider nativo registrado em `src/dsh.ts` expõe as skills acadêmicas sob a identidade de provider `dshbanca` por meio de `ctx.skills.registerProvider`.
+
+Para comprovar que o DSH real descobre e carrega integralmente o conjunto acadêmico do DSHbanca, a sonda verifica deterministicamente as oito skills:
+
+1. `banca-avaliacao`
+2. `banca-correcao`
+3. `banca-detector-ia`
+4. `banca-grille`
+5. `banca-plagio`
+6. `banca-planejador`
+7. `banca-referencias`
+8. `banca-revisor`
+
+### Contrato de evidência para skills nativas
+
+A verificação diferencia rigorosamente cada estágio:
+- **Fonte empacotada (`packagedSkills`)**: verificação estática pré-boot no repositório de que `skills/<nome>/SKILL.md` existe e possui digest SHA-256 e tamanho compatíveis com o estado canônico.
+- **Descoberta (`discovered`)**: consulta ao catálogo exposto pelo DSH via `ctx.skills.snapshot` ou `ctx.skills.list({ cwd, signal })`, confirmando que a skill está presente e que o provider vencedor é `dshbanca`. O catálogo global do host pode conter outras skills (não é artificialmente restrito a oito), mas as oito esperadas precisam provir de `dshbanca`.
+- **Carregamento nativo (`loaded`)**: invocação da API nativa do DSH `ctx.skills.get(skillName, { cwd, signal })`. Não é feita chamada direta ao provider interno; o carregamento é mediado pelo registry do host.
+- **Integridade verificada (`integrityVerified`)**: comparação do digest SHA-256 do corpo Markdown carregado (`content`, sem o frontmatter delimitado por `---`) contra o digest do corpo canônico. O conteúdo acadêmico integral nunca é exposto no relatório de evidência; apenas digests SHA-256 e contagem de bytes são registrados.
+- **Bloqueio por host ausente ou não autorizado**: na ausência do DSH ou quando a execução ativa não foi autorizada (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`), o estágio permanece explicitamente `BLOCKED`.
+
+O resultado é registrado de forma independente em `stages.nativeSkills`:
+- `status`: `PASS`, `FAIL` ou `BLOCKED`.
+- `evidence.skills`: mapa das oito skills contendo nome, provider, caminho relativo, status de descoberta, carregamento, digest SHA-256 do corpo e confirmação de integridade.
+- `evidence.catalogComplete`: indicador de conclusão da observação pelo registry.
+
+A aprovação em discovery não produz automaticamente `PASS` no carregamento. Ausência de API nativa, catálogo incompleto, provider incorreto ou hash divergente resultam em `FAIL` ou `BLOCKED` imediatos. A invocação de `ctx.skills.get` comprova carregamento pelo serviço de skills do DSH, mas não equivale à execução ou aplicação das instruções por um agente ou modelo de IA.
+
 ## Cenário, integridade e teardown
 
 O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo. Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
@@ -75,7 +106,8 @@ Os testes em `tests/e2e_dsh_profile_contract.test.ts` validam rejeições do con
 - Não cobre loop real de agente, `SessionController.prompt`, chamadas a modelo, identidade originada pelo gerenciador de subagents, avaliação acadêmica ou julgamento humano.
 - O `Agent` com `origin: "subagent"` é criado pelo `AgentRegistry` nativo com metadados de origem e sessão pai, sem chamar o serviço que executa delegação. O teste comprova enforcement fail-closed para essa identidade DSH, não o lifecycle completo de spawn do subagent manager.
 - `--dump-config` e os testes de contrato não comprovam associação no Agent real. A etapa ativa está bloqueada sem autorização específica e seu resultado não foi executado neste slice.
-- O E2E mantém o status de identidade/guard da issue #2 separado de `stages.auditorMarkdown.status`. A issue #3 continua `BLOCKED` até existir evidência nativa do conteúdo carregado e associado ao Agent/Session, sem executar modelo.
+- O E2E mantém o status de identidade/guard da issue #2 separado de `stages.auditorMarkdown.status` (issue #3) e `stages.nativeSkills.status` (issue #38). Ambas as etapas continuam `BLOCKED` até existir evidência nativa autorizada no host DSH real, sem executar modelo.
+- Os testes determinísticos locais em `tests/e2e_dsh_profile_contract.test.ts` comprovam que o contrato rejeita catálogos incompletos, skills ausentes, providers incorretos e divergências de conteúdo, mas não equivalem à execução no host DSH.
 - Os hashes são de arquivos sintéticos e relativos ao workspace temporário. Nenhum manuscrito real é usado.
 
 ## Segurança da suíte de testes
