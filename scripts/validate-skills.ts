@@ -171,7 +171,7 @@ export function validateAllSkills(baseDir: string): ValidationError[] {
 }
 
 if (import.meta.main) {
-    const skillsDir = process.env.SKILLS_DIR || "assets/dsh/skills";
+    const skillsDir = process.env.SKILLS_DIR || "skills";
     const errors = validateAllSkills(skillsDir);
     if (errors.length > 0) {
         console.error("Skill validation failed:");
