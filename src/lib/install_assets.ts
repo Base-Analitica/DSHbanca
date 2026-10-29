@@ -1,7 +1,8 @@
 import { existsSync, cpSync, lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { join, dirname, relative } from "node:path"
 import { fileURLToPath } from "node:url"
-import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
+import { prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths.js"
+import { validateSkillContent, validateAllSkills } from "./skill_validator.js"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -263,484 +264,17 @@ Estes comandos ainda não possuem arquivos de comando registrados no OpenCode, m
 `,
 }
 
-const SKILLS: Record<string, Record<string, string>> = {
-  "banca-referencias": {
-    "SKILL.md": `---
-name: banca-referencias
-description: Valida referências bibliográficas do texto contra bases de dados acadêmicas.
----
-# Skill: Banca Referências
+export const EXPECTED_CANONICAL_SKILLS = [
+  "banca-avaliacao",
+  "banca-correcao",
+  "banca-detector-ia",
+  "banca-grille",
+  "banca-plagio",
+  "banca-planejador",
+  "banca-referencias",
+  "banca-revisor",
+] as const
 
-Valida referências contra bases acadêmicas.
-
-## Quando usar
-Para verificar a autenticidade e validade das referências citadas ao final de um trabalho acadêmico.
-
-## Quando NÃO usar
-Não use para avaliar a qualidade ou aderência das referências ao tema estudado, apenas sua existência factual nas bases.
-
-## Entradas necessárias
-- Caminho para o diretório ou arquivo \`.bib\` ou \`Referências\`.
-
-## Ferramentas permitidas
-- \`banca_refs\`
-
-## Protocolo
-1. Executar \`banca_refs\` para extrair a lista de referências.
-2. Para cada referência extraída, tentar validação contra bases de dados externas.
-3. Classificar cada referência: encontrada, não encontrada, ou suspeita.
-4. Calcular o score geral de saúde das referências.
-5. Gerar uma certidão formal de validação de fontes.
-
-## Formato da saída
-Um relatório Markdown em \`.banca/reports/\` com a "Certidão de Fontes" e a tabela de score.
-
-## Limites e nível de confiança
-Depende de conectividade e disponibilidade das bases de dados, mas é rigoroso para referências do tipo DOI e ISBN. Fontes antigas ou obscuras podem ser marcadas falsamente como não encontradas.
-
-## Situações que exigem confirmação humana
-Uma quantidade grande de referências não encontradas pode indicar problemas de conectividade, indisponibilidade da base de dados, ou falha no parser. O autor deve revisar manualmente e confirmar a validade.
-
-## Relação com a rubrica ativa
-Atua diretamente no Scorecard sob "Citações/Fontes", baseando as penalidades na tabela de impacto.
-
-## Comportamento quando as evidências forem insuficientes
-A referência assume estado "Suspeita" se os metadados estiverem corrompidos e nenhuma busca puder ser realizada com sucesso.
-`,
-  },
-  "banca-revisor": {
-    "SKILL.md": `---
-name: banca-revisor
-description: Revisa o diff das correções aplicadas para bloquear regressões e proteger dados.
----
-# Skill: Banca Revisor
-
-Revisa diff de correções e bloqueia regressão.
-
-## Quando usar
-Imediatamente após a aplicação de correções no texto, antes de consolidar ou aprovar a iteração atual.
-
-## Quando NÃO usar
-Não use para propor novas correções. A responsabilidade do revisor é apenas barrar erros.
-
-## Entradas necessárias
-- Estado atual do projeto.
-- Snapshot prévio das modificações gerado pelo sistema.
-
-## Ferramentas permitidas
-\`banca_status\` para identificar arquivos modificados. Avaliação majoritariamente conduzida por leitura visual de diff no contexto.
-
-## Protocolo
-1. Comparar o diff gerado entre o último snapshot estável e o estado atual modificado.
-2. Checar contra restrições rígidas:
-   - Nenhum dado imutável deve ter sido alterado.
-   - Nenhuma citação pode ter sido removida sem que uma substituta válida fosse adicionada.
-   - Nenhum arquivo/caminho protegido deve ter sido modificado.
-   - O projeto deve compilar com sucesso.
-3. Se regressão detectada: rejeitar o diff e sugerir rollback.
-
-## Formato da saída
-Aprovação silenciosa em log ou erro claro de "Bloqueio" rejeitando a última iteração, com instruções para restauração.
-
-## Limites e nível de confiança
-Comportamento conservador e focada em sinalização de risco para chamar a atenção do usuário perante deleções suspeitas.
-
-## Situações que exigem confirmação humana
-Bloqueio contínuo do revisor (ciclo travado), onde a intervenção manual deve ignorar a revisão ou corrigir os dados de raiz.
-
-## Relação com a rubrica ativa
-Atua como camada de segurança para alertar sobre possível perda de nota ou degradação na iteração atual.
-
-## Comportamento quando as evidências forem insuficientes
-Se não houver snapshot anterior válido, o revisor passa sem bloquear, gerando um aviso sobre o pulo do fluxo de segurança.
-
-## Critérios de Bloqueio Ativos
-- Score caiu → bloqueio imediato.
-- Dado imutável alterado → bloqueio imediato.
-- Citação removida sem substituta → bloqueio.
-- Remoção abrupta (>20 linhas) sem justificativa clara → alerta, passível de bloqueio.
-`,
-  },
-  "banca-correcao": {
-    "SKILL.md": `---
-name: banca-correcao
-description: Aplica correções no manuscrito utilizando snapshots e validação de compilação.
----
-# Skill: Banca Correção
-
-Aplica correções no manuscrito com snapshot, contrato e validação.
-
-## Quando usar
-Para aplicar modificações recomendadas ao código-fonte ou texto do projeto, especialmente após uma rodada de avaliação ou planejamento.
-
-## Quando NÃO usar
-Não use para reescrever capítulos inteiros sem aprovação prévia. Não use para formatar dados estatísticos ou resultados experimentais primários.
-
-## Entradas necessárias
-- Relatório de auditoria prévio.
-- Plano de correções estruturado.
-
-## Ferramentas permitidas
-- \`banca_snapshot\`
-- \`banca_corrigir\`
-- \`banca_compile\`
-
-## Protocolo
-1. Carregar relatório de auditoria e plano.
-2. Classificar cada achado (Auto, Entrevistar, Pular) usando a Matriz de Decisão.
-3. Criar um snapshot de segurança com \`banca_snapshot\`.
-4. Aplicar as correções com \`banca_corrigir\`.
-5. Compilar para verificar a estabilidade com \`banca_compile\`.
-6. Revisar o diff e atualizar o scorecard.
-
-## Formato da saída
-Alterações diretas nos arquivos e atualização do histórico de correções em \`.banca/\`.
-
-## Limites e nível de confiança
-Snapshots fornecem segurança permitindo a reversão de mudanças caso ocorram falhas, mas as compilações e re-auditorias são fundamentais para confirmar a ausência de regressões.
-
-## Situações que exigem confirmação humana
-- Confiança baixa e impacto alto para a correção.
-- Alterações em caminhos protegidos ou seções que exigem revisão (Matriz de Decisão).
-
-## Relação com a rubrica ativa
-Atua para elevar o score nas dimensões em defasagem apontadas pelo scorecard, focando na conformidade ABNT e estrutural.
-
-## Comportamento quando as evidências forem insuficientes
-Em caso de falta de certeza sobre a correção, falhar para a categoria "Entrevistar" e não aplicar a alteração diretamente.
-
-## Imutáveis (Guardrails)
-- Dados experimentais primários.
-- Resultados estatísticos.
-- Identificadores (CEUA, DOI).
-- Caminhos protegidos e seções blindadas.
-`,
-  },
-  "banca-avaliacao": {
-    "SKILL.md": `---
-name: banca-avaliacao
-description: Protocolo de auditoria exaustiva por lotes canônicos com síntese global apenas após cobertura completa.
----
-# Skill: Banca Avaliação
-
-Orquestra a auditoria acadêmica exaustiva do manuscrito canônico, lote a lote, e só então obtém a entrada de síntese global e produz a síntese acadêmica relacional. Não calcula pontuação numérica global, aprovação ou reprovação.
-
-## Quando usar
-Sempre que for necessário auditar o manuscrito de forma exaustiva, cobrindo todos os lotes planejados, e preparar a síntese global após a cobertura completa.
-
-## Quando NÃO usar
-- Não use para aplicar correções no manuscrito.
-- Não use para calcular pontuação, pesos, tetos, travas, aprovação ou reprovação.
-- Não use para triagem exclusiva de IA sem análise de conteúdo.
-- Não use para emitir parecer integral antes da cobertura completa de todos os lotes.
-
-## Entradas necessárias
-- Diretório do projeto da monografia (raiz com o manuscrito canônico).
-- Respostas das tools \`banca_context\`, \`read\` (context pack), \`banca_auditar\` e, ao final, \`banca_sintese\`.
-
-## Ferramentas permitidas
-- \`banca_context\`
-- \`read\` — somente no caminho exato do context pack retornado (\`.banca/context/context-*.md\`)
-- \`banca_auditar\`
-- \`banca_sintese\`
-
-## Protocolo exaustivo por lotes
-
-1. Chamar \`banca_context\` **sem** \`completedBatchId\` para criar ou retomar o checkpoint.
-2. Após **cada** chamada bem-sucedida de \`banca_context\`, usar a ferramenta nativa \`read\` no caminho exato retornado em \`context → <caminho>\`. Não ler o manuscrito diretamente nem procurar outros arquivos.
-3. Somente depois do \`read\`, extrair fingerprint, batchId, chunks e proveniência do context pack. Se o contexto indicar erro, plano bloqueado ou fingerprint inválido, **interromper**.
-4. Se não houver próximo lote e o checkpoint estiver completo, ir ao passo 9 (síntese).
-5. Analisar **todos** os chunks do lote atual. Cada finding deve ser compatível com o lote e incluir:
-   - categoria
-   - severidade
-   - claim
-   - evidence
-   - arquivo público relativo
-   - linhas inicial e final
-   - sectionId
-6. Chamar \`banca_auditar\` com o fingerprint e o batchId **exatos** do contexto. Enviar array vazio de findings quando nenhum finding válido existir.
-7. Avançar o checkpoint **somente** após recibo bem-sucedido de \`banca_auditar\`. Não chame \`banca_context\` com \`completedBatchId\` se a auditoria falhou.
-8. Chamar novamente \`banca_context\` com \`completedBatchId\` igual ao lote concluído. Repetir a partir do passo 2 (incluindo \`read\` do novo caminho) até não existir próximo lote.
-9. Chamar \`banca_sintese\` **somente** depois que \`banca_context\` (e o \`read\` do pack) comprovar checkpoint completo e ausência de próximo lote.
-10. Somente após \`banca_sintese\` retornar com sucesso uma entrada de cobertura completa, produzir a **síntese acadêmica global** relacionando findings de lotes diferentes (passo seguinte). O mero repasse estruturado da entrada de \`banca_sintese\` **não** é comportamento final suficiente.
-
-Ordem lógica obrigatória:
-
-\`\`\`text
-banca_context
-→ read do caminho retornado
-→ análise de um lote
-→ banca_auditar
-→ banca_context com completedBatchId
-→ read do caminho retornado
-→ repetir
-→ banca_sintese somente após cobertura completa
-→ síntese acadêmica global após retorno bem-sucedido de banca_sintese
-\`\`\`
-
-## Findings e proveniência
-- Não invente arquivo, linha, fingerprint ou batchId.
-- Findings locais são criados e persistidos **somente** por \`banca_auditar\`.
-- Não persista findings fora de \`banca_auditar\`.
-- Findings devem referir apenas trechos presentes no lote atual.
-
-## Gate de síntese e falhas
-- \`banca_sintese\` aparece somente após cobertura completa.
-- Falha em qualquer lote impede síntese global.
-- Se \`banca_sintese\` retornar erro, cobertura incompleta, contrato inválido ou dados insuficientes: interromper o fluxo; **não** produza síntese integral; **não** produza score; **não** produza aprovação ou reprovação; **não** transforme resultados parciais em parecer completo.
-- Se contexto, \`read\`, auditoria ou síntese retornar erro, plano bloqueado, fingerprint incompatível ou cobertura incompleta: interromper o fluxo sem gerar pontuação, aprovação, reprovação ou parecer integral.
-
-## Síntese acadêmica global (após banca_sintese bem-sucedida)
-
-A entrada retornada por \`banca_sintese\` alimenta a análise relacional. A síntese global **relaciona findings já validados** de lotes diferentes; não cria silenciosamente novos findings persistidos.
-
-### Seções obrigatórias da saída global
-
-Produza estas seções, nesta ordem:
-
-1. **Síntese global do manuscrito**
-2. **Contradições ou tensões entre seções**
-3. **Coerência entre objetivos, método, resultados e conclusão**
-4. **Lacunas globais de argumentação ou evidência**
-5. **Redundâncias e inconsistências recorrentes**
-6. **Prioridades de revisão**
-
-Não obrigue a existência de um problema. Quando não houver evidência suficiente para uma categoria, declare explicitamente que nenhum problema global comprovável foi identificado nela.
-
-### Rastreabilidade das conclusões globais
-
-Toda conclusão global deve apontar para os findings que a sustentam, utilizando os respectivos:
-
-- \`findingId\`
-- arquivo
-- linhas
-- seção
-- claim ou evidence
-
-Uma observação que depende de dois ou mais findings deve identificar **todos** eles. Não invente finding, arquivo, linha, seção, fingerprint ou relação causal.
-
-### Separação entre finding local e observação global
-
-- Findings locais: criados e persistidos somente por \`banca_auditar\`.
-- A síntese global relaciona findings já validados; não os reescreve como novos findings.
-- A síntese **não** cria silenciosamente novos findings persistidos.
-- Uma irregularidade descoberta apenas na fase global deve ser apresentada como **observação global que requer revisão humana**, sem fingir que já foi validada e persistida por \`banca_auditar\`.
-
-### Linguagem proibida na saída
-
-A saída não pode usar linguagem de nota acadêmica, aprovação institucional, reprovação ou previsão de banca. Não calcule pontuação, score, pesos, tetos ou travas.
-
-## Formato da saída
-- Durante os lotes: resumo do lote processado e findings submetidos (sem pontuação global).
-- Após \`banca_sintese\` bem-sucedida: síntese acadêmica global estruturada nas seis seções acima, com rastreabilidade por \`findingId\` e proveniência — não basta repassar a entrada estruturada da tool sem análise relacional.
-- Em falha de \`banca_sintese\` ou cobertura incompleta: interromper sem síntese integral, score, aprovação ou reprovação.
-
-## Limites e nível de confiança
-A análise de conteúdo depende da heurística do modelo sobre os chunks fornecidos no context pack e sobre os findings validados. Contagens e findings persistidos não equivalem a validação normativa ABNT completa nem a pontuação oficial.
-
-## Situações que exigem confirmação humana
-- Plano bloqueado ou manuscrito incompleto.
-- Erro de fingerprint, batchId ou cobertura incompleta que impeça progresso.
-- Falha persistente de \`banca_context\`, \`read\`, \`banca_auditar\` ou \`banca_sintese\`.
-- Observações globais que não correspondem a findings já persistidos.
-
-## Relação com a rubrica ativa
-Use a rubrica institucional apenas como orientação qualitativa dos eixos a observar nos findings. Não aplique pesos hardcoded, tetos ou travas, e não calcule pontuação global neste fluxo. Scoring permanece fora deste contrato.
-
-## Comportamento quando as evidências forem insuficientes
-Se o lote não puder ser lido via \`read\` do context pack, o contexto estiver bloqueado ou a auditoria falhar, interromper e sinalizar o erro. Não inferir findings inventados e não chamar \`banca_sintese\` com cobertura incompleta. Se a entrada de \`banca_sintese\` for inválida ou insuficiente, não complete a síntese global.
-`,
-  },
-  "banca-plagio": {
-    "SKILL.md": `---
-name: banca-plagio
-description: Interpreta relatórios CopySpider e reescreve trechos de texto problemáticos.
----
-# Skill: Banca Plágio
-
-Parseia relatórios CopySpider e reescreve trechos problemáticos.
-
-## Quando usar
-Para lidar com relatórios de plágio e reescrever partes do texto marcadas com similaridade excessiva.
-
-## Quando NÃO usar
-Não use para gerar texto novo do zero ou substituir citações diretas legítimas.
-
-## Entradas necessárias
-- Caminho para o arquivo PDF ou HTML do relatório do CopySpider.
-
-## Ferramentas permitidas
-- \`banca_plagio\`
-- \`banca_snapshot\`, \`banca_corrigir\` e \`banca_compile\` para aplicar edições com segurança.
-
-## Protocolo
-1. Parsear o relatório CopySpider fornecido.
-2. Identificar fontes com similaridade Geral (Sg) no nível Moderado ou Alto.
-3. Mapear n-gramas do relatório contra os capítulos do texto original.
-4. Classificar ações para cada trecho: PULAR, REESCREVER ou ENTREVISTAR.
-5. Reescrever as seções mantendo os imutáveis intactos.
-6. Validar compilação do projeto a cada bloco modificado.
-7. Arquivar o relatório original no registro do projeto.
-
-## Formato da saída
-Arquivos do projeto atualizados com texto reescrito. Logs das modificações.
-
-## Limites e nível de confiança
-A reescrita de texto sem perda semântica tem nível de confiança médio/alto, mas a skill não entende citações mal formatadas inerentemente sem o relatório ABNT prévio.
-
-## Situações que exigem confirmação humana
-Trechos com similaridade muito alta, sem fontes associadas e extensos demais para serem apenas reescritos sem risco de perda de significado.
-
-## Relação com a rubrica ativa
-Reduz a penalidade no eixo Citações/Fontes caso seja um erro de transcrição não citada.
-
-## Comportamento quando as evidências forem insuficientes
-Se o relatório for ilegível, deve reportar falha no parser sem alterar nenhum arquivo.
-
-## Imutáveis (Guardrails)
-- Nomes de instituições e órgãos públicos.
-- Variáveis, constantes e dados matemáticos.
-- Citações já devidamente referenciadas.
-- Resultados estatísticos.
-`,
-  },
-  "banca-detector-ia": {
-    "SKILL.md": `---
-name: banca-detector-ia
-description: Analisa padrões estilísticos sinalizados pela heurística interna e produz uma triagem não conclusiva, sem determinar autoria por IA.
----
-# Skill: Banca Detector IA
-
-Triagem de risco de texto gerado por IA.
-
-## Quando usar
-Para analisar suspeitas de geração por IA em trechos sinalizados, aplicando uma heurística de padrões linguísticos repetitivos.
-
-## Quando NÃO usar
-Nunca use para emitir laudos conclusivos sobre autoria ou uso de IA, nem como justificativa primária para reprovação.
-
-## Entradas necessárias
-- Caminho para o diretório alvo.
-
-## Ferramentas permitidas
-- \`banca_ia\`
-
-## Protocolo
-1. Executar \`banca_ia\` para scan heurístico do diretório.
-2. Para análise profunda: combinar a execução com ensemble opcional.
-3. Combinar scores heurísticos gerados e formatar o diagnóstico.
-4. Gerar relatório contendo níveis de risco e evidências identificadas.
-
-## Formato da saída
-Relatório em Markdown com Risco (baixo/moderado/alto), Confiança (0-100) e listagem de trechos por arquivo.
-
-## Limites e nível de confiança
-A confiança é inerentemente baixa. A heurística baseia-se em vocabulário comum de LLMs e previsibilidade de n-gramas, que também ocorrem em texto humano.
-
-## Situações que exigem confirmação humana
-O relatório final sempre exige análise do orientador/banca para qualquer tomada de decisão. A skill nunca pune automaticamente.
-
-## Relação com a rubrica ativa
-O relatório pode ser anexado como evidência extra ao avaliador humano, mas não afeta automaticamente o Scorecard técnico.
-
-## Comportamento quando as evidências forem insuficientes
-Se o documento for curto demais, deve reportar "Evidência Insuficiente" sem atribuir classificação de risco.
-`,
-  },
-  "banca-grille": {
-    "SKILL.md": `---
-name: banca-grille
-description: Executa entrevista com o usuário antes de aplicar correções complexas ou ambíguas.
----
-# Skill: Banca Grille
-
-Entrevista exaustiva com usuário antes de executar correções complexas.
-
-## Quando usar
-Sempre que uma correção proposta esbarrar na Matriz de Decisão sob a categoria "Entrevistar" (alto risco, ambiguidade ou caminhos restritos).
-
-## Quando NÃO usar
-Não use para correções triviais (ex.: erros de digitação simples ou espaços em branco).
-
-## Entradas necessárias
-- Contexto do achado a ser corrigido.
-
-## Ferramentas permitidas
-Esta skill atua exclusivamente através da comunicação textual com o usuário para clarificação. Não executa ferramentas nem altera arquivos diretamente.
-
-## Protocolo
-1. Apresentar contexto do achado apontado na auditoria ou revisão.
-2. Perguntar ao usuário de forma objetiva sobre:
-   - Escopo: quais arquivos ou seções devem ser corrigidos?
-   - Imutáveis: o que NÃO pode ser alterado no texto em questão?
-   - Tolerância: qual é a nota alvo ou limite aceitável de refatoração?
-3. Salvar respostas no contexto da iteração atual.
-4. Só prosseguir para a próxima etapa quando todas as respostas forem esclarecidas.
-
-## Formato da saída
-Repasse de contexto claro e estruturado para o agente/skill solicitante.
-
-## Limites e nível de confiança
-Alta confiança por tratar-se de confirmação direta com o autor (human-in-the-loop).
-
-## Situações que exigem confirmação humana
-A natureza desta skill é inteiramente baseada em interação humana.
-
-## Relação com a rubrica ativa
-Atua como um filtro de segurança para não comprometer o projeto antes de aplicar regras estritas de nota.
-
-## Comportamento quando as evidências forem insuficientes
-Perguntar novamente ao usuário ou solicitar arquivos adicionais para fornecer melhor contexto ao problema.
-`,
-  },
-  "banca-planejador": {
-    "SKILL.md": `---
-name: banca-planejador
-description: Define o plano de correção otimizado para a próxima iteração do loop.
----
-# Skill: Banca Planejador
-
-Define plano de correção para iteração do loop.
-
-## Quando usar
-No início de uma rodada de iteração, após a auditoria, para criar um plano acionável para o agente corretor.
-
-## Quando NÃO usar
-Não use diretamente como corretor. A skill não deve alterar arquivos de código fonte ou manuscritos do projeto principal, apenas documentos de planejamento.
-
-## Entradas necessárias
-- Context pack atualizado (via \`banca_context\`).
-- Relatório de auditoria contendo as deficiências.
-- Histórico de iterações anteriores.
-
-## Ferramentas permitidas
-A skill produz orientação textual e planejamento. Pode requerer leitura do histórico se fornecido no contexto, mas não grava arquivos diretamente.
-
-## Protocolo
-1. Analisar as dependências entre os problemas apontados na auditoria.
-2. Priorizar achados críticos (como travas que limitam a nota a 4.0 ou 6.0).
-3. Elaborar uma estratégia priorizando a adição de citação sobre a remoção de texto e mantendo intocáveis os imutáveis.
-4. Restringir o escopo para um máximo de 10 correções planejadas por iteração, evitando instabilidade.
-5. Produzir o artefato final.
-
-## Formato da saída
-- Plano em Markdown descrevendo a estratégia.
-- Objeto ou lista estruturada para repasse ao executor da correção.
-
-## Limites e nível de confiança
-Confiança alta para o planejamento lógico; a implementação prática recairá sobre \`banca-correcao\`.
-
-## Situações que exigem confirmação humana
-Se o número de problemas críticos for gigantesco a ponto de exigir refatoração total da estrutura do TCC.
-
-## Relação com a rubrica ativa
-Usa os pesos da rubrica ativa para priorizar os problemas de maior impacto no score final.
-
-## Comportamento quando as evidências forem insuficientes
-Planejar iteração vazia, avisando o usuário que não há correções necessárias ou que os dados da auditoria não puderam ser lidos.
-`,
-  },
-}
 
 const TEMPLATES: Record<string, string> = {
   "scorecard.md": `# Scorecard\n\n| Dimensão | Nota |\n|----------|------|\n| ABNT/Estrutura | 0.0 |\n| Citações/Fontes | 0.0 |\n| Conteúdo/Lógica | 0.0 |\n| Estilo Acadêmico | 0.0 |\n| **Final** | **0.0** |\n`,
@@ -777,12 +311,94 @@ function copyDirectory(projectRoot: string, src: string, dest: string, force: bo
   }
 }
 
-export function installAssets(projectRoot: string, force: boolean, customAssetsDir?: string): string[] {
+export function installAssets(
+  projectRoot: string,
+  force: boolean,
+  customAssetsDir?: string,
+  customSkillsDir?: string,
+): string[] {
   const installed: string[] = []
 
+  // Preflight canonical skills directory
+  const defaultCanonicalSkillsDir = join(__dirname, "..", "..", "skills")
+  const canonicalSkillsDir = customSkillsDir || defaultCanonicalSkillsDir
+
+  if (!existsSync(canonicalSkillsDir)) {
+    throw new Error(`canonical skills directory does not exist: ${canonicalSkillsDir}`)
+  }
+  const canonicalDirStat = lstatSync(canonicalSkillsDir)
+  if (canonicalDirStat.isSymbolicLink() || !canonicalDirStat.isDirectory()) {
+    throw new Error(`canonical skills directory must be a regular directory: ${canonicalSkillsDir}`)
+  }
+
+  const canonicalSkillContents = new Map<string, Buffer>()
+
+  for (const skillName of EXPECTED_CANONICAL_SKILLS) {
+    const skillDir = join(canonicalSkillsDir, skillName)
+    if (!existsSync(skillDir)) {
+      throw new Error(`canonical skill directory missing: ${skillName}`)
+    }
+    const skillDirStat = lstatSync(skillDir)
+    if (skillDirStat.isSymbolicLink() || !skillDirStat.isDirectory()) {
+      throw new Error(`canonical skill directory ${skillName} must be a regular directory`)
+    }
+
+    const skillFile = join(skillDir, "SKILL.md")
+    if (!existsSync(skillFile)) {
+      throw new Error(`canonical skill SKILL.md missing: ${skillName}`)
+    }
+    const fileStat = lstatSync(skillFile)
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+      throw new Error(`canonical skill ${skillName}/SKILL.md must be a regular file`)
+    }
+
+    const contentBuf = readFileSync(skillFile)
+    const validationErrors = validateSkillContent(skillFile, contentBuf.toString("utf8"), skillName)
+    if (validationErrors.length > 0) {
+      throw new Error(
+        `canonical skill ${skillName}/SKILL.md has invalid frontmatter: ${validationErrors.map((e) => e.message).join("; ")}`
+      )
+    }
+    canonicalSkillContents.set(skillName, contentBuf)
+  }
+
+  const allSkillErrors = validateAllSkills(canonicalSkillsDir)
+  if (allSkillErrors.length > 0) {
+    throw new Error(
+      `canonical skills directory failed validation: ${allSkillErrors.map((e) => `${e.file}: ${e.message}`).join("; ")}`
+    )
+  }
+
   const pluginAssetsDir = customAssetsDir || join(__dirname, "..", "..", "assets")
+  const assetsAvailable = existsSync(pluginAssetsDir)
+
+  if (assetsAvailable) {
+    // If assets directory exists, fail-closed before any mutations if incomplete
+    const agentsDir = join(pluginAssetsDir, "dsh", "agents")
+    if (!existsSync(agentsDir) || !lstatSync(agentsDir).isDirectory()) {
+      throw new Error(`custom assets directory is incomplete: missing ${join("dsh", "agents")}`)
+    }
+    for (const agentName of Object.keys(AGENTS)) {
+      const agentFile = join(agentsDir, agentName)
+      if (!existsSync(agentFile) || !lstatSync(agentFile).isFile()) {
+        throw new Error(`custom assets directory is incomplete: missing ${join("dsh", "agents", agentName)}`)
+      }
+    }
+
+    const commandsDir = join(pluginAssetsDir, "dsh", "commands")
+    if (!existsSync(commandsDir) || !lstatSync(commandsDir).isDirectory()) {
+      throw new Error(`custom assets directory is incomplete: missing ${join("dsh", "commands")}`)
+    }
+    for (const cmdName of Object.keys(COMMANDS)) {
+      const cmdFile = join(commandsDir, cmdName)
+      if (!existsSync(cmdFile) || !lstatSync(cmdFile).isFile()) {
+        throw new Error(`custom assets directory is incomplete: missing ${join("dsh", "commands", cmdName)}`)
+      }
+    }
+  }
+
   const versionedAuditor = join(pluginAssetsDir, "dsh", "agents", "banca-auditor.md")
-  const expectedAuditor = existsSync(versionedAuditor)
+  const expectedAuditor = assetsAvailable && existsSync(versionedAuditor)
     ? readFileSync(versionedAuditor)
     : Buffer.from(AGENTS["banca-auditor.md"], "utf8")
   const existingAuditorAsset = join(projectRoot, ".dsh", "agents", "banca-auditor.md")
@@ -810,6 +426,51 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
   // blocks the whole installation with no partial external changes.
   resolveRealInsideRoot(projectRoot, join(projectRoot, ".dsh"))
   resolveRealInsideRoot(projectRoot, join(projectRoot, ".banca"))
+  resolveRealInsideRoot(projectRoot, join(projectRoot, ".dsh", "skills"))
+
+  for (const p of [join(projectRoot, ".dsh"), join(projectRoot, ".dsh", "skills")]) {
+    try {
+      const st = lstatSync(p)
+      if (st.isSymbolicLink()) {
+        throw new Error(`destination ${relative(projectRoot, p)} must not be a symbolic link`)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  }
+
+  // Preflight destination skills
+  for (const skillName of EXPECTED_CANONICAL_SKILLS) {
+    const destSkillDir = join(projectRoot, ".dsh", "skills", skillName)
+    const destSkillFile = join(destSkillDir, "SKILL.md")
+
+    resolveRealInsideRoot(projectRoot, destSkillDir)
+    resolveRealInsideRoot(projectRoot, destSkillFile)
+
+    try {
+      const dirStat = lstatSync(destSkillDir)
+      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+        throw new Error(`installed skill directory ${skillName} must be a regular directory`)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+
+    try {
+      const fileStat = lstatSync(destSkillFile)
+      if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+        throw new Error(`installed skill ${skillName}/SKILL.md must be a regular file`)
+      }
+      const safePath = resolveRealInsideRoot(projectRoot, destSkillFile)
+      const existingContent = readFileSync(safePath)
+      const canonicalContent = canonicalSkillContents.get(skillName)!
+      if (!existingContent.equals(canonicalContent)) {
+        throw new Error(`installed skill ${skillName}/SKILL.md differs from the canonical source`)
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+  }
 
   function write(path: string, content: string) {
     const target = prepareRealPathForWrite(projectRoot, path)
@@ -819,12 +480,9 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
     }
   }
 
-  if (existsSync(pluginAssetsDir)) {
+  if (assetsAvailable) {
     // Install versioned agents (DSH-native)
     copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "agents"), join(projectRoot, ".dsh", "agents"), force, installed)
-
-    // Install versioned skills (DSH-native)
-    copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "skills"), join(projectRoot, ".dsh", "skills"), force, installed)
 
     // Install versioned commands
     copyDirectory(projectRoot, join(pluginAssetsDir, "dsh", "commands"), join(projectRoot, ".dsh", "commands"), force, installed)
@@ -841,12 +499,15 @@ export function installAssets(projectRoot: string, force: boolean, customAssetsD
     for (const [name, content] of Object.entries(COMMANDS)) {
       write(join(projectRoot, ".dsh", "commands", name), content)
     }
+  }
 
-    // Fallback skills (DSH-native)
-    for (const [skillName, files] of Object.entries(SKILLS)) {
-      for (const [fileName, content] of Object.entries(files)) {
-        write(join(projectRoot, ".dsh", "skills", skillName, fileName), content)
-      }
+  // Install the 8 canonical skills (ALWAYS from canonical skills/, never from assets or duplicate string constants)
+  for (const skillName of EXPECTED_CANONICAL_SKILLS) {
+    const destSkillFile = join(projectRoot, ".dsh", "skills", skillName, "SKILL.md")
+    const target = prepareRealPathForWrite(projectRoot, destSkillFile)
+    if (!existsSync(target) || force) {
+      writeFileSync(target, canonicalSkillContents.get(skillName)!)
+      installed.push(target)
     }
   }
 

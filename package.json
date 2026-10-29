@@ -42,11 +42,11 @@
     "e2e:opencode": "bun run build && bun run scripts/e2e-opencode.ts"
   },
   "dependencies": {
+    "yaml": "2.7.0",
     "zod": "^4.1.8"
   },
   "devDependencies": {
     "@types/node": "20.19.43",
-    "typescript": "5.9.3",
-    "yaml": "2.7.0"
+    "typescript": "5.9.3"
   }
 }
