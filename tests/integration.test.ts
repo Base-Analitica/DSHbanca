@@ -167,7 +167,6 @@ describe("Integration — immutableFacts guard", () => {
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "dados/experimento.csv", oldText: "1,2,3", newText: "4,5,6" }],
-      skipSnapshot: true,
     }, {} as any)
     expect(result).toContain("blocked")
     expect(result).toContain("immutable")
@@ -181,7 +180,6 @@ describe("Integration — immutableFacts guard", () => {
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "main.tex", oldText: "Introduction paragraph", newText: "Updated paragraph" }],
-      skipSnapshot: true,
     }, {} as any)
     expect(result).not.toContain("blocked")
     expect(result).toContain("✓")
@@ -195,7 +193,6 @@ describe("Integration — immutableFacts guard", () => {
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "main.tex", oldText: "", newText: "INSERTED" }],
-      skipSnapshot: true,
     }, {} as any)
     expect(result).toContain("empty oldText")
     const content = readFileSync(join(testRoot, "main.tex"), "utf-8")
@@ -220,7 +217,6 @@ Third paragraph with FIXME marker too.
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE" }],
-      skipSnapshot: true,
     }, {} as any)
 
     expect(result).toContain("✓")
@@ -243,7 +239,6 @@ One FIXME here.
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE", expectedOccurrences: 5 }],
-      skipSnapshot: true,
     }, {} as any)
 
     // Should still apply the replacement (1 found) but warn about the mismatch
@@ -267,7 +262,6 @@ Another FIXME here.
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE", expectedOccurrences: 2 }],
-      skipSnapshot: true,
     }, {} as any)
 
     expect(result).not.toContain("⚠")
@@ -384,7 +378,6 @@ describe("Integration — path traversal safety", () => {
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "../evil.tex", oldText: "a", newText: "b" }],
-      skipSnapshot: true,
     }, {} as any)
     expect(result).toContain("blocked")
     expect(result).toContain("escapes project root")
@@ -396,7 +389,6 @@ describe("Integration — path traversal safety", () => {
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
       corrections: [{ file: "/etc/passwd", oldText: "a", newText: "b" }],
-      skipSnapshot: true,
     }, {} as any)
     expect(result).toContain("blocked")
     expect(result).toContain("escapes project root")
@@ -434,8 +426,8 @@ describe("Integration — path traversal safety", () => {
     writeFileSync(join(testRoot, ".env"), "SECRET=123")
     mkdirSync(join(testRoot, ".banca", "cache"), { recursive: true })
     writeFileSync(join(testRoot, ".banca", "cache", "refs.json"), "{}")
-    mkdirSync(join(testRoot, ".opencode", "agents"), { recursive: true })
-    writeFileSync(join(testRoot, ".opencode", "agents", "x.md"), "agent")
+    mkdirSync(join(testRoot, ".dsh", "agents"), { recursive: true })
+    writeFileSync(join(testRoot, ".dsh", "agents", "x.md"), "agent")
 
     const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
     const result = await bancaSnapshot.execute({
@@ -448,7 +440,7 @@ describe("Integration — path traversal safety", () => {
     expect(existsSync(join(snapDir, "main.tex"))).toBe(true)
     expect(existsSync(join(snapDir, ".env"))).toBe(false)
     expect(existsSync(join(snapDir, ".banca", "cache", "refs.json"))).toBe(false)
-    expect(existsSync(join(snapDir, ".opencode", "agents", "x.md"))).toBe(false)
+    expect(existsSync(join(snapDir, ".dsh", "agents", "x.md"))).toBe(false)
   })
 })
 
@@ -573,7 +565,7 @@ describe("Integration — Auditoria Extrema Fixes", () => {
     const installed = installAssets(testRoot, true)
     expect(installed.length).toBeGreaterThan(0)
     // Check if the agent file is copied
-    const agentPath = join(testRoot, ".opencode", "agents", "banca-loop.md")
+    const agentPath = join(testRoot, ".dsh", "agents", "banca-loop.md")
     expect(existsSync(agentPath)).toBe(true)
     expect(readFileSync(agentPath, "utf-8")).toContain("Orquestra etapa assistida")
   })

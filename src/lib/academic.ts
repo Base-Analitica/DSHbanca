@@ -18,7 +18,7 @@ export interface ValidationResult {
   key: string
   found: boolean
   score: number
-  status: "verificada" | "parcial" | "suspeita" | "nao_encontrada"
+  status: "verificada" | "parcial" | "suspeita" | "nao_encontrada" | "bloqueada"
   matchedBy: "doi" | "title" | "none"
   metadata?: RefMetadata
   evidence?: string

@@ -60,7 +60,7 @@ interface McpResponse {
 export async function resolveRef(
   ref: RefMetadata,
   projectRoot: string,
-  mcpCmd?: string[],
+  _mcpCmd?: string[],
 ): Promise<ProviderResult> {
   const cache = new RefCache(projectRoot)
 
@@ -70,64 +70,23 @@ export async function resolveRef(
     return { result: cached, provider: "cache" }
   }
 
-  let mcpError: string | undefined
-
-  // 2. try MCP (if command configured)
-  if (mcpCmd && mcpCmd.length > 0) {
-    const client = new McpClient(mcpCmd, 20000)
-    try {
-      await client.start()
-
-      let mcpResult: unknown
-      if (ref.doi) {
-        mcpResult = await client.callTool("get_paper_details", { doi: ref.doi })
-      } else if (ref.title) {
-        mcpResult = await client.callTool("search_papers", { query: [ref.title, ref.year, ref.authors?.[0]].filter(Boolean).join(" "), limit: 3 })
-      }
-
-      if (mcpResult) {
-        const parsed = parseMcpResult(mcpResult, ref)
-        cache.set(ref.key, ref.doi, parsed)
-        return { result: parsed, provider: "mcp:crossref-academic" }
-      }
-    } catch (err: any) {
-      mcpError = `MCP fallback (${err.message ? String(err.message).slice(0, 50) : "unknown"})`
-    } finally {
-      await client.close().catch(() => {})
-    }
+  // 2. In DSHbanca (DSH-only architecture), the plugin does not start standalone
+  // MCP child processes or make direct REST fetch calls to external services.
+  // External providers and network transport are governed by the DSH host.
+  // Because DSH 0.2.0-rc.2 does not provide a native reference provider service,
+  // uncached references fail closed with explicit BLOCKED status without
+  // calling fetch or child_process.spawn.
+  const blockedResult: ValidationResult = {
+    key: ref.key,
+    found: false,
+    score: 0,
+    status: "bloqueada",
+    matchedBy: "none",
+    evidence: "external reference lookup blocked — no native DSH provider available",
+    error: "external_transport_blocked",
   }
 
-  // 3. fallback: REST API
-  try {
-    const restResult = await validateRef(ref)
-    if (mcpError) {
-      restResult.evidence = restResult.evidence ? `${restResult.evidence} | ${mcpError}` : mcpError
-    }
-    cache.set(ref.key, ref.doi, restResult)
-    return { result: restResult, provider: restResult.found ? "rest:crossref" : "rest:crossref" }
-  } catch (err: any) {
-    // 4. last resort: cache even if not found
-    const cached = cache.get(ref)
-    if (cached) {
-      if (mcpError) {
-        cached.evidence = cached.evidence ? `${cached.evidence} | ${mcpError}` : mcpError
-      }
-      return { result: cached, provider: "cache" }
-    }
-
-    // 5. mark pending
-    cache.markPending([ref])
-    const pending: ValidationResult = {
-      key: ref.key,
-      found: false,
-      score: 0,
-      status: "nao_encontrada",
-      matchedBy: "none",
-      evidence: [mcpError, "all providers failed — pending retry"].filter(Boolean).join(" | "),
-      error: "network_unavailable",
-    }
-    return { result: pending, provider: "none" }
-  }
+  return { result: blockedResult, provider: "none" }
 }
 
 /**

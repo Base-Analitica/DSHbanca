@@ -1,10 +1,9 @@
-import { tool } from "@opencode-ai/plugin"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { compileLatex, findLatexEngine, findBibEngine, validateEngine, validateBibEngine, buildCompileCommands, type LatexCommand } from "../lib/latex"
-const z = tool.schema
-
-export const bancaCompile = tool({
+export const bancaCompile = defineBancaTool({
   description: "Compile LaTeX manuscript using configured engine.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),

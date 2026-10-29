@@ -1,13 +1,12 @@
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync } from "node:fs"
 import { join, isAbsolute, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
-import { tool } from "@opencode-ai/plugin"
-import { resolveInsideRoot, assertInsideRoot } from "../lib/safe_paths"
+import { z } from "zod"
+import { defineBancaTool } from "../lib/tool"
+import { resolveRealInsideRoot } from "../lib/safe_paths"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { saveReport } from "../lib/reports"
-const z = tool.schema
-
 interface CopySpiderRow {
   source: string
   sg: number
@@ -58,7 +57,7 @@ function classify(si: number): string {
   return "PULAR"
 }
 
-export const bancaPlagio = tool({
+export const bancaPlagio = defineBancaTool({
   description: "Parse CopySpider report, classify similarity by severity, map to manuscript.",
   args: {
     reportPath: z.string().describe("Path to CopySpider report (HTML or PDF). If relative, resolved inside projectRoot. If absolute, validated to ensure it resides inside projectRoot."),
@@ -67,15 +66,9 @@ export const bancaPlagio = tool({
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory
     
-    let finalReportPath: string
-    if (isAbsolute(args.reportPath)) {
-      assertInsideRoot(root, args.reportPath)
-      finalReportPath = resolve(args.reportPath)
-    } else {
-      finalReportPath = resolveInsideRoot(root, args.reportPath)
-    }
+    const finalReportPath = resolveRealInsideRoot(root, args.reportPath)
 
-    if (!existsSync(finalReportPath)) return "report not found"
+    if (!existsSync(finalReportPath) || !lstatSync(finalReportPath).isFile()) return "report not found"
 
     const config = loadConfig(root)
     const paths = resolveManuscriptPaths(root, config)

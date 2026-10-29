@@ -168,7 +168,7 @@ export function validateAllAgents(agentsDir: string): string[] {
 }
 
 if (import.meta.main) {
-  const dir = process.env.AGENTS_DIR || "assets/opencode/agents";
+  const dir = process.env.AGENTS_DIR || "assets/dsh/agents";
   const errs = validateAllAgents(dir);
 
   if (errs.length > 0) {

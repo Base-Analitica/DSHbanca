@@ -9,6 +9,8 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Corrigido
 
+- Runner E2E nativo DSH (`scripts/e2e-dsh-profile.ts`): compatibilidade com pnpm 12 nativo (`pnpm-native`) e entrypoints JavaScript (`.cjs`/`.mjs`), validação estrita de manifesto `package.json` (`name: "pnpm"`), confinamento de entrypoints, coerência de versão com cache, fail-closed e rejeição do dispatcher Corepack (#32).
+- Integração nativa DSH registra as 16 ferramentas `banca_*`, com schemas, validação e diretório da sessão; catálogo compartilhado com OpenCode e regressão do bundle compilado.
 - `banca_corrigir`: substituição agora usa `replaceAll` em vez de `replace` (string), que substituía apenas a primeira ocorrência — correções repetidas no manuscrito eram silenciosamente dropadas
 - `banca_corrigir`: adicionado campo opcional `expectedOccurrences` no schema de correção; quando o count real difere do esperado, um warning `⚠` é emitido no resultado
 - `banca_corrigir`: resultado agora reporta quantas substituições foram feitas por arquivo (`✓ file (N replacements)`)
@@ -23,6 +25,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Segurança
 
+- E2E legado OpenCode deixa de iniciar no `bun test` padrão; execução de modelo e uso/cópia de credenciais exigem opt-ins separados e modelo explicitamente selecionado.
 - Reduzido risco de execução shell na compilação LaTeX (validação de engines, argumentos separados)
 - Auto-registro de dependência externa (crossref-academic via `uvx`) deixou de ser comportamento padrão
 - Script check-secrets.sh: modo `--ci` detecta chaves reais sem falso positivo em documentação
