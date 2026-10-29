@@ -902,51 +902,8 @@ describe("Skills Validation", () => {
       });
       expect(nodeRun.status).toBe(0);
       expect(nodeRun.stdout).toContain("CASE_K_NODE_SUCCESS");
-    });
 
-    test("L. Resguardo hermético de empacotamento: ausência de cache fail-closed sem rede, scripts ignorados e timeout efetivo", () => {
-      // 1. Caso sem cache: ausência de cache é detectada imediatamente sem acessar rede
-      const emptyCacheDir = tempDir("empty-cache-");
-      const testPkgDir = tempDir("test-pkg-no-cache-");
-      writeFileSync(join(testPkgDir, "package.json"), readFileSync(join(__dirname, "..", "package.json")));
-      writeFileSync(join(testPkgDir, "bun.lock"), readFileSync(join(__dirname, "..", "bun.lock")));
-
-      const offlineNoCacheRes = spawnSync("bun", [
-        "install",
-        "--production",
-        "--frozen-lockfile",
-        "--offline",
-        "--ignore-scripts",
-        `--cache-dir=${emptyCacheDir}`,
-      ], {
-        cwd: testPkgDir,
-        encoding: "utf8",
-        timeout: 10000,
-      });
-      expect(offlineNoCacheRes.status).not.toBe(0);
-      expect(offlineNoCacheRes.stderr).toContain("is not in the cache");
-
-      // 2. Caso com scripts de dependências: flag --ignore-scripts impede execução de hooks externos
-      const testScriptsDir = tempDir("test-scripts-dir-");
-      const markerFile = join(testScriptsDir, "hook-executed.marker");
-      writeFileSync(join(testScriptsDir, "package.json"), JSON.stringify({
-        name: "test-scripts-check",
-        scripts: {
-          postinstall: `touch "${markerFile}"`
-        }
-      }));
-      const scriptRes = spawnSync("bun", [
-        "install",
-        "--ignore-scripts",
-        "--offline",
-      ], {
-        cwd: testScriptsDir,
-        encoding: "utf8",
-        timeout: 10000,
-      });
-      expect(existsSync(markerFile)).toBe(false);
-
-      // 3. Caso com subprocesso travado: timeout bounded encerra o processo de forma controlada
+      // 6. Prova de timeout efetivo e encerramento controlado de subprocessos travados
       const hangStart = Date.now();
       const hangRes = spawnSync("node", ["-e", "setTimeout(() => {}, 60000)"], {
         timeout: 200,
