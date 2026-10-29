@@ -18,23 +18,37 @@ const EXPECTED_SKILLS = [
 ];
 
 describe("Skills Validation", () => {
+  const canonicalSkillsDir = join(__dirname, "..", "skills");
   const versionedSkillsDir = join(__dirname, "..", "assets", "dsh", "skills");
 
-  test("1 & 2. all versioned skills are valid and names match directories", () => {
-    const errors = validateAllSkills(versionedSkillsDir);
+  test("1 & 2. all canonical skills in skills/ are valid and names match directories", () => {
+    const errors = validateAllSkills(canonicalSkillsDir);
     expect(errors).toHaveLength(0);
   });
 
-  test("3. all names are unique", () => {
-    const errors = validateAllSkills(versionedSkillsDir);
+  test("3. all names in skills/ are unique", () => {
+    const errors = validateAllSkills(canonicalSkillsDir);
     const duplicates = errors.filter(e => e.message.includes("Duplicate skill name"));
     expect(duplicates).toHaveLength(0);
   });
 
-  test("4. all have valid description", () => {
-     const errors = validateAllSkills(versionedSkillsDir);
+  test("4. all skills in skills/ have valid description", () => {
+     const errors = validateAllSkills(canonicalSkillsDir);
      const descErrors = errors.filter(e => e.message.includes("description"));
      expect(descErrors).toHaveLength(0);
+  });
+
+  test("canonical skills/ contains exactly the 8 expected skills", () => {
+    const dirs = readdirSync(canonicalSkillsDir, { withFileTypes: true })
+      .filter((d: any) => d.isDirectory())
+      .map((d: any) => d.name);
+    expect(dirs.length).toBe(8);
+    expect([...dirs].sort()).toEqual([...EXPECTED_SKILLS].sort());
+  });
+
+  test("all mirror skills in assets/dsh/skills are valid", () => {
+    const errors = validateAllSkills(versionedSkillsDir);
+    expect(errors).toHaveLength(0);
   });
 
   describe("Invalid fixtures rejection", () => {
@@ -283,18 +297,115 @@ describe("Skills Validation", () => {
   });
 
   describe("CLI Execution", () => {
-    test("valid directory exits with 0", () => {
-        const result = spawnSync("bun", ["run", "scripts/validate-skills.ts"], {
-            env: { ...process.env, SKILLS_DIR: join(__dirname, "..", "assets", "dsh", "skills") }
-        });
-        expect(result.status).toBe(0);
+    const scriptPath = join(__dirname, "..", "scripts", "validate-skills.ts");
+    const cliFixturesDir = mkdtempSync(join(tmpdir(), "skills-cli-fixtures-"));
+
+    afterAll(() => {
+      rmSync(cliFixturesDir, { recursive: true, force: true });
     });
 
-    test("invalid directory exits with non-zero", () => {
-        const result = spawnSync("bun", ["run", "scripts/validate-skills.ts"], {
-            env: { ...process.env, SKILLS_DIR: join(__dirname, "does-not-exist") }
-        });
-        expect(result.status).not.toBe(0);
+    function runCli(cwd: string, envOverrides: Record<string, string | undefined> = {}) {
+      const env = { ...process.env, ...envOverrides };
+      if (!("SKILLS_DIR" in envOverrides)) {
+        delete env.SKILLS_DIR;
+      }
+      return spawnSync("bun", ["run", scriptPath], {
+        cwd,
+        env,
+        encoding: "utf8",
+      });
+    }
+
+    test("1. skills/ invalido + espelho valido -> FAIL", () => {
+      const testDir = join(cliFixturesDir, "case1-invalid-canonical");
+      const invalidSkillDir = join(testDir, "skills", "banca-avaliacao");
+      const validMirrorDir = join(testDir, "assets", "dsh", "skills", "banca-avaliacao");
+      mkdirSync(invalidSkillDir, { recursive: true });
+      mkdirSync(validMirrorDir, { recursive: true });
+      writeFileSync(join(invalidSkillDir, "SKILL.md"), "INVALID FRONTMATTER CONTENT");
+      writeFileSync(
+        join(validMirrorDir, "SKILL.md"),
+        "---\nname: banca-avaliacao\ndescription: valid\n---\n# Valid"
+      );
+
+      const res = runCli(testDir);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("Skill validation failed:");
+    });
+
+    test("2. skills/ valido + espelho invalido -> PASS", () => {
+      const testDir = join(cliFixturesDir, "case2-valid-canonical");
+      const validSkillDir = join(testDir, "skills", "banca-avaliacao");
+      const invalidMirrorDir = join(testDir, "assets", "dsh", "skills", "banca-avaliacao");
+      mkdirSync(validSkillDir, { recursive: true });
+      mkdirSync(invalidMirrorDir, { recursive: true });
+      writeFileSync(
+        join(validSkillDir, "SKILL.md"),
+        "---\nname: banca-avaliacao\ndescription: valid\n---\n# Valid"
+      );
+      writeFileSync(join(invalidMirrorDir, "SKILL.md"), "INVALID FRONTMATTER CONTENT");
+
+      const res = runCli(testDir);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("All skills are valid.");
+    });
+
+    test("3. skills/ inexistente -> FAIL", () => {
+      const testDir = join(cliFixturesDir, "case3-missing-canonical");
+      mkdirSync(testDir, { recursive: true });
+
+      const res = runCli(testDir);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("Base directory does not exist");
+    });
+
+    test("4. diretorio vazio -> FAIL", () => {
+      const testDir = join(cliFixturesDir, "case4-empty-canonical");
+      mkdirSync(join(testDir, "skills"), { recursive: true });
+
+      const res = runCli(testDir);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("Skills directory is empty");
+    });
+
+    test("5. diretorio de skill sem SKILL.md -> FAIL", () => {
+      const testDir = join(cliFixturesDir, "case5-no-skill-md");
+      mkdirSync(join(testDir, "skills", "banca-avaliacao"), { recursive: true });
+
+      const res = runCli(testDir);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("Skill directory without SKILL.md");
+    });
+
+    test("6. oito skills reais validas em skills/ -> PASS (CLI default no repo root)", () => {
+      const repoRoot = join(__dirname, "..");
+      const res = runCli(repoRoot);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain("All skills are valid.");
+    });
+
+    test("7. override explicito SKILLS_DIR -> mantem o comportamento previsto", () => {
+      const repoRoot = join(__dirname, "..");
+
+      // Override with valid directory
+      const validRes = runCli(repoRoot, {
+        SKILLS_DIR: join(repoRoot, "skills"),
+      });
+      expect(validRes.status).toBe(0);
+      expect(validRes.stdout).toContain("All skills are valid.");
+
+      // Override with mirror directory
+      const mirrorRes = runCli(repoRoot, {
+        SKILLS_DIR: join(repoRoot, "assets", "dsh", "skills"),
+      });
+      expect(mirrorRes.status).toBe(0);
+
+      // Override with non-existent directory
+      const invalidRes = runCli(repoRoot, {
+        SKILLS_DIR: join(cliFixturesDir, "does-not-exist"),
+      });
+      expect(invalidRes.status).not.toBe(0);
+      expect(invalidRes.stderr).toContain("Base directory does not exist");
     });
   });
 });
