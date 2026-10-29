@@ -1,8 +1,8 @@
-import { describe, expect, test, beforeAll, afterAll } from "bun:test";
+import { describe, expect, test, beforeAll, afterAll, afterEach } from "bun:test";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
-import { readFileSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, mkdtempSync } from "fs";
+import { readFileSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, mkdtempSync, symlinkSync } from "fs";
 import { validateSkill, validateAllSkills } from "../scripts/validate-skills";
 import { installAssets } from "../src/lib/install_assets";
 
@@ -406,6 +406,301 @@ describe("Skills Validation", () => {
       });
       expect(invalidRes.status).not.toBe(0);
       expect(invalidRes.stderr).toContain("Base directory does not exist");
+    });
+  });
+
+  describe("Canonical Skill Installer (#40)", () => {
+    const canonicalSkillsDir = join(__dirname, "..", "skills");
+    const testRoots: string[] = [];
+
+    afterEach(() => {
+      while (testRoots.length > 0) {
+        const root = testRoots.pop();
+        if (root && existsSync(root)) {
+          rmSync(root, { recursive: true, force: true });
+        }
+      }
+    });
+
+    function tempDir(prefix: string): string {
+      const dir = mkdtempSync(join(tmpdir(), prefix));
+      testRoots.push(dir);
+      return dir;
+    }
+
+    function projectInventory(root: string): Record<string, string> {
+      const inventory: Record<string, string> = {};
+      const walk = (directory: string, prefix = "") => {
+        if (!existsSync(directory)) return;
+        for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+          const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+          const p = join(directory, entry.name);
+          if (entry.isDirectory()) walk(p, rel);
+          else inventory[rel] = entry.isFile() ? readFileSync(p, "utf8") : "<non-regular>";
+        }
+      };
+      walk(root);
+      return inventory;
+    }
+
+    test("A. Instalação normal: 8 skills com hashes idênticos aos arquivos canônicos", () => {
+      const project = tempDir("case-a-normal-");
+      const installed = installAssets(project, true);
+      expect(installed.length).toBeGreaterThan(0);
+
+      const installedSkillsDir = join(project, ".dsh", "skills");
+      for (const skill of EXPECTED_SKILLS) {
+        const installedPath = join(installedSkillsDir, skill, "SKILL.md");
+        const canonicalPath = join(canonicalSkillsDir, skill, "SKILL.md");
+        expect(existsSync(installedPath)).toBe(true);
+
+        const installedHash = new Bun.CryptoHasher("sha256").update(readFileSync(installedPath)).digest("hex");
+        const canonicalHash = new Bun.CryptoHasher("sha256").update(readFileSync(canonicalPath)).digest("hex");
+        expect(installedHash).toBe(canonicalHash);
+      }
+    });
+
+    test("B. Fallback sem assets: customAssetsDir inexistente ainda provê as 8 skills canônicas", () => {
+      const project = tempDir("case-b-fallback-");
+      const nonexistentAssets = join(project, "no-such-assets-dir");
+      const installed = installAssets(project, true, nonexistentAssets);
+      expect(installed.length).toBeGreaterThan(0);
+
+      const installedSkillsDir = join(project, ".dsh", "skills");
+      for (const skill of EXPECTED_SKILLS) {
+        const installedPath = join(installedSkillsDir, skill, "SKILL.md");
+        const canonicalPath = join(canonicalSkillsDir, skill, "SKILL.md");
+        expect(existsSync(installedPath)).toBe(true);
+
+        const installedHash = new Bun.CryptoHasher("sha256").update(readFileSync(installedPath)).digest("hex");
+        const canonicalHash = new Bun.CryptoHasher("sha256").update(readFileSync(canonicalPath)).digest("hex");
+        expect(installedHash).toBe(canonicalHash);
+      }
+
+      // Provar eliminação da constante duplicada SKILLS no código fonte
+      const installerSource = readFileSync(join(__dirname, "..", "src", "lib", "install_assets.ts"), "utf8");
+      expect(installerSource).not.toMatch(/\bconst\s+SKILLS\b/);
+    });
+
+    test("C. Fonte canônica inválida com espelho válido: instalação rejeitada", () => {
+      const project = tempDir("case-c-invalid-canonical-");
+      const invalidCanonical = tempDir("invalid-canonical-skills-");
+
+      // Criar 7 skills válidas e 1 ausente
+      for (const skill of EXPECTED_SKILLS.slice(1)) {
+        const sDir = join(invalidCanonical, skill);
+        mkdirSync(sDir, { recursive: true });
+        writeFileSync(join(sDir, "SKILL.md"), readFileSync(join(canonicalSkillsDir, skill, "SKILL.md")));
+      }
+
+      const before = projectInventory(project);
+      expect(() => {
+        // Passar canonical dir inválido (4º argumento)
+        (installAssets as any)(project, true, undefined, invalidCanonical);
+      }).toThrow(/canonical skill.*missing|canonical skills directory/i);
+
+      expect(projectInventory(project)).toEqual(before);
+
+      // Agora com SKILL.md com frontmatter inválido
+      const corruptCanonical = tempDir("corrupt-canonical-skills-");
+      for (const skill of EXPECTED_SKILLS) {
+        const sDir = join(corruptCanonical, skill);
+        mkdirSync(sDir, { recursive: true });
+        if (skill === "banca-avaliacao") {
+          writeFileSync(join(sDir, "SKILL.md"), "NO_FRONTMATTER_CORRUPT_SKILL");
+        } else {
+          writeFileSync(join(sDir, "SKILL.md"), readFileSync(join(canonicalSkillsDir, skill, "SKILL.md")));
+        }
+      }
+
+      expect(() => {
+        (installAssets as any)(project, true, undefined, corruptCanonical);
+      }).toThrow(/canonical skill.*frontmatter|invalid/i);
+    });
+
+    test("D. Espelho divergente com canônica válida: instalador não usa o espelho divergente", () => {
+      const project = tempDir("case-d-mirror-divergent-");
+      const customAssets = tempDir("custom-assets-with-tampered-mirror-");
+
+      // Copiar agents, commands, templates válidos
+      const defaultAssets = join(__dirname, "..", "assets");
+      mkdirSync(join(customAssets, "dsh", "agents"), { recursive: true });
+      mkdirSync(join(customAssets, "dsh", "commands"), { recursive: true });
+      mkdirSync(join(customAssets, "templates"), { recursive: true });
+
+      for (const agent of readdirSync(join(defaultAssets, "dsh", "agents"))) {
+        writeFileSync(join(customAssets, "dsh", "agents", agent), readFileSync(join(defaultAssets, "dsh", "agents", agent)));
+      }
+      for (const cmd of readdirSync(join(defaultAssets, "dsh", "commands"))) {
+        writeFileSync(join(customAssets, "dsh", "commands", cmd), readFileSync(join(defaultAssets, "dsh", "commands", cmd)));
+      }
+      for (const tpl of readdirSync(join(defaultAssets, "templates"))) {
+        writeFileSync(join(customAssets, "templates", tpl), readFileSync(join(defaultAssets, "templates", tpl)));
+      }
+
+      // Adicionar espelho adulterado em dsh/skills
+      mkdirSync(join(customAssets, "dsh", "skills", "banca-avaliacao"), { recursive: true });
+      writeFileSync(
+        join(customAssets, "dsh", "skills", "banca-avaliacao", "SKILL.md"),
+        "---\nname: banca-avaliacao\ndescription: TAMPERED_MIRROR_SKILL\n---\n# Tampered Content\n",
+      );
+
+      installAssets(project, true, customAssets);
+
+      const installedSkill = readFileSync(join(project, ".dsh", "skills", "banca-avaliacao", "SKILL.md"), "utf8");
+      expect(installedSkill).not.toContain("TAMPERED_MIRROR_SKILL");
+      expect(installedSkill).not.toContain("Tampered Content");
+
+      const canonicalSkill = readFileSync(join(canonicalSkillsDir, "banca-avaliacao", "SKILL.md"), "utf8");
+      expect(installedSkill).toBe(canonicalSkill);
+    });
+
+    test("E. Assets incompletos: falha controlada antes de modificações parciais", () => {
+      const project = tempDir("case-e-incomplete-assets-");
+      const incompleteAssets = tempDir("incomplete-assets-dir-");
+      // Cria diretório dsh/agents vazio (sem banca-auditor.md nem outros agents)
+      mkdirSync(join(incompleteAssets, "dsh", "agents"), { recursive: true });
+
+      const before = projectInventory(project);
+      expect(() => {
+        installAssets(project, true, incompleteAssets);
+      }).toThrow(/incomplete|missing/i);
+
+      expect(projectInventory(project)).toEqual(before);
+    });
+
+    test("F. Symlinks e paths protegidos: bloqueio sem escrita externa", () => {
+      const project = tempDir("case-f-symlink-proj-");
+      const external = tempDir("case-f-external-");
+
+      // Destino .dsh/skills symlink para fora
+      mkdirSync(join(project, ".dsh"), { recursive: true });
+      const externalSkills = join(external, "external-skills");
+      mkdirSync(externalSkills, { recursive: true });
+      const destSkills = join(project, ".dsh", "skills");
+      symlinkSync(externalSkills, destSkills);
+
+      const extBefore = projectInventory(external);
+      expect(() => installAssets(project, true)).toThrow();
+      expect(projectInventory(external)).toEqual(extBefore);
+
+      // Symlink em skill file individual
+      const project2 = tempDir("case-f-symlink-file-");
+      const extFile = join(external, "target-skill.md");
+      writeFileSync(extFile, "EXTERNAL_ORIGINAL_CONTENT");
+      mkdirSync(join(project2, ".dsh", "skills", "banca-avaliacao"), { recursive: true });
+      symlinkSync(extFile, join(project2, ".dsh", "skills", "banca-avaliacao", "SKILL.md"));
+
+      expect(() => installAssets(project2, true)).toThrow(/must be a regular file|escapes workspace root/i);
+      expect(readFileSync(extFile, "utf8")).toBe("EXTERNAL_ORIGINAL_CONTENT");
+    });
+
+    test("G. Instalação repetida, idempotência e proteção contra sobrescrita de dados do usuário", () => {
+      const project = tempDir("case-g-idempotence-");
+
+      // 1ª execução
+      const firstRun = installAssets(project, false);
+      expect(firstRun.length).toBeGreaterThan(0);
+
+      // 2ª execução sem force -> idempotente
+      const secondRun = installAssets(project, false);
+      expect(secondRun.length).toBe(0);
+
+      // Simular arquivo de skill customizado pelo usuário (drift)
+      const customizedSkill = join(project, ".dsh", "skills", "banca-avaliacao", "SKILL.md");
+      writeFileSync(customizedSkill, "---\nname: banca-avaliacao\ndescription: USER_CUSTOMIZED\n---\n# User\n");
+
+      // Tentativa com force: false -> bloqueado
+      expect(() => installAssets(project, false)).toThrow(/differs from the canonical source/i);
+      expect(readFileSync(customizedSkill, "utf8")).toContain("USER_CUSTOMIZED");
+
+      // Tentativa com force: true -> TAMBÉM bloqueado (force não autoriza sobrescrever dados do usuário)
+      expect(() => installAssets(project, true)).toThrow(/differs from the canonical source/i);
+      expect(readFileSync(customizedSkill, "utf8")).toContain("USER_CUSTOMIZED");
+
+      // Adicionar skill customizada do usuário no workspace (.dsh/skills/minha-skill/SKILL.md)
+      // Deve ser preservada sem ser apagada
+      const customUserSkillDir = join(project, ".dsh", "skills", "minha-skill");
+      mkdirSync(customUserSkillDir, { recursive: true });
+      const customUserSkillFile = join(customUserSkillDir, "SKILL.md");
+      writeFileSync(customUserSkillFile, "---\nname: minha-skill\ndescription: custom\n---\n# Custom\n");
+
+      // Restaurar banca-avaliacao para o canônico para testar preservação de custom-skill
+      writeFileSync(customizedSkill, readFileSync(join(canonicalSkillsDir, "banca-avaliacao", "SKILL.md")));
+
+      installAssets(project, false);
+      expect(existsSync(customUserSkillFile)).toBe(true);
+      expect(readFileSync(customUserSkillFile, "utf8")).toContain("minha-skill");
+    });
+
+    test("H. Empacotamento: pacote construído contém a fonte canônica e instalador resolve em dist", () => {
+      const project = tempDir("case-h-pack-");
+
+      // Compilar dist
+      const buildRes = spawnSync("bun", ["run", "build"], { cwd: join(__dirname, ".."), encoding: "utf8" });
+      expect(buildRes.status).toBe(0);
+
+      // Verificar que dist/lib/install_assets.js existe
+      const distInstaller = join(__dirname, "..", "dist", "lib", "install_assets.js");
+      expect(existsSync(distInstaller)).toBe(true);
+
+      // Verificar arquivos incluídos no pacote via npm pack --dry-run --json
+      const packRes = spawnSync("npm", ["pack", "--dry-run", "--json"], { cwd: join(__dirname, ".."), encoding: "utf8" });
+      expect(packRes.status).toBe(0);
+      const [packInfo] = JSON.parse(packRes.stdout);
+      const packedPaths = new Set(packInfo.files.map((f: any) => f.path));
+      for (const skill of EXPECTED_SKILLS) {
+        expect(packedPaths.has(`skills/${skill}/SKILL.md`)).toBe(true);
+      }
+
+      // Executar instalador a partir de dist/lib/install_assets.js
+      const distModule = require(distInstaller);
+      const installed = distModule.installAssets(project, true);
+      expect(installed.length).toBeGreaterThan(0);
+
+      for (const skill of EXPECTED_SKILLS) {
+        const installedPath = join(project, ".dsh", "skills", skill, "SKILL.md");
+        expect(existsSync(installedPath)).toBe(true);
+        const installedHash = new Bun.CryptoHasher("sha256").update(readFileSync(installedPath)).digest("hex");
+        const canonicalHash = new Bun.CryptoHasher("sha256").update(readFileSync(join(canonicalSkillsDir, skill, "SKILL.md"))).digest("hex");
+        expect(installedHash).toBe(canonicalHash);
+      }
+    });
+
+    test("I. Reversibilidade comprovada em fixture: estado anterior, instalação canônica e reversão verificada", () => {
+      const project = tempDir("case-i-reversibility-");
+
+      // 1. Estado anterior da instalação em fixture
+      const initialInventory = projectInventory(project);
+      expect(Object.keys(initialInventory)).toHaveLength(0);
+
+      // 2. Instalação canônica
+      const installed = installAssets(project, false);
+      expect(installed.length).toBeGreaterThan(0);
+
+      // 3. Verificação de conteúdo e fingerprints das 8 skills
+      const installedFingerprints: Record<string, string> = {};
+      for (const skill of EXPECTED_SKILLS) {
+        const skillPath = join(project, ".dsh", "skills", skill, "SKILL.md");
+        expect(existsSync(skillPath)).toBe(true);
+        const hash = new Bun.CryptoHasher("sha256").update(readFileSync(skillPath)).digest("hex");
+        installedFingerprints[skill] = hash;
+        const canonicalHash = new Bun.CryptoHasher("sha256").update(readFileSync(join(canonicalSkillsDir, skill, "SKILL.md"))).digest("hex");
+        expect(hash).toBe(canonicalHash);
+      }
+
+      // 4. Procedimento de reversão: remoção controlada dos assets instalados
+      for (const path of installed) {
+        if (existsSync(path)) {
+          rmSync(path, { force: true });
+        }
+      }
+      rmSync(join(project, ".dsh"), { recursive: true, force: true });
+      rmSync(join(project, ".banca"), { recursive: true, force: true });
+
+      // 5. Verificação de restauração do estado inicial
+      const finalInventory = projectInventory(project);
+      expect(finalInventory).toEqual(initialInventory);
     });
   });
 });
