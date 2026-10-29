@@ -22,12 +22,18 @@ import { renderControlPresetSelector } from "./lib/dsh-profile-e2e-observer-cont
 import {
   canonicalAuditorMarkdownSha256,
   expectedTools,
+  expectedNativeSkills,
+  expectedNativeSkillProvider,
+  canonicalNativeSkills,
   missingHostExitCode,
   passExitCode,
   failureExitCode,
   classifyAuditorMarkdownStatus,
+  classifyNativeSkillsStatus,
   classifyProfileGateStatuses,
+  captureNativeSkillsEvidence,
   validateAuditorMarkdownEvidence,
+  validateNativeSkillsEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -87,6 +93,7 @@ const report: GateReport = {
     dsh: null,
     cordis: null,
     cordisPluginLoader: null,
+    dshSkill: null,
     dshAgent: null,
     dshAgentLoop: null,
     dshTools: null,
@@ -103,8 +110,8 @@ const report: GateReport = {
   failures: [],
   limitations: [
     "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
-    "O resultado da identidade/guard (#2) e o carregamento das instruções Markdown (#3) são reportados separadamente.",
-    "A sonda ativa agent/pre-step exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
+    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3) e a descoberta/carregamento das skills nativas (#38) são reportados separadamente.",
+    "A sonda ativa agent/pre-step e skills nativas exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
   ],
 }
 
@@ -407,6 +414,67 @@ import { join } from "node:path";
 export const name = ${JSON.stringify(observerName)};
 export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections"];
 const expected = ${JSON.stringify(expectedTools)};
+const expectedNativeSkillsList = [
+  "banca-avaliacao",
+  "banca-correcao",
+  "banca-detector-ia",
+  "banca-grille",
+  "banca-plagio",
+  "banca-planejador",
+  "banca-referencias",
+  "banca-revisor"
+];
+const expectedNativeSkillProvider = "dshbanca";
+const canonicalNativeSkillsMeta = {
+  "banca-avaliacao": {
+    "sourcePath": "skills/banca-avaliacao/SKILL.md",
+    "sourceSha256": "60bdcd97061da7748f7d1f9d6d7999fd62afac9b1269bf089eb23da7aab7c85e",
+    "bodySha256": "840e88e69a1d816fb24514d92fe0f1dac43098d16a7517fffb1e62e08f0b7a47",
+    "bodyLength": 7589
+  },
+  "banca-correcao": {
+    "sourcePath": "skills/banca-correcao/SKILL.md",
+    "sourceSha256": "d0a05d3feb78f5ef05615a48892b3c5cdc88fc589b3fc2100f2d78a0a32d45c7",
+    "bodySha256": "330b72a1154c2b0c2c4db9257817f8583c29e5d0e43d1442fe79eecfc3598bd3",
+    "bodyLength": 1924
+  },
+  "banca-detector-ia": {
+    "sourcePath": "skills/banca-detector-ia/SKILL.md",
+    "sourceSha256": "db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b",
+    "bodySha256": "69be0b5a2debf9dc3b177e9a593928d82421caa4985e9d6b1ce6de8469fa8eb5",
+    "bodyLength": 1537
+  },
+  "banca-grille": {
+    "sourcePath": "skills/banca-grille/SKILL.md",
+    "sourceSha256": "c22d6bd6598117c491176fd1366c9c3974104bc3a349ebe791b1051f79682aa1",
+    "bodySha256": "46d86bfd7ad6cda4bc58f79961db784e71e4a50192b35acde882fe2756ec9f6e",
+    "bodyLength": 1691
+  },
+  "banca-plagio": {
+    "sourcePath": "skills/banca-plagio/SKILL.md",
+    "sourceSha256": "1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661",
+    "bodySha256": "c1131ca56ac512d4182db27b35845930bde9fc7a401707b6aa19acc1e0ce1a6c",
+    "bodyLength": 1913
+  },
+  "banca-planejador": {
+    "sourcePath": "skills/banca-planejador/SKILL.md",
+    "sourceSha256": "d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64",
+    "bodySha256": "f5a9e935b54f027f9f82f936cd692ef6b952b4e583546169b85b2fd5fd00a20e",
+    "bodyLength": 1856
+  },
+  "banca-referencias": {
+    "sourcePath": "skills/banca-referencias/SKILL.md",
+    "sourceSha256": "b5b73abbbae029adc82980b2045c705b091b1629a44d14efab92aa731008d36b",
+    "bodySha256": "d41cad0de66968a7fc1d74e0b8223326e6f6e73ac965c3b31f93d65c8e7c3ed8",
+    "bodyLength": 1702
+  },
+  "banca-revisor": {
+    "sourcePath": "skills/banca-revisor/SKILL.md",
+    "sourceSha256": "deb90fe58a8d334bddd9f4dc66810cb5c57621cc63bad313c44c199c042de798",
+    "bodySha256": "126b884ba795ea9c66f50ba18a4a1a2dfe7382bfba00107db76114cb30242216",
+    "bodyLength": 2042
+  }
+};
 const auditorMarkdownSourceSha256 = ${JSON.stringify(auditorMarkdownSourceSha256)};
 const auditorMarkdownSourceSha1 = ${JSON.stringify(auditorMarkdownSourceSha1)};
 const sha = async (path) => createHash("sha256").update(await readFile(path)).digest("hex");
@@ -465,20 +533,147 @@ const decoyOutput = {
 };
 ${renderControlPresetSelector(e2eControlPresetId)}
 
+export async function captureNativeSkillsEvidence(ctx, workspace) {
+  const signal = new AbortController().signal;
+  let observedCatalog = [];
+  let catalogSnapshotComplete = false;
+  const hostApiAvailable =
+    typeof ctx.skills?.snapshot === "function" &&
+    typeof ctx.skills?.list === "function" &&
+    typeof ctx.skills?.get === "function";
+
+  if (typeof ctx.skills?.snapshot === "function") {
+    try {
+      const snap = await ctx.skills.snapshot({ cwd: workspace, signal });
+      if (snap && typeof snap === "object" && !Array.isArray(snap) && Array.isArray(snap.skills)) {
+        observedCatalog = snap.skills;
+        catalogSnapshotComplete = snap.complete === true;
+      } else {
+        observedCatalog = [];
+        catalogSnapshotComplete = false;
+      }
+    } catch {
+      observedCatalog = typeof ctx.skills?.list === "function"
+        ? (await ctx.skills.list({ cwd: workspace, signal }).catch(() => []))
+        : [];
+      catalogSnapshotComplete = false;
+    }
+  } else if (typeof ctx.skills?.list === "function") {
+    try {
+      const list = await ctx.skills.list({ cwd: workspace, signal });
+      observedCatalog = Array.isArray(list) ? list : [];
+    } catch {
+      observedCatalog = [];
+    }
+    catalogSnapshotComplete = false;
+  }
+
+  const evidence = {
+    hostApiAvailable,
+    catalogComplete: catalogSnapshotComplete,
+    totalSkillsObserved: observedCatalog.length,
+    allDiscovered: false,
+    allLoaded: false,
+    allIntegrityVerified: false,
+    skills: {},
+  };
+
+  if (evidence.hostApiAvailable) {
+    let allDiscovered = true;
+    let allLoaded = true;
+    let allIntegrityVerified = true;
+
+    for (const skillName of expectedNativeSkillsList) {
+      const canonical = canonicalNativeSkillsMeta[skillName];
+      const winningSummary = observedCatalog.find((row) => row && row.name === skillName);
+      const discovered = winningSummary !== undefined;
+      if (!discovered) allDiscovered = false;
+
+      let loaded = false;
+      let contentSha256 = null;
+      let contentBytes = null;
+      let integrityVerified = false;
+
+      if (discovered && typeof ctx.skills?.get === "function") {
+        try {
+          const loadSignal = new AbortController().signal;
+          const loadedDef = await ctx.skills.get(skillName, { cwd: workspace, signal: loadSignal });
+          if (loadedDef && typeof loadedDef === "object" && typeof loadedDef.content === "string") {
+            loaded = true;
+            contentBytes = Buffer.byteLength(loadedDef.content, "utf8");
+            contentSha256 = createHash("sha256").update(loadedDef.content).digest("hex");
+            integrityVerified = contentSha256 === canonical.bodySha256;
+          }
+        } catch {
+          loaded = false;
+        }
+      }
+
+      if (!loaded) allLoaded = false;
+      if (!integrityVerified) allIntegrityVerified = false;
+
+      evidence.skills[skillName] = {
+        name: skillName,
+        provider: typeof winningSummary?.provider === "string" ? winningSummary.provider : null,
+        sourcePath: canonical.sourcePath,
+        sourceSha256: canonical.sourceSha256,
+        canonicalBodySha256: canonical.bodySha256,
+        discovered,
+        loaded,
+        contentSha256,
+        contentBytes,
+        integrityVerified,
+      };
+    }
+
+    evidence.allDiscovered = allDiscovered;
+    evidence.allLoaded = allLoaded;
+    evidence.allIntegrityVerified = allIntegrityVerified;
+  }
+
+  return evidence;
+}
+
 export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
   const reportPath = ${JSON.stringify(observerResult)};
   let tools = [];
   let skillFound = false;
+
   for (let attempt = 0; attempt < 50; attempt++) {
     tools = ctx.tools.schemas().map((schema) => schema.name).filter((tool) => tool.startsWith("banca_")).sort();
-    const skillRows = await ctx.skills.list({ cwd: workspace, signal: new AbortController().signal });
-    skillFound = skillRows.some((skill) => skill.name === "banca-avaliacao");
-    if (JSON.stringify(tools) === JSON.stringify([...expected].sort()) && skillFound) break;
+    const listSignal = new AbortController().signal;
+    let observedCatalog = [];
+    let catalogSnapshotComplete = false;
+    if (typeof ctx.skills?.snapshot === "function") {
+      try {
+        const snap = await ctx.skills.snapshot({ cwd: workspace, signal: listSignal });
+        if (snap && typeof snap === "object" && !Array.isArray(snap) && Array.isArray(snap.skills)) {
+          observedCatalog = snap.skills;
+          catalogSnapshotComplete = snap.complete === true;
+        }
+      } catch {
+        observedCatalog = typeof ctx.skills?.list === "function" ? await ctx.skills.list({ cwd: workspace, signal: listSignal }).catch(() => []) : [];
+      }
+    } else if (typeof ctx.skills?.list === "function") {
+      try {
+        const list = await ctx.skills.list({ cwd: workspace, signal: listSignal });
+        observedCatalog = Array.isArray(list) ? list : [];
+      } catch {
+        observedCatalog = [];
+      }
+    }
+    skillFound = observedCatalog.some((skill) => skill && skill.name === "banca-avaliacao");
+    const allEightDiscovered = expectedNativeSkillsList.every((name) =>
+      observedCatalog.some((skill) => skill && skill.name === name)
+    );
+    if (JSON.stringify(tools) === JSON.stringify([...expected].sort()) && skillFound && allEightDiscovered && catalogSnapshotComplete) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (JSON.stringify(tools) !== JSON.stringify([...expected].sort())) fail("the DSH tools service did not discover the exact expected banca tool set; observed count=" + tools.length + " names=" + JSON.stringify(tools));
   if (!skillFound) fail("the DSH skills service did not discover banca-avaliacao");
+
+  const nativeSkillsEvidence = await captureNativeSkillsEvidence(ctx, workspace);
 
   const sessionController = ctx.get("sessionController");
   const presetRows = await ctx.agentPresets.list();
@@ -839,6 +1034,7 @@ export async function apply(ctx) {
       toolNames: tools,
       exactToolSet: true,
       skillFound,
+      nativeSkillsEvidence,
       executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status"],
       statusSucceeded,
       statusReadOnly: JSON.stringify(statusBefore) === JSON.stringify(statusAfter),
@@ -1055,6 +1251,7 @@ async function main(): Promise<void> {
   report.versions.cordisPluginLoader = JSON.parse(readFileSync(loaderManifestPath, "utf8")).version
 
   const hostPackageVersions = [
+    ["dshSkill", "@deepseek-ai/dsh-skill"],
     ["dshAgent", "@deepseek-ai/dsh-agent"],
     ["dshAgentLoop", "@deepseek-ai/dsh-agent-loop"],
     ["dshTools", "@deepseek-ai/dsh-tools"],
@@ -1240,11 +1437,44 @@ async function main(): Promise<void> {
     return
   }
 
+  const packagedSkillsVerification: Record<string, { exists: boolean; sourceSha256Matches: boolean }> = {}
+  let allPackagedSkillsValid = true
+  for (const skillName of expectedNativeSkills) {
+    const canonical = canonicalNativeSkills[skillName]
+    const absoluteSkillPath = join(repositoryRoot, canonical.sourcePath)
+    const exists = existsSync(absoluteSkillPath)
+    const matches = exists && hashFile(absoluteSkillPath) === canonical.sourceSha256
+    packagedSkillsVerification[skillName] = { exists, sourceSha256Matches: matches }
+    if (!exists || !matches) allPackagedSkillsValid = false
+  }
+  report.stages.packagedSkills = {
+    canonicalCount: expectedNativeSkills.length,
+    allPackagedSkillsValid,
+    verification: packagedSkillsVerification,
+  }
+  if (!allPackagedSkillsValid) {
+    fail("Packaged canonical skills in repository checkout are missing or tampered", "FAIL")
+    return
+  }
+
   if (process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED !== "yes") {
     report.stages.profileBoot = {
       status: "BLOCKED",
       started: false,
       reason: "new human authorization is required for the one-shot no-model Agent pre-step probe",
+    }
+    report.stages.nativeSkills = {
+      status: "BLOCKED",
+      hostContract: {
+        skillsRegistry: {
+          version: report.versions.dshSkill,
+          service: "ctx.skills",
+          list: "ctx.skills.list",
+          get: "ctx.skills.get",
+          snapshot: "ctx.skills.snapshot",
+        },
+      },
+      blocker: "Native skills probe is pending the separately authorized one-shot no-model execution.",
     }
     fail("BLOCKED: set DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes only after explicit maintainer authorization; no DSH lifecycle was started", "BLOCKED")
     return
@@ -1267,9 +1497,12 @@ async function main(): Promise<void> {
   const auditorMarkdownEvidence = observed.auditorMarkdownEvidence
   const auditorMarkdownErrors = validateAuditorMarkdownEvidence(auditorMarkdownEvidence)
   const auditorMarkdownStatus = classifyAuditorMarkdownStatus(auditorMarkdownEvidence)
+  const nativeSkillsEvidence = observed.nativeSkillsEvidence
+  const nativeSkillsErrors = validateNativeSkillsEvidence(nativeSkillsEvidence)
+  const nativeSkillsStatus = classifyNativeSkillsStatus(nativeSkillsEvidence)
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
-  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus)
+  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus)
   report.stages.gateSummary = gateStatuses
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
@@ -1294,6 +1527,23 @@ async function main(): Promise<void> {
     agentTeardown: observed.agentTeardown,
     externalActivity: observed.externalActivity,
     hostApiSurvey: observed.hostApiSurvey,
+  }
+  report.stages.nativeSkills = {
+    status: nativeSkillsStatus,
+    evidence: nativeSkillsEvidence,
+    validationErrors: nativeSkillsErrors,
+    hostContract: {
+      skillsRegistry: {
+        version: report.versions.dshSkill,
+        service: "ctx.skills",
+        list: "ctx.skills.list",
+        get: "ctx.skills.get",
+        snapshot: "ctx.skills.snapshot",
+      },
+    },
+    blocker: nativeSkillsStatus === "BLOCKED"
+      ? "Native skills probe is pending the separately authorized one-shot no-model probe."
+      : null,
   }
   report.stages.auditorMarkdown = {
     status: auditorMarkdownStatus,
@@ -1322,8 +1572,15 @@ async function main(): Promise<void> {
     fail(`Issue #3 auditor Markdown source/install integrity failed: ${auditorMarkdownErrors.join("; ")}`)
     return
   }
+  if (nativeSkillsStatus === "FAIL") {
+    fail(`Issue #38 native skills discovery/loading integrity failed: ${nativeSkillsErrors.join("; ")}`)
+    return
+  }
   if (auditorMarkdownStatus === "BLOCKED") {
     report.limitations.push("Issue #3 auditor Markdown loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
+  }
+  if (nativeSkillsStatus === "BLOCKED") {
+    report.limitations.push("Issue #38 native skills discovery/loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
   if (errors.length > 0) {
     fail(`Real DSH runtime evidence violated the profile contract: ${errors.join("; ")}`)
@@ -1390,8 +1647,11 @@ try {
 const auditorMarkdownStatus = typeof report.stages.auditorMarkdown === "object" && report.stages.auditorMarkdown !== null
   ? (report.stages.auditorMarkdown as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}\n`)
+const nativeSkillsStatus = typeof report.stages.nativeSkills === "object" && report.stages.nativeSkills !== null
+  ? (report.stages.nativeSkills as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
-if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
+if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Skill ${report.versions.dshSkill ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)
 process.exitCode = finalStatus === "PASS" ? passExitCode() : finalStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode()

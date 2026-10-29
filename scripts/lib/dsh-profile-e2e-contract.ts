@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 export const expectedTools = [
   "banca_init",
   "banca_status",
@@ -17,6 +19,79 @@ export const expectedTools = [
   "banca_contract",
 ] as const
 
+export const expectedNativeSkills = [
+  "banca-avaliacao",
+  "banca-correcao",
+  "banca-detector-ia",
+  "banca-grille",
+  "banca-plagio",
+  "banca-planejador",
+  "banca-referencias",
+  "banca-revisor",
+] as const
+
+export type ExpectedNativeSkillName = typeof expectedNativeSkills[number]
+
+export const expectedNativeSkillProvider = "dshbanca"
+
+export interface CanonicalNativeSkillDefinition {
+  sourcePath: string
+  sourceSha256: string
+  bodySha256: string
+  bodyLength: number
+}
+
+export const canonicalNativeSkills: Record<ExpectedNativeSkillName, CanonicalNativeSkillDefinition> = {
+  "banca-avaliacao": {
+    sourcePath: "skills/banca-avaliacao/SKILL.md",
+    sourceSha256: "60bdcd97061da7748f7d1f9d6d7999fd62afac9b1269bf089eb23da7aab7c85e",
+    bodySha256: "840e88e69a1d816fb24514d92fe0f1dac43098d16a7517fffb1e62e08f0b7a47",
+    bodyLength: 7589,
+  },
+  "banca-correcao": {
+    sourcePath: "skills/banca-correcao/SKILL.md",
+    sourceSha256: "d0a05d3feb78f5ef05615a48892b3c5cdc88fc589b3fc2100f2d78a0a32d45c7",
+    bodySha256: "330b72a1154c2b0c2c4db9257817f8583c29e5d0e43d1442fe79eecfc3598bd3",
+    bodyLength: 1924,
+  },
+  "banca-detector-ia": {
+    sourcePath: "skills/banca-detector-ia/SKILL.md",
+    sourceSha256: "db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b",
+    bodySha256: "69be0b5a2debf9dc3b177e9a593928d82421caa4985e9d6b1ce6de8469fa8eb5",
+    bodyLength: 1537,
+  },
+  "banca-grille": {
+    sourcePath: "skills/banca-grille/SKILL.md",
+    sourceSha256: "c22d6bd6598117c491176fd1366c9c3974104bc3a349ebe791b1051f79682aa1",
+    bodySha256: "46d86bfd7ad6cda4bc58f79961db784e71e4a50192b35acde882fe2756ec9f6e",
+    bodyLength: 1691,
+  },
+  "banca-plagio": {
+    sourcePath: "skills/banca-plagio/SKILL.md",
+    sourceSha256: "1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661",
+    bodySha256: "c1131ca56ac512d4182db27b35845930bde9fc7a401707b6aa19acc1e0ce1a6c",
+    bodyLength: 1913,
+  },
+  "banca-planejador": {
+    sourcePath: "skills/banca-planejador/SKILL.md",
+    sourceSha256: "d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64",
+    bodySha256: "f5a9e935b54f027f9f82f936cd692ef6b952b4e583546169b85b2fd5fd00a20e",
+    bodyLength: 1856,
+  },
+  "banca-referencias": {
+    sourcePath: "skills/banca-referencias/SKILL.md",
+    sourceSha256: "b5b73abbbae029adc82980b2045c705b091b1629a44d14efab92aa731008d36b",
+    bodySha256: "d41cad0de66968a7fc1d74e0b8223326e6f6e73ac965c3b31f93d65c8e7c3ed8",
+    bodyLength: 1702,
+  },
+  "banca-revisor": {
+    sourcePath: "skills/banca-revisor/SKILL.md",
+    sourceSha256: "deb90fe58a8d334bddd9f4dc66810cb5c57621cc63bad313c44c199c042de798",
+    bodySha256: "126b884ba795ea9c66f50ba18a4a1a2dfe7382bfba00107db76114cb30242216",
+    bodyLength: 2042,
+  },
+}
+
 /** Pinned source identity for this no-content-change validation slice. */
 export const canonicalAuditorMarkdownSha256 = "103cbdf191600d83a8becdb43ce89fc37aa0f5c532768238929524d0cbedaf7a"
 export const canonicalAuditorMarkdownSha1 = "aedf761fe161b1befc61eaad15b6ec01cd11153c"
@@ -29,17 +104,33 @@ export function classifyAuditorMarkdownStatus(value: unknown): ProfileGateStatus
   return validateAuditorMarkdownEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
-/** Keep the legacy identity/read-only gate visible while making Markdown mandatory for overall acceptance. */
+/** Classify the native skills discovery/loading verification gate status. */
+export function classifyNativeSkillsStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.hostApiAvailable !== true) return "BLOCKED"
+  return validateNativeSkillsEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
+/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills verification. */
 export function classifyProfileGateStatuses(
   issue2Status: ProfileGateStatus,
   auditorMarkdownStatus: ProfileGateStatus,
-): { issue2Status: ProfileGateStatus; auditorMarkdownStatus: ProfileGateStatus; overallStatus: ProfileGateStatus; exitCode: number } {
-  const overallStatus: ProfileGateStatus = issue2Status === "FAIL" || auditorMarkdownStatus === "FAIL"
+  nativeSkillsStatus?: ProfileGateStatus,
+): {
+  issue2Status: ProfileGateStatus
+  auditorMarkdownStatus: ProfileGateStatus
+  nativeSkillsStatus?: ProfileGateStatus
+  overallStatus: ProfileGateStatus
+  exitCode: number
+} {
+  const statuses = [issue2Status, auditorMarkdownStatus]
+  if (nativeSkillsStatus !== undefined) statuses.push(nativeSkillsStatus)
+  const overallStatus: ProfileGateStatus = statuses.includes("FAIL")
     ? "FAIL"
-    : issue2Status === "BLOCKED" || auditorMarkdownStatus === "BLOCKED" ? "BLOCKED" : "PASS"
+    : statuses.includes("BLOCKED") ? "BLOCKED" : "PASS"
   return {
     issue2Status,
     auditorMarkdownStatus,
+    ...(nativeSkillsStatus !== undefined ? { nativeSkillsStatus } : {}),
     overallStatus,
     exitCode: overallStatus === "PASS" ? passExitCode() : overallStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
   }
@@ -209,6 +300,213 @@ export function validateAuditorMarkdownEvidence(value: unknown): string[] {
     errors.push("E2E used or did not rule out a model/credential call")
   }
   return errors
+}
+
+export interface NativeSkillItemEvidence {
+  name: string
+  provider: string | null
+  sourcePath: string
+  sourceSha256: string
+  canonicalBodySha256: string
+  discovered: boolean
+  loaded: boolean
+  contentSha256: string | null
+  contentBytes: number | null
+  integrityVerified: boolean
+}
+
+export interface NativeSkillsEvidence {
+  hostApiAvailable: boolean
+  catalogComplete: boolean
+  totalSkillsObserved: number
+  allDiscovered: boolean
+  allLoaded: boolean
+  allIntegrityVerified: boolean
+  skills: Record<string, NativeSkillItemEvidence>
+  aborted?: boolean
+}
+
+/**
+ * Validate proof that all eight canonical academic skills are discovered and
+ * loaded exclusively by DSH native skill services with full body integrity.
+ */
+export function validateNativeSkillsEvidence(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) {
+    return ["native skills evidence lacks required host verification"]
+  }
+  if (value.aborted === true) {
+    errors.push("native skill discovery or loading operation was aborted")
+  }
+  if (value.hostApiAvailable !== true) {
+    errors.push("native skills evidence lacks required host verification")
+  }
+  if (value.catalogComplete !== true) {
+    errors.push("native skill catalog discovery was incomplete")
+  }
+
+  const skills = isRecord(value.skills) ? value.skills : {}
+  for (const expectedName of expectedNativeSkills) {
+    const canonical = canonicalNativeSkills[expectedName]
+    const skill = isRecord(skills[expectedName]) ? (skills[expectedName] as Record<string, any>) : undefined
+    if (!skill || skill.discovered !== true) {
+      errors.push(`required skill "${expectedName}" was not discovered`)
+      continue
+    }
+    if (skill.provider !== expectedNativeSkillProvider) {
+      errors.push(`skill "${expectedName}" provider is "${skill.provider}", expected "${expectedNativeSkillProvider}"`)
+    }
+    if (skill.sourcePath !== canonical.sourcePath) {
+      errors.push(`skill "${expectedName}" source path differs from canonical source`)
+    }
+    if (
+      skill.sourceSha256 !== canonical.sourceSha256 ||
+      skill.canonicalBodySha256 !== canonical.bodySha256
+    ) {
+      errors.push(`canonical source hash for "${expectedName}" is invalid`)
+    }
+    if (skill.loaded !== true) {
+      errors.push(`skill "${expectedName}" was discovered but could not be loaded`)
+      continue
+    }
+    if (skill.contentSha256 !== canonical.bodySha256 || skill.integrityVerified !== true) {
+      errors.push(`skill "${expectedName}" loaded content does not match canonical source`)
+    }
+  }
+
+  if (value.allDiscovered !== true && !errors.some((e) => e.includes("was not discovered"))) {
+    errors.push("not all required native skills were discovered")
+  }
+  if (value.allLoaded !== true && !errors.some((e) => e.includes("could not be loaded"))) {
+    errors.push("not all required native skills were loaded")
+  }
+  if (value.allIntegrityVerified !== true && !errors.some((e) => e.includes("does not match canonical source"))) {
+    errors.push("not all required native skills had their integrity verified")
+  }
+
+  return errors
+}
+
+export interface SkillRegistryObserverLike {
+  snapshot?: (options?: { cwd?: string; signal?: AbortSignal }) => Promise<unknown>
+  list?: (options?: { cwd?: string; signal?: AbortSignal }) => Promise<unknown>
+  get?: (name: string, options?: { cwd?: string; signal?: AbortSignal }) => Promise<unknown>
+}
+
+export interface SkillObserverContextLike {
+  skills?: SkillRegistryObserverLike
+}
+
+/**
+ * Capture native skills evidence from a live or synthetic DSH context fail-closed.
+ * An explicit snapshot with complete === true must be observed to prove catalog completeness.
+ * Missing snapshot, snapshot exceptions, malformed snapshot responses, and complete !== true
+ * never produce catalogComplete === true.
+ */
+export async function captureNativeSkillsEvidence(
+  ctx: SkillObserverContextLike,
+  workspace: string,
+  options?: { signal?: AbortSignal },
+): Promise<NativeSkillsEvidence> {
+  const signal = options?.signal ?? new AbortController().signal
+  let observedCatalog: any[] = []
+  let catalogSnapshotComplete = false
+  const hostApiAvailable =
+    typeof ctx.skills?.snapshot === "function" &&
+    typeof ctx.skills?.list === "function" &&
+    typeof ctx.skills?.get === "function"
+
+  if (typeof ctx.skills?.snapshot === "function") {
+    try {
+      const snap = await ctx.skills.snapshot({ cwd: workspace, signal })
+      if (isRecord(snap) && Array.isArray(snap.skills)) {
+        observedCatalog = snap.skills
+        catalogSnapshotComplete = snap.complete === true
+      } else {
+        observedCatalog = []
+        catalogSnapshotComplete = false
+      }
+    } catch {
+      observedCatalog = typeof ctx.skills?.list === "function"
+        ? ((await ctx.skills.list({ cwd: workspace, signal }).catch(() => [])) as any[])
+        : []
+      catalogSnapshotComplete = false
+    }
+  } else if (typeof ctx.skills?.list === "function") {
+    try {
+      const list = await ctx.skills.list({ cwd: workspace, signal })
+      observedCatalog = Array.isArray(list) ? list : []
+    } catch {
+      observedCatalog = []
+    }
+    catalogSnapshotComplete = false
+  }
+
+  const evidence: NativeSkillsEvidence = {
+    hostApiAvailable,
+    catalogComplete: catalogSnapshotComplete,
+    totalSkillsObserved: observedCatalog.length,
+    allDiscovered: false,
+    allLoaded: false,
+    allIntegrityVerified: false,
+    skills: {},
+  }
+
+  if (evidence.hostApiAvailable) {
+    let allDiscovered = true
+    let allLoaded = true
+    let allIntegrityVerified = true
+
+    for (const skillName of expectedNativeSkills) {
+      const canonical = canonicalNativeSkills[skillName]
+      const winningSummary = observedCatalog.find((row) => isRecord(row) && row.name === skillName)
+      const discovered = winningSummary !== undefined
+      if (!discovered) allDiscovered = false
+
+      let loaded = false
+      let contentSha256: string | null = null
+      let contentBytes: number | null = null
+      let integrityVerified = false
+
+      if (discovered && typeof ctx.skills?.get === "function") {
+        try {
+          const loadSignal = new AbortController().signal
+          const loadedDef = await ctx.skills.get(skillName, { cwd: workspace, signal: loadSignal })
+          if (isRecord(loadedDef) && typeof loadedDef.content === "string") {
+            const content = loadedDef.content
+            loaded = true
+            contentBytes = Buffer.byteLength(content, "utf8")
+            contentSha256 = createHash("sha256").update(content).digest("hex")
+            integrityVerified = contentSha256 === canonical.bodySha256
+          }
+        } catch {
+          loaded = false
+        }
+      }
+
+      if (!loaded) allLoaded = false
+      if (!integrityVerified) allIntegrityVerified = false
+
+      evidence.skills[skillName] = {
+        name: skillName,
+        provider: typeof winningSummary?.provider === "string" ? winningSummary.provider : null,
+        sourcePath: canonical.sourcePath,
+        sourceSha256: canonical.sourceSha256,
+        canonicalBodySha256: canonical.bodySha256,
+        discovered,
+        loaded,
+        contentSha256,
+        contentBytes,
+        integrityVerified,
+      }
+    }
+
+    evidence.allDiscovered = allDiscovered
+    evidence.allLoaded = allLoaded
+    evidence.allIntegrityVerified = allIntegrityVerified
+  }
+
+  return evidence
 }
 
 export function validateEvidence(evidence: RuntimeEvidence): string[] {
