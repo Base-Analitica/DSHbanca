@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
+import { e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
+import { renderControlPresetSelector } from "../scripts/lib/dsh-profile-e2e-observer-control.js"
 import {
   canonicalAuditorMarkdownSha256,
   canonicalAuditorMarkdownSha1,
@@ -14,6 +20,7 @@ import {
   validateNativeSkillsEvidence,
   classifyNativeSkillsStatus,
   classifyProfileGateStatuses,
+  captureNativeSkillsEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -544,5 +551,155 @@ describe("DSH native skills discovery and loading contract (#38)", () => {
   ])("rejects negative test case: %s", (_label, evidence, expectedError) => {
     expect(validateNativeSkillsEvidence(evidence)).toContain(expectedError)
     expect(classifyNativeSkillsStatus(evidence)).toBe(evidence.hostApiAvailable === false ? "BLOCKED" : "FAIL")
+  })
+})
+
+function getCanonicalSkillBody(name: string): string {
+  const text = readFileSync(`skills/${name}/SKILL.md`, "utf8")
+  const end = text.indexOf("\n---", 3)
+  return text.slice(end + 4).replace(/^\n+/, "")
+}
+
+function buildMockSkillsContext(options: {
+  snapshot?: "complete" | "incomplete" | "throws" | "malformed" | "missing"
+  list?: "valid" | "incomplete" | "throws"
+  get?: "valid" | "divergent" | "missingSkill" | "throws"
+}) {
+  const names = options.list === "incomplete" ? expectedNativeSkills.slice(0, 7) : expectedNativeSkills
+  const summaries = names.map((name) => ({ name, provider: expectedNativeSkillProvider }))
+  return {
+    skills: {
+      ...(options.snapshot === "missing"
+        ? {}
+        : {
+            snapshot: async () => {
+              if (options.snapshot === "throws") throw new Error("DSH skills snapshot host error")
+              if (options.snapshot === "incomplete") return { skills: summaries, complete: false }
+              if (options.snapshot === "malformed") return { skills: "not-an-array", complete: "yes" }
+              return { skills: summaries, complete: true }
+            },
+          }),
+      list: async () => {
+        if (options.list === "throws") throw new Error("DSH skills list host error")
+        return summaries
+      },
+      get: async (name: string) => {
+        if (options.get === "throws") throw new Error(`DSH skills get error for ${name}`)
+        if (options.get === "missingSkill" && name === "banca-revisor") return undefined
+        const content = getCanonicalSkillBody(name)
+        if (options.get === "divergent" && name === "banca-revisor") {
+          return { name, content: content + "\n<!-- divergent content -->" }
+        }
+        return { name, content }
+      },
+    },
+  }
+}
+
+describe("observer evidence capture and fail-closed catalog completeness", () => {
+  test("1. snapshot throws, list and get succeed -> returns FAIL, not PASS", async () => {
+    const ctx = buildMockSkillsContext({ snapshot: "throws", list: "valid", get: "valid" })
+    const evidence = await captureNativeSkillsEvidence(ctx, "/tmp/workspace")
+    expect(evidence.catalogComplete).toBe(false)
+    expect(evidence.hostApiAvailable).toBe(true)
+    expect(validateNativeSkillsEvidence(evidence)).toContain("native skill catalog discovery was incomplete")
+    expect(classifyNativeSkillsStatus(evidence)).toBe("FAIL")
+  })
+
+  test("2. snapshot is missing, list and get work -> returns BLOCKED, not PASS", async () => {
+    const ctx = buildMockSkillsContext({ snapshot: "missing", list: "valid", get: "valid" })
+    const evidence = await captureNativeSkillsEvidence(ctx, "/tmp/workspace")
+    expect(evidence.catalogComplete).toBe(false)
+    expect(evidence.hostApiAvailable).toBe(false)
+    expect(validateNativeSkillsEvidence(evidence)).toContain("native skills evidence lacks required host verification")
+    expect(classifyNativeSkillsStatus(evidence)).toBe("BLOCKED")
+  })
+
+  test("3. snapshot.complete is false -> returns FAIL", async () => {
+    const ctx = buildMockSkillsContext({ snapshot: "incomplete", list: "valid", get: "valid" })
+    const evidence = await captureNativeSkillsEvidence(ctx, "/tmp/workspace")
+    expect(evidence.catalogComplete).toBe(false)
+    expect(validateNativeSkillsEvidence(evidence)).toContain("native skill catalog discovery was incomplete")
+    expect(classifyNativeSkillsStatus(evidence)).toBe("FAIL")
+  })
+
+  test("4. snapshot returns malformed object -> returns FAIL", async () => {
+    const ctx = buildMockSkillsContext({ snapshot: "malformed", list: "valid", get: "valid" })
+    const evidence = await captureNativeSkillsEvidence(ctx, "/tmp/workspace")
+    expect(evidence.catalogComplete).toBe(false)
+    expect(validateNativeSkillsEvidence(evidence)).toContain("native skill catalog discovery was incomplete")
+    expect(classifyNativeSkillsStatus(evidence)).toBe("FAIL")
+  })
+
+  test("5. snapshot.complete is true with 8 valid skills and integer content -> returns PASS", async () => {
+    const ctx = buildMockSkillsContext({ snapshot: "complete", list: "valid", get: "valid" })
+    const evidence = await captureNativeSkillsEvidence(ctx, "/tmp/workspace")
+    expect(evidence.catalogComplete).toBe(true)
+    expect(evidence.allDiscovered).toBe(true)
+    expect(evidence.allLoaded).toBe(true)
+    expect(evidence.allIntegrityVerified).toBe(true)
+    expect(validateNativeSkillsEvidence(evidence)).toEqual([])
+    expect(classifyNativeSkillsStatus(evidence)).toBe("PASS")
+  })
+
+  test("6a. missing skill from get -> returns FAIL", async () => {
+    const ctx = buildMockSkillsContext({ snapshot: "complete", list: "valid", get: "missingSkill" })
+    const evidence = await captureNativeSkillsEvidence(ctx, "/tmp/workspace")
+    expect(evidence.allLoaded).toBe(false)
+    expect(validateNativeSkillsEvidence(evidence)).toContain('skill "banca-revisor" was discovered but could not be loaded')
+    expect(classifyNativeSkillsStatus(evidence)).toBe("FAIL")
+  })
+
+  test("6b. divergent content from get -> returns FAIL", async () => {
+    const ctx = buildMockSkillsContext({ snapshot: "complete", list: "valid", get: "divergent" })
+    const evidence = await captureNativeSkillsEvidence(ctx, "/tmp/workspace")
+    expect(evidence.allIntegrityVerified).toBe(false)
+    expect(validateNativeSkillsEvidence(evidence)).toContain('skill "banca-revisor" loaded content does not match canonical source')
+    expect(classifyNativeSkillsStatus(evidence)).toBe("FAIL")
+  })
+
+  test("actual observer module generated in scripts/e2e-dsh-profile.ts is fail-closed", async () => {
+    const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+    const templateStart = runnerSource.indexOf("const observerSource = `")
+    const contentStart = templateStart + "const observerSource = `".length
+    const contentEnd = runnerSource.indexOf("\n`\n  writeFileSync(join(observerRoot, \"index.js\"), observerSource", contentStart)
+    const template = runnerSource.slice(contentStart, contentEnd)
+    const renderObserver = new Function(
+      "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
+      "workspace", "observerResult", "renderControlPresetSelector", "e2eControlPresetId",
+      `return \`${template}\`;`,
+    ) as (...args: unknown[]) => string
+    const generatedModuleSource = renderObserver(
+      "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
+      "/tmp/synthetic-workspace", "/tmp/observer-result.json", renderControlPresetSelector, e2eControlPresetId,
+    )
+
+    const directory = mkdtempSync(join(tmpdir(), "dshbanca-observer-skills-"))
+    const modulePath = join(directory, "observer-skills.mjs")
+    try {
+      writeFileSync(modulePath, generatedModuleSource, { mode: 0o600 })
+      const generatedModule = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}`)
+      expect(typeof generatedModule.captureNativeSkillsEvidence).toBe("function")
+
+      // Snapshot throws: must FAIL, not PASS
+      const ctxThrows = buildMockSkillsContext({ snapshot: "throws", list: "valid", get: "valid" })
+      const evidenceThrows = await generatedModule.captureNativeSkillsEvidence(ctxThrows, "/tmp/workspace")
+      expect(evidenceThrows.catalogComplete).toBe(false)
+      expect(classifyNativeSkillsStatus(evidenceThrows)).toBe("FAIL")
+
+      // Snapshot missing: must BLOCKED, not PASS
+      const ctxMissing = buildMockSkillsContext({ snapshot: "missing", list: "valid", get: "valid" })
+      const evidenceMissing = await generatedModule.captureNativeSkillsEvidence(ctxMissing, "/tmp/workspace")
+      expect(evidenceMissing.catalogComplete).toBe(false)
+      expect(classifyNativeSkillsStatus(evidenceMissing)).toBe("BLOCKED")
+
+      // Snapshot complete: must PASS
+      const ctxPass = buildMockSkillsContext({ snapshot: "complete", list: "valid", get: "valid" })
+      const evidencePass = await generatedModule.captureNativeSkillsEvidence(ctxPass, "/tmp/workspace")
+      expect(evidencePass.catalogComplete).toBe(true)
+      expect(classifyNativeSkillsStatus(evidencePass)).toBe("PASS")
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 })

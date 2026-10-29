@@ -31,6 +31,7 @@ import {
   classifyAuditorMarkdownStatus,
   classifyNativeSkillsStatus,
   classifyProfileGateStatuses,
+  captureNativeSkillsEvidence,
   validateAuditorMarkdownEvidence,
   validateNativeSkillsEvidence,
   validateEvidence,
@@ -532,40 +533,43 @@ const decoyOutput = {
 };
 ${renderControlPresetSelector(e2eControlPresetId)}
 
-export async function apply(ctx) {
-  const workspace = ${JSON.stringify(workspace)};
-  const reportPath = ${JSON.stringify(observerResult)};
-  let tools = [];
-  let skillFound = false;
+export async function captureNativeSkillsEvidence(ctx, workspace) {
+  const signal = new AbortController().signal;
   let observedCatalog = [];
-  let catalogSnapshotComplete = true;
+  let catalogSnapshotComplete = false;
+  const hostApiAvailable =
+    typeof ctx.skills?.snapshot === "function" &&
+    typeof ctx.skills?.list === "function" &&
+    typeof ctx.skills?.get === "function";
 
-  for (let attempt = 0; attempt < 50; attempt++) {
-    tools = ctx.tools.schemas().map((schema) => schema.name).filter((tool) => tool.startsWith("banca_")).sort();
-    const listSignal = new AbortController().signal;
-    if (typeof ctx.skills?.snapshot === "function") {
-      try {
-        const snap = await ctx.skills.snapshot({ cwd: workspace, signal: listSignal });
-        observedCatalog = Array.isArray(snap?.skills) ? snap.skills : [];
-        catalogSnapshotComplete = snap?.complete === true;
-      } catch {
-        observedCatalog = typeof ctx.skills?.list === "function" ? await ctx.skills.list({ cwd: workspace, signal: listSignal }) : [];
+  if (typeof ctx.skills?.snapshot === "function") {
+    try {
+      const snap = await ctx.skills.snapshot({ cwd: workspace, signal });
+      if (snap && typeof snap === "object" && !Array.isArray(snap) && Array.isArray(snap.skills)) {
+        observedCatalog = snap.skills;
+        catalogSnapshotComplete = snap.complete === true;
+      } else {
+        observedCatalog = [];
+        catalogSnapshotComplete = false;
       }
-    } else if (typeof ctx.skills?.list === "function") {
-      observedCatalog = await ctx.skills.list({ cwd: workspace, signal: listSignal });
+    } catch {
+      observedCatalog = typeof ctx.skills?.list === "function"
+        ? (await ctx.skills.list({ cwd: workspace, signal }).catch(() => []))
+        : [];
+      catalogSnapshotComplete = false;
     }
-    skillFound = observedCatalog.some((skill) => skill.name === "banca-avaliacao");
-    const allEightDiscovered = expectedNativeSkillsList.every((name) =>
-      observedCatalog.some((skill) => skill.name === name)
-    );
-    if (JSON.stringify(tools) === JSON.stringify([...expected].sort()) && skillFound && allEightDiscovered) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  } else if (typeof ctx.skills?.list === "function") {
+    try {
+      const list = await ctx.skills.list({ cwd: workspace, signal });
+      observedCatalog = Array.isArray(list) ? list : [];
+    } catch {
+      observedCatalog = [];
+    }
+    catalogSnapshotComplete = false;
   }
-  if (JSON.stringify(tools) !== JSON.stringify([...expected].sort())) fail("the DSH tools service did not discover the exact expected banca tool set; observed count=" + tools.length + " names=" + JSON.stringify(tools));
-  if (!skillFound) fail("the DSH skills service did not discover banca-avaliacao");
 
-  const nativeSkillsEvidence = {
-    hostApiAvailable: typeof ctx.skills?.list === "function" && typeof ctx.skills?.get === "function",
+  const evidence = {
+    hostApiAvailable,
     catalogComplete: catalogSnapshotComplete,
     totalSkillsObserved: observedCatalog.length,
     allDiscovered: false,
@@ -574,14 +578,14 @@ export async function apply(ctx) {
     skills: {},
   };
 
-  if (nativeSkillsEvidence.hostApiAvailable) {
+  if (evidence.hostApiAvailable) {
     let allDiscovered = true;
     let allLoaded = true;
     let allIntegrityVerified = true;
 
     for (const skillName of expectedNativeSkillsList) {
       const canonical = canonicalNativeSkillsMeta[skillName];
-      const winningSummary = observedCatalog.find((row) => row.name === skillName);
+      const winningSummary = observedCatalog.find((row) => row && row.name === skillName);
       const discovered = winningSummary !== undefined;
       if (!discovered) allDiscovered = false;
 
@@ -590,11 +594,11 @@ export async function apply(ctx) {
       let contentBytes = null;
       let integrityVerified = false;
 
-      if (discovered) {
+      if (discovered && typeof ctx.skills?.get === "function") {
         try {
           const loadSignal = new AbortController().signal;
           const loadedDef = await ctx.skills.get(skillName, { cwd: workspace, signal: loadSignal });
-          if (loadedDef && typeof loadedDef.content === "string") {
+          if (loadedDef && typeof loadedDef === "object" && typeof loadedDef.content === "string") {
             loaded = true;
             contentBytes = Buffer.byteLength(loadedDef.content, "utf8");
             contentSha256 = createHash("sha256").update(loadedDef.content).digest("hex");
@@ -608,9 +612,9 @@ export async function apply(ctx) {
       if (!loaded) allLoaded = false;
       if (!integrityVerified) allIntegrityVerified = false;
 
-      nativeSkillsEvidence.skills[skillName] = {
+      evidence.skills[skillName] = {
         name: skillName,
-        provider: winningSummary?.provider ?? null,
+        provider: typeof winningSummary?.provider === "string" ? winningSummary.provider : null,
         sourcePath: canonical.sourcePath,
         sourceSha256: canonical.sourceSha256,
         canonicalBodySha256: canonical.bodySha256,
@@ -622,10 +626,54 @@ export async function apply(ctx) {
       };
     }
 
-    nativeSkillsEvidence.allDiscovered = allDiscovered;
-    nativeSkillsEvidence.allLoaded = allLoaded;
-    nativeSkillsEvidence.allIntegrityVerified = allIntegrityVerified;
+    evidence.allDiscovered = allDiscovered;
+    evidence.allLoaded = allLoaded;
+    evidence.allIntegrityVerified = allIntegrityVerified;
   }
+
+  return evidence;
+}
+
+export async function apply(ctx) {
+  const workspace = ${JSON.stringify(workspace)};
+  const reportPath = ${JSON.stringify(observerResult)};
+  let tools = [];
+  let skillFound = false;
+
+  for (let attempt = 0; attempt < 50; attempt++) {
+    tools = ctx.tools.schemas().map((schema) => schema.name).filter((tool) => tool.startsWith("banca_")).sort();
+    const listSignal = new AbortController().signal;
+    let observedCatalog = [];
+    let catalogSnapshotComplete = false;
+    if (typeof ctx.skills?.snapshot === "function") {
+      try {
+        const snap = await ctx.skills.snapshot({ cwd: workspace, signal: listSignal });
+        if (snap && typeof snap === "object" && !Array.isArray(snap) && Array.isArray(snap.skills)) {
+          observedCatalog = snap.skills;
+          catalogSnapshotComplete = snap.complete === true;
+        }
+      } catch {
+        observedCatalog = typeof ctx.skills?.list === "function" ? await ctx.skills.list({ cwd: workspace, signal: listSignal }).catch(() => []) : [];
+      }
+    } else if (typeof ctx.skills?.list === "function") {
+      try {
+        const list = await ctx.skills.list({ cwd: workspace, signal: listSignal });
+        observedCatalog = Array.isArray(list) ? list : [];
+      } catch {
+        observedCatalog = [];
+      }
+    }
+    skillFound = observedCatalog.some((skill) => skill && skill.name === "banca-avaliacao");
+    const allEightDiscovered = expectedNativeSkillsList.every((name) =>
+      observedCatalog.some((skill) => skill && skill.name === name)
+    );
+    if (JSON.stringify(tools) === JSON.stringify([...expected].sort()) && skillFound && allEightDiscovered && catalogSnapshotComplete) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (JSON.stringify(tools) !== JSON.stringify([...expected].sort())) fail("the DSH tools service did not discover the exact expected banca tool set; observed count=" + tools.length + " names=" + JSON.stringify(tools));
+  if (!skillFound) fail("the DSH skills service did not discover banca-avaliacao");
+
+  const nativeSkillsEvidence = await captureNativeSkillsEvidence(ctx, workspace);
 
   const sessionController = ctx.get("sessionController");
   const presetRows = await ctx.agentPresets.list();

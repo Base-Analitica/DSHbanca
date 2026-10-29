@@ -53,7 +53,7 @@ Para comprovar que o DSH real descobre e carrega integralmente o conjunto acadê
 
 A verificação diferencia rigorosamente cada estágio:
 - **Fonte empacotada (`packagedSkills`)**: verificação estática pré-boot no repositório de que `skills/<nome>/SKILL.md` existe e possui digest SHA-256 e tamanho compatíveis com o estado canônico.
-- **Descoberta (`discovered`)**: consulta ao catálogo exposto pelo DSH via `ctx.skills.snapshot` ou `ctx.skills.list({ cwd, signal })`, confirmando que a skill está presente e que o provider vencedor é `dshbanca`. O catálogo global do host pode conter outras skills (não é artificialmente restrito a oito), mas as oito esperadas precisam provir de `dshbanca`.
+- **Descoberta (`discovered`)**: consulta ao catálogo exposto pelo DSH via `ctx.skills.snapshot` com observação estrita de `complete === true`, confirmando que a skill está presente e que o provider vencedor é `dshbanca`. Caso `snapshot` falhe, lance erro ou retorne `complete !== true`, o fallback diagnóstico via `list` não atesta completude e `catalogComplete` permanece `false`. O catálogo global do host pode conter outras skills (não é artificialmente restrito a oito), mas as oito esperadas precisam provir de `dshbanca`.
 - **Carregamento nativo (`loaded`)**: invocação da API nativa do DSH `ctx.skills.get(skillName, { cwd, signal })`. Não é feita chamada direta ao provider interno; o carregamento é mediado pelo registry do host.
 - **Integridade verificada (`integrityVerified`)**: comparação do digest SHA-256 do corpo Markdown carregado (`content`, sem o frontmatter delimitado por `---`) contra o digest do corpo canônico. O conteúdo acadêmico integral nunca é exposto no relatório de evidência; apenas digests SHA-256 e contagem de bytes são registrados.
 - **Bloqueio por host ausente ou não autorizado**: na ausência do DSH ou quando a execução ativa não foi autorizada (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`), o estágio permanece explicitamente `BLOCKED`.
@@ -61,9 +61,9 @@ A verificação diferencia rigorosamente cada estágio:
 O resultado é registrado de forma independente em `stages.nativeSkills`:
 - `status`: `PASS`, `FAIL` ou `BLOCKED`.
 - `evidence.skills`: mapa das oito skills contendo nome, provider, caminho relativo, status de descoberta, carregamento, digest SHA-256 do corpo e confirmação de integridade.
-- `evidence.catalogComplete`: indicador de conclusão da observação pelo registry.
+- `evidence.catalogComplete`: indicador rigoroso de completude do catálogo (`true` somente se `snapshot.complete === true` foi observado diretamente no host).
 
-A aprovação em discovery não produz automaticamente `PASS` no carregamento. Ausência de API nativa, catálogo incompleto, provider incorreto ou hash divergente resultam em `FAIL` ou `BLOCKED` imediatos. A invocação de `ctx.skills.get` comprova carregamento pelo serviço de skills do DSH, mas não equivale à execução ou aplicação das instruções por um agente ou modelo de IA.
+A aprovação em discovery não produz automaticamente `PASS` no carregamento. Ausência de API nativa (`BLOCKED`), catálogo incompleto ou não comprovado (`FAIL`), provider incorreto ou hash divergente resultam em `FAIL` ou `BLOCKED` imediatos. A invocação de `ctx.skills.get` comprova carregamento pelo serviço de skills do DSH, mas não equivale à execução ou aplicação das instruções por um agente ou modelo de IA.
 
 ## Cenário, integridade e teardown
 

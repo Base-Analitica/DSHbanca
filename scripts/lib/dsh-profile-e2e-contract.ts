@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 export const expectedTools = [
   "banca_init",
   "banca_status",
@@ -383,6 +385,128 @@ export function validateNativeSkillsEvidence(value: unknown): string[] {
   }
 
   return errors
+}
+
+export interface SkillRegistryObserverLike {
+  snapshot?: (options?: { cwd?: string; signal?: AbortSignal }) => Promise<unknown>
+  list?: (options?: { cwd?: string; signal?: AbortSignal }) => Promise<unknown>
+  get?: (name: string, options?: { cwd?: string; signal?: AbortSignal }) => Promise<unknown>
+}
+
+export interface SkillObserverContextLike {
+  skills?: SkillRegistryObserverLike
+}
+
+/**
+ * Capture native skills evidence from a live or synthetic DSH context fail-closed.
+ * An explicit snapshot with complete === true must be observed to prove catalog completeness.
+ * Missing snapshot, snapshot exceptions, malformed snapshot responses, and complete !== true
+ * never produce catalogComplete === true.
+ */
+export async function captureNativeSkillsEvidence(
+  ctx: SkillObserverContextLike,
+  workspace: string,
+  options?: { signal?: AbortSignal },
+): Promise<NativeSkillsEvidence> {
+  const signal = options?.signal ?? new AbortController().signal
+  let observedCatalog: any[] = []
+  let catalogSnapshotComplete = false
+  const hostApiAvailable =
+    typeof ctx.skills?.snapshot === "function" &&
+    typeof ctx.skills?.list === "function" &&
+    typeof ctx.skills?.get === "function"
+
+  if (typeof ctx.skills?.snapshot === "function") {
+    try {
+      const snap = await ctx.skills.snapshot({ cwd: workspace, signal })
+      if (isRecord(snap) && Array.isArray(snap.skills)) {
+        observedCatalog = snap.skills
+        catalogSnapshotComplete = snap.complete === true
+      } else {
+        observedCatalog = []
+        catalogSnapshotComplete = false
+      }
+    } catch {
+      observedCatalog = typeof ctx.skills?.list === "function"
+        ? ((await ctx.skills.list({ cwd: workspace, signal }).catch(() => [])) as any[])
+        : []
+      catalogSnapshotComplete = false
+    }
+  } else if (typeof ctx.skills?.list === "function") {
+    try {
+      const list = await ctx.skills.list({ cwd: workspace, signal })
+      observedCatalog = Array.isArray(list) ? list : []
+    } catch {
+      observedCatalog = []
+    }
+    catalogSnapshotComplete = false
+  }
+
+  const evidence: NativeSkillsEvidence = {
+    hostApiAvailable,
+    catalogComplete: catalogSnapshotComplete,
+    totalSkillsObserved: observedCatalog.length,
+    allDiscovered: false,
+    allLoaded: false,
+    allIntegrityVerified: false,
+    skills: {},
+  }
+
+  if (evidence.hostApiAvailable) {
+    let allDiscovered = true
+    let allLoaded = true
+    let allIntegrityVerified = true
+
+    for (const skillName of expectedNativeSkills) {
+      const canonical = canonicalNativeSkills[skillName]
+      const winningSummary = observedCatalog.find((row) => isRecord(row) && row.name === skillName)
+      const discovered = winningSummary !== undefined
+      if (!discovered) allDiscovered = false
+
+      let loaded = false
+      let contentSha256: string | null = null
+      let contentBytes: number | null = null
+      let integrityVerified = false
+
+      if (discovered && typeof ctx.skills?.get === "function") {
+        try {
+          const loadSignal = new AbortController().signal
+          const loadedDef = await ctx.skills.get(skillName, { cwd: workspace, signal: loadSignal })
+          if (isRecord(loadedDef) && typeof loadedDef.content === "string") {
+            const content = loadedDef.content
+            loaded = true
+            contentBytes = Buffer.byteLength(content, "utf8")
+            contentSha256 = createHash("sha256").update(content).digest("hex")
+            integrityVerified = contentSha256 === canonical.bodySha256
+          }
+        } catch {
+          loaded = false
+        }
+      }
+
+      if (!loaded) allLoaded = false
+      if (!integrityVerified) allIntegrityVerified = false
+
+      evidence.skills[skillName] = {
+        name: skillName,
+        provider: typeof winningSummary?.provider === "string" ? winningSummary.provider : null,
+        sourcePath: canonical.sourcePath,
+        sourceSha256: canonical.sourceSha256,
+        canonicalBodySha256: canonical.bodySha256,
+        discovered,
+        loaded,
+        contentSha256,
+        contentBytes,
+        integrityVerified,
+      }
+    }
+
+    evidence.allDiscovered = allDiscovered
+    evidence.allLoaded = allLoaded
+    evidence.allIntegrityVerified = allIntegrityVerified
+  }
+
+  return evidence
 }
 
 export function validateEvidence(evidence: RuntimeEvidence): string[] {
