@@ -552,23 +552,32 @@ const parseContextMeta = async (contextOutput) => {
 export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   const configPath = join(workspace, ".banca", "project.json");
   const config = JSON.parse(await readFile(configPath, "utf8"));
-  config.analysis = { coverageMode: "exhaustive", maxCharactersPerBatch: 80 };
+  const maxCharsPerBatch = 80;
+  config.analysis = { coverageMode: "exhaustive", maxCharactersPerBatch: maxCharsPerBatch };
   await writeFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 
-  const manuscriptFiles = [
-    "main.tex",
-    "referencias.bib",
-    "capitulos/introducao.tex",
+  const chapterFiles = [
     "capitulos/lote1.tex",
     "capitulos/lote2.tex",
     "capitulos/lote3.tex",
     "capitulos/lote4.tex",
     "capitulos/lote5.tex",
   ];
+  const manuscriptFiles = [
+    "main.tex",
+    "referencias.bib",
+    ...chapterFiles,
+  ];
   const initialManuscriptHashes = {};
   for (const rel of manuscriptFiles) {
     initialManuscriptHashes[rel] = await sha(join(workspace, rel));
   }
+
+  let totalManuscriptChars = (await readFile(join(workspace, "main.tex"), "utf8")).length;
+  for (const rel of chapterFiles) {
+    totalManuscriptChars += (await readFile(join(workspace, rel), "utf8")).length;
+  }
+  const expectedTotalBatches = Math.ceil(totalManuscriptChars / maxCharsPerBatch);
 
   const initRes = await runTool(ctx, "dshbanca-e2e-academic-init", "banca_context", {}, agent);
   if (initRes.result.isError) fail("academic probe: banca_context init failed: " + initRes.message);
@@ -576,7 +585,9 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   const planId = currentMeta.plan.planId;
   const manuscriptFingerprint = currentMeta.manuscript.fingerprint;
   const totalBatches = currentMeta.checkpoint.totalBatches;
-  if (totalBatches !== 5) fail("academic probe: expected 5 batches, got " + totalBatches);
+  if (totalBatches !== expectedTotalBatches) {
+    fail("academic probe: expected " + expectedTotalBatches + " batches for known chapters (" + totalManuscriptChars + " chars, budget " + maxCharsPerBatch + "), got " + totalBatches);
+  }
 
   let unverifiedAdvancesBlocked = 0;
   let prematureSynthesisBlocked = 0;
@@ -1518,7 +1529,6 @@ async function main(): Promise<void> {
   mkdirSync(join(workspace, "capitulos"), { recursive: true, mode: 0o700 })
   writeFileSync(join(workspace, "main.tex"), "\\documentclass{article}\n\\begin{document}\nTexto acadêmico sintético de validação.\\end{document}\n", { mode: 0o600 })
   writeFileSync(join(workspace, "referencias.bib"), "@article{synthetic2026, title={Referência Sintética}, author={Pessoa, Exemplo}, year={2026}}\n", { mode: 0o600 })
-  writeFileSync(join(workspace, "capitulos", "introducao.tex"), "Introdução sintética para teste do DSHbanca.\n", { mode: 0o600 })
   for (let i = 1; i <= 5; i++) {
     writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
   }

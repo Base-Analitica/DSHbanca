@@ -39,6 +39,7 @@ import {
   recordBatchAuditConfirmation,
   saveAnalysisFindings,
 } from "../src/lib/state"
+import { validateBatchAuditEvidence } from "../scripts/lib/dsh-profile-e2e-contract"
 
 function writeTree(root: string, files: Record<string, string>): void {
   for (const [rel, content] of Object.entries(files)) {
@@ -1071,5 +1072,206 @@ describe("Issue #44: Batch audit evidence gate", () => {
     // authentic host provenance requires host-level trust model / host-signed tokens (NEEDS_APPROVAL).
     expect(advances).toBe(plan.batches.length)
     expect(synthRes).not.toContain("synthesis input error")
+  })
+
+  test("P1 regression (#5725467483): fixture retaining introducao.tex alongside lote1..5 plans 6 batches, blocking synthesis if only 5 are audited", async () => {
+    // Recreate the exact fixture from HEAD c6c515e: main.tex (95 chars) + introducao.tex (45 chars) + lote1..5 (59 chars each)
+    const files: Record<string, string> = {
+      "main.tex":
+        "\\documentclass{article}\n\\begin{document}\nCURRENT_SENTINEL synthetic manuscript.\n\\end{document}\n",
+      "refs.bib": "@article{synthetic2026, title={Ref}, author={A}, year={2026}}\n",
+      "capitulos/introducao.tex": "Introdução sintética para teste do DSHbanca.\n",
+    }
+    for (let i = 1; i <= 5; i++) {
+      files[`capitulos/lote${i}.tex`] = `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`
+    }
+    mkdirSync(join(projectRoot, ".banca"), { recursive: true })
+    writeFileSync(
+      join(projectRoot, ".banca", "project.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          manuscript: {
+            format: "latex",
+            root: ".",
+            main: "main.tex",
+            bib: "refs.bib",
+            chapters: ["capitulos/*.tex"],
+            outputDir: "trabalhos",
+          },
+          compile: { enabled: false, command: [] },
+          analysis: { coverageMode: "exhaustive", maxCharactersPerBatch: 80 },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    )
+    writeTree(projectRoot, files)
+
+    const { plan, planId } = getPlan(projectRoot)
+    // Total characters: 95 + 45 + 5 * 59 = 435. With budget 80, canonical plan yields 6 batches, NOT 5!
+    expect(plan.batches.length).toBe(6)
+    expect(plan.batches.length).not.toBe(5)
+
+    const ctx = { directory: projectRoot } as any
+
+    // If an audit probe expects 5 batches, the expectation check detects the divergence
+    const expectedBatchesIfIntroducaoOmitted = 5
+    expect(plan.batches.length === expectedBatchesIfIntroducaoOmitted).toBe(false)
+
+    // If an auditor blindly audits only 5 of the 6 batches
+    await bancaContext.execute({ projectRoot }, ctx)
+    for (let i = 0; i < 5; i++) {
+      const batch = plan.batches[i]
+      await bancaAuditar.execute(
+        {
+          projectRoot,
+          manuscriptFingerprint: plan.fingerprint!,
+          batchId: batch.batchId,
+          findings: [],
+        },
+        ctx,
+      )
+      await bancaContext.execute(
+        { projectRoot, completedBatchId: batch.batchId },
+        ctx,
+      )
+    }
+
+    const checkpoint = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(checkpoint?.completedBatches).toBe(5)
+    expect(checkpoint?.totalBatches).toBe(6)
+    expect(checkpoint?.state).toBe("running")
+
+    // banca_sintese must block prematurely with code=incomplete_coverage
+    const synthRes = await bancaSintese.execute({ projectRoot }, ctx)
+    expect(synthRes).toContain("synthesis input error")
+    expect(synthRes).toContain("code=incomplete_coverage")
+
+    // Contract validation fails closed on incomplete batches
+    const contractErrors = validateBatchAuditEvidence({
+      totalBatches: 6,
+      completedBatches: 5,
+      planId,
+      manuscriptFingerprint: plan.fingerprint!,
+      unverifiedAdvancesBlocked: 5,
+      prematureSynthesisBlocked: 5,
+      auditsCompletedWithZeroFindings: 5,
+      orderlyAdvances: 5,
+      resumesWithoutSpuriousAdvance: 5,
+      synthesisReleased: false,
+      synthesisInputCoverageState: "in_progress",
+      manuscriptPreserved: true,
+    })
+    expect(contractErrors).toContain("completedBatches must equal totalBatches")
+  })
+
+  test("regression: unexpected extra section added to 5-chapter manuscript is detected and requires explicit audit", async () => {
+    // 1. Setup canonical 5-chapter manuscript with budget 80
+    const files: Record<string, string> = {
+      "main.tex":
+        "\\documentclass{article}\n\\begin{document}\nCURRENT_SENTINEL synthetic manuscript.\n\\end{document}\n",
+      "refs.bib": "@article{synthetic2026, title={Ref}, author={A}, year={2026}}\n",
+    }
+    for (let i = 1; i <= 5; i++) {
+      files[`capitulos/lote${i}.tex`] = `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`
+    }
+    mkdirSync(join(projectRoot, ".banca"), { recursive: true })
+    writeFileSync(
+      join(projectRoot, ".banca", "project.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          manuscript: {
+            format: "latex",
+            root: ".",
+            main: "main.tex",
+            bib: "refs.bib",
+            chapters: ["capitulos/*.tex"],
+            outputDir: "trabalhos",
+          },
+          compile: { enabled: false, command: [] },
+          analysis: { coverageMode: "exhaustive", maxCharactersPerBatch: 80 },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    )
+    writeTree(projectRoot, files)
+
+    // Base plan: 95 chars (main.tex) + 5 * 59 chars = 390 chars. Math.ceil(390 / 80) = 5 batches.
+    const { plan: basePlan } = getPlan(projectRoot)
+    expect(basePlan.batches.length).toBe(5)
+
+    // 2. Inject unexpected extra section not anticipated by the 5-chapter expectation
+    writeFileSync(
+      join(projectRoot, "capitulos", "secao_extra.tex"),
+      "Texto adicional de secao inesperada nao prevista pela expectativa do teste.\n",
+      "utf8",
+    )
+
+    const { plan: planWithExtra, planId: planIdWithExtra } = getPlan(projectRoot)
+    // Extra section adds 76 chars (total 466 chars). Math.ceil(466 / 80) = 6 batches!
+    expect(planWithExtra.batches.length).toBe(6)
+
+    // Grounded expectation for the 5 known chapters detects the discrepancy
+    const expectedKnownBatches = 5
+    expect(planWithExtra.batches.length).not.toBe(expectedKnownBatches)
+
+    const ctx = { directory: projectRoot } as any
+    await bancaContext.execute({ projectRoot }, ctx)
+
+    // 3. Auditing only the 5 expected batches leaves the extra section's batch un-audited
+    for (let i = 0; i < expectedKnownBatches; i++) {
+      const batch = planWithExtra.batches[i]
+      await bancaAuditar.execute(
+        {
+          projectRoot,
+          manuscriptFingerprint: planWithExtra.fingerprint!,
+          batchId: batch.batchId,
+          findings: [],
+        },
+        ctx,
+      )
+      await bancaContext.execute(
+        { projectRoot, completedBatchId: batch.batchId },
+        ctx,
+      )
+    }
+
+    // Synthesis is blocked because coverage is incomplete (5 of 6 batches)
+    const prematureRes = await bancaSintese.execute({ projectRoot }, ctx)
+    expect(prematureRes).toContain("synthesis input error")
+    expect(prematureRes).toContain("code=incomplete_coverage")
+
+    // 4. Now audit the final 6th batch (containing the extra section)
+    const finalBatch = planWithExtra.batches[5]
+    await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: planWithExtra.fingerprint!,
+        batchId: finalBatch.batchId,
+        findings: [],
+      },
+      ctx,
+    )
+    await bancaContext.execute(
+      { projectRoot, completedBatchId: finalBatch.batchId },
+      ctx,
+    )
+
+    // Checkpoint reaches complete
+    const finalCp = loadAnalysisCheckpoint(projectRoot, planIdWithExtra)
+    expect(finalCp?.state).toBe("complete")
+    expect(finalCp?.completedBatches).toBe(6)
+
+    // Synthesis is released once ALL batches are audited
+    const finalSynthRes = await bancaSintese.execute({ projectRoot }, ctx)
+    expect(finalSynthRes).not.toContain("synthesis input error")
+    const parsed = JSON.parse(finalSynthRes)
+    expect(parsed.coverage.state).toBe("complete")
+    expect(parsed.coverage.completedBatches).toBe(6)
   })
 })
