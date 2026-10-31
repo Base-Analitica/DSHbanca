@@ -19,6 +19,18 @@ import {
   mergeAnalysisFindings,
   type AnalysisFinding,
 } from "./analysis_findings"
+import {
+  AnalysisAuditConfirmationError,
+  BATCH_AUDIT_CONFIRMATION_VERSION,
+  mergeBatchAuditConfirmations,
+  type BatchAuditConfirmation,
+} from "./analysis_audit_confirmation"
+
+export {
+  AnalysisAuditConfirmationError,
+  BATCH_AUDIT_CONFIRMATION_VERSION,
+  type BatchAuditConfirmation,
+}
 
 export interface ProjectState {
   currentScore: number | null
@@ -241,7 +253,8 @@ function atomicWriteJsonFile(opts: {
     // Re-throw controlled domain errors unchanged when callers pre-threw them.
     if (
       err instanceof AnalysisCheckpointError ||
-      err instanceof AnalysisFindingsStoreError
+      err instanceof AnalysisFindingsStoreError ||
+      err instanceof AnalysisAuditConfirmationError
     ) {
       throw err
     }
@@ -810,4 +823,505 @@ export function saveAnalysisFindings(
       )
     },
   })
+}
+
+// ---------------------------------------------------------------------------
+// AnalysisAuditConfirmations store (dedicated; not ProjectState / not checkpoint)
+// Path: .banca/analysis/audit-confirmations/<planId>.json
+// ---------------------------------------------------------------------------
+
+export const ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION =
+  "analysis-audit-confirmations-store-v1" as const
+
+const AUDIT_CONFIRMATIONS_DIR_PARTS = [
+  ".banca",
+  "analysis",
+  "audit-confirmations",
+] as const
+
+const AUDIT_CONFIRMATIONS_STORE_V1_KEYS = [
+  "version",
+  "planId",
+  "manuscriptFingerprint",
+  "confirmations",
+] as const
+
+const AUDIT_CONFIRMATIONS_STORE_V1_KEY_SET = new Set<string>(
+  AUDIT_CONFIRMATIONS_STORE_V1_KEYS,
+)
+
+export interface AnalysisAuditConfirmationsStoreV1 {
+  version: typeof ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION
+  planId: string
+  manuscriptFingerprint: string
+  confirmations: BatchAuditConfirmation[]
+}
+
+const auditConfirmationsPathErrors: PathInspectErrors & DirEnsureErrors = {
+  onLstatFailure: () => {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_storage",
+      "failed to lstat audit confirmation storage path",
+    )
+  },
+  onSymlink: (part: string) => {
+    throw new AnalysisAuditConfirmationError(
+      "symlink_refused",
+      `refusing symbolic link in audit confirmation storage path: ${part}`,
+    )
+  },
+  onNotDirectory: (part: string) => {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_storage",
+      `audit confirmation storage path component is not a directory: ${part}`,
+    )
+  },
+  onMkdirFailure: (part: string) => {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_storage",
+      `failed to create audit confirmation storage directory: ${part}`,
+    )
+  },
+}
+
+function assertValidAuditPlanId(planId: string): void {
+  if (!isPlanIdHex(planId)) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_plan_id",
+      "planId must be a 64-character lowercase hex SHA-256 digest",
+    )
+  }
+}
+
+/**
+ * Public relative path of an audit confirmations store (POSIX-style, project-relative).
+ * Validates planId as SHA-256 hex before use.
+ */
+export function getAnalysisAuditConfirmationsRelativePath(
+  planId: string,
+): string {
+  assertValidAuditPlanId(planId)
+  return `.banca/analysis/audit-confirmations/${planId}.json`
+}
+
+function resolveAuditConfirmationsAbsPath(
+  projectRoot: string,
+  planId: string,
+): string {
+  assertValidAuditPlanId(planId)
+  return resolveInsideRoot(
+    projectRoot,
+    join(".banca", "analysis", "audit-confirmations", `${planId}.json`),
+  )
+}
+
+function ensureAuditConfirmationsDirNoSymlinks(projectRoot: string): string {
+  return ensureDirPartsNoSymlinks(
+    projectRoot,
+    AUDIT_CONFIRMATIONS_DIR_PARTS,
+    auditConfirmationsPathErrors,
+  )
+}
+
+function inspectAuditConfirmationsPath(
+  projectRoot: string,
+  planId: string,
+): { absPath: string; finalStat: Stats | null } {
+  assertValidAuditPlanId(planId)
+  return inspectRelativeStoragePath(
+    projectRoot,
+    [...AUDIT_CONFIRMATIONS_DIR_PARTS, `${planId}.json`],
+    () => resolveAuditConfirmationsAbsPath(projectRoot, planId),
+    auditConfirmationsPathErrors,
+  )
+}
+
+function assertExactAuditStoreKeys(obj: object): void {
+  const keys = Object.keys(obj)
+  if (keys.length !== AUDIT_CONFIRMATIONS_STORE_V1_KEY_SET.size) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      `audit store must have exactly ${AUDIT_CONFIRMATIONS_STORE_V1_KEY_SET.size} keys for ${ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION}`,
+    )
+  }
+  for (const key of keys) {
+    if (!AUDIT_CONFIRMATIONS_STORE_V1_KEY_SET.has(key)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        "audit store contains an unknown key",
+      )
+    }
+  }
+  for (const required of AUDIT_CONFIRMATIONS_STORE_V1_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(obj, required)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        `audit store is missing required key: ${required}`,
+      )
+    }
+  }
+}
+
+const BATCH_CONFIRMATION_KEYS = [
+  "version",
+  "planId",
+  "manuscriptFingerprint",
+  "batchId",
+  "batchIndex",
+  "acceptedCount",
+  "disclaimer",
+] as const
+const BATCH_CONFIRMATION_KEY_SET = new Set<string>(BATCH_CONFIRMATION_KEYS)
+
+function parseSingleConfirmation(
+  item: unknown,
+  expectedPlanId: string,
+  expectedFingerprint: string,
+): BatchAuditConfirmation {
+  if (item == null || typeof item !== "object" || Array.isArray(item)) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "confirmation in audit store must be a JSON object",
+    )
+  }
+  const keys = Object.keys(item)
+  if (keys.length !== BATCH_CONFIRMATION_KEY_SET.size) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      `confirmation must have exactly ${BATCH_CONFIRMATION_KEY_SET.size} keys`,
+    )
+  }
+  for (const k of keys) {
+    if (!BATCH_CONFIRMATION_KEY_SET.has(k)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        "confirmation contains an unknown key",
+      )
+    }
+  }
+  const obj = item as Record<string, unknown>
+  if (obj.version !== BATCH_AUDIT_CONFIRMATION_VERSION) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      `confirmation.version must be ${BATCH_AUDIT_CONFIRMATION_VERSION}`,
+    )
+  }
+  if (typeof obj.planId !== "string" || obj.planId !== expectedPlanId) {
+    throw new AnalysisAuditConfirmationError(
+      "incompatible_plan",
+      "confirmation.planId does not match store.planId",
+    )
+  }
+  if (
+    typeof obj.manuscriptFingerprint !== "string" ||
+    obj.manuscriptFingerprint !== expectedFingerprint
+  ) {
+    throw new AnalysisAuditConfirmationError(
+      "incompatible_fingerprint",
+      "confirmation.manuscriptFingerprint does not match store.manuscriptFingerprint",
+    )
+  }
+  if (typeof obj.batchId !== "string" || obj.batchId.length === 0) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "confirmation.batchId must be a non-empty string",
+    )
+  }
+  if (
+    typeof obj.batchIndex !== "number" ||
+    !Number.isInteger(obj.batchIndex) ||
+    obj.batchIndex < 0
+  ) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "confirmation.batchIndex must be an integer >= 0",
+    )
+  }
+  if (
+    typeof obj.acceptedCount !== "number" ||
+    !Number.isInteger(obj.acceptedCount) ||
+    obj.acceptedCount < 0
+  ) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "confirmation.acceptedCount must be an integer >= 0",
+    )
+  }
+  if (typeof obj.disclaimer !== "string" || obj.disclaimer.length === 0) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "confirmation.disclaimer must be a non-empty string",
+    )
+  }
+  return {
+    version: BATCH_AUDIT_CONFIRMATION_VERSION,
+    planId: obj.planId,
+    manuscriptFingerprint: obj.manuscriptFingerprint,
+    batchId: obj.batchId,
+    batchIndex: obj.batchIndex,
+    acceptedCount: obj.acceptedCount,
+    disclaimer: obj.disclaimer,
+  }
+}
+
+function parseAnalysisAuditConfirmationsStore(
+  parsed: unknown,
+  expectedPlanId: string,
+): AnalysisAuditConfirmationsStoreV1 {
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "audit confirmations store file must contain a JSON object",
+    )
+  }
+
+  assertExactAuditStoreKeys(parsed)
+  const obj = parsed as Record<string, unknown>
+
+  if (obj.version !== ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      `audit store.version must be ${ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION}`,
+    )
+  }
+
+  if (typeof obj.planId !== "string" || obj.planId.length === 0) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "audit store.planId must be a non-empty string",
+    )
+  }
+  if (obj.planId !== expectedPlanId) {
+    throw new AnalysisAuditConfirmationError(
+      "incompatible_plan",
+      "audit store.planId does not match the requested plan identity",
+    )
+  }
+
+  if (
+    typeof obj.manuscriptFingerprint !== "string" ||
+    obj.manuscriptFingerprint.length === 0
+  ) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "audit store.manuscriptFingerprint must be a non-empty string",
+    )
+  }
+
+  if (!Array.isArray(obj.confirmations)) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "audit store.confirmations must be an array",
+    )
+  }
+
+  const seenBatchIds = new Set<string>()
+  const seenIndices = new Set<number>()
+  const validatedConfirmations: BatchAuditConfirmation[] = []
+
+  for (let i = 0; i < obj.confirmations.length; i++) {
+    const raw = obj.confirmations[i]
+    const c = parseSingleConfirmation(
+      raw,
+      obj.planId,
+      obj.manuscriptFingerprint,
+    )
+    if (seenBatchIds.has(c.batchId)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        `audit store contains duplicate batchId: ${c.batchId}`,
+      )
+    }
+    if (seenIndices.has(c.batchIndex)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        `audit store contains duplicate batchIndex: ${c.batchIndex}`,
+      )
+    }
+    seenBatchIds.add(c.batchId)
+    seenIndices.add(c.batchIndex)
+    validatedConfirmations.push(c)
+  }
+
+  validatedConfirmations.sort((a, b) => a.batchIndex - b.batchIndex)
+
+  return {
+    version: ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION,
+    planId: obj.planId,
+    manuscriptFingerprint: obj.manuscriptFingerprint,
+    confirmations: validatedConfirmations,
+  }
+}
+
+/**
+ * Load the audit confirmations store for `planId`, or null when the file is absent.
+ * Fail-closed on symlink storage, non-regular file, malformed/incompatible content.
+ */
+export function loadAnalysisAuditConfirmations(
+  projectRoot: string,
+  planId: string,
+): AnalysisAuditConfirmationsStoreV1 | null {
+  assertValidAuditPlanId(planId)
+  const { absPath, finalStat } = inspectAuditConfirmationsPath(
+    projectRoot,
+    planId,
+  )
+  if (finalStat === null) {
+    return null
+  }
+  if (!finalStat.isFile() || finalStat.isSymbolicLink()) {
+    if (finalStat.isSymbolicLink()) {
+      throw new AnalysisAuditConfirmationError(
+        "symlink_refused",
+        "refusing to load audit confirmations store through a symbolic link",
+      )
+    }
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_storage",
+      "audit confirmations store path exists but is not a regular file",
+    )
+  }
+
+  let raw: string
+  try {
+    raw = readFileSync(absPath, "utf-8")
+  } catch {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_storage",
+      "failed to read audit confirmations store file",
+    )
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "audit confirmations store file contains malformed JSON",
+    )
+  }
+
+  return parseAnalysisAuditConfirmationsStore(parsed, planId)
+}
+
+/**
+ * Persist an audit confirmations store under `.banca/analysis/audit-confirmations/<planId>.json`.
+ * Uses same-directory temp + atomic rename. Refuses symlinks.
+ */
+export function saveAnalysisAuditConfirmations(
+  projectRoot: string,
+  store: AnalysisAuditConfirmationsStoreV1,
+): void {
+  if (store == null || typeof store !== "object") {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_audit_store",
+      "store must be an AnalysisAuditConfirmationsStoreV1 object",
+    )
+  }
+
+  const validated = parseAnalysisAuditConfirmationsStore(store, store.planId)
+  assertValidAuditPlanId(validated.planId)
+
+  const dir = ensureAuditConfirmationsDirNoSymlinks(projectRoot)
+  const absPath = resolveAuditConfirmationsAbsPath(
+    projectRoot,
+    validated.planId,
+  )
+  const tmpName = `.${validated.planId}.${process.pid}.${Date.now()}.tmp`
+
+  const body = JSON.stringify(
+    {
+      version: validated.version,
+      planId: validated.planId,
+      manuscriptFingerprint: validated.manuscriptFingerprint,
+      confirmations: validated.confirmations,
+    } satisfies AnalysisAuditConfirmationsStoreV1,
+    null,
+    2,
+  )
+
+  atomicWriteJsonFile({
+    projectRoot,
+    dirAbs: dir,
+    dirRelParts: AUDIT_CONFIRMATIONS_DIR_PARTS,
+    absPath,
+    tmpName,
+    body,
+    onLstatFailure: auditConfirmationsPathErrors.onLstatFailure,
+    onTargetSymlink: () => {
+      throw new AnalysisAuditConfirmationError(
+        "symlink_refused",
+        "refusing to overwrite an audit confirmations store symbolic link",
+      )
+    },
+    onPersistFailure: () => {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_storage",
+        "failed to persist audit confirmations store",
+      )
+    },
+  })
+}
+
+/**
+ * Record a batch audit confirmation idempotently in the store for `planId`.
+ * If confirmation already exists for `batchId`, replaces it without duplicating.
+ */
+export function recordBatchAuditConfirmation(
+  projectRoot: string,
+  confirmation: BatchAuditConfirmation,
+): AnalysisAuditConfirmationsStoreV1 {
+  assertValidAuditPlanId(confirmation.planId)
+
+  let existing = loadAnalysisAuditConfirmations(
+    projectRoot,
+    confirmation.planId,
+  )
+  let updatedConfirmations: BatchAuditConfirmation[]
+  if (existing === null) {
+    updatedConfirmations = [confirmation]
+  } else {
+    if (
+      existing.manuscriptFingerprint !== confirmation.manuscriptFingerprint
+    ) {
+      throw new AnalysisAuditConfirmationError(
+        "incompatible_fingerprint",
+        "existing audit confirmations store fingerprint does not match confirmation fingerprint",
+      )
+    }
+    if (existing.planId !== confirmation.planId) {
+      throw new AnalysisAuditConfirmationError(
+        "incompatible_plan",
+        "existing audit confirmations store planId does not match confirmation planId",
+      )
+    }
+    updatedConfirmations = mergeBatchAuditConfirmations(
+      existing.confirmations,
+      confirmation,
+    )
+  }
+
+  const store: AnalysisAuditConfirmationsStoreV1 = {
+    version: ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION,
+    planId: confirmation.planId,
+    manuscriptFingerprint: confirmation.manuscriptFingerprint,
+    confirmations: updatedConfirmations,
+  }
+
+  saveAnalysisAuditConfirmations(projectRoot, store)
+  return store
+}
+
+/**
+ * Load a single BatchAuditConfirmation for a given planId and batchId, or null.
+ */
+export function loadBatchAuditConfirmation(
+  projectRoot: string,
+  planId: string,
+  batchId: string,
+): BatchAuditConfirmation | null {
+  const store = loadAnalysisAuditConfirmations(projectRoot, planId)
+  if (store === null) return null
+  return store.confirmations.find((c) => c.batchId === batchId) ?? null
 }

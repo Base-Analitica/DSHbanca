@@ -26,7 +26,14 @@ import {
 import {
   getAnalysisCheckpointRelativePath,
   loadAnalysisCheckpoint,
+  recordBatchAuditConfirmation,
 } from "../src/lib/state"
+import { createBatchAuditConfirmation } from "../src/lib/analysis_audit_confirmation"
+
+function confirmBatch(projectRoot: string, plan: any, batch: any): void {
+  const c = createBatchAuditConfirmation(plan, batch, 0)
+  recordBatchAuditConfirmation(projectRoot, c)
+}
 
 function writeTree(root: string, files: Record<string, string>): void {
   for (const [rel, content] of Object.entries(files)) {
@@ -309,6 +316,12 @@ describe("banca_context — checkpoint persistence and resume", () => {
     const firstId = plan.batches[0].batchId
 
     await runContext(projectRoot)
+    const missingAuditResult = await runContext(projectRoot, {
+      completedBatchId: firstId,
+    })
+    expect(missingAuditResult).toContain("code=missing_batch_audit")
+
+    confirmBatch(projectRoot, plan, plan.batches[0])
     const result = await runContext(projectRoot, { completedBatchId: firstId })
     expect(result).toMatch(/^context → /)
 
@@ -337,6 +350,8 @@ describe("banca_context — checkpoint persistence and resume", () => {
     const createOut = runContextInChildProcess(projectRoot)
     expect(createOut).toMatch(/^context → /)
 
+    confirmBatch(projectRoot, plan, plan.batches[0])
+
     // Process B: advance first batch (separate OS process).
     const advanceOut = runContextInChildProcess(projectRoot, {
       completedBatchId: firstId,
@@ -364,6 +379,7 @@ describe("banca_context — checkpoint persistence and resume", () => {
 
     await runContext(projectRoot)
     for (const batch of plan.batches) {
+      confirmBatch(projectRoot, plan, batch)
       const result = await runContext(projectRoot, {
         completedBatchId: batch.batchId,
       })
@@ -394,6 +410,7 @@ describe("banca_context — checkpoint persistence and resume", () => {
     const firstId = plan.batches[0].batchId
 
     await runContext(projectRoot)
+    confirmBatch(projectRoot, plan, plan.batches[0])
     await runContext(projectRoot, { completedBatchId: firstId })
     const afterFirst = readPersistedCheckpoint(
       projectRoot,
@@ -488,6 +505,7 @@ describe("banca_context — checkpoint persistence and resume", () => {
     const firstPlan = planOracle(projectRoot).plan
     const firstId = createAnalysisCheckpoint(firstPlan).planId
     await runContext(projectRoot)
+    confirmBatch(projectRoot, firstPlan, firstPlan.batches[0])
     await runContext(projectRoot, {
       completedBatchId: firstPlan.batches[0].batchId,
     })

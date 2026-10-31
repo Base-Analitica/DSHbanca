@@ -14,8 +14,10 @@ import {
   type AnalysisCheckpoint,
 } from "../lib/analysis_checkpoint"
 import {
+  AnalysisAuditConfirmationError,
   getAnalysisCheckpointRelativePath,
   loadAnalysisCheckpoint,
+  loadBatchAuditConfirmation,
   saveAnalysisCheckpoint,
 } from "../lib/state"
 
@@ -98,7 +100,47 @@ export const bancaContext = defineBancaTool({
       // through completeAnalysisBatch so invalid_batch_id is returned for "".
       // Only true omission/undefined resumes without advancing.
       if (args.completedBatchId !== undefined) {
-        checkpoint = completeAnalysisBatch(plan, checkpoint, args.completedBatchId)
+        const expectedNext = nextAnalysisBatch(plan, checkpoint)
+        if (
+          expectedNext !== null &&
+          args.completedBatchId === expectedNext.batchId
+        ) {
+          let confirmation
+          try {
+            confirmation = loadBatchAuditConfirmation(
+              root,
+              checkpoint.planId,
+              expectedNext.batchId,
+            )
+          } catch (err) {
+            if (err instanceof AnalysisAuditConfirmationError) {
+              throw new AnalysisCheckpointError(err.code, err.message)
+            }
+            throw err
+          }
+          if (confirmation === null) {
+            throw new AnalysisCheckpointError(
+              "missing_batch_audit",
+              `cannot advance checkpoint: audit confirmation missing for batch ${expectedNext.batchId}`,
+            )
+          }
+          if (
+            confirmation.planId !== checkpoint.planId ||
+            confirmation.manuscriptFingerprint !== plan.fingerprint ||
+            confirmation.batchId !== expectedNext.batchId ||
+            confirmation.batchIndex !== expectedNext.index
+          ) {
+            throw new AnalysisCheckpointError(
+              "incompatible_batch_audit",
+              `persisted audit confirmation for batch ${expectedNext.batchId} is incompatible with current plan`,
+            )
+          }
+        }
+        checkpoint = completeAnalysisBatch(
+          plan,
+          checkpoint,
+          args.completedBatchId,
+        )
         saveAnalysisCheckpoint(root, checkpoint)
       } else {
         // Resume-only: force validation without advancing.

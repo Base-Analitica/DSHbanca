@@ -37,10 +37,23 @@ import {
   ANALYSIS_FINDINGS_STORE_VERSION,
   loadAnalysisCheckpoint,
   loadAnalysisFindings,
+  loadAnalysisAuditConfirmations,
+  recordBatchAuditConfirmation,
   saveAnalysisCheckpoint,
   saveAnalysisFindings,
   type AnalysisFindingsStoreV1,
 } from "../src/lib/state"
+import { createBatchAuditConfirmation } from "../src/lib/analysis_audit_confirmation"
+
+function confirmAllBatches(
+  projectRoot: string,
+  plan: ReturnType<typeof planOracle>["plan"],
+): void {
+  for (const batch of plan.batches) {
+    const confirmation = createBatchAuditConfirmation(plan, batch, 0)
+    recordBatchAuditConfirmation(projectRoot, confirmation)
+  }
+}
 
 function writeTree(root: string, files: Record<string, string>): void {
   for (const [rel, content] of Object.entries(files)) {
@@ -301,10 +314,12 @@ function prepareCompleteFixtures(
     findings,
   }
   saveAnalysisFindings(projectRoot, store)
+  confirmAllBatches(projectRoot, plan)
 
   // Confirm public loaders see what we wrote.
   expect(loadAnalysisCheckpoint(projectRoot, planId)).not.toBeNull()
   expect(loadAnalysisFindings(projectRoot, planId)).not.toBeNull()
+  expect(loadAnalysisAuditConfirmations(projectRoot, planId)).not.toBeNull()
 
   return { plan, planId, checkpoint, store }
 }
@@ -336,6 +351,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
+    confirmAllBatches(projectRoot, plan)
 
     const expected = JSON.stringify(
       createGlobalAnalysisSynthesisInput(plan, checkpoint, findings),
@@ -364,6 +380,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
+    confirmAllBatches(projectRoot, plan)
     const expected = JSON.stringify(
       createGlobalAnalysisSynthesisInput(plan, checkpoint, findings),
     )
@@ -729,6 +746,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
+    confirmAllBatches(projectRoot, plan)
     const before = snapshotProject(projectRoot)
     // Snapshot is content+structure after fixtures, before tool — not mtime.
     const result = await runSintese(projectRoot)
@@ -740,6 +758,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
     expect(existsSync(analysisDir)).toBe(true)
     expect(readdirSync(join(analysisDir, "checkpoints")).length).toBe(1)
     expect(readdirSync(join(analysisDir, "findings")).length).toBe(1)
+    expect(readdirSync(join(analysisDir, "audit-confirmations")).length).toBe(1)
   })
 
   test("11) DSH entry registers banca_sintese and preserves existing tools", async () => {
@@ -779,6 +798,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
+    confirmAllBatches(projectRoot, plan)
     const expectedObj = createGlobalAnalysisSynthesisInput(
       plan,
       checkpoint,

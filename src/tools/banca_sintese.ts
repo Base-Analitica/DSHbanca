@@ -23,10 +23,13 @@ import {
   createGlobalAnalysisSynthesisInput,
 } from "../lib/analysis_synthesis"
 import {
+  AnalysisAuditConfirmationError,
   AnalysisFindingsStoreError,
   loadAnalysisCheckpoint,
   loadAnalysisFindings,
+  loadAnalysisAuditConfirmations,
 } from "../lib/state"
+import { assertAllBatchesConfirmed } from "../lib/analysis_audit_confirmation"
 
 
 function formatError(code: string, message: string): string {
@@ -134,13 +137,13 @@ export const bancaSintese = defineBancaTool({
       )
     }
 
+    let input
     try {
-      const input = createGlobalAnalysisSynthesisInput(
+      input = createGlobalAnalysisSynthesisInput(
         plan,
         checkpoint,
         store.findings,
       )
-      return JSON.stringify(input)
     } catch (err) {
       if (err instanceof AnalysisSynthesisError) {
         return formatError(err.code, err.message)
@@ -156,5 +159,57 @@ export const bancaSintese = defineBancaTool({
         "an unexpected synthesis input error occurred",
       )
     }
+
+    // Verify durable audit evidence for all required plan batches
+    // A checkpoint marked complete without sufficient confirmations is rejected.
+    if (plan.batches.length > 0) {
+      let auditStore
+      try {
+        auditStore = loadAnalysisAuditConfirmations(root, planId)
+      } catch (err) {
+        if (err instanceof AnalysisAuditConfirmationError) {
+          return formatError(err.code, err.message)
+        }
+        return formatError(
+          "unexpected",
+          "an unexpected audit confirmation load error occurred",
+        )
+      }
+
+      if (auditStore === null) {
+        return formatError(
+          "missing_audit_confirmation",
+          "no persisted audit confirmations exist for the current plan",
+        )
+      }
+
+      if (auditStore.manuscriptFingerprint !== plan.fingerprint) {
+        return formatError(
+          "incompatible_fingerprint",
+          "audit confirmation store manuscriptFingerprint does not match the current plan fingerprint",
+        )
+      }
+
+      if (auditStore.planId !== planId) {
+        return formatError(
+          "incompatible_plan",
+          "audit confirmation store planId does not match the current plan identity",
+        )
+      }
+
+      try {
+        assertAllBatchesConfirmed(plan, auditStore.confirmations)
+      } catch (err) {
+        if (err instanceof AnalysisAuditConfirmationError) {
+          return formatError(err.code, err.message)
+        }
+        return formatError(
+          "unexpected",
+          "an unexpected audit confirmation validation error occurred",
+        )
+      }
+    }
+
+    return JSON.stringify(input)
   },
 })
