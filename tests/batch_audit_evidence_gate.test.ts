@@ -22,6 +22,7 @@ import {
   createAnalysisCheckpoint,
   completeAnalysisBatch,
 } from "../src/lib/analysis_checkpoint"
+import { createAnalysisFinding } from "../src/lib/analysis_findings"
 import {
   createBatchAuditConfirmation,
   BATCH_AUDIT_CONFIRMATION_VERSION,
@@ -32,6 +33,7 @@ import {
   ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION,
   loadAnalysisCheckpoint,
   saveAnalysisCheckpoint,
+  loadAnalysisFindings,
   loadAnalysisAuditConfirmations,
   saveAnalysisAuditConfirmations,
   recordBatchAuditConfirmation,
@@ -627,5 +629,185 @@ describe("Issue #44: Batch audit evidence gate", () => {
     expect(parsed.coverage.state).toBe("complete")
     expect(parsed.coverage.totalBatches).toBe(0)
     expect(parsed.findings).toEqual([])
+  })
+
+  test("P1 regression: fabricated confirmations without banca_auditar cannot advance checkpoint or release synthesis", async () => {
+    writeProject(projectRoot, {
+      maxCharactersPerBatch: 50,
+      introContent:
+        "Primeiro capitulo sintetico para analise academica com texto longo o bastante para dividir em multiplos lotes ordenados.\\n",
+      metodoContent:
+        "Segundo capitulo sintetico de metodologia para segmentar em ainda mais lotes exaustivos da analise.\\n",
+    })
+    const { plan, planId } = getPlan(projectRoot)
+    expect(plan.batches.length).toBeGreaterThanOrEqual(4)
+    const ctx = { directory: projectRoot } as any
+
+    await bancaContext.execute({ projectRoot }, ctx)
+    const initialCp = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(initialCp?.completedBatches).toBe(0)
+
+    // Fabricate confirmations using createBatchAuditConfirmation(plan, batch, 0)
+    const fabricatedConfirmations = plan.batches.map((b) =>
+      createBatchAuditConfirmation(plan, b, 0),
+    )
+    saveAnalysisAuditConfirmations(projectRoot, {
+      version: ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint!,
+      confirmations: fabricatedConfirmations,
+    })
+
+    // Save empty findings store
+    saveAnalysisFindings(projectRoot, {
+      version: ANALYSIS_FINDINGS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint!,
+      findings: [],
+    })
+
+    // For each batchId, attempt to advance with banca_context
+    let advances = 0
+    for (const batch of plan.batches) {
+      const res = await bancaContext.execute(
+        { projectRoot, completedBatchId: batch.batchId },
+        ctx,
+      )
+      if (
+        !res.includes("context checkpoint error") &&
+        !res.includes("missing_batch_audit")
+      ) {
+        advances++
+      }
+    }
+
+    const checkpoint = loadAnalysisCheckpoint(projectRoot, planId)
+    const synthRes = await bancaSintese.execute({ projectRoot }, ctx)
+    const synthOk = !synthRes.includes("synthesis input error")
+
+    // Assert that the vulnerability from review #5725015784 is BLOCKED
+    expect(advances).toBe(0)
+    expect(checkpoint?.state).not.toBe("complete")
+    expect(synthOk).toBe(false)
+    expect(synthRes).toContain("synthesis input error")
+  })
+
+  test("negative: confirmation count or digest incompatible with stored findings fails closed", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+
+    await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: plan.fingerprint!,
+        batchId: plan.batches[0].batchId,
+        findings: [
+          {
+            category: "estrutura",
+            severity: "media",
+            claim: "claim text for batch 0",
+            evidence: "evidence text",
+            file: "capitulos/intro.tex",
+            startLine: 1,
+            endLine: 1,
+            sectionId: "sec1",
+          },
+        ],
+      },
+      ctx,
+    )
+
+    // Tamper with the confirmation: change acceptedCount to 0 while store has 1 finding
+    const auditStore = loadAnalysisAuditConfirmations(projectRoot, planId)!
+    auditStore.confirmations[0] = {
+      ...auditStore.confirmations[0],
+      acceptedCount: 0,
+    }
+    saveAnalysisAuditConfirmations(projectRoot, auditStore)
+
+    const advanceRes = await bancaContext.execute(
+      { projectRoot, completedBatchId: plan.batches[0].batchId },
+      ctx,
+    )
+    expect(advanceRes).toContain("context checkpoint error")
+    expect(advanceRes).toContain("code=incompatible_batch_audit")
+  })
+
+  test("negative: findings store altered after audit fails closed", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+    for (const batch of plan.batches) {
+      await bancaAuditar.execute(
+        {
+          projectRoot,
+          manuscriptFingerprint: plan.fingerprint!,
+          batchId: batch.batchId,
+          findings: [],
+        },
+        ctx,
+      )
+      await bancaContext.execute(
+        { projectRoot, completedBatchId: batch.batchId },
+        ctx,
+      )
+    }
+    const cp = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(cp?.state).toBe("complete")
+
+    // Tamper with the findings store: inject an unexpected finding for batch 0
+    const injectedFinding = createAnalysisFinding(plan, {
+      category: "estrutura",
+      severity: "media",
+      claim: "tampered valid claim",
+      evidence: "tampered evidence",
+      file: "capitulos/intro.tex",
+      startLine: 1,
+      endLine: 1,
+      sectionId: "sec1",
+      manuscriptFingerprint: plan.fingerprint!,
+      batchId: plan.batches[0].batchId,
+    })
+    const store = loadAnalysisFindings(projectRoot, planId)!
+    store.findings.push(injectedFinding)
+    saveAnalysisFindings(projectRoot, store)
+
+    const synthRes = await bancaSintese.execute({ projectRoot }, ctx)
+    expect(synthRes).toContain("synthesis input error")
+    expect(synthRes).toContain("code=incompatible_batch_audit")
+  })
+
+  test("positive: legitimate banca_auditar submission with zero findings advances checkpoint and synthesizes cleanly", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+
+    for (const batch of plan.batches) {
+      const auditRes = await bancaAuditar.execute(
+        {
+          projectRoot,
+          manuscriptFingerprint: plan.fingerprint!,
+          batchId: batch.batchId,
+          findings: [],
+        },
+        ctx,
+      )
+      expect(auditRes).toContain('"acceptedCount":0')
+
+      const advanceRes = await bancaContext.execute(
+        { projectRoot, completedBatchId: batch.batchId },
+        ctx,
+      )
+      expect(advanceRes).not.toContain("context checkpoint error")
+    }
+
+    const checkpoint = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(checkpoint?.state).toBe("complete")
+
+    const synthRes = await bancaSintese.execute({ projectRoot }, ctx)
+    expect(synthRes).not.toContain("synthesis input error")
+    const parsed = JSON.parse(synthRes)
+    expect(parsed.coverage.state).toBe("complete")
   })
 })

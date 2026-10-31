@@ -4,15 +4,20 @@
  * Binds durable audit evidence to planId, manuscriptFingerprint, batchId,
  * canonical batchIndex, and structurally validated acceptedCount.
  *
+ * Provides cryptographic binding (findingsDigest, submissionId) between
+ * batch audit confirmations and the findings validated by banca_auditar.
+ *
  * No filesystem, I/O, models, tools, clocks, or randomness.
  * Fail-closed on invalid, missing, tampered, or mismatched fields.
  */
 
+import { createHash } from "node:crypto"
 import { computePlanIdentity } from "./analysis_checkpoint"
 import type {
   ExhaustiveAnalysisBatch,
   ExhaustiveAnalysisPlan,
 } from "./analysis_coverage"
+import type { AnalysisFinding } from "./analysis_findings"
 
 /** Wire version of the batch audit confirmation record. */
 export const BATCH_AUDIT_CONFIRMATION_VERSION =
@@ -22,8 +27,8 @@ export const BATCH_AUDIT_CONFIRMATION_VERSION =
 export const BATCH_AUDIT_DISCLAIMER =
   "Structural validation confirmation for one canonical plan batch. Does not prove model execution, semantic inference, or academic grade." as const
 
-/** Exact key set for batch-audit-confirmation-v1. */
-const BATCH_AUDIT_CONFIRMATION_KEYS = [
+/** Core key set required for any batch-audit-confirmation-v1. */
+const BATCH_AUDIT_CONFIRMATION_CORE_KEYS = [
   "version",
   "planId",
   "manuscriptFingerprint",
@@ -33,9 +38,16 @@ const BATCH_AUDIT_CONFIRMATION_KEYS = [
   "disclaimer",
 ] as const
 
-const BATCH_AUDIT_CONFIRMATION_KEY_SET = new Set<string>(
-  BATCH_AUDIT_CONFIRMATION_KEYS,
+const BATCH_AUDIT_CONFIRMATION_CORE_KEY_SET = new Set<string>(
+  BATCH_AUDIT_CONFIRMATION_CORE_KEYS,
 )
+
+const BATCH_AUDIT_CONFIRMATION_ALL_KEYS = new Set<string>([
+  ...BATCH_AUDIT_CONFIRMATION_CORE_KEYS,
+  "findingIds",
+  "findingsDigest",
+  "submissionId",
+])
 
 /**
  * Durable record certifying that a batch was submitted through structural audit validation.
@@ -48,6 +60,9 @@ export interface BatchAuditConfirmation {
   batchId: string
   batchIndex: number
   acceptedCount: number
+  findingIds?: string[]
+  findingsDigest?: string
+  submissionId?: string
   disclaimer: string
 }
 
@@ -61,15 +76,79 @@ export class AnalysisAuditConfirmationError extends Error {
   }
 }
 
+function utf8(value: string): Buffer {
+  return Buffer.from(value, "utf8")
+}
+
+function appendFramed(parts: Buffer[], value: string): void {
+  const bytes = utf8(value)
+  const header = Buffer.allocUnsafe(4)
+  header.writeUInt32BE(bytes.byteLength, 0)
+  parts.push(header, bytes)
+}
+
 /**
- * Create a new BatchAuditConfirmation for a canonical plan batch.
- * Validates plan status, batch membership, index, and non-negative count.
+ * Compute deterministic digest over the accepted findings of a batch.
+ * Uses length-framed UTF-8 of sorted findingIds.
+ */
+export function computeBatchFindingsDigest(
+  findings: readonly (AnalysisFinding | { findingId: string } | string)[],
+): string {
+  const findingIds = findings
+    .map((item) => (typeof item === "string" ? item : item.findingId))
+    .sort()
+
+  const parts: Buffer[] = []
+  appendFramed(parts, "openbanca-batch-findings-digest-v1")
+  appendFramed(parts, String(findingIds.length))
+  for (const id of findingIds) {
+    appendFramed(parts, id)
+  }
+  return createHash("sha256").update(Buffer.concat(parts)).digest("hex")
+}
+
+/**
+ * Compute deterministic submission identity binding confirmation to plan, batch,
+ * and findings digest.
+ */
+export function computeAuditSubmissionId(opts: {
+  planId: string
+  manuscriptFingerprint: string
+  batchId: string
+  batchIndex: number
+  acceptedCount: number
+  findingsDigest: string
+}): string {
+  const parts: Buffer[] = []
+  appendFramed(parts, "openbanca-audit-submission-id-v1")
+  appendFramed(parts, opts.planId)
+  appendFramed(parts, opts.manuscriptFingerprint)
+  appendFramed(parts, opts.batchId)
+  appendFramed(parts, String(opts.batchIndex))
+  appendFramed(parts, String(opts.acceptedCount))
+  appendFramed(parts, opts.findingsDigest)
+  return createHash("sha256").update(Buffer.concat(parts)).digest("hex")
+}
+
+export type BatchAuditSubmissionInput = {
+  findings?: readonly (AnalysisFinding | { findingId: string })[]
+  disclaimer?: string
+}
+
+/**
+ * Create a BatchAuditConfirmation for a canonical plan batch.
+ *
+ * When called with submission input `{ findings }`, computes findingsDigest and submissionId,
+ * producing a verified confirmation backed by audit submission evidence.
+ *
+ * When called with a raw count `acceptedCount: number`, produces an unverified draft record
+ * lacking durable submission evidence (rejected by banca_context and banca_sintese).
  */
 export function createBatchAuditConfirmation(
   plan: ExhaustiveAnalysisPlan,
   batch: ExhaustiveAnalysisBatch,
-  acceptedCount: number,
-  disclaimer?: string,
+  submissionOrCount: number | BatchAuditSubmissionInput,
+  legacyDisclaimer?: string,
 ): BatchAuditConfirmation {
   if (plan.status !== "complete") {
     throw new AnalysisAuditConfirmationError(
@@ -110,16 +189,59 @@ export function createBatchAuditConfirmation(
     )
   }
 
-  if (
-    typeof acceptedCount !== "number" ||
-    !Number.isInteger(acceptedCount) ||
-    acceptedCount < 0
-  ) {
+  if (typeof submissionOrCount === "number") {
+    if (!Number.isInteger(submissionOrCount) || submissionOrCount < 0) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_accepted_count",
+        "acceptedCount must be an integer >= 0",
+      )
+    }
+    // Unverified record without submission evidence
+    return {
+      version: BATCH_AUDIT_CONFIRMATION_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint,
+      batchId: batch.batchId,
+      batchIndex: batch.index,
+      acceptedCount: submissionOrCount,
+      disclaimer: legacyDisclaimer ?? BATCH_AUDIT_DISCLAIMER,
+    }
+  }
+
+  if (submissionOrCount == null || typeof submissionOrCount !== "object") {
     throw new AnalysisAuditConfirmationError(
-      "invalid_accepted_count",
-      "acceptedCount must be an integer >= 0",
+      "invalid_submission_input",
+      "submission must be an object or non-negative integer",
     )
   }
+
+  const findings = submissionOrCount.findings ?? []
+  if (!Array.isArray(findings)) {
+    throw new AnalysisAuditConfirmationError(
+      "invalid_submission_input",
+      "submission findings must be an array",
+    )
+  }
+
+  const findingIds = findings.map((f) => {
+    if (typeof f !== "object" || f === null || typeof f.findingId !== "string") {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_submission_input",
+        "finding in submission must have a non-empty string findingId",
+      )
+    }
+    return f.findingId
+  }).sort()
+
+  const findingsDigest = computeBatchFindingsDigest(findingIds)
+  const submissionId = computeAuditSubmissionId({
+    planId,
+    manuscriptFingerprint: plan.fingerprint,
+    batchId: batch.batchId,
+    batchIndex: batch.index,
+    acceptedCount: findings.length,
+    findingsDigest,
+  })
 
   return {
     version: BATCH_AUDIT_CONFIRMATION_VERSION,
@@ -127,8 +249,11 @@ export function createBatchAuditConfirmation(
     manuscriptFingerprint: plan.fingerprint,
     batchId: batch.batchId,
     batchIndex: batch.index,
-    acceptedCount,
-    disclaimer: disclaimer ?? BATCH_AUDIT_DISCLAIMER,
+    acceptedCount: findings.length,
+    findingIds,
+    findingsDigest,
+    submissionId,
+    disclaimer: submissionOrCount.disclaimer ?? BATCH_AUDIT_DISCLAIMER,
   }
 }
 
@@ -152,14 +277,16 @@ export function validateBatchAuditConfirmation(
   }
 
   const keys = Object.keys(confirmation)
-  if (keys.length !== BATCH_AUDIT_CONFIRMATION_KEY_SET.size) {
-    throw new AnalysisAuditConfirmationError(
-      "invalid_confirmation",
-      `confirmation must have exactly ${BATCH_AUDIT_CONFIRMATION_KEY_SET.size} keys`,
-    )
+  for (const required of BATCH_AUDIT_CONFIRMATION_CORE_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(confirmation, required)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_confirmation",
+        `confirmation is missing required key: ${required}`,
+      )
+    }
   }
   for (const key of keys) {
-    if (!BATCH_AUDIT_CONFIRMATION_KEY_SET.has(key)) {
+    if (!BATCH_AUDIT_CONFIRMATION_ALL_KEYS.has(key)) {
       throw new AnalysisAuditConfirmationError(
         "invalid_confirmation",
         "confirmation contains an unknown key",
@@ -238,7 +365,7 @@ export function validateBatchAuditConfirmation(
     )
   }
 
-  return {
+  const result: BatchAuditConfirmation = {
     version: BATCH_AUDIT_CONFIRMATION_VERSION,
     planId: obj.planId,
     manuscriptFingerprint: obj.manuscriptFingerprint,
@@ -246,6 +373,114 @@ export function validateBatchAuditConfirmation(
     batchIndex: obj.batchIndex,
     acceptedCount: obj.acceptedCount,
     disclaimer: obj.disclaimer,
+  }
+
+  if (obj.findingIds !== undefined) {
+    if (!Array.isArray(obj.findingIds)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_confirmation",
+        "confirmation.findingIds must be an array of strings",
+      )
+    }
+    for (const id of obj.findingIds) {
+      if (typeof id !== "string" || id.length === 0) {
+        throw new AnalysisAuditConfirmationError(
+          "invalid_confirmation",
+          "confirmation.findingIds elements must be non-empty strings",
+        )
+      }
+    }
+    result.findingIds = [...obj.findingIds]
+  }
+
+  if (obj.findingsDigest !== undefined) {
+    if (typeof obj.findingsDigest !== "string" || obj.findingsDigest.length === 0) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_confirmation",
+        "confirmation.findingsDigest must be a non-empty string",
+      )
+    }
+    result.findingsDigest = obj.findingsDigest
+  }
+
+  if (obj.submissionId !== undefined) {
+    if (typeof obj.submissionId !== "string" || obj.submissionId.length === 0) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_confirmation",
+        "confirmation.submissionId must be a non-empty string",
+      )
+    }
+    result.submissionId = obj.submissionId
+  }
+
+  return result
+}
+
+/**
+ * Verify that a batch confirmation is coherent with the validated findings in the store.
+ * Fails closed if submission evidence is missing, counts differ, or digests/findingIds mismatch.
+ */
+export function verifyBatchConfirmationCoherence(
+  confirmation: BatchAuditConfirmation,
+  batchFindings: readonly AnalysisFinding[],
+): void {
+  if (
+    typeof confirmation.submissionId !== "string" ||
+    confirmation.submissionId.length === 0 ||
+    typeof confirmation.findingsDigest !== "string" ||
+    confirmation.findingsDigest.length === 0 ||
+    !Array.isArray(confirmation.findingIds)
+  ) {
+    throw new AnalysisAuditConfirmationError(
+      "missing_submission_evidence",
+      `audit confirmation for batch ${confirmation.batchId} lacks durable submission evidence`,
+    )
+  }
+
+  if (confirmation.acceptedCount !== batchFindings.length) {
+    throw new AnalysisAuditConfirmationError(
+      "incompatible_batch_audit",
+      `audit confirmation acceptedCount (${confirmation.acceptedCount}) does not match stored findings count (${batchFindings.length}) for batch ${confirmation.batchId}`,
+    )
+  }
+
+  const expectedDigest = computeBatchFindingsDigest(batchFindings)
+  if (confirmation.findingsDigest !== expectedDigest) {
+    throw new AnalysisAuditConfirmationError(
+      "incompatible_batch_audit",
+      `audit confirmation findingsDigest does not match stored findings digest for batch ${confirmation.batchId}`,
+    )
+  }
+
+  const expectedFindingIds = batchFindings.map((f) => f.findingId).sort()
+  if (confirmation.findingIds.length !== expectedFindingIds.length) {
+    throw new AnalysisAuditConfirmationError(
+      "incompatible_batch_audit",
+      `audit confirmation findingIds count does not match stored findings for batch ${confirmation.batchId}`,
+    )
+  }
+  for (let i = 0; i < expectedFindingIds.length; i++) {
+    if (confirmation.findingIds[i] !== expectedFindingIds[i]) {
+      throw new AnalysisAuditConfirmationError(
+        "incompatible_batch_audit",
+        `audit confirmation findingId at index ${i} does not match stored finding for batch ${confirmation.batchId}`,
+      )
+    }
+  }
+
+  const expectedSubmissionId = computeAuditSubmissionId({
+    planId: confirmation.planId,
+    manuscriptFingerprint: confirmation.manuscriptFingerprint,
+    batchId: confirmation.batchId,
+    batchIndex: confirmation.batchIndex,
+    acceptedCount: confirmation.acceptedCount,
+    findingsDigest: confirmation.findingsDigest,
+  })
+  if (confirmation.submissionId !== expectedSubmissionId) {
+    throw new AnalysisAuditConfirmationError(
+      "incompatible_batch_audit",
+      `audit confirmation submissionId is invalid for batch ${confirmation.batchId}`,
+    )
   }
 }
 
@@ -293,11 +528,13 @@ export function validateBatchAuditConfirmationsForPlan(
 
 /**
  * Verify that EVERY batch required by the plan has a valid confirmation.
+ * Optionally verifies bidirectional coherence against stored findings.
  * Complete empty plan (0 batches) passes.
  */
 export function assertAllBatchesConfirmed(
   plan: ExhaustiveAnalysisPlan,
   confirmations: readonly BatchAuditConfirmation[],
+  storedFindings?: readonly AnalysisFinding[],
 ): void {
   const validated = validateBatchAuditConfirmationsForPlan(plan, confirmations)
   const confirmedMap = new Map<string, BatchAuditConfirmation>()
@@ -318,6 +555,25 @@ export function assertAllBatchesConfirmed(
         "incompatible_batch_audit",
         `audit confirmation for batch ${batch.batchId} has inconsistent index`,
       )
+    }
+    if (storedFindings !== undefined) {
+      const batchFindings = storedFindings.filter(
+        (f) => f.batchId === batch.batchId,
+      )
+      verifyBatchConfirmationCoherence(confirmation, batchFindings)
+    }
+  }
+
+  if (storedFindings !== undefined) {
+    const validBatchIds = new Set(plan.batches.map((b) => b.batchId))
+    for (let i = 0; i < storedFindings.length; i++) {
+      const f = storedFindings[i]
+      if (!validBatchIds.has(f.batchId)) {
+        throw new AnalysisAuditConfirmationError(
+          "incompatible_batch_audit",
+          `findings store contains finding for unconfirmed or unknown batch: ${f.batchId}`,
+        )
+      }
     }
   }
 }

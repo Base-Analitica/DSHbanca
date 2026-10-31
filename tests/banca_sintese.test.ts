@@ -48,9 +48,13 @@ import { createBatchAuditConfirmation } from "../src/lib/analysis_audit_confirma
 function confirmAllBatches(
   projectRoot: string,
   plan: ReturnType<typeof planOracle>["plan"],
+  findings: readonly AnalysisFinding[] = [],
 ): void {
   for (const batch of plan.batches) {
-    const confirmation = createBatchAuditConfirmation(plan, batch, 0)
+    const batchFindings = findings.filter((f) => f.batchId === batch.batchId)
+    const confirmation = createBatchAuditConfirmation(plan, batch, {
+      findings: batchFindings,
+    })
     recordBatchAuditConfirmation(projectRoot, confirmation)
   }
 }
@@ -314,7 +318,7 @@ function prepareCompleteFixtures(
     findings,
   }
   saveAnalysisFindings(projectRoot, store)
-  confirmAllBatches(projectRoot, plan)
+  confirmAllBatches(projectRoot, plan, findings)
 
   // Confirm public loaders see what we wrote.
   expect(loadAnalysisCheckpoint(projectRoot, planId)).not.toBeNull()
@@ -351,7 +355,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
-    confirmAllBatches(projectRoot, plan)
+    confirmAllBatches(projectRoot, plan, findings)
 
     const expected = JSON.stringify(
       createGlobalAnalysisSynthesisInput(plan, checkpoint, findings),
@@ -380,7 +384,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
-    confirmAllBatches(projectRoot, plan)
+    confirmAllBatches(projectRoot, plan, findings)
     const expected = JSON.stringify(
       createGlobalAnalysisSynthesisInput(plan, checkpoint, findings),
     )
@@ -746,7 +750,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
-    confirmAllBatches(projectRoot, plan)
+    confirmAllBatches(projectRoot, plan, findings)
     const before = snapshotProject(projectRoot)
     // Snapshot is content+structure after fixtures, before tool — not mtime.
     const result = await runSintese(projectRoot)
@@ -798,7 +802,7 @@ describe("banca_sintese — validated global synthesis input tool", () => {
       manuscriptFingerprint: plan.fingerprint as string,
       findings,
     })
-    confirmAllBatches(projectRoot, plan)
+    confirmAllBatches(projectRoot, plan, findings)
     const expectedObj = createGlobalAnalysisSynthesisInput(
       plan,
       checkpoint,

@@ -962,7 +962,7 @@ function assertExactAuditStoreKeys(obj: object): void {
   }
 }
 
-const BATCH_CONFIRMATION_KEYS = [
+const BATCH_CONFIRMATION_CORE_KEYS = [
   "version",
   "planId",
   "manuscriptFingerprint",
@@ -971,7 +971,17 @@ const BATCH_CONFIRMATION_KEYS = [
   "acceptedCount",
   "disclaimer",
 ] as const
-const BATCH_CONFIRMATION_KEY_SET = new Set<string>(BATCH_CONFIRMATION_KEYS)
+
+const BATCH_CONFIRMATION_OPTIONAL_KEYS = [
+  "findingIds",
+  "findingsDigest",
+  "submissionId",
+] as const
+
+const BATCH_CONFIRMATION_ALLOWED_KEYS = new Set<string>([
+  ...BATCH_CONFIRMATION_CORE_KEYS,
+  ...BATCH_CONFIRMATION_OPTIONAL_KEYS,
+])
 
 function parseSingleConfirmation(
   item: unknown,
@@ -985,14 +995,16 @@ function parseSingleConfirmation(
     )
   }
   const keys = Object.keys(item)
-  if (keys.length !== BATCH_CONFIRMATION_KEY_SET.size) {
-    throw new AnalysisAuditConfirmationError(
-      "invalid_audit_store",
-      `confirmation must have exactly ${BATCH_CONFIRMATION_KEY_SET.size} keys`,
-    )
+  for (const required of BATCH_CONFIRMATION_CORE_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(item, required)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        `confirmation is missing required key: ${required}`,
+      )
+    }
   }
   for (const k of keys) {
-    if (!BATCH_CONFIRMATION_KEY_SET.has(k)) {
+    if (!BATCH_CONFIRMATION_ALLOWED_KEYS.has(k)) {
       throw new AnalysisAuditConfirmationError(
         "invalid_audit_store",
         "confirmation contains an unknown key",
@@ -1053,7 +1065,8 @@ function parseSingleConfirmation(
       "confirmation.disclaimer must be a non-empty string",
     )
   }
-  return {
+
+  const result: BatchAuditConfirmation = {
     version: BATCH_AUDIT_CONFIRMATION_VERSION,
     planId: obj.planId,
     manuscriptFingerprint: obj.manuscriptFingerprint,
@@ -1062,6 +1075,46 @@ function parseSingleConfirmation(
     acceptedCount: obj.acceptedCount,
     disclaimer: obj.disclaimer,
   }
+
+  if (obj.findingIds !== undefined) {
+    if (!Array.isArray(obj.findingIds)) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        "confirmation.findingIds must be an array of strings",
+      )
+    }
+    for (const id of obj.findingIds) {
+      if (typeof id !== "string" || id.length === 0) {
+        throw new AnalysisAuditConfirmationError(
+          "invalid_audit_store",
+          "confirmation.findingIds elements must be non-empty strings",
+        )
+      }
+    }
+    result.findingIds = [...obj.findingIds]
+  }
+
+  if (obj.findingsDigest !== undefined) {
+    if (typeof obj.findingsDigest !== "string" || obj.findingsDigest.length === 0) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        "confirmation.findingsDigest must be a non-empty string",
+      )
+    }
+    result.findingsDigest = obj.findingsDigest
+  }
+
+  if (obj.submissionId !== undefined) {
+    if (typeof obj.submissionId !== "string" || obj.submissionId.length === 0) {
+      throw new AnalysisAuditConfirmationError(
+        "invalid_audit_store",
+        "confirmation.submissionId must be a non-empty string",
+      )
+    }
+    result.submissionId = obj.submissionId
+  }
+
+  return result
 }
 
 function parseAnalysisAuditConfirmationsStore(

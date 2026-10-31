@@ -15,11 +15,14 @@ import {
 } from "../lib/analysis_checkpoint"
 import {
   AnalysisAuditConfirmationError,
+  AnalysisFindingsStoreError,
   getAnalysisCheckpointRelativePath,
   loadAnalysisCheckpoint,
+  loadAnalysisFindings,
   loadBatchAuditConfirmation,
   saveAnalysisCheckpoint,
 } from "../lib/state"
+import { verifyBatchConfirmationCoherence } from "../lib/analysis_audit_confirmation"
 
 /**
  * Format checkpoint errors for the tool surface.
@@ -134,6 +137,46 @@ export const bancaContext = defineBancaTool({
               "incompatible_batch_audit",
               `persisted audit confirmation for batch ${expectedNext.batchId} is incompatible with current plan`,
             )
+          }
+
+          let findingsStore
+          try {
+            findingsStore = loadAnalysisFindings(root, checkpoint.planId)
+          } catch (err) {
+            if (err instanceof AnalysisFindingsStoreError) {
+              throw new AnalysisCheckpointError(err.code, err.message)
+            }
+            throw err
+          }
+          if (findingsStore === null) {
+            throw new AnalysisCheckpointError(
+              "missing_findings_store",
+              `cannot advance checkpoint: findings store missing for plan ${checkpoint.planId}`,
+            )
+          }
+          if (findingsStore.manuscriptFingerprint !== plan.fingerprint) {
+            throw new AnalysisCheckpointError(
+              "incompatible_fingerprint",
+              "findings store manuscriptFingerprint does not match the current plan fingerprint",
+            )
+          }
+          if (findingsStore.planId !== checkpoint.planId) {
+            throw new AnalysisCheckpointError(
+              "incompatible_plan",
+              "findings store planId does not match the current plan identity",
+            )
+          }
+
+          const batchFindings = findingsStore.findings.filter(
+            (f) => f.batchId === expectedNext.batchId,
+          )
+          try {
+            verifyBatchConfirmationCoherence(confirmation, batchFindings)
+          } catch (err) {
+            if (err instanceof AnalysisAuditConfirmationError) {
+              throw new AnalysisCheckpointError(err.code, err.message)
+            }
+            throw err
           }
         }
         checkpoint = completeAnalysisBatch(

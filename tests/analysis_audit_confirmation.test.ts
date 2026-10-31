@@ -8,6 +8,7 @@ import {
   validateBatchAuditConfirmationsForPlan,
   assertAllBatchesConfirmed,
   mergeBatchAuditConfirmations,
+  verifyBatchConfirmationCoherence,
   type BatchAuditConfirmation,
 } from "../src/lib/analysis_audit_confirmation"
 import { computePlanIdentity } from "../src/lib/analysis_checkpoint"
@@ -205,6 +206,40 @@ describe("analysis_audit_confirmation — pure contract", () => {
     // All present succeeds
     const c2 = createBatchAuditConfirmation(plan, plan.batches[2], 0)
     expect(() => assertAllBatchesConfirmed(plan, [c0, c1, c2])).not.toThrow()
+  })
+
+  test("verifyBatchConfirmationCoherence rejects unverified confirmation lacking submission evidence", () => {
+    const plan = createSyntheticPlan({ batchCount: 1 })
+    // Raw count produces unverified confirmation
+    const unverified = createBatchAuditConfirmation(plan, plan.batches[0], 0)
+    expect(() => verifyBatchConfirmationCoherence(unverified, [])).toThrow(
+      AnalysisAuditConfirmationError,
+    )
+  })
+
+  test("verifyBatchConfirmationCoherence succeeds on verified confirmation with matching findings", () => {
+    const plan = createSyntheticPlan({ batchCount: 1 })
+    const verified = createBatchAuditConfirmation(plan, plan.batches[0], {
+      findings: [],
+    })
+    expect(() => verifyBatchConfirmationCoherence(verified, [])).not.toThrow()
+  })
+
+  test("verifyBatchConfirmationCoherence rejects mismatched finding count or digest", () => {
+    const plan = createSyntheticPlan({ batchCount: 1 })
+    const verified = createBatchAuditConfirmation(plan, plan.batches[0], {
+      findings: [{ findingId: "finding-1" } as any],
+    })
+    // Empty store when 1 finding was verified
+    expect(() => verifyBatchConfirmationCoherence(verified, [])).toThrow(
+      AnalysisAuditConfirmationError,
+    )
+    // Different findingId
+    expect(() =>
+      verifyBatchConfirmationCoherence(verified, [
+        { findingId: "finding-2" } as any,
+      ]),
+    ).toThrow(AnalysisAuditConfirmationError)
   })
 
   test("assertAllBatchesConfirmed succeeds on empty plan (0 batches)", () => {

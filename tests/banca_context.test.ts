@@ -18,20 +18,35 @@ import { loadConfig } from "../src/lib/config"
 import { loadCanonicalLatexManuscript } from "../src/lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../src/lib/analysis_coverage"
 import {
+  computePlanIdentity,
   createAnalysisCheckpoint,
   completeAnalysisBatch,
   nextAnalysisBatch,
   type AnalysisCheckpoint,
 } from "../src/lib/analysis_checkpoint"
 import {
+  ANALYSIS_FINDINGS_STORE_VERSION,
   getAnalysisCheckpointRelativePath,
   loadAnalysisCheckpoint,
+  loadAnalysisFindings,
   recordBatchAuditConfirmation,
+  saveAnalysisFindings,
 } from "../src/lib/state"
 import { createBatchAuditConfirmation } from "../src/lib/analysis_audit_confirmation"
 
 function confirmBatch(projectRoot: string, plan: any, batch: any): void {
-  const c = createBatchAuditConfirmation(plan, batch, 0)
+  const planId = computePlanIdentity(plan)
+  let store = loadAnalysisFindings(projectRoot, planId)
+  if (store === null) {
+    store = {
+      version: ANALYSIS_FINDINGS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint,
+      findings: [],
+    }
+    saveAnalysisFindings(projectRoot, store)
+  }
+  const c = createBatchAuditConfirmation(plan, batch, { findings: [] })
   recordBatchAuditConfirmation(projectRoot, c)
 }
 

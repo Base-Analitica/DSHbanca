@@ -198,7 +198,7 @@ export const bancaSintese = defineBancaTool({
       }
 
       try {
-        assertAllBatchesConfirmed(plan, auditStore.confirmations)
+        assertAllBatchesConfirmed(plan, auditStore.confirmations, store.findings)
       } catch (err) {
         if (err instanceof AnalysisAuditConfirmationError) {
           return formatError(err.code, err.message)

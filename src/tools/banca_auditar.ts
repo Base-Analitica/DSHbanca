@@ -327,8 +327,10 @@ export const bancaAuditar = defineBancaTool({
       const confirmation = createBatchAuditConfirmation(
         plan,
         batch,
-        acceptedCount,
-        AUDIT_RECEIPT_DISCLAIMER,
+        {
+          findings: validated,
+          disclaimer: AUDIT_RECEIPT_DISCLAIMER,
+        },
       )
       recordBatchAuditConfirmation(root, confirmation)
     } catch (err) {
