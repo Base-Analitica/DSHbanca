@@ -110,20 +110,23 @@ export function classifyNativeSkillsStatus(value: unknown): ProfileGateStatus {
   return validateNativeSkillsEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
-/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills verification. */
+/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills and batch audit verification. */
 export function classifyProfileGateStatuses(
   issue2Status: ProfileGateStatus,
   auditorMarkdownStatus: ProfileGateStatus,
   nativeSkillsStatus?: ProfileGateStatus,
+  batchAuditStatus?: ProfileGateStatus,
 ): {
   issue2Status: ProfileGateStatus
   auditorMarkdownStatus: ProfileGateStatus
   nativeSkillsStatus?: ProfileGateStatus
+  batchAuditStatus?: ProfileGateStatus
   overallStatus: ProfileGateStatus
   exitCode: number
 } {
   const statuses = [issue2Status, auditorMarkdownStatus]
   if (nativeSkillsStatus !== undefined) statuses.push(nativeSkillsStatus)
+  if (batchAuditStatus !== undefined) statuses.push(batchAuditStatus)
   const overallStatus: ProfileGateStatus = statuses.includes("FAIL")
     ? "FAIL"
     : statuses.includes("BLOCKED") ? "BLOCKED" : "PASS"
@@ -131,6 +134,7 @@ export function classifyProfileGateStatuses(
     issue2Status,
     auditorMarkdownStatus,
     ...(nativeSkillsStatus !== undefined ? { nativeSkillsStatus } : {}),
+    ...(batchAuditStatus !== undefined ? { batchAuditStatus } : {}),
     overallStatus,
     exitCode: overallStatus === "PASS" ? passExitCode() : overallStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
   }
@@ -654,6 +658,76 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
   }
   return errors
 }
+
+export interface BatchAuditEvidenceGateEvidence {
+  totalBatches: number
+  completedBatches: number
+  planId: string
+  manuscriptFingerprint: string
+  unverifiedAdvancesBlocked: number
+  prematureSynthesisBlocked: number
+  auditsCompletedWithZeroFindings: number
+  orderlyAdvances: number
+  resumesWithoutSpuriousAdvance: number
+  synthesisReleased: boolean
+  synthesisInputCoverageState: string
+  manuscriptPreserved: boolean
+}
+
+/**
+ * Validate proof that all batches required durable audit confirmation before advancing
+ * and releasing synthesis input, with zero-findings support and synthetic manuscript preservation.
+ */
+export function validateBatchAuditEvidence(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) {
+    return ["batch audit evidence gate lacks required host verification"]
+  }
+  if (typeof value.totalBatches !== "number" || value.totalBatches < 2) {
+    errors.push("totalBatches must be at least 2")
+  }
+  if (value.completedBatches !== value.totalBatches) {
+    errors.push("completedBatches must equal totalBatches")
+  }
+  if (typeof value.planId !== "string" || value.planId.length === 0) {
+    errors.push("planId must be a non-empty string")
+  }
+  if (typeof value.manuscriptFingerprint !== "string" || value.manuscriptFingerprint.length === 0) {
+    errors.push("manuscriptFingerprint must be a non-empty string")
+  }
+  if (typeof value.unverifiedAdvancesBlocked !== "number" || value.unverifiedAdvancesBlocked < (value.totalBatches ?? 2)) {
+    errors.push("all batches must reject advance without audit")
+  }
+  if (typeof value.prematureSynthesisBlocked !== "number" || value.prematureSynthesisBlocked < (value.totalBatches ?? 2)) {
+    errors.push("all incomplete batches must block synthesis")
+  }
+  if (typeof value.auditsCompletedWithZeroFindings !== "number" || value.auditsCompletedWithZeroFindings !== value.totalBatches) {
+    errors.push("all batches must accept audit with zero findings")
+  }
+  if (typeof value.orderlyAdvances !== "number" || value.orderlyAdvances !== value.totalBatches) {
+    errors.push("all batches must advance in order")
+  }
+  if (typeof value.resumesWithoutSpuriousAdvance !== "number" || value.resumesWithoutSpuriousAdvance !== value.totalBatches) {
+    errors.push("resume must not spuriously advance completedBatches")
+  }
+  if (value.synthesisReleased !== true) {
+    errors.push("synthesis must be released upon full coverage")
+  }
+  if (value.synthesisInputCoverageState !== "complete") {
+    errors.push("synthesis coverage state must be complete")
+  }
+  if (value.manuscriptPreserved !== true) {
+    errors.push("synthetic manuscript was modified by analysis tools")
+  }
+  return errors
+}
+
+/** Classify the batch audit evidence gate status. */
+export function classifyBatchAuditEvidenceStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.totalBatches === undefined) return "BLOCKED"
+  return validateBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
 
 export function missingHostExitCode(): number {
   return 2

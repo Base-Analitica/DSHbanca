@@ -19,6 +19,8 @@ import {
   classifyAuditorMarkdownStatus,
   validateNativeSkillsEvidence,
   classifyNativeSkillsStatus,
+  validateBatchAuditEvidence,
+  classifyBatchAuditEvidenceStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateEvidence,
@@ -701,5 +703,116 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
+  })
+})
+
+const completeBatchAuditEvidence = {
+  totalBatches: 5,
+  completedBatches: 5,
+  planId: "1fc2cf44ea0ad923b401d36e35932491c8009807ff0207e05f1e7bd3d3929085",
+  manuscriptFingerprint: "a6260a0083fa91b7e41bdc14855f626f65df8d9c2b57e71e54f05eef51784338",
+  unverifiedAdvancesBlocked: 5,
+  prematureSynthesisBlocked: 5,
+  auditsCompletedWithZeroFindings: 5,
+  orderlyAdvances: 5,
+  resumesWithoutSpuriousAdvance: 5,
+  synthesisReleased: true,
+  synthesisInputCoverageState: "complete",
+  manuscriptPreserved: true,
+}
+
+describe("DSH batch audit evidence gate contract (#44)", () => {
+  test("accepts complete positive batch audit evidence", () => {
+    expect(validateBatchAuditEvidence(completeBatchAuditEvidence)).toEqual([])
+    expect(classifyBatchAuditEvidenceStatus(completeBatchAuditEvidence)).toBe("PASS")
+  })
+
+  test("reports BLOCKED when evidence is missing or totalBatches undefined", () => {
+    expect(classifyBatchAuditEvidenceStatus(undefined)).toBe("BLOCKED")
+    expect(classifyBatchAuditEvidenceStatus({})).toBe("BLOCKED")
+  })
+
+  test("gate summary incorporates batch audit status while preserving earlier gates", () => {
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      overallStatus: "PASS",
+      exitCode: 0,
+    })
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "BLOCKED")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "FAIL")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "FAIL",
+      overallStatus: "FAIL",
+      exitCode: 1,
+    })
+  })
+
+  test.each([
+    [
+      "totalBatches < 2",
+      { ...completeBatchAuditEvidence, totalBatches: 1, completedBatches: 1 },
+      "totalBatches must be at least 2",
+    ],
+    [
+      "completedBatches !== totalBatches",
+      { ...completeBatchAuditEvidence, completedBatches: 4 },
+      "completedBatches must equal totalBatches",
+    ],
+    [
+      "unverified advance not blocked",
+      { ...completeBatchAuditEvidence, unverifiedAdvancesBlocked: 4 },
+      "all batches must reject advance without audit",
+    ],
+    [
+      "premature synthesis not blocked",
+      { ...completeBatchAuditEvidence, prematureSynthesisBlocked: 4 },
+      "all incomplete batches must block synthesis",
+    ],
+    [
+      "audits completed with zero findings mismatch",
+      { ...completeBatchAuditEvidence, auditsCompletedWithZeroFindings: 4 },
+      "all batches must accept audit with zero findings",
+    ],
+    [
+      "orderly advances mismatch",
+      { ...completeBatchAuditEvidence, orderlyAdvances: 4 },
+      "all batches must advance in order",
+    ],
+    [
+      "resume spurious advance",
+      { ...completeBatchAuditEvidence, resumesWithoutSpuriousAdvance: 4 },
+      "resume must not spuriously advance completedBatches",
+    ],
+    [
+      "synthesis not released",
+      { ...completeBatchAuditEvidence, synthesisReleased: false },
+      "synthesis must be released upon full coverage",
+    ],
+    [
+      "synthesis coverage state not complete",
+      { ...completeBatchAuditEvidence, synthesisInputCoverageState: "partial" },
+      "synthesis coverage state must be complete",
+    ],
+    [
+      "synthetic manuscript modified by analysis tools",
+      { ...completeBatchAuditEvidence, manuscriptPreserved: false },
+      "synthetic manuscript was modified by analysis tools",
+    ],
+  ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
+    const errors = validateBatchAuditEvidence(invalidEvidence)
+    expect(errors).toContain(expectedError)
+    expect(classifyBatchAuditEvidenceStatus(invalidEvidence)).toBe("FAIL")
   })
 })
