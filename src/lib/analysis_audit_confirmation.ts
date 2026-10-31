@@ -7,6 +7,18 @@
  * Provides cryptographic binding (findingsDigest, submissionId) between
  * batch audit confirmations and the findings validated by banca_auditar.
  *
+ * TRUST MODEL & AUTHENTICITY BOUNDARY:
+ * 1. Coerência entre findings e confirmações: Garante matematicamente via SHA-256
+ *    (findingsDigest, findingIds) que a confirmação e o store de findings estão
+ *    estritamente alinhados. Modificações no store invalidam o avanço do checkpoint.
+ * 2. Evidência estrutural de submissão: Produzida pelo adaptador acadêmico banca_auditar
+ *    ao persistir achados validados e emitir recibos estruturados com disclaimer.
+ * 3. Limite de proveniência autenticada: Hashes determinísticos operando em arquivos JSON
+ *    no workspace aberto NÃO comprovam autenticidade de origem da chamada contra um
+ *    escritor arbitrário no workspace. Garantia forte de proveniência exige que o host
+ *    (DSH runtime) assine digitalmente a submissão ou utilize armazenamento fora do
+ *    workspace, o que constitui decisão arquitetural pendente de aprovação humana (NEEDS_APPROVAL).
+ *
  * No filesystem, I/O, models, tools, clocks, or randomness.
  * Fail-closed on invalid, missing, tampered, or mismatched fields.
  */
@@ -23,9 +35,9 @@ import type { AnalysisFinding } from "./analysis_findings"
 export const BATCH_AUDIT_CONFIRMATION_VERSION =
   "batch-audit-confirmation-v1" as const
 
-/** Disclaimer: confirmation proves only structural submission, never inference or grade. */
+/** Disclaimer: confirmation proves only structural consistency, never model execution or host authenticity. */
 export const BATCH_AUDIT_DISCLAIMER =
-  "Structural validation confirmation for one canonical plan batch. Does not prove model execution, semantic inference, or academic grade." as const
+  "Structural validation confirmation for one canonical plan batch. Does not prove model execution, semantic inference, academic grade, or host-authenticated origin." as const
 
 /** Core key set required for any batch-audit-confirmation-v1. */
 const BATCH_AUDIT_CONFIRMATION_CORE_KEYS = [

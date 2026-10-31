@@ -810,4 +810,266 @@ describe("Issue #44: Batch audit evidence gate", () => {
     const parsed = JSON.parse(synthRes)
     expect(parsed.coverage.state).toBe("complete")
   })
+
+  test("P1 regression (#5725144182): multiple incremental submissions to the same batch accumulate canonical findings cleanly", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+    const batch0 = plan.batches[0]
+
+    // 1. First audit of batch 0 with finding A
+    const resA = await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: plan.fingerprint!,
+        batchId: batch0.batchId,
+        findings: [
+          {
+            category: "estrutura",
+            severity: "media",
+            claim: "claim A for batch 0",
+            evidence: "evidence A",
+            file: "capitulos/intro.tex",
+            startLine: 1,
+            endLine: 1,
+            sectionId: "sec1",
+          },
+        ],
+      },
+      ctx,
+    )
+    expect(resA).toContain('"acceptedCount":1')
+    expect(resA).toContain('"addedCount":1')
+    expect(resA).toContain('"totalCount":1')
+
+    // 2. Second audit of same batch 0 with distinct finding B
+    const resB = await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: plan.fingerprint!,
+        batchId: batch0.batchId,
+        findings: [
+          {
+            category: "clareza",
+            severity: "baixa",
+            claim: "claim B for batch 0",
+            evidence: "evidence B",
+            file: "capitulos/intro.tex",
+            startLine: 1,
+            endLine: 1,
+            sectionId: "sec1",
+          },
+        ],
+      },
+      ctx,
+    )
+    expect(resB).toContain('"acceptedCount":1')
+    expect(resB).toContain('"addedCount":1')
+    expect(resB).toContain('"totalCount":2')
+
+    // 3. banca_context must advance batch 0 cleanly (no incompatible_batch_audit!)
+    const advanceRes = await bancaContext.execute(
+      { projectRoot, completedBatchId: batch0.batchId },
+      ctx,
+    )
+    expect(advanceRes).not.toContain("context checkpoint error")
+    expect(advanceRes).not.toContain("incompatible_batch_audit")
+
+    const checkpoint = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(checkpoint?.completedBatches).toBe(1)
+  })
+
+  test("incremental submission: replay of exact identical finding is deduplicated and preserves coherence", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+    const batch0 = plan.batches[0]
+
+    const finding = {
+      category: "estrutura",
+      severity: "media",
+      claim: "repeated claim for batch 0",
+      evidence: "evidence text",
+      file: "capitulos/intro.tex",
+      startLine: 1,
+      endLine: 1,
+      sectionId: "sec1",
+    }
+
+    await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: plan.fingerprint!,
+        batchId: batch0.batchId,
+        findings: [finding],
+      },
+      ctx,
+    )
+
+    // Replay identical finding
+    const replayRes = await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: plan.fingerprint!,
+        batchId: batch0.batchId,
+        findings: [finding],
+      },
+      ctx,
+    )
+    expect(replayRes).toContain('"acceptedCount":1')
+    expect(replayRes).toContain('"addedCount":0')
+    expect(replayRes).toContain('"duplicateCount":1')
+    expect(replayRes).toContain('"totalCount":1')
+
+    // Checkpoint advances without error
+    const advanceRes = await bancaContext.execute(
+      { projectRoot, completedBatchId: batch0.batchId },
+      ctx,
+    )
+    expect(advanceRes).not.toContain("context checkpoint error")
+  })
+
+  test("incremental submission: zero findings call after non-empty audit preserves previous findings", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+    const batch0 = plan.batches[0]
+
+    // Initial audit with 1 finding
+    await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: plan.fingerprint!,
+        batchId: batch0.batchId,
+        findings: [
+          {
+            category: "estrutura",
+            severity: "media",
+            claim: "claim before empty call",
+            evidence: "evidence text",
+            file: "capitulos/intro.tex",
+            startLine: 1,
+            endLine: 1,
+            sectionId: "sec1",
+          },
+        ],
+      },
+      ctx,
+    )
+
+    // Second audit with zero findings
+    const emptyRes = await bancaAuditar.execute(
+      {
+        projectRoot,
+        manuscriptFingerprint: plan.fingerprint!,
+        batchId: batch0.batchId,
+        findings: [],
+      },
+      ctx,
+    )
+    expect(emptyRes).toContain('"acceptedCount":0')
+    expect(emptyRes).toContain('"addedCount":0')
+    expect(emptyRes).toContain('"totalCount":1')
+
+    // Stored findings must NOT have been wiped out
+    const store = loadAnalysisFindings(projectRoot, planId)
+    expect(store?.findings.length).toBe(1)
+
+    // Checkpoint advances cleanly
+    const advanceRes = await bancaContext.execute(
+      { projectRoot, completedBatchId: batch0.batchId },
+      ctx,
+    )
+    expect(advanceRes).not.toContain("context checkpoint error")
+  })
+
+  test("persistence failure during banca_auditar fails closed without advancing checkpoint", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+    const batch0 = plan.batches[0]
+
+    const bancaDir = join(projectRoot, ".banca")
+    chmodSync(bancaDir, 0o555)
+
+    try {
+      const auditRes = await bancaAuditar.execute(
+        {
+          projectRoot,
+          manuscriptFingerprint: plan.fingerprint!,
+          batchId: batch0.batchId,
+          findings: [
+            {
+              category: "estrutura",
+              severity: "media",
+              claim: "claim on un-writable store",
+              evidence: "evidence text",
+              file: "capitulos/intro.tex",
+              startLine: 1,
+              endLine: 1,
+              sectionId: "sec1",
+            },
+          ],
+        },
+        ctx,
+      )
+      expect(auditRes).toContain("audit validation error")
+      expect(auditRes).toContain("code=invalid_findings_storage")
+
+      // Attempting to advance batch 0 must fail closed
+      const advanceRes = await bancaContext.execute(
+        { projectRoot, completedBatchId: batch0.batchId },
+        ctx,
+      )
+      expect(advanceRes).toContain("context checkpoint error")
+    } finally {
+      chmodSync(bancaDir, 0o755)
+    }
+  })
+
+  test("trust model authenticity boundary: workspace-internal forgery passes consistency but does not prove host execution", async () => {
+    writeProject(projectRoot, {
+      maxCharactersPerBatch: 50,
+      introContent:
+        "Primeiro capitulo com texto suficiente para gerar lotes multiplos.\\n",
+      metodoContent:
+        "Segundo capitulo com metodologia independente para gerar mais lotes.\\n",
+    })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+
+    // Direct filesystem fabrication using the pure consistency helper
+    const fabricatedConfirmations = plan.batches.map((b) =>
+      createBatchAuditConfirmation(plan, b, { findings: [] }),
+    )
+    saveAnalysisAuditConfirmations(projectRoot, {
+      version: ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint!,
+      confirmations: fabricatedConfirmations,
+    })
+    saveAnalysisFindings(projectRoot, {
+      version: ANALYSIS_FINDINGS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint!,
+      findings: [],
+    })
+
+    // Advance all batches programmatically
+    let advances = 0
+    for (const batch of plan.batches) {
+      const res = await bancaContext.execute(
+        { projectRoot, completedBatchId: batch.batchId },
+        ctx,
+      )
+      if (!res.includes("context checkpoint error")) advances++
+    }
+
+    const synthRes = await bancaSintese.execute({ projectRoot }, ctx)
+
+    // Confirms that intra-workspace consistency succeeds, demonstrating why
+    // authentic host provenance requires host-level trust model / host-signed tokens (NEEDS_APPROVAL).
+    expect(advances).toBe(plan.batches.length)
+    expect(synthRes).not.toContain("synthesis input error")
+  })
 })

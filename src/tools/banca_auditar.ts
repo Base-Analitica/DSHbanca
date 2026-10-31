@@ -323,12 +323,14 @@ export const bancaAuditar = defineBancaTool({
       )
     }
 
+    const batchFindings = merged.filter((f) => f.batchId === batch.batchId)
+
     try {
       const confirmation = createBatchAuditConfirmation(
         plan,
         batch,
         {
-          findings: validated,
+          findings: batchFindings,
           disclaimer: AUDIT_RECEIPT_DISCLAIMER,
         },
       )
