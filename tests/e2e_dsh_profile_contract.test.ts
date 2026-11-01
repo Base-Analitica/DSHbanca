@@ -1260,6 +1260,7 @@ describe("DSH native questions evidence gate contract (#46)", () => {
 
 const completeAcademicDecisionEvidence = {
   hostApiAvailable: true,
+  domainLibraryLoaded: true,
   skillLoaded: {
     name: "banca-grille",
     discovered: true,
@@ -1287,6 +1288,7 @@ const completeAcademicDecisionEvidence = {
     containsFindingId: true,
     containsLocalizedEvidence: true,
     containsRecommendationJustification: true,
+    evidenceSnippetVerified: true,
     detailFieldDroppedByHostTool: true,
     optionsCount: 5,
     hasRecommendedOption: true,
@@ -1326,6 +1328,11 @@ const completeAcademicDecisionEvidence = {
       answererReached: false,
     },
     mismatchedOrIncompatibleRejected: true,
+    cancellation: {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      rejectionObserved: true,
+    },
     cancellationHandled: true,
   },
 }
@@ -1603,6 +1610,70 @@ describe("DSH native academic decision evidence gate contract (#48)", () => {
         negativeCases: { ...completeAcademicDecisionEvidence.negativeCases, cancellationHandled: false },
       },
       "cancellation must be handled fail-closed",
+    ],
+    [
+      "academic domain library missing or not loaded",
+      {
+        ...completeAcademicDecisionEvidence,
+        domainLibraryLoaded: false,
+      },
+      "academic decision domain library academic_decision.js was not loaded or required exports were missing",
+    ],
+    [
+      "evidence snippet on cited lines not verified in synthetic fixture",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: {
+          ...completeAcademicDecisionEvidence.transmittedPayload,
+          evidenceSnippetVerified: false,
+        },
+      },
+      "evidence snippet on cited lines of synthetic manuscript fixture was not verified",
+    ],
+    [
+      "host ignores abort signal and returns success",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          cancellation: {
+            handled: false,
+            observedErrorCode: "IGNORED_ABORT_SUCCESS",
+            rejectionObserved: false,
+          },
+        },
+      },
+      "cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected",
+    ],
+    [
+      "cancellation observes generic error instead of ASK_ABORTED",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          cancellation: {
+            handled: false,
+            observedErrorCode: "GENERIC_ERROR",
+            rejectionObserved: true,
+          },
+        },
+      },
+      "cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected",
+    ],
+    [
+      "cancellation rejection not observed",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          cancellation: {
+            handled: false,
+            observedErrorCode: "",
+            rejectionObserved: false,
+          },
+        },
+      },
+      "cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected",
     ],
   ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
     const errors = validateAcademicDecisionEvidence(invalidEvidence)

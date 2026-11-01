@@ -1309,6 +1309,7 @@ export interface AcademicDecisionTransmittedPayloadEvidence {
   containsFindingId: boolean
   containsLocalizedEvidence: boolean
   containsRecommendationJustification: boolean
+  evidenceSnippetVerified: boolean
   detailFieldDroppedByHostTool: boolean
   optionsCount: number
   hasRecommendedOption: boolean
@@ -1340,6 +1341,12 @@ export interface AcademicDecisionAbsenceOfMutationEvidence {
   manuscriptPreserved: boolean
 }
 
+export interface AcademicDecisionCancellationEvidence {
+  handled: boolean
+  observedErrorCode: string
+  rejectionObserved: boolean
+}
+
 export interface AcademicDecisionNegativeCasesEvidence {
   delegatedAgentBlocked: {
     blocked: boolean
@@ -1347,11 +1354,13 @@ export interface AcademicDecisionNegativeCasesEvidence {
     answererReached: boolean
   }
   mismatchedOrIncompatibleRejected: boolean
+  cancellation: AcademicDecisionCancellationEvidence
   cancellationHandled: boolean
 }
 
 export interface AcademicDecisionCycleEvidence {
   hostApiAvailable: boolean
+  domainLibraryLoaded: boolean
   skillLoaded: AcademicDecisionSkillLoadedEvidence
   agentIdentity: AcademicDecisionAgentIdentityEvidence
   toolDispatch: AcademicDecisionToolDispatchEvidence
@@ -1374,6 +1383,9 @@ export function validateAcademicDecisionEvidence(value: unknown): string[] {
   }
   if (value.hostApiAvailable !== true) {
     errors.push("academic decision host API was not available")
+  }
+  if (value.domainLibraryLoaded !== true) {
+    errors.push("academic decision domain library academic_decision.js was not loaded or required exports were missing")
   }
 
   // 1. Skill verification
@@ -1443,6 +1455,9 @@ export function validateAcademicDecisionEvidence(value: unknown): string[] {
     }
     if (payload.containsRecommendationJustification !== true) {
       errors.push("transmitted question text must contain recommendation justification")
+    }
+    if (payload.evidenceSnippetVerified !== true) {
+      errors.push("evidence snippet on cited lines of synthetic manuscript fixture was not verified")
     }
     if (payload.detailFieldDroppedByHostTool !== true) {
       errors.push("evidence must prove host tool drops detail field and incorporates content into question text")
@@ -1534,6 +1549,15 @@ export function validateAcademicDecisionEvidence(value: unknown): string[] {
     }
     if (neg.mismatchedOrIncompatibleRejected !== true) {
       errors.push("mismatched or incompatible answer must be rejected")
+    }
+    const cancel = isRecord(neg.cancellation) ? (neg.cancellation as unknown as AcademicDecisionCancellationEvidence) : undefined
+    if (
+      !cancel ||
+      cancel.handled !== true ||
+      cancel.rejectionObserved !== true ||
+      cancel.observedErrorCode !== "ASK_ABORTED"
+    ) {
+      errors.push("cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected")
     }
     if (neg.cancellationHandled !== true) {
       errors.push("cancellation must be handled fail-closed")

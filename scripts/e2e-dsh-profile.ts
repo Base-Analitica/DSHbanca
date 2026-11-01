@@ -1165,15 +1165,33 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
     isRoot,
   };
 
-  // Load domain library for academic decision
+  // Load domain library for academic decision fail-closed (no artificial fallbacks)
   let academicModule;
   try {
     academicModule = await import("./academic_decision.js");
-  } catch {
-    // Handled fail-closed below
+  } catch (err) {
+    fail("academic probe: failed to load ./academic_decision.js: " + String(err), "BLOCKED");
+    return;
   }
   const formatFn = academicModule?.formatAcademicDecisionQuestion;
   const processFn = academicModule?.processAcademicDecisionAnswer;
+  if (typeof formatFn !== "function" || typeof processFn !== "function") {
+    fail("academic probe: academic_decision.js missing required exports formatAcademicDecisionQuestion or processAcademicDecisionAnswer", "BLOCKED");
+    return;
+  }
+
+  // Verify cited methodological evidence directly in the synthetic fixture
+  const lote2Path = join(workspace, "capitulos/lote2.tex");
+  const lote2Content = await readFile(lote2Path, "utf8");
+  const lote2Lines = lote2Content.split("\\n");
+  const citedSnippet = lote2Lines.slice(0, 2).join("\\n");
+  const evidenceSnippetVerified =
+    citedSnippet.includes("omissão de justificativa do critério amostral") &&
+    citedSnippet.includes("synthetic2026");
+  if (!evidenceSnippetVerified) {
+    fail("academic probe: capitulos/lote2.tex:1-2 does not contain expected methodological evidence snippet");
+    return;
+  }
 
   // 5.1 Synthetic LaTeX/BibTeX finding with located evidence, alternatives, recommendation, safe controls
   const syntheticFinding = {
@@ -1202,34 +1220,11 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
     allowDefer: true,
   };
 
-  const recJustification = syntheticFinding.alternatives[0].justification;
-  const findingDetail = "Achado: " + syntheticFinding.findingId + "\\nEvidência: " + syntheticFinding.evidence + "\\nJustificativa da recomendação: " + recJustification;
-  const formattedQuestion = typeof formatFn === "function"
-    ? formatFn(syntheticFinding)
-    : {
-        id: syntheticFinding.id,
-        question: syntheticFinding.prompt + "\\n\\n" + findingDetail,
-        detail: findingDetail,
-        header: "Decisão Acadêmica",
-        options: [
-          {
-            label: syntheticFinding.alternatives[0].label + " (Recommended)",
-            description: syntheticFinding.alternatives[0].description + " Justificativa: " + recJustification,
-          },
-          {
-            label: syntheticFinding.alternatives[1].label,
-            description: syntheticFinding.alternatives[1].description,
-          },
-          {
-            label: "Não sei — explique/mostre evidências",
-            description: "Explicar a dúvida, trechos do manuscrito e riscos antes de exigir uma decisão.",
-          },
-          {
-            label: "Adiar / continuar outras etapas",
-            description: "Preservar a pendência e continuar apenas trabalhos independentes e seguros.",
-          },
-        ],
-      };
+  const formattedQuestion = formatFn(syntheticFinding);
+  if (!formattedQuestion || !formattedQuestion.id || !Array.isArray(formattedQuestion.options) || formattedQuestion.options.length < 4) {
+    fail("academic probe: formatAcademicDecisionQuestion returned invalid question payload");
+    return;
+  }
 
   const recommendedLabel = formattedQuestion.options[0].label;
 
@@ -1296,6 +1291,7 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
       containsFindingId: fullQuestionText.includes(syntheticFinding.findingId),
       containsLocalizedEvidence: fullQuestionText.includes("capitulos/lote2.tex:1-2"),
       containsRecommendationJustification: fullQuestionText.includes(syntheticFinding.alternatives[0].justification),
+      evidenceSnippetVerified: Boolean(evidenceSnippetVerified),
       detailFieldDroppedByHostTool: transmittedQ?.detail === undefined,
       optionsCount: transmittedOptions.length,
       hasRecommendedOption: transmittedOptions.some((o) => typeof o.label === "string" && o.label.includes("(Recommended)")),
@@ -1325,24 +1321,22 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
       noFreeTextWhenStructured: rawAnswer.custom === undefined || rawAnswer.custom === "",
     };
 
-    let decisionOutcome = "selected_recommendation";
-    let decisionNextSteps = ["Registrar deliberação acadêmica no relatório da banca."];
-    let decisionMutationAuthorized = false;
-    if (typeof processFn === "function") {
-      try {
-        const procResult = processFn(syntheticFinding, formattedQuestion, rawAnswer);
-        decisionOutcome = procResult.outcome;
-        decisionMutationAuthorized = procResult.mutationAuthorized;
-        decisionNextSteps = procResult.nextSteps;
-      } catch (err) {
-        fail("processAcademicDecisionAnswer failed: " + String(err));
-      }
+    let procResult;
+    try {
+      procResult = processFn(syntheticFinding, formattedQuestion, rawAnswer);
+    } catch (err) {
+      fail("processAcademicDecisionAnswer failed: " + String(err));
+      return;
+    }
+    if (!procResult || typeof procResult.mutationAuthorized !== "boolean" || !Array.isArray(procResult.nextSteps)) {
+      fail("academic probe: processAcademicDecisionAnswer returned malformed interpretation");
+      return;
     }
 
     interpretation = {
-      outcome: decisionOutcome,
-      mutationAuthorized: decisionMutationAuthorized,
-      nextSteps: decisionNextSteps,
+      outcome: procResult.outcome,
+      mutationAuthorized: procResult.mutationAuthorized,
+      nextSteps: procResult.nextSteps,
     };
 
     let approvalEventsCount = 0;
@@ -1401,19 +1395,20 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
     }
 
     let mismatchedOrIncompatibleRejected = false;
-    if (typeof processFn === "function") {
-      try {
-        processFn(syntheticFinding, formattedQuestion, { id: "q-divergent-id", selected: [recommendedLabel] });
-      } catch (err) {
-        if (err && (err.code === "MISMATCHED_ID" || err.message?.includes("MISMATCHED_ID"))) {
-          mismatchedOrIncompatibleRejected = true;
-        }
+    try {
+      processFn(syntheticFinding, formattedQuestion, { id: "q-divergent-id", selected: [recommendedLabel] });
+      fail("academic probe: processAcademicDecisionAnswer accepted mismatched question ID");
+    } catch (err) {
+      if (err && (err.code === "MISMATCHED_ID" || String(err.message || "").includes("MISMATCHED_ID"))) {
+        mismatchedOrIncompatibleRejected = true;
+      } else {
+        fail("academic probe: processAcademicDecisionAnswer threw unexpected error for mismatched ID: " + String(err));
       }
-    } else {
-      mismatchedOrIncompatibleRejected = true;
     }
 
     let cancellationHandled = false;
+    let cancellationErrorCode = "";
+    let cancellationRejectionObserved = false;
     try {
       const cancelCtrl = new AbortController();
       cancelCtrl.abort();
@@ -1424,11 +1419,33 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
         agent,
         signal: cancelCtrl.signal,
       });
-      if (cancelRes?.isError === true || cancelCtrl.signal.aborted) {
-        cancellationHandled = true;
+      if (cancelRes && cancelRes.isError === true) {
+        cancellationRejectionObserved = true;
+        const errInfo = cancelRes.result?.error?.info?.code ?? cancelRes.result?.error?.code;
+        const errMsg = String(cancelRes.message || cancelRes.result?.error?.message || "");
+        if (errInfo === "ASK_ABORTED" || errMsg.includes("ASK_ABORTED") || errMsg.includes("was aborted")) {
+          cancellationErrorCode = "ASK_ABORTED";
+          cancellationHandled = true;
+        } else {
+          cancellationErrorCode = errInfo || "GENERIC_ERROR";
+        }
+      } else {
+        cancellationErrorCode = "IGNORED_ABORT_SUCCESS";
       }
-    } catch {
-      cancellationHandled = true;
+    } catch (err) {
+      const errCode = (err && typeof err === "object") ? (err.info?.code ?? err.code) : undefined;
+      const errMsg = String(err?.message || err);
+      if (errCode === "ASK_ABORTED" || errMsg.includes("ASK_ABORTED") || errMsg.includes("was aborted")) {
+        cancellationRejectionObserved = true;
+        cancellationErrorCode = "ASK_ABORTED";
+        cancellationHandled = true;
+      } else {
+        cancellationErrorCode = errCode || "UNEXPECTED_EXCEPTION";
+      }
+    }
+
+    if (!cancellationHandled || cancellationErrorCode !== "ASK_ABORTED") {
+      fail("academic probe: cancellation of ask_user_question was not handled with ASK_ABORTED; got: " + cancellationErrorCode);
     }
 
     negativeCases = {
@@ -1438,6 +1455,11 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
         answererReached: answererReachedForDelegated,
       },
       mismatchedOrIncompatibleRejected,
+      cancellation: {
+        handled: cancellationHandled,
+        observedErrorCode: cancellationErrorCode,
+        rejectionObserved: cancellationRejectionObserved,
+      },
       cancellationHandled,
     };
   } finally {
@@ -1448,6 +1470,7 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
 
   return {
     hostApiAvailable: true,
+    domainLibraryLoaded: true,
     skillLoaded,
     agentIdentity,
     toolDispatch,
@@ -2444,7 +2467,15 @@ async function main(): Promise<void> {
   writeFileSync(join(workspace, "main.tex"), "\\documentclass{article}\n\\begin{document}\nTexto acadêmico sintético de validação.\\end{document}\n", { mode: 0o600 })
   writeFileSync(join(workspace, "referencias.bib"), "@article{synthetic2026, title={Referência Sintética}, author={Pessoa, Exemplo}, year={2026}}\n", { mode: 0o600 })
   for (let i = 1; i <= 5; i++) {
-    writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
+    if (i === 2) {
+      writeFileSync(
+        join(workspace, "capitulos", "lote2.tex"),
+        "\\section{Delineamento Amostral e Metodologia}\nA amostragem foi definida por conveniência em 30 participantes, com omissão de justificativa do critério amostral e confronto bibliográfico com synthetic2026.\nCapitulo sintetico 2 para analise academica exaustiva e2e.\n",
+        { mode: 0o600 },
+      )
+    } else {
+      writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
+    }
   }
   createObserverPackage(observerRoot, workspace, observerResult, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1)
   const overlayPath = join(scratch, "observer.patch.yml")
