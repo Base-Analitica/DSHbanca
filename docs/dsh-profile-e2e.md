@@ -94,21 +94,22 @@ O DSH provê esses serviços através dos pacotes `@deepseek-ai/dsh-user-questio
 - **Cancelamento**: o suporte nativo a `AbortSignal` cancela a pergunta pendente, rejeitando com `ASK_ABORTED`.
 - **Tratamento de respostas e validações**: o host valida integridade de opções e intenções. Uma resposta incompatível ou intent inconsistente falha com `BAD_INTENT` ou `BAD_ANSWER`.
 - **Comportamentos acadêmicos exercitados**:
-  1. *Selecionar uma recomendação*: resposta a pergunta estruturada escolhendo a opção recomendada pela banca.
+  1. *Selecionar uma recomendação*: resposta a pergunta estruturada escolhendo a opção recomendada pela banca (`validOptions` e `observedAnswer` verificados).
   2. *Solicitar mais evidências*: resposta selecionando solicitação de subsídios adicionais antes de deliberação.
   3. *Adiar uma decisão*: escolha explícita de adiamento estruturado.
   4. *Fornecer resposta personalizada*: resposta `custom` informando decisão orientada pelo usuário.
-  5. *Cancelar a pergunta*: interrupção da pergunta via `AbortSignal`.
-  6. *Rejeitar resposta incompatível*: validação fail-closed rejeitando opção fora do catálogo ou intent inválido.
-  7. *Impedir interação por Agent delegado*: recusa imediata de tentativa de pergunta estruturada por subagente delegado.
-  8. *Garantir que a seleção NÃO autoriza correção*: o resultado da seleção de alternativas é estritamente uma escolha estruturada; uma tentativa de executar mutação acadêmica (`banca_corrigir` ou `banca_restore`) a partir exclusivamente do resultado de `userQuestions` sem uma aprovação independente válida de mutação é terminantemente rejeitada.
+  5. *Cancelar a pergunta*: interrupção da pergunta via `AbortSignal`, verificando estritamente `ASK_ABORTED` (sem fallbacks genéricos).
+  6. *Rejeitar resposta incompatível*: validação fail-closed rejeitando opção fora do catálogo ou intent inválido com `BAD_INTENT` ou `BAD_ANSWER`.
+  7. *Impedir interação por Agent delegado*: recusa imediata de tentativa de pergunta estruturada por subagente delegado com `DELEGATED_CALLER`.
+  8. *Garantir que a seleção NÃO autoriza correção*: verificação estritamente não mutante dos contratos de autoridade (nenhuma ferramenta mutante como `banca_corrigir` ou `banca_restore` é despachada nesta sonda, eliminando qualquer dependência da guarda read-only do auditor). Comprova que a execução de `userQuestions` não emite eventos de aprovação (`approval/asked` ou `approval/decided`) na sessão, preservando integralmente os digests do manuscrito.
 
 ### Contrato de aprovação independente (`ctx.approval`)
 
 - **Invocação nativa**: `ctx.approval.request({ ... })`.
-- **Semântica estrita**: os retornos possíveis são `'allowed-once'`, `'rejected'`, `'cancelled'` e `'unavailable'`.
-- **Escopo e concessão**: somente o resultado `'allowed-once'`, emitido no escopo específico da ação auditada, confere autorização transitória de execução para operações mutantes.
+- **Precondição de turno aberto**: `ctx.approval.request` exige estritamente um turno ativo (`hasOpenTurn(session) === true`); chamadas fora de turno lançam o erro característico do DSH (`approval.request() outside an open turn`). Exceções genéricas são rejeitadas pelo validador fail-closed.
+- **Subgate interativo de decisões**: a observação de decisões interativas de aprovação (`'allowed-once'`, `'rejected'`, `'cancelled'`, `'unavailable'`) requer turno aberto; sem autorização de lifecycle (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`), esse subgate permanece categorizado como `BLOCKED`, não sendo permitida a substituição por constantes booleanas sintéticas.
 - **Isolamento de autoridade**: respostas de `ctx.userQuestions.ask()` nunca são mapeadas para `'allowed-once'` e não relaxam guards do `ToolRuntime`.
+- **Anti-falso-positivo**: o validador exige correspondência estrita de IDs entre perguntas e respostas, opções selecionadas pertencentes a `validOptions`, códigos de erro reais sem fallbacks artificiais e ausência de afirmações estáticas não observadas.
 
 O resultado é registrado de forma independente em `stages.nativeQuestions` com status (`PASS`, `FAIL`, `BLOCKED`). Na ausência do DSH ou quando a execução ativa não foi autorizada (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`), o estágio permanece estritamente `BLOCKED`. A sonda sintética controlada exercita a conformidade de contratos e APIs sem simular ou reivindicar interface Web de usuário real e sem qualquer execução de modelos de IA.
 

@@ -827,68 +827,123 @@ const completeNativeQuestionsEvidence = {
   behaviors: {
     selectRecommendation: {
       questionId: "q-academic-rec-1",
-      selectedOption: "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
+      prompt: "Como deseja tratar a fundamentação teórica insuficiente apontada na auditoria?",
+      validOptions: [
+        "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
+        "Não sei — explique/mostre evidências",
+        "Adiar / continuar outras etapas",
+      ],
+      observedAnswer: {
+        id: "q-academic-rec-1",
+        selected: ["Adotar recomendação: Adicionar seção de Trabalhos Relacionados"],
+      },
       isRecommendation: true,
-      answered: true,
       mutationAuthorized: false,
     },
     requestMoreEvidence: {
       questionId: "q-academic-evid-1",
-      selectedOption: "Não sei — explique/mostre evidências",
-      answered: true,
+      prompt: "Deseja ver as evidências da omissão bibliográfica?",
+      validOptions: [
+        "Adotar recomendação: Incluir citações indicadas",
+        "Não sei — explique/mostre evidências",
+        "Adiar / continuar outras etapas",
+      ],
+      observedAnswer: {
+        id: "q-academic-evid-1",
+        selected: ["Não sei — explique/mostre evidências"],
+      },
       mutationAuthorized: false,
     },
     deferDecision: {
       questionId: "q-academic-defer-1",
-      selectedOption: "Adiar / continuar outras etapas",
-      answered: true,
+      prompt: "Deseja deliberar agora sobre a reestruturação da introdução?",
+      validOptions: [
+        "Adotar recomendação: Reescrever parágrafos 2 e 3",
+        "Adiar / continuar outras etapas",
+      ],
+      observedAnswer: {
+        id: "q-academic-defer-1",
+        selected: ["Adiar / continuar outras etapas"],
+      },
       mutationAuthorized: false,
     },
     customResponse: {
       questionId: "q-academic-custom-1",
-      customText: "Outro: Manter escopo atual conforme deliberação do orientador",
-      answered: true,
+      prompt: "Qual direcionamento metodológico adotar no capítulo 3?",
+      validOptions: [
+        "Adotar recomendação: Análise quantitativa",
+        "Adiar / continuar outras etapas",
+      ],
+      observedAnswer: {
+        id: "q-academic-custom-1",
+        selected: [],
+        custom: "Outro: Manter escopo atual conforme deliberação do orientador",
+      },
       mutationAuthorized: false,
     },
     cancelQuestion: {
       questionId: "q-academic-cancel-1",
+      prompt: "Pergunta que será cancelada imediatamente?",
       cancelled: true,
       errorCode: "ASK_ABORTED",
     },
     rejectIncompatibleAnswer: {
       rejected: true,
-      errorCode: "BAD_ANSWER",
+      errorCode: "BAD_INTENT",
     },
     delegatedAgentBlocked: {
+      callingAgentOrigin: "subagent",
       blocked: true,
       errorCode: "DELEGATED_CALLER",
     },
     selectionDoesNotAuthorizeMutation: {
-      attemptedTool: "banca_corrigir",
-      selectionReceived: true,
+      nonMutatingProof: true,
+      noApprovalEmitted: true,
       mutationDispatched: false,
       manuscriptPreserved: true,
-      approvalOutcomeIfNotApproved: "unavailable",
+      auditorGuardUsedAsProof: false,
     },
   },
   independentApproval: {
-    contractVerified: true,
+    status: "BLOCKED",
+    openTurnRequiredObserved: true,
+    openTurnErrorMessage:
+      "approval.request() outside an open turn: the approval/asked + approval/decided audit pair must be turn-enclosed (a bare event between turns is crash-tail garbage on reload). Ask from inside the turn that needs the decision.",
+    interactiveDecisionsStatus: "BLOCKED",
+    interactiveDecisionsBlocker:
+      "Interactive approval decisions require an open turn, pending separately authorized lifecycle execution.",
+  },
+  uiWebDisclaimer:
+    "Synthetic answerer for native DSH contract verification only; not proof of real Web UI or interactive browser session.",
+  modelExecutionUsed: false,
+}
+
+const fullPassNativeQuestionsEvidence = {
+  ...completeNativeQuestionsEvidence,
+  independentApproval: {
+    status: "PASS",
+    openTurnRequiredObserved: true,
+    openTurnErrorMessage:
+      "approval.request() outside an open turn: the approval/asked + approval/decided audit pair must be turn-enclosed (a bare event between turns is crash-tail garbage on reload). Ask from inside the turn that needs the decision.",
+    interactiveDecisionsStatus: "PASS",
     allowedOnceIsSoleGrant: true,
     nonGrantsDeny: {
       rejectedDenies: true,
       cancelledDenies: true,
       unavailableDenies: true,
     },
-    requiresOpenTurn: true,
   },
-  uiWebDisclaimer: "Synthetic answerer for native DSH contract verification only; not proof of real Web UI or interactive browser session.",
-  modelExecutionUsed: false,
 }
 
 describe("DSH native questions evidence gate contract (#46)", () => {
-  test("accepts complete positive native questions evidence", () => {
+  test("accepts complete valid native questions evidence (BLOCKED pre-lifecycle)", () => {
     expect(validateNativeQuestionsEvidence(completeNativeQuestionsEvidence)).toEqual([])
-    expect(classifyNativeQuestionsStatus(completeNativeQuestionsEvidence)).toBe("PASS")
+    expect(classifyNativeQuestionsStatus(completeNativeQuestionsEvidence)).toBe("BLOCKED")
+  })
+
+  test("accepts full pass native questions evidence (PASS post-lifecycle)", () => {
+    expect(validateNativeQuestionsEvidence(fullPassNativeQuestionsEvidence)).toEqual([])
+    expect(classifyNativeQuestionsStatus(fullPassNativeQuestionsEvidence)).toBe("PASS")
   })
 
   test("reports BLOCKED when evidence is missing or hostApiAvailable false", () => {
@@ -976,12 +1031,12 @@ describe("DSH native questions evidence gate contract (#46)", () => {
       "delegated agent must be blocked from userQuestions with DELEGATED_CALLER",
     ],
     [
-      "approval rejected outcome does not deny",
+      "approval rejected outcome does not deny in PASS",
       {
-        ...completeNativeQuestionsEvidence,
+        ...fullPassNativeQuestionsEvidence,
         independentApproval: {
-          ...completeNativeQuestionsEvidence.independentApproval,
-          nonGrantsDeny: { ...completeNativeQuestionsEvidence.independentApproval.nonGrantsDeny, rejectedDenies: false },
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          nonGrantsDeny: { ...fullPassNativeQuestionsEvidence.independentApproval.nonGrantsDeny, rejectedDenies: false },
         },
       },
       "non-grant approval outcome 'rejected' must deny authorization",
@@ -990,6 +1045,32 @@ describe("DSH native questions evidence gate contract (#46)", () => {
       "model execution used in probe",
       { ...completeNativeQuestionsEvidence, modelExecutionUsed: true },
       "native questions probe used unauthorized model execution",
+    ],
+    [
+      "unobserved static boolean claim of approval contract verification",
+      {
+        ...completeNativeQuestionsEvidence,
+        independentApproval: {
+          ...completeNativeQuestionsEvidence.independentApproval,
+          contractVerified: true,
+        },
+      },
+      "unobserved static boolean claim of approval contract verification is rejected",
+    ],
+    [
+      "attempt to present auditor guard as independent approval proof",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          selectionDoesNotAuthorizeMutation: {
+            ...completeNativeQuestionsEvidence.behaviors.selectionDoesNotAuthorizeMutation,
+            attemptedTool: "banca_corrigir",
+            auditorGuardUsedAsProof: true,
+          },
+        },
+      },
+      "auditor read-only guard must not be presented as proof of independent approval boundary",
     ],
   ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
     const errors = validateNativeQuestionsEvidence(invalidEvidence)

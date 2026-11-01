@@ -802,12 +802,17 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       },
     ];
     const ans1 = await ctx.userQuestions.ask({ questions: q1, agent });
-    const sel1 = ans1.answers.find((a) => a.id === "q-academic-rec-1")?.selected?.[0];
+    const ans1Item = ans1.answers.find((a) => a.id === "q-academic-rec-1");
+    const sel1 = ans1Item?.selected?.[0];
     const b1 = {
       questionId: "q-academic-rec-1",
-      selectedOption: sel1 ?? "",
+      prompt: q1[0].question,
+      validOptions: q1[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans1Item?.id ?? "",
+        selected: ans1Item?.selected ?? [],
+      },
       isRecommendation: sel1 === "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
-      answered: true,
       mutationAuthorized: false,
     };
 
@@ -824,11 +829,15 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       },
     ];
     const ans2 = await ctx.userQuestions.ask({ questions: q2, agent });
-    const sel2 = ans2.answers.find((a) => a.id === "q-academic-evid-1")?.selected?.[0];
+    const ans2Item = ans2.answers.find((a) => a.id === "q-academic-evid-1");
     const b2 = {
       questionId: "q-academic-evid-1",
-      selectedOption: sel2 ?? "",
-      answered: true,
+      prompt: q2[0].question,
+      validOptions: q2[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans2Item?.id ?? "",
+        selected: ans2Item?.selected ?? [],
+      },
       mutationAuthorized: false,
     };
 
@@ -844,11 +853,15 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       },
     ];
     const ans3 = await ctx.userQuestions.ask({ questions: q3, agent });
-    const sel3 = ans3.answers.find((a) => a.id === "q-academic-defer-1")?.selected?.[0];
+    const ans3Item = ans3.answers.find((a) => a.id === "q-academic-defer-1");
     const b3 = {
       questionId: "q-academic-defer-1",
-      selectedOption: sel3 ?? "",
-      answered: true,
+      prompt: q3[0].question,
+      validOptions: q3[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans3Item?.id ?? "",
+        selected: ans3Item?.selected ?? [],
+      },
       mutationAuthorized: false,
     };
 
@@ -864,11 +877,16 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       },
     ];
     const ans4 = await ctx.userQuestions.ask({ questions: q4, agent });
-    const custom4 = ans4.answers.find((a) => a.id === "q-academic-custom-1")?.custom;
+    const ans4Item = ans4.answers.find((a) => a.id === "q-academic-custom-1");
     const b4 = {
       questionId: "q-academic-custom-1",
-      customText: custom4 ?? "",
-      answered: true,
+      prompt: q4[0].question,
+      validOptions: q4[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans4Item?.id ?? "",
+        selected: ans4Item?.selected ?? [],
+        custom: ans4Item?.custom ?? "",
+      },
       mutationAuthorized: false,
     };
 
@@ -884,11 +902,17 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
         signal: abortCtrl.signal,
       });
     } catch (err) {
-      cancelHandled = true;
-      cancelErrorCode = err.code ?? (err.message?.includes("aborted") ? "ASK_ABORTED" : err.name);
+      if (err && typeof err === "object" && err.code === "ASK_ABORTED") {
+        cancelHandled = true;
+        cancelErrorCode = err.code;
+      } else {
+        cancelHandled = false;
+        cancelErrorCode = String(err?.code || err?.message || err);
+      }
     }
     const b5 = {
       questionId: "q-academic-cancel-1",
+      prompt: "Pergunta que será cancelada imediatamente?",
       cancelled: cancelHandled,
       errorCode: cancelErrorCode,
     };
@@ -910,8 +934,13 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
         agent,
       });
     } catch (err) {
-      rejectedIncompatible = true;
-      rejectErrorCode = err.code ?? "BAD_INTENT";
+      if (err && typeof err === "object" && (err.code === "BAD_INTENT" || err.code === "BAD_ANSWER")) {
+        rejectedIncompatible = true;
+        rejectErrorCode = err.code;
+      } else {
+        rejectedIncompatible = false;
+        rejectErrorCode = String(err?.code || err?.message || err);
+      }
     }
     const b6 = {
       rejected: rejectedIncompatible,
@@ -927,27 +956,21 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
         agent: unverifiedAgent,
       });
     } catch (err) {
-      delegatedBlocked = true;
-      delegatedErrorCode = err.code ?? "DELEGATED_CALLER";
+      if (err && typeof err === "object" && err.code === "DELEGATED_CALLER") {
+        delegatedBlocked = true;
+        delegatedErrorCode = err.code;
+      } else {
+        delegatedBlocked = false;
+        delegatedErrorCode = String(err?.code || err?.message || err);
+      }
     }
     const b7 = {
+      callingAgentOrigin: "subagent",
       blocked: delegatedBlocked,
       errorCode: delegatedErrorCode,
     };
 
-    // 8. Garantir que a seleção NÃO autoriza correção
-    let mutationAttemptError = false;
-    const mutationAttempt = await runTool(
-      ctx,
-      "dshbanca-e2e-unauthorized-selection-mutation",
-      "banca_corrigir",
-      {
-        corrections: [{ file: "main.tex", oldText: "CURRENT_SENTINEL", newText: "UNAUTHORIZED_SELECTION_MUTATION" }],
-      },
-      agent,
-    );
-    mutationAttemptError = mutationAttempt.result.isError === true;
-
+    // 8. Garantir que a seleção NÃO autoriza correção (verificação estritamente não-mutante)
     let manuscriptPreserved = true;
     for (const file of manuscriptFiles) {
       const hashAfter = await sha(join(workspace, file));
@@ -957,12 +980,22 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       }
     }
 
+    let approvalEventsCount = 0;
+    if (typeof agent.session?.seq === "number") {
+      for (let seq = agent.session.seq - 1; seq >= 0; seq -= 1) {
+        const ev = agent.session.eventAt(seq);
+        if (ev?.type === "approval/asked" || ev?.type === "approval/decided") {
+          approvalEventsCount += 1;
+        }
+      }
+    }
+
     const b8 = {
-      attemptedTool: "banca_corrigir",
-      selectionReceived: sel1 === "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
-      mutationDispatched: !mutationAttemptError,
+      nonMutatingProof: true,
+      noApprovalEmitted: approvalEventsCount === 0,
+      mutationDispatched: false,
       manuscriptPreserved,
-      approvalOutcomeIfNotApproved: "unavailable",
+      auditorGuardUsedAsProof: false,
     };
 
     behaviors = {
@@ -976,26 +1009,31 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       selectionDoesNotAuthorizeMutation: b8,
     };
 
-    let requiresOpenTurn = false;
+    let openTurnRequiredObserved = false;
+    let openTurnErrorMessage = "";
     try {
       await ctx.approval.request({
         agent,
-        toolName: "banca_corrigir",
-        reason: "Test approval outside open turn",
+        toolName: "non_mutating_check",
+        reason: "Contract probe for open turn precondition",
       });
-    } catch {
-      requiresOpenTurn = true;
+    } catch (err) {
+      const msg = String(err?.message || err);
+      if (msg.includes("approval.request() outside an open turn")) {
+        openTurnRequiredObserved = true;
+        openTurnErrorMessage = msg;
+      } else {
+        openTurnRequiredObserved = false;
+        openTurnErrorMessage = msg;
+      }
     }
 
     independentApproval = {
-      contractVerified: true,
-      allowedOnceIsSoleGrant: true,
-      nonGrantsDeny: {
-        rejectedDenies: true,
-        cancelledDenies: true,
-        unavailableDenies: true,
-      },
-      requiresOpenTurn,
+      status: "BLOCKED",
+      openTurnRequiredObserved,
+      openTurnErrorMessage,
+      interactiveDecisionsStatus: "BLOCKED",
+      interactiveDecisionsBlocker: "Interactive approval decisions require an open turn, pending separately authorized lifecycle execution.",
     };
   } finally {
     if (typeof disposeSyntheticAnswerer === "function") {

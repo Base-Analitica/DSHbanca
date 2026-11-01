@@ -113,7 +113,11 @@ export function classifyNativeSkillsStatus(value: unknown): ProfileGateStatus {
 /** Classify the native questions/approval verification gate status. */
 export function classifyNativeQuestionsStatus(value: unknown): ProfileGateStatus {
   if (!isRecord(value) || value.hostApiAvailable !== true) return "BLOCKED"
-  return validateNativeQuestionsEvidence(value).length === 0 ? "PASS" : "FAIL"
+  const errors = validateNativeQuestionsEvidence(value)
+  if (errors.length > 0) return "FAIL"
+  const approval = isRecord(value.independentApproval) ? value.independentApproval : undefined
+  if (approval?.status === "BLOCKED") return "BLOCKED"
+  return "PASS"
 }
 
 /** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills, batch audit, and native questions verification. */
@@ -739,68 +743,83 @@ export function classifyBatchAuditEvidenceStatus(value: unknown): ProfileGateSta
 }
 
 
+export interface QuestionBehaviorEvidence {
+  questionId: string
+  prompt: string
+  validOptions: string[]
+  observedAnswer: {
+    id: string
+    selected: string[]
+    custom?: string
+  }
+  isRecommendation?: boolean
+  mutationAuthorized: boolean
+}
+
+export interface CustomQuestionBehaviorEvidence {
+  questionId: string
+  prompt: string
+  validOptions?: string[]
+  observedAnswer: {
+    id: string
+    selected?: string[]
+    custom: string
+  }
+  mutationAuthorized: boolean
+}
+
+export interface NativeQuestionsBehaviorsEvidence {
+  selectRecommendation: QuestionBehaviorEvidence
+  requestMoreEvidence: QuestionBehaviorEvidence
+  deferDecision: QuestionBehaviorEvidence
+  customResponse: CustomQuestionBehaviorEvidence
+  cancelQuestion: {
+    questionId: string
+    prompt?: string
+    cancelled: boolean
+    errorCode: string
+  }
+  rejectIncompatibleAnswer: {
+    rejected: boolean
+    errorCode: string
+  }
+  delegatedAgentBlocked: {
+    callingAgentOrigin?: string
+    blocked: boolean
+    errorCode: string
+  }
+  selectionDoesNotAuthorizeMutation: {
+    nonMutatingProof?: boolean
+    noApprovalEmitted?: boolean
+    mutationDispatched: boolean
+    manuscriptPreserved: boolean
+    auditorGuardUsedAsProof?: boolean
+    attemptedTool?: string
+  }
+}
+
+export interface IndependentApprovalEvidence {
+  status: "PASS" | "BLOCKED" | "FAIL"
+  openTurnRequiredObserved?: boolean
+  openTurnErrorMessage?: string
+  interactiveDecisionsStatus?: "BLOCKED" | "NOT_EVALUATED" | "PASS" | "FAIL"
+  interactiveDecisionsBlocker?: string
+  allowedOnceIsSoleGrant?: boolean
+  nonGrantsDeny?: {
+    rejectedDenies: boolean
+    cancelledDenies: boolean
+    unavailableDenies: boolean
+  }
+  contractVerified?: boolean
+}
+
 export interface NativeQuestionsEvidence {
   hostApiAvailable: boolean
   userQuestionsServiceAvailable: boolean
   approvalServiceAvailable: boolean
   syntheticScenarioCompleted: boolean
-  behaviors: {
-    selectRecommendation: {
-      questionId: string
-      selectedOption: string
-      isRecommendation: boolean
-      answered: boolean
-      mutationAuthorized: boolean
-    }
-    requestMoreEvidence: {
-      questionId: string
-      selectedOption: string
-      answered: boolean
-      mutationAuthorized: boolean
-    }
-    deferDecision: {
-      questionId: string
-      selectedOption: string
-      answered: boolean
-      mutationAuthorized: boolean
-    }
-    customResponse: {
-      questionId: string
-      customText: string
-      answered: boolean
-      mutationAuthorized: boolean
-    }
-    cancelQuestion: {
-      questionId: string
-      cancelled: boolean
-      errorCode: string
-    }
-    rejectIncompatibleAnswer: {
-      rejected: boolean
-      errorCode: string
-    }
-    delegatedAgentBlocked: {
-      blocked: boolean
-      errorCode: string
-    }
-    selectionDoesNotAuthorizeMutation: {
-      attemptedTool: string
-      selectionReceived: boolean
-      mutationDispatched: boolean
-      manuscriptPreserved: boolean
-      approvalOutcomeIfNotApproved: string
-    }
-  }
-  independentApproval: {
-    contractVerified: boolean
-    allowedOnceIsSoleGrant: boolean
-    nonGrantsDeny: {
-      rejectedDenies: boolean
-      cancelledDenies: boolean
-      unavailableDenies: boolean
-    }
-    requiresOpenTurn: boolean
-  }
+  behaviors: NativeQuestionsBehaviorsEvidence
+  independentApproval: IndependentApprovalEvidence
   uiWebDisclaimer: string
   modelExecutionUsed: boolean
 }
@@ -833,60 +852,229 @@ export function validateNativeQuestionsEvidence(value: unknown): string[] {
     return errors
   }
 
-  // Central safety risk: option selection must NOT authorize manuscript mutation
-  if (behaviors.selectRecommendation?.mutationAuthorized === true) {
-    errors.push("central safety risk violation: selecting a recommendation must not grant mutation authorization")
-  }
-  if (behaviors.requestMoreEvidence?.mutationAuthorized === true) {
-    errors.push("requesting more evidence must not grant mutation authorization")
-  }
-  if (behaviors.deferDecision?.mutationAuthorized === true) {
-    errors.push("deferring a decision must not grant mutation authorization")
-  }
-  if (behaviors.customResponse?.mutationAuthorized === true) {
-    errors.push("providing a custom answer must not grant mutation authorization")
-  }
-  if (behaviors.selectionDoesNotAuthorizeMutation?.manuscriptPreserved !== true) {
-    errors.push("academic manuscript was mutated by question selection workflow")
-  }
-  if (behaviors.selectionDoesNotAuthorizeMutation?.mutationDispatched === true) {
-    errors.push("mutation tool was dispatched without independent approval grant")
+  // 1. selectRecommendation
+  const b1 = isRecord(behaviors.selectRecommendation) ? behaviors.selectRecommendation : undefined
+  if (!b1) {
+    errors.push("selectRecommendation behavior is required and missing")
+  } else {
+    if (typeof b1.questionId !== "string" || b1.questionId.trim().length === 0) {
+      errors.push("selectRecommendation questionId must be a non-empty string")
+    }
+    if (typeof b1.prompt !== "string" || b1.prompt.trim().length === 0) {
+      errors.push("selectRecommendation prompt must be a non-empty string")
+    }
+    if (!Array.isArray(b1.validOptions) || b1.validOptions.length < 2) {
+      errors.push("selectRecommendation validOptions must contain at least two options")
+    }
+    const ans1 = isRecord(b1.observedAnswer) ? b1.observedAnswer : undefined
+    if (!ans1) {
+      errors.push("selectRecommendation observedAnswer is missing")
+    } else {
+      if (ans1.id !== b1.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (!Array.isArray(ans1.selected) || ans1.selected.length === 0) {
+        errors.push("selectRecommendation observedAnswer must have non-empty selected array")
+      } else if (Array.isArray(b1.validOptions)) {
+        for (const opt of ans1.selected as string[]) {
+          if (!b1.validOptions.includes(opt)) {
+            errors.push("observed answer selected option is not in valid options list")
+          }
+        }
+      }
+    }
+    if (b1.isRecommendation !== true) {
+      errors.push("selectRecommendation must observe selection of a recommended option")
+    }
+    if (b1.mutationAuthorized !== false) {
+      errors.push("central safety risk violation: selecting a recommendation must not grant mutation authorization")
+    }
   }
 
-  // Negative contract behaviors
-  if (behaviors.cancelQuestion?.cancelled !== true || behaviors.cancelQuestion?.errorCode !== "ASK_ABORTED") {
-    errors.push("question cancellation was not verified with ASK_ABORTED error")
-  }
-  if (behaviors.delegatedAgentBlocked?.blocked !== true || behaviors.delegatedAgentBlocked?.errorCode !== "DELEGATED_CALLER") {
-    errors.push("delegated agent must be blocked from userQuestions with DELEGATED_CALLER")
-  }
-  if (behaviors.rejectIncompatibleAnswer?.rejected !== true) {
-    errors.push("incompatible or mismatched answer was not rejected")
+  // 2. requestMoreEvidence
+  const b2 = isRecord(behaviors.requestMoreEvidence) ? behaviors.requestMoreEvidence : undefined
+  if (!b2) {
+    errors.push("requestMoreEvidence behavior is required and missing")
+  } else {
+    if (typeof b2.questionId !== "string" || b2.questionId.trim().length === 0) {
+      errors.push("requestMoreEvidence questionId must be a non-empty string")
+    }
+    if (typeof b2.prompt !== "string" || b2.prompt.trim().length === 0) {
+      errors.push("requestMoreEvidence prompt must be a non-empty string")
+    }
+    if (!Array.isArray(b2.validOptions) || b2.validOptions.length === 0) {
+      errors.push("requestMoreEvidence validOptions must be a non-empty array")
+    }
+    const ans2 = isRecord(b2.observedAnswer) ? b2.observedAnswer : undefined
+    if (!ans2) {
+      errors.push("requestMoreEvidence observedAnswer is missing")
+    } else {
+      if (ans2.id !== b2.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (!Array.isArray(ans2.selected) || ans2.selected.length === 0) {
+        errors.push("requestMoreEvidence observedAnswer must have non-empty selected array")
+      } else if (Array.isArray(b2.validOptions)) {
+        for (const opt of ans2.selected as string[]) {
+          if (!b2.validOptions.includes(opt)) {
+            errors.push("observed answer selected option is not in valid options list")
+          }
+        }
+      }
+    }
+    if (b2.mutationAuthorized !== false) {
+      errors.push("requesting more evidence must not grant mutation authorization")
+    }
   }
 
-  // Independent approval contract
+  // 3. deferDecision
+  const b3 = isRecord(behaviors.deferDecision) ? behaviors.deferDecision : undefined
+  if (!b3) {
+    errors.push("deferDecision behavior is required and missing")
+  } else {
+    if (typeof b3.questionId !== "string" || b3.questionId.trim().length === 0) {
+      errors.push("deferDecision questionId must be a non-empty string")
+    }
+    if (typeof b3.prompt !== "string" || b3.prompt.trim().length === 0) {
+      errors.push("deferDecision prompt must be a non-empty string")
+    }
+    if (!Array.isArray(b3.validOptions) || b3.validOptions.length === 0) {
+      errors.push("deferDecision validOptions must be a non-empty array")
+    }
+    const ans3 = isRecord(b3.observedAnswer) ? b3.observedAnswer : undefined
+    if (!ans3) {
+      errors.push("deferDecision observedAnswer is missing")
+    } else {
+      if (ans3.id !== b3.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (!Array.isArray(ans3.selected) || ans3.selected.length === 0) {
+        errors.push("deferDecision observedAnswer must have non-empty selected array")
+      } else if (Array.isArray(b3.validOptions)) {
+        for (const opt of ans3.selected as string[]) {
+          if (!b3.validOptions.includes(opt)) {
+            errors.push("observed answer selected option is not in valid options list")
+          }
+        }
+      }
+    }
+    if (b3.mutationAuthorized !== false) {
+      errors.push("deferring a decision must not grant mutation authorization")
+    }
+  }
+
+  // 4. customResponse
+  const b4 = isRecord(behaviors.customResponse) ? behaviors.customResponse : undefined
+  if (!b4) {
+    errors.push("customResponse behavior is required and missing")
+  } else {
+    if (typeof b4.questionId !== "string" || b4.questionId.trim().length === 0) {
+      errors.push("customResponse questionId must be a non-empty string")
+    }
+    if (typeof b4.prompt !== "string" || b4.prompt.trim().length === 0) {
+      errors.push("customResponse prompt must be a non-empty string")
+    }
+    const ans4 = isRecord(b4.observedAnswer) ? b4.observedAnswer : undefined
+    if (!ans4) {
+      errors.push("customResponse observedAnswer is missing")
+    } else {
+      if (ans4.id !== b4.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (typeof ans4.custom !== "string" || ans4.custom.trim().length === 0) {
+        errors.push("customResponse observedAnswer must contain a non-empty custom string")
+      }
+    }
+    if (b4.mutationAuthorized !== false) {
+      errors.push("providing a custom answer must not grant mutation authorization")
+    }
+  }
+
+  // 5. cancelQuestion
+  const b5 = isRecord(behaviors.cancelQuestion) ? behaviors.cancelQuestion : undefined
+  if (!b5) {
+    errors.push("cancelQuestion behavior is required and missing")
+  } else {
+    if (b5.cancelled !== true || b5.errorCode !== "ASK_ABORTED") {
+      errors.push("question cancellation was not verified with ASK_ABORTED error")
+    }
+  }
+
+  // 6. rejectIncompatibleAnswer
+  const b6 = isRecord(behaviors.rejectIncompatibleAnswer) ? behaviors.rejectIncompatibleAnswer : undefined
+  if (!b6) {
+    errors.push("rejectIncompatibleAnswer behavior is required and missing")
+  } else {
+    if (b6.rejected !== true) {
+      errors.push("incompatible or mismatched answer was not rejected")
+    }
+    if (b6.errorCode !== "BAD_ANSWER" && b6.errorCode !== "BAD_INTENT") {
+      errors.push("incompatible answer error code must be BAD_ANSWER or BAD_INTENT")
+    }
+  }
+
+  // 7. delegatedAgentBlocked
+  const b7 = isRecord(behaviors.delegatedAgentBlocked) ? behaviors.delegatedAgentBlocked : undefined
+  if (!b7) {
+    errors.push("delegatedAgentBlocked behavior is required and missing")
+  } else {
+    if (b7.blocked !== true || b7.errorCode !== "DELEGATED_CALLER") {
+      errors.push("delegated agent must be blocked from userQuestions with DELEGATED_CALLER")
+    }
+  }
+
+  // 8. selectionDoesNotAuthorizeMutation (strictly non-mutating proof, no auditor guard reliance)
+  const b8 = isRecord(behaviors.selectionDoesNotAuthorizeMutation) ? behaviors.selectionDoesNotAuthorizeMutation : undefined
+  if (!b8) {
+    errors.push("selectionDoesNotAuthorizeMutation behavior is required and missing")
+  } else {
+    if (b8.mutationDispatched === true) {
+      errors.push("mutation tool was dispatched without independent approval grant")
+    }
+    if (b8.manuscriptPreserved !== true) {
+      errors.push("academic manuscript was mutated by question selection workflow")
+    }
+    if (b8.noApprovalEmitted !== true) {
+      errors.push("question selection must not emit approval grant")
+    }
+    if (b8.attemptedTool === "banca_corrigir" || b8.auditorGuardUsedAsProof === true) {
+      errors.push("auditor read-only guard must not be presented as proof of independent approval boundary")
+    }
+  }
+
+  // 9. Independent approval contract
   const approval = isRecord(value.independentApproval) ? value.independentApproval : undefined
   if (!approval) {
     errors.push("independent approval verification object is missing")
   } else {
-    if (approval.contractVerified !== true) {
-      errors.push("independent approval contract was not verified")
+    // Unverified static booleans are explicitly rejected
+    if (approval.contractVerified === true) {
+      errors.push("unobserved static boolean claim of approval contract verification is rejected")
     }
-    if (approval.allowedOnceIsSoleGrant !== true) {
-      errors.push("allowed-once must be the sole granting outcome in DSH approval contract")
+    if (
+      approval.openTurnRequiredObserved !== true ||
+      typeof approval.openTurnErrorMessage !== "string" ||
+      !approval.openTurnErrorMessage.includes("outside an open turn")
+    ) {
+      errors.push("approval service threw generic error instead of open turn precondition error")
     }
-    const nonGrants = isRecord(approval.nonGrantsDeny) ? approval.nonGrantsDeny : undefined
-    if (!nonGrants || nonGrants.rejectedDenies !== true) {
-      errors.push("non-grant approval outcome 'rejected' must deny authorization")
+    if (approval.status !== "PASS" && approval.status !== "BLOCKED") {
+      errors.push("independent approval verification status is invalid or failed")
     }
-    if (!nonGrants || nonGrants.cancelledDenies !== true) {
-      errors.push("non-grant approval outcome 'cancelled' must deny authorization")
-    }
-    if (!nonGrants || nonGrants.unavailableDenies !== true) {
-      errors.push("non-grant approval outcome 'unavailable' must deny authorization")
-    }
-    if (approval.requiresOpenTurn !== true) {
-      errors.push("approval contract requires an open turn")
+    if (approval.status === "PASS") {
+      if (approval.allowedOnceIsSoleGrant !== true) {
+        errors.push("allowed-once must be the sole granting outcome in DSH approval contract")
+      }
+      const nonGrants = isRecord(approval.nonGrantsDeny) ? approval.nonGrantsDeny : undefined
+      if (!nonGrants || nonGrants.rejectedDenies !== true) {
+        errors.push("non-grant approval outcome 'rejected' must deny authorization")
+      }
+      if (!nonGrants || nonGrants.cancelledDenies !== true) {
+        errors.push("non-grant approval outcome 'cancelled' must deny authorization")
+      }
+      if (!nonGrants || nonGrants.unavailableDenies !== true) {
+        errors.push("non-grant approval outcome 'unavailable' must deny authorization")
+      }
     }
   }
 
