@@ -110,23 +110,32 @@ export function classifyNativeSkillsStatus(value: unknown): ProfileGateStatus {
   return validateNativeSkillsEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
-/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills and batch audit verification. */
+/** Classify the native questions/approval verification gate status. */
+export function classifyNativeQuestionsStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.hostApiAvailable !== true) return "BLOCKED"
+  return validateNativeQuestionsEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
+/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills, batch audit, and native questions verification. */
 export function classifyProfileGateStatuses(
   issue2Status: ProfileGateStatus,
   auditorMarkdownStatus: ProfileGateStatus,
   nativeSkillsStatus?: ProfileGateStatus,
   batchAuditStatus?: ProfileGateStatus,
+  nativeQuestionsStatus?: ProfileGateStatus,
 ): {
   issue2Status: ProfileGateStatus
   auditorMarkdownStatus: ProfileGateStatus
   nativeSkillsStatus?: ProfileGateStatus
   batchAuditStatus?: ProfileGateStatus
+  nativeQuestionsStatus?: ProfileGateStatus
   overallStatus: ProfileGateStatus
   exitCode: number
 } {
   const statuses = [issue2Status, auditorMarkdownStatus]
   if (nativeSkillsStatus !== undefined) statuses.push(nativeSkillsStatus)
   if (batchAuditStatus !== undefined) statuses.push(batchAuditStatus)
+  if (nativeQuestionsStatus !== undefined) statuses.push(nativeQuestionsStatus)
   const overallStatus: ProfileGateStatus = statuses.includes("FAIL")
     ? "FAIL"
     : statuses.includes("BLOCKED") ? "BLOCKED" : "PASS"
@@ -135,6 +144,7 @@ export function classifyProfileGateStatuses(
     auditorMarkdownStatus,
     ...(nativeSkillsStatus !== undefined ? { nativeSkillsStatus } : {}),
     ...(batchAuditStatus !== undefined ? { batchAuditStatus } : {}),
+    ...(nativeQuestionsStatus !== undefined ? { nativeQuestionsStatus } : {}),
     overallStatus,
     exitCode: overallStatus === "PASS" ? passExitCode() : overallStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
   }
@@ -728,6 +738,168 @@ export function classifyBatchAuditEvidenceStatus(value: unknown): ProfileGateSta
   return validateBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
+
+export interface NativeQuestionsEvidence {
+  hostApiAvailable: boolean
+  userQuestionsServiceAvailable: boolean
+  approvalServiceAvailable: boolean
+  syntheticScenarioCompleted: boolean
+  behaviors: {
+    selectRecommendation: {
+      questionId: string
+      selectedOption: string
+      isRecommendation: boolean
+      answered: boolean
+      mutationAuthorized: boolean
+    }
+    requestMoreEvidence: {
+      questionId: string
+      selectedOption: string
+      answered: boolean
+      mutationAuthorized: boolean
+    }
+    deferDecision: {
+      questionId: string
+      selectedOption: string
+      answered: boolean
+      mutationAuthorized: boolean
+    }
+    customResponse: {
+      questionId: string
+      customText: string
+      answered: boolean
+      mutationAuthorized: boolean
+    }
+    cancelQuestion: {
+      questionId: string
+      cancelled: boolean
+      errorCode: string
+    }
+    rejectIncompatibleAnswer: {
+      rejected: boolean
+      errorCode: string
+    }
+    delegatedAgentBlocked: {
+      blocked: boolean
+      errorCode: string
+    }
+    selectionDoesNotAuthorizeMutation: {
+      attemptedTool: string
+      selectionReceived: boolean
+      mutationDispatched: boolean
+      manuscriptPreserved: boolean
+      approvalOutcomeIfNotApproved: string
+    }
+  }
+  independentApproval: {
+    contractVerified: boolean
+    allowedOnceIsSoleGrant: boolean
+    nonGrantsDeny: {
+      rejectedDenies: boolean
+      cancelledDenies: boolean
+      unavailableDenies: boolean
+    }
+    requiresOpenTurn: boolean
+  }
+  uiWebDisclaimer: string
+  modelExecutionUsed: boolean
+}
+
+/**
+ * Validate proof that native DSH user-questions and independent approval contracts
+ * were exercised, proving that option selection does not grant mutation authorization.
+ */
+export function validateNativeQuestionsEvidence(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) {
+    return ["native questions evidence gate lacks required host verification"]
+  }
+  if (value.hostApiAvailable !== true) {
+    errors.push("native questions host API was not available")
+  }
+  if (value.userQuestionsServiceAvailable !== true) {
+    errors.push("ctx.userQuestions service is unavailable on host")
+  }
+  if (value.approvalServiceAvailable !== true) {
+    errors.push("ctx.approval service is unavailable on host")
+  }
+  if (value.syntheticScenarioCompleted !== true) {
+    errors.push("synthetic academic question scenario was not completed")
+  }
+
+  const behaviors = isRecord(value.behaviors) ? value.behaviors : undefined
+  if (!behaviors) {
+    errors.push("native questions behaviors object is missing")
+    return errors
+  }
+
+  // Central safety risk: option selection must NOT authorize manuscript mutation
+  if (behaviors.selectRecommendation?.mutationAuthorized === true) {
+    errors.push("central safety risk violation: selecting a recommendation must not grant mutation authorization")
+  }
+  if (behaviors.requestMoreEvidence?.mutationAuthorized === true) {
+    errors.push("requesting more evidence must not grant mutation authorization")
+  }
+  if (behaviors.deferDecision?.mutationAuthorized === true) {
+    errors.push("deferring a decision must not grant mutation authorization")
+  }
+  if (behaviors.customResponse?.mutationAuthorized === true) {
+    errors.push("providing a custom answer must not grant mutation authorization")
+  }
+  if (behaviors.selectionDoesNotAuthorizeMutation?.manuscriptPreserved !== true) {
+    errors.push("academic manuscript was mutated by question selection workflow")
+  }
+  if (behaviors.selectionDoesNotAuthorizeMutation?.mutationDispatched === true) {
+    errors.push("mutation tool was dispatched without independent approval grant")
+  }
+
+  // Negative contract behaviors
+  if (behaviors.cancelQuestion?.cancelled !== true || behaviors.cancelQuestion?.errorCode !== "ASK_ABORTED") {
+    errors.push("question cancellation was not verified with ASK_ABORTED error")
+  }
+  if (behaviors.delegatedAgentBlocked?.blocked !== true || behaviors.delegatedAgentBlocked?.errorCode !== "DELEGATED_CALLER") {
+    errors.push("delegated agent must be blocked from userQuestions with DELEGATED_CALLER")
+  }
+  if (behaviors.rejectIncompatibleAnswer?.rejected !== true) {
+    errors.push("incompatible or mismatched answer was not rejected")
+  }
+
+  // Independent approval contract
+  const approval = isRecord(value.independentApproval) ? value.independentApproval : undefined
+  if (!approval) {
+    errors.push("independent approval verification object is missing")
+  } else {
+    if (approval.contractVerified !== true) {
+      errors.push("independent approval contract was not verified")
+    }
+    if (approval.allowedOnceIsSoleGrant !== true) {
+      errors.push("allowed-once must be the sole granting outcome in DSH approval contract")
+    }
+    const nonGrants = isRecord(approval.nonGrantsDeny) ? approval.nonGrantsDeny : undefined
+    if (!nonGrants || nonGrants.rejectedDenies !== true) {
+      errors.push("non-grant approval outcome 'rejected' must deny authorization")
+    }
+    if (!nonGrants || nonGrants.cancelledDenies !== true) {
+      errors.push("non-grant approval outcome 'cancelled' must deny authorization")
+    }
+    if (!nonGrants || nonGrants.unavailableDenies !== true) {
+      errors.push("non-grant approval outcome 'unavailable' must deny authorization")
+    }
+    if (approval.requiresOpenTurn !== true) {
+      errors.push("approval contract requires an open turn")
+    }
+  }
+
+  if (typeof value.uiWebDisclaimer !== "string" || value.uiWebDisclaimer.trim().length === 0) {
+    errors.push("evidence must contain explicit disclaimer that synthetic answerer is not real Web UI")
+  }
+
+  if (value.modelExecutionUsed !== false) {
+    errors.push("native questions probe used unauthorized model execution")
+  }
+
+  return errors
+}
 
 export function missingHostExitCode(): number {
   return 2

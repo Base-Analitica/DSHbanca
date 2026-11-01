@@ -43,11 +43,15 @@ test("actual generated observer module binds the control preset ID without runne
     const generatedModule = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}`)
     expect(typeof generatedModule.apply).toBe("function")
     expect(typeof generatedModule.runAcademicBatchAuditProbe).toBe("function")
+    expect(typeof generatedModule.runAcademicNativeQuestionsProbe).toBe("function")
     expect(generatedModuleSource).toContain("banca_auditar")
     expect(generatedModuleSource).toContain("missing_batch_audit")
     expect(generatedModuleSource).toContain("expectedTotalBatches")
     expect(generatedModuleSource).toContain("known chapters")
     expect(generatedModuleSource).toContain("dshbanca-e2e-final-synthesis")
+    expect(generatedModuleSource).toContain("q-academic-rec-1")
+    expect(generatedModuleSource).toContain("user-questions/request")
+    expect(generatedModuleSource).toContain("DELEGATED_CALLER")
     const agent = { id: "control-agent", ctx: {} }
     let selectedId: string | undefined
     const ctx = {

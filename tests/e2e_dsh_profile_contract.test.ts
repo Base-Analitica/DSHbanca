@@ -21,6 +21,8 @@ import {
   classifyNativeSkillsStatus,
   validateBatchAuditEvidence,
   classifyBatchAuditEvidenceStatus,
+  validateNativeQuestionsEvidence,
+  classifyNativeQuestionsStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateEvidence,
@@ -814,5 +816,184 @@ describe("DSH batch audit evidence gate contract (#44)", () => {
     const errors = validateBatchAuditEvidence(invalidEvidence)
     expect(errors).toContain(expectedError)
     expect(classifyBatchAuditEvidenceStatus(invalidEvidence)).toBe("FAIL")
+  })
+})
+
+const completeNativeQuestionsEvidence = {
+  hostApiAvailable: true,
+  userQuestionsServiceAvailable: true,
+  approvalServiceAvailable: true,
+  syntheticScenarioCompleted: true,
+  behaviors: {
+    selectRecommendation: {
+      questionId: "q-academic-rec-1",
+      selectedOption: "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
+      isRecommendation: true,
+      answered: true,
+      mutationAuthorized: false,
+    },
+    requestMoreEvidence: {
+      questionId: "q-academic-evid-1",
+      selectedOption: "Não sei — explique/mostre evidências",
+      answered: true,
+      mutationAuthorized: false,
+    },
+    deferDecision: {
+      questionId: "q-academic-defer-1",
+      selectedOption: "Adiar / continuar outras etapas",
+      answered: true,
+      mutationAuthorized: false,
+    },
+    customResponse: {
+      questionId: "q-academic-custom-1",
+      customText: "Outro: Manter escopo atual conforme deliberação do orientador",
+      answered: true,
+      mutationAuthorized: false,
+    },
+    cancelQuestion: {
+      questionId: "q-academic-cancel-1",
+      cancelled: true,
+      errorCode: "ASK_ABORTED",
+    },
+    rejectIncompatibleAnswer: {
+      rejected: true,
+      errorCode: "BAD_ANSWER",
+    },
+    delegatedAgentBlocked: {
+      blocked: true,
+      errorCode: "DELEGATED_CALLER",
+    },
+    selectionDoesNotAuthorizeMutation: {
+      attemptedTool: "banca_corrigir",
+      selectionReceived: true,
+      mutationDispatched: false,
+      manuscriptPreserved: true,
+      approvalOutcomeIfNotApproved: "unavailable",
+    },
+  },
+  independentApproval: {
+    contractVerified: true,
+    allowedOnceIsSoleGrant: true,
+    nonGrantsDeny: {
+      rejectedDenies: true,
+      cancelledDenies: true,
+      unavailableDenies: true,
+    },
+    requiresOpenTurn: true,
+  },
+  uiWebDisclaimer: "Synthetic answerer for native DSH contract verification only; not proof of real Web UI or interactive browser session.",
+  modelExecutionUsed: false,
+}
+
+describe("DSH native questions evidence gate contract (#46)", () => {
+  test("accepts complete positive native questions evidence", () => {
+    expect(validateNativeQuestionsEvidence(completeNativeQuestionsEvidence)).toEqual([])
+    expect(classifyNativeQuestionsStatus(completeNativeQuestionsEvidence)).toBe("PASS")
+  })
+
+  test("reports BLOCKED when evidence is missing or hostApiAvailable false", () => {
+    expect(classifyNativeQuestionsStatus(undefined)).toBe("BLOCKED")
+    expect(classifyNativeQuestionsStatus({})).toBe("BLOCKED")
+    expect(classifyNativeQuestionsStatus({ hostApiAvailable: false })).toBe("BLOCKED")
+  })
+
+  test("gate summary incorporates native questions status while preserving earlier gates", () => {
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "PASS",
+      overallStatus: "PASS",
+      exitCode: 0,
+    })
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "BLOCKED")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "FAIL")).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "FAIL",
+      overallStatus: "FAIL",
+      exitCode: 1,
+    })
+  })
+
+  test.each([
+    [
+      "recommendation selection marked as mutation authorized",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          selectRecommendation: { ...completeNativeQuestionsEvidence.behaviors.selectRecommendation, mutationAuthorized: true },
+        },
+      },
+      "central safety risk violation: selecting a recommendation must not grant mutation authorization",
+    ],
+    [
+      "manuscript modified following selection",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          selectionDoesNotAuthorizeMutation: {
+            ...completeNativeQuestionsEvidence.behaviors.selectionDoesNotAuthorizeMutation,
+            manuscriptPreserved: false,
+          },
+        },
+      },
+      "academic manuscript was mutated by question selection workflow",
+    ],
+    [
+      "cancellation not handled",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          cancelQuestion: { ...completeNativeQuestionsEvidence.behaviors.cancelQuestion, cancelled: false },
+        },
+      },
+      "question cancellation was not verified with ASK_ABORTED error",
+    ],
+    [
+      "delegated agent not blocked",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: { ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked, blocked: false },
+        },
+      },
+      "delegated agent must be blocked from userQuestions with DELEGATED_CALLER",
+    ],
+    [
+      "approval rejected outcome does not deny",
+      {
+        ...completeNativeQuestionsEvidence,
+        independentApproval: {
+          ...completeNativeQuestionsEvidence.independentApproval,
+          nonGrantsDeny: { ...completeNativeQuestionsEvidence.independentApproval.nonGrantsDeny, rejectedDenies: false },
+        },
+      },
+      "non-grant approval outcome 'rejected' must deny authorization",
+    ],
+    [
+      "model execution used in probe",
+      { ...completeNativeQuestionsEvidence, modelExecutionUsed: true },
+      "native questions probe used unauthorized model execution",
+    ],
+  ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
+    const errors = validateNativeQuestionsEvidence(invalidEvidence)
+    expect(errors).toContain(expectedError)
+    expect(classifyNativeQuestionsStatus(invalidEvidence)).toBe("FAIL")
   })
 })

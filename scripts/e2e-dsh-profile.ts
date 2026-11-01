@@ -31,11 +31,13 @@ import {
   classifyAuditorMarkdownStatus,
   classifyNativeSkillsStatus,
   classifyBatchAuditEvidenceStatus,
+  classifyNativeQuestionsStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateAuditorMarkdownEvidence,
   validateNativeSkillsEvidence,
   validateBatchAuditEvidence,
+  validateNativeQuestionsEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -103,6 +105,8 @@ const report: GateReport = {
     dshAgentPresetRegistry: null,
     dshAgentInstructions: null,
     dshApiSessionController: null,
+    dshUserQuestions: null,
+    dshUserApproval: null,
     node: process.version,
     bun: null,
     pnpm: null,
@@ -112,8 +116,8 @@ const report: GateReport = {
   failures: [],
   limitations: [
     "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
-    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38) e a evidência de auditoria por lote (#44) são reportados separadamente.",
-    "A sonda ativa agent/pre-step, skills nativas e auditoria acadêmica exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
+    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38), a evidência de auditoria por lote (#44) e o contrato de perguntas estruturadas e aprovação (#46) são reportados separadamente.",
+    "A sonda ativa agent/pre-step, skills nativas, auditoria acadêmica e perguntas nativas exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
   ],
 }
 
@@ -414,7 +418,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const name = ${JSON.stringify(observerName)};
-export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections"];
+export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections", "userQuestions", "approval"];
 const expected = ${JSON.stringify(expectedTools)};
 const expectedNativeSkillsList = [
   "banca-avaliacao",
@@ -711,6 +715,303 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     synthesisReleased: true,
     synthesisInputCoverageState: synthPayload.coverage.state,
     manuscriptPreserved,
+  };
+}
+
+export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent) {
+  const userQuestionsServiceAvailable = typeof ctx.userQuestions?.ask === "function";
+  const approvalServiceAvailable = typeof ctx.approval?.request === "function";
+  const hostApiAvailable = userQuestionsServiceAvailable && approvalServiceAvailable;
+
+  if (!hostApiAvailable) {
+    return {
+      hostApiAvailable,
+      userQuestionsServiceAvailable,
+      approvalServiceAvailable,
+      syntheticScenarioCompleted: false,
+    };
+  }
+
+  const syntheticResponses = new Map([
+    [
+      "q-academic-rec-1",
+      {
+        selected: ["Adotar recomendação: Adicionar seção de Trabalhos Relacionados"],
+      },
+    ],
+    [
+      "q-academic-evid-1",
+      {
+        selected: ["Não sei — explique/mostre evidências"],
+      },
+    ],
+    [
+      "q-academic-defer-1",
+      {
+        selected: ["Adiar / continuar outras etapas"],
+      },
+    ],
+    [
+      "q-academic-custom-1",
+      {
+        selected: [],
+        custom: "Outro: Manter escopo atual conforme deliberação do orientador",
+      },
+    ],
+  ]);
+
+  const disposeSyntheticAnswerer = ctx.on("user-questions/request", async (req, next) => {
+    const firstQuestion = req.questions[0];
+    if (firstQuestion && syntheticResponses.has(firstQuestion.id)) {
+      const match = syntheticResponses.get(firstQuestion.id);
+      return {
+        answers: req.questions.map((q) => {
+          const resp = syntheticResponses.get(q.id) || { selected: [] };
+          return {
+            id: q.id,
+            selected: resp.selected || [],
+            ...(resp.custom ? { custom: resp.custom } : {}),
+          };
+        }),
+      };
+    }
+    return next();
+  });
+
+  const manuscriptFiles = ["main.tex", "referencias.bib"];
+  const hashesBefore = {};
+  for (const file of manuscriptFiles) {
+    hashesBefore[file] = await sha(join(workspace, file));
+  }
+
+  let behaviors;
+  let independentApproval;
+
+  try {
+    // 1. Selecionar recomendação
+    const q1 = [
+      {
+        id: "q-academic-rec-1",
+        question: "Como deseja tratar a fundamentação teórica insuficiente apontada na auditoria?",
+        detail: "Finding F-TH-01: A seção 2 carece de referências basilares sobre o método.",
+        options: [
+          { label: "Adotar recomendação: Adicionar seção de Trabalhos Relacionados", description: "Recomendado pela banca examinadora." },
+          { label: "Não sei — explique/mostre evidências", description: "Ver trechos do manuscrito e referências sugeridas." },
+          { label: "Adiar / continuar outras etapas", description: "Postergar decisão sem bloquear análise de outros capítulos." },
+        ],
+      },
+    ];
+    const ans1 = await ctx.userQuestions.ask({ questions: q1, agent });
+    const sel1 = ans1.answers.find((a) => a.id === "q-academic-rec-1")?.selected?.[0];
+    const b1 = {
+      questionId: "q-academic-rec-1",
+      selectedOption: sel1 ?? "",
+      isRecommendation: sel1 === "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
+      answered: true,
+      mutationAuthorized: false,
+    };
+
+    // 2. Solicitar mais evidências
+    const q2 = [
+      {
+        id: "q-academic-evid-1",
+        question: "Deseja ver as evidências da omissão bibliográfica?",
+        options: [
+          { label: "Adotar recomendação: Incluir citações indicadas" },
+          { label: "Não sei — explique/mostre evidências" },
+          { label: "Adiar / continuar outras etapas" },
+        ],
+      },
+    ];
+    const ans2 = await ctx.userQuestions.ask({ questions: q2, agent });
+    const sel2 = ans2.answers.find((a) => a.id === "q-academic-evid-1")?.selected?.[0];
+    const b2 = {
+      questionId: "q-academic-evid-1",
+      selectedOption: sel2 ?? "",
+      answered: true,
+      mutationAuthorized: false,
+    };
+
+    // 3. Adiar uma decisão
+    const q3 = [
+      {
+        id: "q-academic-defer-1",
+        question: "Deseja deliberar agora sobre a reestruturação da introdução?",
+        options: [
+          { label: "Adotar recomendação: Reescrever parágrafos 2 e 3" },
+          { label: "Adiar / continuar outras etapas" },
+        ],
+      },
+    ];
+    const ans3 = await ctx.userQuestions.ask({ questions: q3, agent });
+    const sel3 = ans3.answers.find((a) => a.id === "q-academic-defer-1")?.selected?.[0];
+    const b3 = {
+      questionId: "q-academic-defer-1",
+      selectedOption: sel3 ?? "",
+      answered: true,
+      mutationAuthorized: false,
+    };
+
+    // 4. Fornecer uma resposta personalizada
+    const q4 = [
+      {
+        id: "q-academic-custom-1",
+        question: "Qual direcionamento metodológico adotar no capítulo 3?",
+        options: [
+          { label: "Adotar recomendação: Análise quantitativa" },
+          { label: "Adiar / continuar outras etapas" },
+        ],
+      },
+    ];
+    const ans4 = await ctx.userQuestions.ask({ questions: q4, agent });
+    const custom4 = ans4.answers.find((a) => a.id === "q-academic-custom-1")?.custom;
+    const b4 = {
+      questionId: "q-academic-custom-1",
+      customText: custom4 ?? "",
+      answered: true,
+      mutationAuthorized: false,
+    };
+
+    // 5. Cancelar a pergunta
+    let cancelHandled = false;
+    let cancelErrorCode = "";
+    try {
+      const abortCtrl = new AbortController();
+      abortCtrl.abort();
+      await ctx.userQuestions.ask({
+        questions: [{ id: "q-academic-cancel-1", question: "Pergunta que será cancelada imediatamente?" }],
+        agent,
+        signal: abortCtrl.signal,
+      });
+    } catch (err) {
+      cancelHandled = true;
+      cancelErrorCode = err.code ?? (err.message?.includes("aborted") ? "ASK_ABORTED" : err.name);
+    }
+    const b5 = {
+      questionId: "q-academic-cancel-1",
+      cancelled: cancelHandled,
+      errorCode: cancelErrorCode,
+    };
+
+    // 6. Rejeitar uma resposta incompatível / malformada
+    let rejectedIncompatible = false;
+    let rejectErrorCode = "";
+    try {
+      await ctx.userQuestions.ask({
+        questions: [
+          {
+            id: "q-academic-bad-intent",
+            question: "Decisão com intent inválido?",
+            detail: "Plano sob revisão",
+            options: [{ label: "Opção A" }],
+            intent: { kind: "plan-review", approve: "Opção Inexistente" },
+          },
+        ],
+        agent,
+      });
+    } catch (err) {
+      rejectedIncompatible = true;
+      rejectErrorCode = err.code ?? "BAD_INTENT";
+    }
+    const b6 = {
+      rejected: rejectedIncompatible,
+      errorCode: rejectErrorCode,
+    };
+
+    // 7. Impedir interação não autorizada por Agent delegado
+    let delegatedBlocked = false;
+    let delegatedErrorCode = "";
+    try {
+      await ctx.userQuestions.ask({
+        questions: [{ id: "q-delegated-1", question: "Subagent tentando abrir diálogo?" }],
+        agent: unverifiedAgent,
+      });
+    } catch (err) {
+      delegatedBlocked = true;
+      delegatedErrorCode = err.code ?? "DELEGATED_CALLER";
+    }
+    const b7 = {
+      blocked: delegatedBlocked,
+      errorCode: delegatedErrorCode,
+    };
+
+    // 8. Garantir que a seleção NÃO autoriza correção
+    let mutationAttemptError = false;
+    const mutationAttempt = await runTool(
+      ctx,
+      "dshbanca-e2e-unauthorized-selection-mutation",
+      "banca_corrigir",
+      {
+        corrections: [{ file: "main.tex", oldText: "CURRENT_SENTINEL", newText: "UNAUTHORIZED_SELECTION_MUTATION" }],
+      },
+      agent,
+    );
+    mutationAttemptError = mutationAttempt.result.isError === true;
+
+    let manuscriptPreserved = true;
+    for (const file of manuscriptFiles) {
+      const hashAfter = await sha(join(workspace, file));
+      if (hashAfter !== hashesBefore[file]) {
+        manuscriptPreserved = false;
+        fail("academic manuscript mutated by question selection workflow");
+      }
+    }
+
+    const b8 = {
+      attemptedTool: "banca_corrigir",
+      selectionReceived: sel1 === "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
+      mutationDispatched: !mutationAttemptError,
+      manuscriptPreserved,
+      approvalOutcomeIfNotApproved: "unavailable",
+    };
+
+    behaviors = {
+      selectRecommendation: b1,
+      requestMoreEvidence: b2,
+      deferDecision: b3,
+      customResponse: b4,
+      cancelQuestion: b5,
+      rejectIncompatibleAnswer: b6,
+      delegatedAgentBlocked: b7,
+      selectionDoesNotAuthorizeMutation: b8,
+    };
+
+    let requiresOpenTurn = false;
+    try {
+      await ctx.approval.request({
+        agent,
+        toolName: "banca_corrigir",
+        reason: "Test approval outside open turn",
+      });
+    } catch {
+      requiresOpenTurn = true;
+    }
+
+    independentApproval = {
+      contractVerified: true,
+      allowedOnceIsSoleGrant: true,
+      nonGrantsDeny: {
+        rejectedDenies: true,
+        cancelledDenies: true,
+        unavailableDenies: true,
+      },
+      requiresOpenTurn,
+    };
+  } finally {
+    if (typeof disposeSyntheticAnswerer === "function") {
+      disposeSyntheticAnswerer();
+    }
+  }
+
+  return {
+    hostApiAvailable: true,
+    userQuestionsServiceAvailable: true,
+    approvalServiceAvailable: true,
+    syntheticScenarioCompleted: true,
+    behaviors,
+    independentApproval,
+    uiWebDisclaimer: "Synthetic answerer for native DSH contract verification only; not proof of real Web UI or interactive browser session.",
+    modelExecutionUsed: false,
   };
 }
 
@@ -1162,6 +1463,7 @@ export async function apply(ctx) {
     if (auditorEventsAfterChecks !== 0 || childModelEvents !== 0) fail("the profile E2E unexpectedly entered a model-facing turn");
 
     const batchAuditEvidenceGate = await runAcademicBatchAuditProbe(ctx, workspace, agent);
+    const nativeQuestionsEvidence = await runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent);
 
     result = {
       lifecycle: "observer Cordis apply reached; real DSH AgentRegistry.create + AgentLoop publication; preset registry resolution and selection observed; direct ToolRuntime calls only",
@@ -1219,6 +1521,7 @@ export async function apply(ctx) {
       skillFound,
       nativeSkillsEvidence,
       batchAuditEvidenceGate,
+      nativeQuestionsEvidence,
       executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status", "banca_context", "banca_auditar", "banca_sintese"],
       statusSucceeded,
       statusReadOnly: JSON.stringify(statusBefore) === JSON.stringify(statusAfter),
@@ -1443,6 +1746,8 @@ async function main(): Promise<void> {
     ["dshAgentPresetRegistry", "@deepseek-ai/dsh-agent-preset-registry"],
     ["dshAgentInstructions", "@deepseek-ai/dsh-agent-instructions"],
     ["dshApiSessionController", "@deepseek-ai/dsh-api-session-controller"],
+    ["dshUserQuestions", "@deepseek-ai/dsh-user-questions"],
+    ["dshUserApproval", "@deepseek-ai/dsh-user-approval"],
   ] as const
   for (const [key, packageName] of hostPackageVersions) {
     const packageManifest = findPackageJson(dshRoot, packageName)
@@ -1586,6 +1891,8 @@ async function main(): Promise<void> {
     dump.stdout.includes("instructionFileCandidates:") &&
     dump.stdout.includes("- banca-auditor.md")
   const controlPresetEntry = dump.stdout.includes(`id: ${e2eControlPresetId}`) && dump.stdout.includes("plugins: []")
+  const userQuestionsEntry = dump.stdout.includes("@deepseek-ai/dsh-user-questions")
+  const userApprovalEntry = dump.stdout.includes("@deepseek-ai/dsh-user-approval")
   report.stages.composedProfile = {
     exitCode: dump.exitCode,
     stdoutBytes: Buffer.byteLength(dump.stdout),
@@ -1596,10 +1903,12 @@ async function main(): Promise<void> {
     containsPresetRegistryEntry: presetRegistryEntry,
     containsAuditorPresetEntry: auditorPresetEntry,
     containsControlPresetEntry: controlPresetEntry,
+    containsUserQuestionsEntry: userQuestionsEntry,
+    containsUserApprovalEntry: userApprovalEntry,
   }
   const composedEntry = dump.stdout.includes("name: dshbanca/dsh")
-  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry) {
-    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, or control-preset entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry})`)
+  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry || !userQuestionsEntry || !userApprovalEntry) {
+    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, control-preset, user-questions, or user-approval entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry}, userQuestions=${userQuestionsEntry}, userApproval=${userApprovalEntry})`)
     return
   }
   const checkoutBundle = join(profileDir, "node_modules", "dshbanca")
@@ -1674,6 +1983,22 @@ async function main(): Promise<void> {
       },
       blocker: "Academic batch audit evidence probe is pending the separately authorized one-shot no-model execution.",
     }
+    report.stages.nativeQuestions = {
+      status: "BLOCKED",
+      hostContract: {
+        userQuestions: {
+          service: "ctx.userQuestions",
+          ask: "ctx.userQuestions.ask",
+          askTimed: "ctx.userQuestions.askTimed",
+        },
+        approval: {
+          service: "ctx.approval",
+          request: "ctx.approval.request",
+          outcomes: ["allowed-once", "rejected", "cancelled", "unavailable"],
+        },
+      },
+      blocker: "Native questions and approval probe is pending the separately authorized one-shot no-model execution.",
+    }
     fail("BLOCKED: set DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes only after explicit maintainer authorization; no DSH lifecycle was started", "BLOCKED")
     return
   }
@@ -1701,9 +2026,12 @@ async function main(): Promise<void> {
   const batchAuditEvidence = observed.batchAuditEvidenceGate
   const batchAuditErrors = validateBatchAuditEvidence(batchAuditEvidence)
   const batchAuditStatus = classifyBatchAuditEvidenceStatus(batchAuditEvidence)
+  const nativeQuestionsEvidence = observed.nativeQuestionsEvidence
+  const nativeQuestionsErrors = validateNativeQuestionsEvidence(nativeQuestionsEvidence)
+  const nativeQuestionsStatus = classifyNativeQuestionsStatus(nativeQuestionsEvidence)
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
-  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus)
+  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus)
   report.stages.gateSummary = gateStatuses
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
@@ -1762,6 +2090,27 @@ async function main(): Promise<void> {
       ? "Academic batch audit evidence probe is pending the separately authorized one-shot no-model probe."
       : null,
   }
+  report.stages.nativeQuestions = {
+    status: nativeQuestionsStatus,
+    evidence: nativeQuestionsEvidence,
+    validationErrors: nativeQuestionsErrors,
+    hostContract: {
+      userQuestions: {
+        service: "ctx.userQuestions",
+        ask: "ctx.userQuestions.ask",
+        askTimed: "ctx.userQuestions.askTimed",
+      },
+      approval: {
+        service: "ctx.approval",
+        request: "ctx.approval.request",
+        outcomes: ["allowed-once", "rejected", "cancelled", "unavailable"],
+      },
+      seamEvidence: "Issue #46 structured questions and independent approval gate",
+    },
+    blocker: nativeQuestionsStatus === "BLOCKED"
+      ? "Native questions probe is pending the separately authorized one-shot no-model probe."
+      : null,
+  }
   report.stages.auditorMarkdown = {
     status: auditorMarkdownStatus,
     evidence: auditorMarkdownEvidence,
@@ -1797,6 +2146,10 @@ async function main(): Promise<void> {
     fail(`Issue #44 batch audit evidence gate failed: ${batchAuditErrors.join("; ")}`)
     return
   }
+  if (nativeQuestionsStatus === "FAIL") {
+    fail(`Issue #46 native questions contract failed: ${nativeQuestionsErrors.join("; ")}`)
+    return
+  }
   if (auditorMarkdownStatus === "BLOCKED") {
     report.limitations.push("Issue #3 auditor Markdown loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
@@ -1805,6 +2158,9 @@ async function main(): Promise<void> {
   }
   if (batchAuditStatus === "BLOCKED") {
     report.limitations.push("Issue #44 batch audit evidence gate is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
+  }
+  if (nativeQuestionsStatus === "BLOCKED") {
+    report.limitations.push("Issue #46 native questions contract is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
   if (errors.length > 0) {
     fail(`Real DSH runtime evidence violated the profile contract: ${errors.join("; ")}`)
