@@ -760,8 +760,12 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
     ],
   ]);
 
+  let answererReachedForDelegated = false;
   const disposeSyntheticAnswerer = ctx.on("user-questions/request", async (req, next) => {
     const firstQuestion = req.questions[0];
+    if (firstQuestion?.id === "q-delegated-1") {
+      answererReachedForDelegated = true;
+    }
     if (firstQuestion && syntheticResponses.has(firstQuestion.id)) {
       const match = syntheticResponses.get(firstQuestion.id);
       return {
@@ -950,24 +954,37 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
     // 7. Impedir interação não autorizada por Agent delegado
     let delegatedBlocked = false;
     let delegatedErrorCode = "";
-    try {
-      await ctx.userQuestions.ask({
-        questions: [{ id: "q-delegated-1", question: "Subagent tentando abrir diálogo?" }],
-        agent: unverifiedAgent,
-      });
-    } catch (err) {
-      if (err && typeof err === "object" && err.code === "DELEGATED_CALLER") {
-        delegatedBlocked = true;
-        delegatedErrorCode = err.code;
-      } else {
-        delegatedBlocked = false;
-        delegatedErrorCode = String(err?.code || err?.message || err);
+
+    const isRegistered = ctx.agents?.get(unverifiedAgent?.id) === unverifiedAgent;
+    const isOwned = ctx.agents?.isOwnedBy(unverifiedAgent?.id, agent) === true;
+    const notInRoots = !ctx.agents?.roots().includes(unverifiedAgent);
+
+    if (!isRegistered || !isOwned || !notInRoots) {
+      delegatedBlocked = false;
+      delegatedErrorCode = !isRegistered ? "NOT_REGISTERED" : !isOwned ? "NOT_OWNED" : "IN_ROOTS";
+    } else {
+      try {
+        await ctx.userQuestions.ask({
+          questions: [{ id: "q-delegated-1", question: "Subagent tentando abrir diálogo?" }],
+          agent: unverifiedAgent,
+        });
+      } catch (err) {
+        if (err && typeof err === "object" && err.code === "DELEGATED_CALLER") {
+          delegatedBlocked = true;
+          delegatedErrorCode = err.code;
+        } else {
+          delegatedBlocked = false;
+          delegatedErrorCode = String(err?.code || err?.message || err);
+        }
       }
     }
     const b7 = {
       callingAgentOrigin: "subagent",
+      isOwnedByParent: isOwned,
+      notInRoots,
       blocked: delegatedBlocked,
       errorCode: delegatedErrorCode,
+      answererReached: answererReachedForDelegated,
     };
 
     // 8. Garantir que a seleção NÃO autoriza correção (verificação estritamente não-mutante)
@@ -1240,6 +1257,7 @@ export async function apply(ctx) {
   let result;
   let auditorAgentId;
   let controlAgentId;
+  let unverifiedAgentId;
   try {
     const agent = auditorHandle.agent;
     auditorAgentId = agent.id;
@@ -1475,6 +1493,7 @@ export async function apply(ctx) {
 
     unverifiedHandle = await ctx.agents.create({
       sessionId: "session-dshbanca-e2e-unverified-subagent-" + process.pid + "-" + Date.now(),
+      parentAgent: agent,
       meta: {
         cwd: workspace,
         parentSession: agent.id,
@@ -1483,12 +1502,15 @@ export async function apply(ctx) {
       },
     });
     const unverifiedAgent = unverifiedHandle.agent;
+    unverifiedAgentId = unverifiedAgent.id;
     const unverifiedPreset = ctx.agentPresets.composedPreset(unverifiedAgent.ctx);
     if (
       ctx.agents.get(unverifiedAgent.id) !== unverifiedAgent ||
       ctx.sessions.get(unverifiedAgent.id) !== unverifiedAgent.session ||
-      unverifiedAgent.session.header.origin !== "subagent"
-    ) fail("unverified delegation fixture was not created as a live DSH Agent with subagent Session metadata");
+      unverifiedAgent.session.header.origin !== "subagent" ||
+      !ctx.agents.isOwnedBy(unverifiedAgent.id, agent) ||
+      ctx.agents.roots().includes(unverifiedAgent)
+    ) fail("unverified delegation fixture was not created as a live DSH Agent owned by parent Agent");
 
     const unverifiedBefore = await inventory(workspace);
     let unverifiedBodyInvocations = 0;
@@ -1629,6 +1651,8 @@ export async function apply(ctx) {
         sessionStoreContainsSession: true,
         agentAndSessionIdMatch: unverifiedAgent.id === unverifiedAgent.session.id,
         sessionOrigin: unverifiedAgent.session.header.origin,
+        isOwnedByParent: ctx.agents.isOwnedBy(unverifiedAgent.id, agent) === true,
+        notInRoots: !ctx.agents.roots().includes(unverifiedAgent),
         effectivePreset: unverifiedPreset ?? null,
         attempt: {
           toolName: "banca_corrigir",
@@ -1691,9 +1715,11 @@ export async function apply(ctx) {
   }
   const auditorAgentUnregistered = auditorAgentId !== undefined && ctx.agents.get(auditorAgentId) === undefined && ctx.sessions.get(auditorAgentId) === undefined
   const controlAgentUnregistered = controlAgentId !== undefined && ctx.agents.get(controlAgentId) === undefined && ctx.sessions.get(controlAgentId) === undefined
+  const unverifiedAgentUnregistered = unverifiedAgentId !== undefined && ctx.agents.get(unverifiedAgentId) === undefined && ctx.sessions.get(unverifiedAgentId) === undefined
   result.agentTeardown.auditorAgentUnregistered = auditorAgentUnregistered
   result.agentTeardown.controlAgentUnregistered = controlAgentUnregistered
-  if (!auditorAgentUnregistered || !controlAgentUnregistered) fail("disposed auditor/control Agent or Session remained registered");
+  result.agentTeardown.unverifiedAgentUnregistered = unverifiedAgentUnregistered
+  if (!auditorAgentUnregistered || !controlAgentUnregistered || !unverifiedAgentUnregistered) fail("disposed auditor/control/unverified Agent or Session remained registered");
   await writeFile(reportPath, JSON.stringify(result, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
 }
 export default { name, inject, apply };

@@ -80,8 +80,11 @@ export const completeNativeQuestionsEvidence: NativeQuestionsEvidence = {
     },
     delegatedAgentBlocked: {
       callingAgentOrigin: "subagent",
+      isOwnedByParent: true,
+      notInRoots: true,
       blocked: true,
       errorCode: "DELEGATED_CALLER",
+      answererReached: false,
     },
     selectionDoesNotAuthorizeMutation: {
       nonMutatingProof: true,
@@ -489,6 +492,248 @@ describe("DSH native questions and independent approval contract (#46)", () => {
         "approval events were detected in session log following question workflow",
       )
       expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+
+    // P1 Delegated Agent regressions
+    test("P1 RED reproduction: rejects when delegatedAgentBlocked returns NO_PROVIDER instead of DELEGATED_CALLER", () => {
+      const invalid = {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            callingAgentOrigin: "subagent",
+            isOwnedByParent: false,
+            notInRoots: false,
+            blocked: false,
+            errorCode: "NO_PROVIDER",
+            answererReached: true,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(invalid)
+      expect(errors).toContain("NO_PROVIDER must not be accepted as proof of delegated agent blocking")
+      expect(errors).toContain("delegated agent must be verified as owned by parent in runtime")
+      expect(errors).toContain("delegated agent must not be present in runtime roots")
+      expect(errors).toContain("delegated agent question must not reach the answerer")
+      expect(errors).toContain("delegated agent must be blocked from userQuestions with DELEGATED_CALLER")
+      expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+
+    test("regression: rejects when delegated agent is not owned by parent in runtime", () => {
+      const invalid = {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked,
+            isOwnedByParent: false,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(invalid)
+      expect(errors).toContain("delegated agent must be verified as owned by parent in runtime")
+      expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+
+    test("regression: rejects when delegated agent is present in runtime roots", () => {
+      const invalid = {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked,
+            notInRoots: false,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(invalid)
+      expect(errors).toContain("delegated agent must not be present in runtime roots")
+      expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+
+    test("regression: rejects when delegated agent question reached the answerer", () => {
+      const invalid = {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked,
+            answererReached: true,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(invalid)
+      expect(errors).toContain("delegated agent question must not reach the answerer")
+      expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+  })
+
+  describe("Caller identity differentiation on ctx.userQuestions (DSH contract)", () => {
+    // Exact simulation of DSH AgentRegistry and UserQuestions assertLiveRoot
+    interface AgentStub {
+      id: string
+      session: { id: string; header: { origin?: string; parentSession?: string } }
+    }
+
+    class FakeDshAgentRegistry {
+      private store = new Map<string, { agent: AgentStub; owner?: AgentStub }>()
+
+      enter(agent: AgentStub, owner?: AgentStub) {
+        this.store.set(agent.id, { agent, owner })
+      }
+
+      get(id: string) {
+        return this.store.get(id)?.agent
+      }
+
+      isOwnedBy(id: string, owner: AgentStub) {
+        return this.store.get(id)?.owner === owner
+      }
+
+      roots() {
+        return [...this.store.values()].filter((e) => e.owner === undefined).map((e) => e.agent)
+      }
+
+      dispose(id: string) {
+        this.store.delete(id)
+      }
+    }
+
+    class FakeDshUserQuestions {
+      constructor(
+        private agents: FakeDshAgentRegistry,
+        private answerer?: (req: any) => Promise<any>,
+      ) {}
+
+      assertLiveRoot(agent: AgentStub) {
+        if (this.agents.get(agent.id) !== agent) {
+          const err = new Error("human interaction requires the exact live calling agent when an agent is supplied") as any
+          err.code = "CALLER_NOT_LIVE"
+          throw err
+        }
+        if (!this.agents.roots().includes(agent)) {
+          const err = new Error("human interaction is unavailable while the calling agent is owned by another live agent; include the unresolved question or decision in the child agent's final result") as any
+          err.code = "DELEGATED_CALLER"
+          throw err
+        }
+      }
+
+      async ask(request: { questions: any[]; agent?: AgentStub }) {
+        if (request.agent !== undefined) {
+          this.assertLiveRoot(request.agent)
+        }
+        if (!this.answerer) {
+          const err = new Error("user question service has no active answering provider") as any
+          err.code = "NO_PROVIDER"
+          throw err
+        }
+        return this.answerer(request)
+      }
+    }
+
+    test("Case 1: Valid root agent with answerer succeeds", async () => {
+      const registry = new FakeDshAgentRegistry()
+      const rootAgent: AgentStub = { id: "root-1", session: { id: "root-1", header: { origin: "root" } } }
+      registry.enter(rootAgent, undefined) // root: owner is undefined
+
+      expect(registry.roots()).toContain(rootAgent)
+      expect(registry.get("root-1")).toBe(rootAgent)
+
+      let answererCalled = false
+      const questions = new FakeDshUserQuestions(registry, async () => {
+        answererCalled = true
+        return { answers: [{ id: "q1", selected: ["Option A"] }] }
+      })
+
+      const res = await questions.ask({ questions: [{ id: "q1" }], agent: rootAgent })
+      expect(res.answers[0].selected).toEqual(["Option A"])
+      expect(answererCalled).toBe(true)
+    })
+
+    test("Case 2: Agent with subagent metadata but NO runtime owner is in roots and fails with NO_PROVIDER, not DELEGATED_CALLER", async () => {
+      const registry = new FakeDshAgentRegistry()
+      const parentAgent: AgentStub = { id: "parent-1", session: { id: "parent-1", header: {} } }
+      registry.enter(parentAgent, undefined)
+
+      // Subagent metadata in session, but created WITHOUT parentAgent (runtime owner = undefined)
+      const fakeSubagent: AgentStub = {
+        id: "subagent-no-owner",
+        session: { id: "subagent-no-owner", header: { origin: "subagent", parentSession: "parent-1" } },
+      }
+      registry.enter(fakeSubagent, undefined) // BUG: owner was not passed!
+
+      // Registry sees it as ROOT because owner is undefined!
+      expect(registry.roots()).toContain(fakeSubagent)
+      expect(registry.isOwnedBy(fakeSubagent.id, parentAgent)).toBe(false)
+
+      let answererCalled = false
+      const questions = new FakeDshUserQuestions(registry, undefined) // no answerer
+
+      // assertLiveRoot passes because it is in roots, then fails with NO_PROVIDER instead of DELEGATED_CALLER!
+      await expect(questions.ask({ questions: [{ id: "q1" }], agent: fakeSubagent })).rejects.toMatchObject({
+        code: "NO_PROVIDER",
+      })
+      expect(answererCalled).toBe(false)
+    })
+
+    test("Case 3: Child agent with real runtime owner throws DELEGATED_CALLER and question NEVER reaches answerer", async () => {
+      const registry = new FakeDshAgentRegistry()
+      const parentAgent: AgentStub = { id: "parent-1", session: { id: "parent-1", header: {} } }
+      registry.enter(parentAgent, undefined)
+
+      // Properly created child agent with parentAgent
+      const childAgent: AgentStub = {
+        id: "child-agent-1",
+        session: { id: "child-agent-1", header: { origin: "subagent", parentSession: "parent-1" } },
+      }
+      registry.enter(childAgent, parentAgent) // runtime owner = parentAgent
+
+      expect(registry.roots()).not.toContain(childAgent)
+      expect(registry.isOwnedBy(childAgent.id, parentAgent)).toBe(true)
+
+      let answererCalled = false
+      const questions = new FakeDshUserQuestions(registry, async () => {
+        answererCalled = true
+        return { answers: [] }
+      })
+
+      await expect(questions.ask({ questions: [{ id: "q1" }], agent: childAgent })).rejects.toMatchObject({
+        code: "DELEGATED_CALLER",
+      })
+      // Crucial: answerer must NEVER be called for delegated agent
+      expect(answererCalled).toBe(false)
+    })
+
+    test("Case 4: Nonexistent or disposed agent throws CALLER_NOT_LIVE", async () => {
+      const registry = new FakeDshAgentRegistry()
+      const rootAgent: AgentStub = { id: "root-1", session: { id: "root-1", header: {} } }
+      registry.enter(rootAgent, undefined)
+
+      const questions = new FakeDshUserQuestions(registry, async () => ({ answers: [] }))
+
+      // Disposed agent (unregistered from registry)
+      const disposedAgent: AgentStub = { id: "disposed-1", session: { id: "disposed-1", header: {} } }
+      await expect(questions.ask({ questions: [{ id: "q1" }], agent: disposedAgent })).rejects.toMatchObject({
+        code: "CALLER_NOT_LIVE",
+      })
+
+      // Also after disposing rootAgent
+      registry.dispose("root-1")
+      await expect(questions.ask({ questions: [{ id: "q1" }], agent: rootAgent })).rejects.toMatchObject({
+        code: "CALLER_NOT_LIVE",
+      })
+    })
+
+    test("Case 5: Absence of answerer for valid root agent throws NO_PROVIDER", async () => {
+      const registry = new FakeDshAgentRegistry()
+      const rootAgent: AgentStub = { id: "root-1", session: { id: "root-1", header: {} } }
+      registry.enter(rootAgent, undefined)
+
+      const questions = new FakeDshUserQuestions(registry, undefined) // No provider registered
+
+      await expect(questions.ask({ questions: [{ id: "q1" }], agent: rootAgent })).rejects.toMatchObject({
+        code: "NO_PROVIDER",
+      })
     })
   })
 

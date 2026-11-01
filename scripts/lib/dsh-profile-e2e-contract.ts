@@ -811,8 +811,11 @@ export interface NativeQuestionsBehaviorsEvidence {
   }
   delegatedAgentBlocked: {
     callingAgentOrigin?: string
+    isOwnedByParent?: boolean
+    notInRoots?: boolean
     blocked: boolean
     errorCode: string
+    answererReached?: boolean
   }
   selectionDoesNotAuthorizeMutation: SelectionMutationEvidence
 }
@@ -1038,6 +1041,18 @@ export function validateNativeQuestionsEvidence(value: unknown): string[] {
   if (!b7) {
     errors.push("delegatedAgentBlocked behavior is required and missing")
   } else {
+    if (b7.isOwnedByParent !== true) {
+      errors.push("delegated agent must be verified as owned by parent in runtime")
+    }
+    if (b7.notInRoots !== true) {
+      errors.push("delegated agent must not be present in runtime roots")
+    }
+    if (b7.answererReached === true) {
+      errors.push("delegated agent question must not reach the answerer")
+    }
+    if (b7.errorCode === "NO_PROVIDER") {
+      errors.push("NO_PROVIDER must not be accepted as proof of delegated agent blocking")
+    }
     if (b7.blocked !== true || b7.errorCode !== "DELEGATED_CALLER") {
       errors.push("delegated agent must be blocked from userQuestions with DELEGATED_CALLER")
     }

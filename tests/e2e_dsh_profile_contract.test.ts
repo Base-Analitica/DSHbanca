@@ -893,8 +893,11 @@ const completeNativeQuestionsEvidence = {
     },
     delegatedAgentBlocked: {
       callingAgentOrigin: "subagent",
+      isOwnedByParent: true,
+      notInRoots: true,
       blocked: true,
       errorCode: "DELEGATED_CALLER",
+      answererReached: false,
     },
     selectionDoesNotAuthorizeMutation: {
       nonMutatingProof: true,
@@ -1082,6 +1085,63 @@ describe("DSH native questions evidence gate contract (#46)", () => {
         },
       },
       "delegated agent must be blocked from userQuestions with DELEGATED_CALLER",
+    ],
+    [
+      "delegated agent returned NO_PROVIDER instead of DELEGATED_CALLER",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked,
+            errorCode: "NO_PROVIDER",
+            blocked: false,
+          },
+        },
+      },
+      "NO_PROVIDER must not be accepted as proof of delegated agent blocking",
+    ],
+    [
+      "delegated agent not owned by parent in runtime",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked,
+            isOwnedByParent: false,
+          },
+        },
+      },
+      "delegated agent must be verified as owned by parent in runtime",
+    ],
+    [
+      "delegated agent present in runtime roots",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked,
+            notInRoots: false,
+          },
+        },
+      },
+      "delegated agent must not be present in runtime roots",
+    ],
+    [
+      "delegated agent question reached answerer",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          delegatedAgentBlocked: {
+            ...completeNativeQuestionsEvidence.behaviors.delegatedAgentBlocked,
+            answererReached: true,
+          },
+        },
+      },
+      "delegated agent question must not reach the answerer",
     ],
     [
       "approval rejected outcome does not deny in PASS",
