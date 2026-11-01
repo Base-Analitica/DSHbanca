@@ -120,19 +120,27 @@ export function classifyNativeQuestionsStatus(value: unknown): ProfileGateStatus
   return "PASS"
 }
 
-/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills, batch audit, and native questions verification. */
+/** Classify the native academic decision verification gate status (#48). */
+export function classifyAcademicDecisionStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.hostApiAvailable !== true) return "BLOCKED"
+  return validateAcademicDecisionEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
+/** Keep legacy gates visible while incorporating native skills, batch audit, native questions, and academic decision verification. */
 export function classifyProfileGateStatuses(
   issue2Status: ProfileGateStatus,
   auditorMarkdownStatus: ProfileGateStatus,
   nativeSkillsStatus?: ProfileGateStatus,
   batchAuditStatus?: ProfileGateStatus,
   nativeQuestionsStatus?: ProfileGateStatus,
+  academicDecisionStatus?: ProfileGateStatus,
 ): {
   issue2Status: ProfileGateStatus
   auditorMarkdownStatus: ProfileGateStatus
   nativeSkillsStatus?: ProfileGateStatus
   batchAuditStatus?: ProfileGateStatus
   nativeQuestionsStatus?: ProfileGateStatus
+  academicDecisionStatus?: ProfileGateStatus
   overallStatus: ProfileGateStatus
   exitCode: number
 } {
@@ -140,6 +148,7 @@ export function classifyProfileGateStatuses(
   if (nativeSkillsStatus !== undefined) statuses.push(nativeSkillsStatus)
   if (batchAuditStatus !== undefined) statuses.push(batchAuditStatus)
   if (nativeQuestionsStatus !== undefined) statuses.push(nativeQuestionsStatus)
+  if (academicDecisionStatus !== undefined) statuses.push(academicDecisionStatus)
   const overallStatus: ProfileGateStatus = statuses.includes("FAIL")
     ? "FAIL"
     : statuses.includes("BLOCKED") ? "BLOCKED" : "PASS"
@@ -149,6 +158,7 @@ export function classifyProfileGateStatuses(
     ...(nativeSkillsStatus !== undefined ? { nativeSkillsStatus } : {}),
     ...(batchAuditStatus !== undefined ? { batchAuditStatus } : {}),
     ...(nativeQuestionsStatus !== undefined ? { nativeQuestionsStatus } : {}),
+    ...(academicDecisionStatus !== undefined ? { academicDecisionStatus } : {}),
     overallStatus,
     exitCode: overallStatus === "PASS" ? passExitCode() : overallStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
   }
@@ -1265,6 +1275,269 @@ export function validateNativeQuestionsEvidence(value: unknown): string[] {
 
   if (value.modelExecutionUsed !== false) {
     errors.push("native questions probe used unauthorized model execution")
+  }
+
+  return errors
+}
+
+export interface AcademicDecisionSkillLoadedEvidence {
+  name: "banca-grille"
+  discovered: boolean
+  loaded: boolean
+  canonicalBodySha256: string
+  integrityVerified: boolean
+}
+
+export interface AcademicDecisionAgentIdentityEvidence {
+  agentId: string
+  sessionId: string
+  agentAndSessionIdMatch: boolean
+  isRoot: boolean
+}
+
+export interface AcademicDecisionToolDispatchEvidence {
+  toolName: string
+  callId: string
+  dispatched: boolean
+  isError: boolean
+}
+
+export interface AcademicDecisionTransmittedPayloadEvidence {
+  questionId: string
+  prompt: string
+  fullQuestionText: string
+  containsFindingId: boolean
+  containsLocalizedEvidence: boolean
+  containsRecommendationJustification: boolean
+  detailFieldDroppedByHostTool: boolean
+  optionsCount: number
+  hasRecommendedOption: boolean
+  hasUncertaintyOption: boolean
+  hasDeferOption: boolean
+  hasConsequencesAndRisks: boolean
+}
+
+export interface AcademicDecisionSelectedAnswerEvidence {
+  id: string
+  selected: string[]
+  custom?: string
+  isRecommendation: boolean
+  isNonEmptySelection: boolean
+  noFreeTextWhenStructured: boolean
+}
+
+export interface AcademicDecisionInterpretationEvidence {
+  outcome: string
+  mutationAuthorized: boolean
+  nextSteps: string[]
+}
+
+export interface AcademicDecisionAbsenceOfMutationEvidence {
+  approvalEventsCount: number
+  allowedOnceEmitted: boolean
+  bancaCorrigirDispatched: boolean
+  bancaRestoreDispatched: boolean
+  manuscriptPreserved: boolean
+}
+
+export interface AcademicDecisionNegativeCasesEvidence {
+  delegatedAgentBlocked: {
+    blocked: boolean
+    errorCode: string
+    answererReached: boolean
+  }
+  mismatchedOrIncompatibleRejected: boolean
+  cancellationHandled: boolean
+}
+
+export interface AcademicDecisionCycleEvidence {
+  hostApiAvailable: boolean
+  skillLoaded: AcademicDecisionSkillLoadedEvidence
+  agentIdentity: AcademicDecisionAgentIdentityEvidence
+  toolDispatch: AcademicDecisionToolDispatchEvidence
+  transmittedPayload: AcademicDecisionTransmittedPayloadEvidence
+  selectedAnswer: AcademicDecisionSelectedAnswerEvidence
+  interpretation: AcademicDecisionInterpretationEvidence
+  absenceOfMutationOrApproval: AcademicDecisionAbsenceOfMutationEvidence
+  negativeCases: AcademicDecisionNegativeCasesEvidence
+}
+
+/**
+ * Validate proof that an end-to-end academic decision conforming to banca-grille
+ * was executed through native ToolRuntime ask_user_question with localized evidence,
+ * valid alternatives, selection of recommended option, and strict non-mutating interpretation.
+ */
+export function validateAcademicDecisionEvidence(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) {
+    return ["academic decision evidence gate lacks required host verification"]
+  }
+  if (value.hostApiAvailable !== true) {
+    errors.push("academic decision host API was not available")
+  }
+
+  // 1. Skill verification
+  const skill = isRecord(value.skillLoaded) ? value.skillLoaded : undefined
+  if (!skill) {
+    errors.push("skillLoaded object is missing")
+  } else {
+    if (skill.name !== "banca-grille") {
+      errors.push('skillLoaded must verify skill "banca-grille"')
+    }
+    if (skill.discovered !== true) {
+      errors.push('required skill "banca-grille" was not discovered')
+    }
+    if (skill.loaded !== true) {
+      errors.push('skill "banca-grille" was discovered but could not be loaded')
+    }
+    if (
+      skill.canonicalBodySha256 !== canonicalNativeSkills["banca-grille"].bodySha256 ||
+      skill.integrityVerified !== true
+    ) {
+      errors.push('skill "banca-grille" loaded content does not match canonical source')
+    }
+  }
+
+  // 2. Agent / Session identity
+  const identity = isRecord(value.agentIdentity) ? value.agentIdentity : undefined
+  if (!identity) {
+    errors.push("agentIdentity object is missing")
+  } else {
+    if (typeof identity.agentId !== "string" || identity.agentId.length === 0) {
+      errors.push("agentIdentity.agentId must be a non-empty string")
+    }
+    if (typeof identity.sessionId !== "string" || identity.sessionId.length === 0) {
+      errors.push("agentIdentity.sessionId must be a non-empty string")
+    }
+    if (identity.agentAndSessionIdMatch !== true) {
+      errors.push("agentIdentity.agentAndSessionIdMatch must be true")
+    }
+    if (identity.isRoot !== true) {
+      errors.push("agentIdentity.isRoot must be true")
+    }
+  }
+
+  // 3. Tool dispatch
+  const dispatch = isRecord(value.toolDispatch) ? value.toolDispatch : undefined
+  if (!dispatch) {
+    errors.push("toolDispatch object is missing")
+  } else {
+    if (dispatch.toolName !== "ask_user_question") {
+      errors.push('academic decision must be dispatched through native tool "ask_user_question"')
+    }
+    if (dispatch.dispatched !== true || dispatch.isError === true) {
+      errors.push('native tool "ask_user_question" was not successfully dispatched through ToolRuntime')
+    }
+  }
+
+  // 4. Transmitted payload
+  const payload = isRecord(value.transmittedPayload) ? value.transmittedPayload : undefined
+  if (!payload) {
+    errors.push("transmittedPayload object is missing")
+  } else {
+    if (payload.containsFindingId !== true) {
+      errors.push("transmitted question text must contain stable academic finding identification")
+    }
+    if (payload.containsLocalizedEvidence !== true) {
+      errors.push("transmitted question text must contain localized file and line evidence")
+    }
+    if (payload.containsRecommendationJustification !== true) {
+      errors.push("transmitted question text must contain recommendation justification")
+    }
+    if (payload.detailFieldDroppedByHostTool !== true) {
+      errors.push("evidence must prove host tool drops detail field and incorporates content into question text")
+    }
+    if (typeof payload.optionsCount !== "number" || payload.optionsCount < 4) {
+      errors.push("transmitted question must contain at least 4 options (2-4 alternatives plus safe controls)")
+    }
+    if (payload.hasRecommendedOption !== true) {
+      errors.push("transmitted question must include a designated recommended option")
+    }
+    if (payload.hasUncertaintyOption !== true) {
+      errors.push('transmitted question must include safe uncertainty option "Não sei — explique/mostre evidências"')
+    }
+    if (payload.hasDeferOption !== true) {
+      errors.push('transmitted question must include safe deferral option "Adiar / continuar outras etapas"')
+    }
+    if (payload.hasConsequencesAndRisks !== true) {
+      errors.push("transmitted alternatives must document consequences and risks")
+    }
+  }
+
+  // 5. Selected answer
+  const answer = isRecord(value.selectedAnswer) ? value.selectedAnswer : undefined
+  if (!answer) {
+    errors.push("selectedAnswer object is missing")
+  } else {
+    if (answer.isNonEmptySelection !== true || !Array.isArray(answer.selected) || answer.selected.length === 0) {
+      errors.push("observed answer must contain a non-empty selection")
+    }
+    if (
+      answer.noFreeTextWhenStructured !== true ||
+      (typeof answer.custom === "string" && answer.custom.trim().length > 0)
+    ) {
+      errors.push("observed answer must choose a structured alternative without free text")
+    }
+    if (answer.isRecommendation !== true) {
+      errors.push("observed answer must select the recommended alternative")
+    }
+  }
+
+  // 6. Interpretation (Safety Invariant)
+  const interp = isRecord(value.interpretation) ? value.interpretation : undefined
+  if (!interp) {
+    errors.push("interpretation object is missing")
+  } else {
+    if (interp.mutationAuthorized !== false) {
+      errors.push("central safety risk violation: academic decision must not grant mutation authorization")
+    }
+    if (Array.isArray(interp.nextSteps)) {
+      if (interp.nextSteps.includes("banca_corrigir") || interp.nextSteps.includes("banca_restore")) {
+        errors.push("academic decision nextSteps must not include mutation tools without independent approval")
+      }
+    }
+  }
+
+  // 7. Absence of mutation or approval
+  const absence = isRecord(value.absenceOfMutationOrApproval) ? value.absenceOfMutationOrApproval : undefined
+  if (!absence) {
+    errors.push("absenceOfMutationOrApproval object is missing")
+  } else {
+    if (typeof absence.approvalEventsCount !== "number" || absence.approvalEventsCount !== 0) {
+      errors.push("approval events were detected in academic session following decision")
+    }
+    if (absence.allowedOnceEmitted === true) {
+      errors.push("allowed-once must not be emitted from academic decision workflow")
+    }
+    if (absence.bancaCorrigirDispatched === true) {
+      errors.push("mutation tool was dispatched without independent approval grant")
+    }
+    if (absence.bancaRestoreDispatched === true) {
+      errors.push("restore tool was dispatched without independent approval grant")
+    }
+    if (absence.manuscriptPreserved !== true) {
+      errors.push("academic manuscript was mutated by academic decision workflow")
+    }
+  }
+
+  // 8. Negative cases
+  const neg = isRecord(value.negativeCases) ? value.negativeCases : undefined
+  if (!neg) {
+    errors.push("negativeCases object is missing")
+  } else {
+    const del = isRecord(neg.delegatedAgentBlocked) ? neg.delegatedAgentBlocked : undefined
+    if (!del || del.blocked !== true || del.errorCode !== "DELEGATED_CALLER") {
+      errors.push("delegated agent must be blocked from ask_user_question with DELEGATED_CALLER")
+    }
+    if (del?.answererReached === true) {
+      errors.push("delegated agent question must not reach the answerer")
+    }
+    if (neg.mismatchedOrIncompatibleRejected !== true) {
+      errors.push("mismatched or incompatible answer must be rejected")
+    }
+    if (neg.cancellationHandled !== true) {
+      errors.push("cancellation must be handled fail-closed")
+    }
   }
 
   return errors

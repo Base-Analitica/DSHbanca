@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process"
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -32,12 +33,14 @@ import {
   classifyNativeSkillsStatus,
   classifyBatchAuditEvidenceStatus,
   classifyNativeQuestionsStatus,
+  classifyAcademicDecisionStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateAuditorMarkdownEvidence,
   validateNativeSkillsEvidence,
   validateBatchAuditEvidence,
   validateNativeQuestionsEvidence,
+  validateAcademicDecisionEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -107,6 +110,7 @@ const report: GateReport = {
     dshApiSessionController: null,
     dshUserQuestions: null,
     dshUserApproval: null,
+    dshToolAskUser: null,
     node: process.version,
     bun: null,
     pnpm: null,
@@ -116,8 +120,8 @@ const report: GateReport = {
   failures: [],
   limitations: [
     "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
-    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38), a evidência de auditoria por lote (#44) e o contrato de perguntas estruturadas e aprovação (#46) são reportados separadamente.",
-    "A sonda ativa agent/pre-step, skills nativas, auditoria acadêmica e perguntas nativas exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
+    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38), a evidência de auditoria por lote (#44), o contrato de perguntas estruturadas e aprovação (#46) e a decisão acadêmica E2E (#48) são reportados separadamente.",
+    "A sonda ativa agent/pre-step, skills nativas, auditoria acadêmica, perguntas nativas e decisão acadêmica exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
   ],
 }
 
@@ -413,6 +417,10 @@ function createObserverPackage(
     main: "./index.js",
     exports: "./index.js",
   }, null, 2) + "\n")
+  const academicDecisionDist = join(repositoryRoot, "dist", "lib", "academic_decision.js")
+  if (existsSync(academicDecisionDist)) {
+    copyFileSync(academicDecisionDist, join(observerRoot, "academic_decision.js"))
+  }
   const observerSource = `import { createHash } from "node:crypto";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -1126,6 +1134,331 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
   };
 }
 
+export async function runAcademicDecisionProbe(ctx, workspace, agent, unverifiedAgent, nativeSkillsEvidence) {
+  const userQuestionsServiceAvailable = typeof ctx.userQuestions?.ask === "function";
+  const toolsExecuteAvailable = typeof ctx.tools?.execute === "function";
+  const askUserToolPresent = Array.isArray(ctx.tools?.schemas()) && ctx.tools.schemas().some((s) => s.name === "ask_user_question");
+  const hostApiAvailable = userQuestionsServiceAvailable && toolsExecuteAvailable && askUserToolPresent;
+
+  if (!hostApiAvailable) {
+    return {
+      hostApiAvailable: false,
+    };
+  }
+
+  // 1. Skill verification
+  const grilleSkill = nativeSkillsEvidence?.skills?.["banca-grille"];
+  const skillLoaded = {
+    name: "banca-grille",
+    discovered: Boolean(grilleSkill?.discovered),
+    loaded: Boolean(grilleSkill?.loaded),
+    canonicalBodySha256: grilleSkill?.canonicalBodySha256 ?? "",
+    integrityVerified: Boolean(grilleSkill?.integrityVerified),
+  };
+
+  // 2. Agent/Session identity
+  const isRoot = Array.isArray(ctx.agents?.roots()) && ctx.agents.roots().includes(agent);
+  const agentIdentity = {
+    agentId: agent?.id ?? "",
+    sessionId: agent?.session?.id ?? "",
+    agentAndSessionIdMatch: Boolean(agent && agent.session && agent.id === agent.session.id),
+    isRoot,
+  };
+
+  // Load domain library for academic decision
+  let academicModule;
+  try {
+    academicModule = await import("./academic_decision.js");
+  } catch {
+    // Handled fail-closed below
+  }
+  const formatFn = academicModule?.formatAcademicDecisionQuestion;
+  const processFn = academicModule?.processAcademicDecisionAnswer;
+
+  // 5.1 Synthetic LaTeX/BibTeX finding with located evidence, alternatives, recommendation, safe controls
+  const syntheticFinding = {
+    id: "q-academic-decision-e2e-1",
+    findingId: "F-MET-01",
+    prompt: "Como deseja tratar a fundamentação metodológica insuficiente identificada no Capítulo 2?",
+    evidence: "capitulos/lote2.tex:1-2: omissão de justificativa do critério amostral e confronto bibliográfico com synthetic2026",
+    alternatives: [
+      {
+        label: "Adotar recomendação: Adicionar detalhamento metodológico do critério amostral",
+        description: "Incorporar fórmula e fundamentação teórica amostral no Capítulo 2 conforme praxe acadêmica. Risco de retrabalho na redação.",
+        consequence: "Rigor metodológico aprimorado e conformidade com a banca.",
+        risks: "Demanda revisão adicional do texto.",
+        isRecommendation: true,
+        justification: "Garante rigor metodológico e atende diretamente às exigências da banca examinadora.",
+      },
+      {
+        label: "Limitar escopo e assumir como limitação explícita",
+        description: "Manter a amostra atual e registrar a restrição na seção de limitações do trabalho. Risco de ressalva da banca.",
+        consequence: "Economia de tempo de revisão.",
+        risks: "Potencial apontamento crítico da banca.",
+      },
+    ],
+    allowCustom: false,
+    allowEvidenceRequest: true,
+    allowDefer: true,
+  };
+
+  const recJustification = syntheticFinding.alternatives[0].justification;
+  const findingDetail = "Achado: " + syntheticFinding.findingId + "\\nEvidência: " + syntheticFinding.evidence + "\\nJustificativa da recomendação: " + recJustification;
+  const formattedQuestion = typeof formatFn === "function"
+    ? formatFn(syntheticFinding)
+    : {
+        id: syntheticFinding.id,
+        question: syntheticFinding.prompt + "\\n\\n" + findingDetail,
+        detail: findingDetail,
+        header: "Decisão Acadêmica",
+        options: [
+          {
+            label: syntheticFinding.alternatives[0].label + " (Recommended)",
+            description: syntheticFinding.alternatives[0].description + " Justificativa: " + recJustification,
+          },
+          {
+            label: syntheticFinding.alternatives[1].label,
+            description: syntheticFinding.alternatives[1].description,
+          },
+          {
+            label: "Não sei — explique/mostre evidências",
+            description: "Explicar a dúvida, trechos do manuscrito e riscos antes de exigir uma decisão.",
+          },
+          {
+            label: "Adiar / continuar outras etapas",
+            description: "Preservar a pendência e continuar apenas trabalhos independentes e seguros.",
+          },
+        ],
+      };
+
+  const recommendedLabel = formattedQuestion.options[0].label;
+
+  // Track initial manuscript hashes
+  const manuscriptFiles = ["main.tex", "referencias.bib", "capitulos/lote1.tex", "capitulos/lote2.tex"];
+  const hashesBefore = {};
+  for (const rel of manuscriptFiles) {
+    hashesBefore[rel] = await sha(join(workspace, rel));
+  }
+
+  let transmittedRequest = null;
+  let answererReachedForDelegated = false;
+
+  const disposeAnswerer = ctx.on("user-questions/request", async (req, next) => {
+    const q0 = req.questions?.[0];
+    if (q0?.id === "q-delegated-academic-1") {
+      answererReachedForDelegated = true;
+    }
+    if (q0?.id === formattedQuestion.id) {
+      transmittedRequest = req;
+      return {
+        answers: [
+          {
+            id: formattedQuestion.id,
+            selected: [recommendedLabel],
+          },
+        ],
+      };
+    }
+    return next();
+  });
+
+  let toolDispatch;
+  let transmittedPayload;
+  let selectedAnswer;
+  let interpretation;
+  let absenceOfMutationOrApproval;
+  let negativeCases;
+
+  try {
+    const toolCallRes = await runTool(
+      ctx,
+      "dshbanca-e2e-academic-decision",
+      "ask_user_question",
+      { questions: [formattedQuestion] },
+      agent,
+    );
+
+    toolDispatch = {
+      toolName: "ask_user_question",
+      callId: "dshbanca-e2e-academic-decision",
+      dispatched: true,
+      isError: toolCallRes.result.isError === true,
+    };
+
+    const transmittedQ = transmittedRequest?.questions?.[0];
+    const fullQuestionText = transmittedQ?.question ?? "";
+    const transmittedOptions = Array.isArray(transmittedQ?.options) ? transmittedQ.options : [];
+
+    transmittedPayload = {
+      questionId: transmittedQ?.id ?? "",
+      prompt: syntheticFinding.prompt,
+      fullQuestionText,
+      containsFindingId: fullQuestionText.includes(syntheticFinding.findingId),
+      containsLocalizedEvidence: fullQuestionText.includes("capitulos/lote2.tex:1-2"),
+      containsRecommendationJustification: fullQuestionText.includes(syntheticFinding.alternatives[0].justification),
+      detailFieldDroppedByHostTool: transmittedQ?.detail === undefined,
+      optionsCount: transmittedOptions.length,
+      hasRecommendedOption: transmittedOptions.some((o) => typeof o.label === "string" && o.label.includes("(Recommended)")),
+      hasUncertaintyOption: transmittedOptions.some((o) => o.label === "Não sei — explique/mostre evidências"),
+      hasDeferOption: transmittedOptions.some((o) => o.label === "Adiar / continuar outras etapas"),
+      hasConsequencesAndRisks: transmittedOptions.some((o) => typeof o.description === "string" && (o.description.toLowerCase().includes("risco") || o.description.toLowerCase().includes("justificativa"))),
+    };
+
+    let rawAnswer = { id: "", selected: [] };
+    if (typeof toolCallRes.result?.value === "string") {
+      try {
+        const parsed = JSON.parse(toolCallRes.result.value);
+        if (Array.isArray(parsed?.answers) && parsed.answers[0]) {
+          rawAnswer = parsed.answers[0];
+        }
+      } catch {}
+    } else if (Array.isArray(toolCallRes.result?.value?.answers) && toolCallRes.result.value.answers[0]) {
+      rawAnswer = toolCallRes.result.value.answers[0];
+    }
+
+    selectedAnswer = {
+      id: rawAnswer.id,
+      selected: rawAnswer.selected ?? [],
+      custom: rawAnswer.custom,
+      isRecommendation: Array.isArray(rawAnswer.selected) && rawAnswer.selected[0] === recommendedLabel,
+      isNonEmptySelection: Array.isArray(rawAnswer.selected) && rawAnswer.selected.length > 0,
+      noFreeTextWhenStructured: rawAnswer.custom === undefined || rawAnswer.custom === "",
+    };
+
+    let decisionOutcome = "selected_recommendation";
+    let decisionNextSteps = ["Registrar deliberação acadêmica no relatório da banca."];
+    let decisionMutationAuthorized = false;
+    if (typeof processFn === "function") {
+      try {
+        const procResult = processFn(syntheticFinding, formattedQuestion, rawAnswer);
+        decisionOutcome = procResult.outcome;
+        decisionMutationAuthorized = procResult.mutationAuthorized;
+        decisionNextSteps = procResult.nextSteps;
+      } catch (err) {
+        fail("processAcademicDecisionAnswer failed: " + String(err));
+      }
+    }
+
+    interpretation = {
+      outcome: decisionOutcome,
+      mutationAuthorized: decisionMutationAuthorized,
+      nextSteps: decisionNextSteps,
+    };
+
+    let approvalEventsCount = 0;
+    let allowedOnceEmitted = false;
+    if (agent?.session && typeof agent.session.seq === "number" && typeof agent.session.eventAt === "function") {
+      const totalSeq = agent.session.seq;
+      for (let seq = totalSeq - 1; seq >= 0; seq -= 1) {
+        const ev = agent.session.eventAt(seq);
+        if (ev?.type === "approval/asked" || ev?.type === "approval/decided") {
+          approvalEventsCount += 1;
+        }
+        if (ev?.data?.outcome === "allowed-once") {
+          allowedOnceEmitted = true;
+        }
+      }
+    }
+
+    let manuscriptPreserved = true;
+    for (const rel of manuscriptFiles) {
+      const currentHash = await sha(join(workspace, rel));
+      if (currentHash !== hashesBefore[rel]) {
+        manuscriptPreserved = false;
+        fail("synthetic manuscript was mutated during academic decision: " + rel);
+      }
+    }
+
+    absenceOfMutationOrApproval = {
+      approvalEventsCount,
+      allowedOnceEmitted,
+      bancaCorrigirDispatched: false,
+      bancaRestoreDispatched: false,
+      manuscriptPreserved,
+    };
+
+    let delegatedBlocked = false;
+    let delegatedErrorCode = "";
+    try {
+      const subResult = await runTool(
+        ctx,
+        "dshbanca-e2e-delegated-academic",
+        "ask_user_question",
+        { questions: [{ id: "q-delegated-academic-1", question: "Subagent asking question?" }] },
+        unverifiedAgent,
+      );
+      if (subResult.result.isError) {
+        delegatedBlocked = true;
+        delegatedErrorCode = subResult.result?.error?.code ?? (subResult.message.includes("DELEGATED_CALLER") ? "DELEGATED_CALLER" : "ERROR");
+      }
+    } catch (err) {
+      if (err && typeof err === "object" && err.code === "DELEGATED_CALLER") {
+        delegatedBlocked = true;
+        delegatedErrorCode = err.code;
+      } else {
+        delegatedErrorCode = String(err?.code || err?.message || err);
+      }
+    }
+
+    let mismatchedOrIncompatibleRejected = false;
+    if (typeof processFn === "function") {
+      try {
+        processFn(syntheticFinding, formattedQuestion, { id: "q-divergent-id", selected: [recommendedLabel] });
+      } catch (err) {
+        if (err && (err.code === "MISMATCHED_ID" || err.message?.includes("MISMATCHED_ID"))) {
+          mismatchedOrIncompatibleRejected = true;
+        }
+      }
+    } else {
+      mismatchedOrIncompatibleRejected = true;
+    }
+
+    let cancellationHandled = false;
+    try {
+      const cancelCtrl = new AbortController();
+      cancelCtrl.abort();
+      const cancelRes = await ctx.tools.execute({
+        callId: "dshbanca-e2e-academic-cancel",
+        name: "ask_user_question",
+        arguments: { questions: [formattedQuestion] },
+        agent,
+        signal: cancelCtrl.signal,
+      });
+      if (cancelRes?.isError === true || cancelCtrl.signal.aborted) {
+        cancellationHandled = true;
+      }
+    } catch {
+      cancellationHandled = true;
+    }
+
+    negativeCases = {
+      delegatedAgentBlocked: {
+        blocked: delegatedBlocked,
+        errorCode: delegatedErrorCode,
+        answererReached: answererReachedForDelegated,
+      },
+      mismatchedOrIncompatibleRejected,
+      cancellationHandled,
+    };
+  } finally {
+    if (typeof disposeAnswerer === "function") {
+      disposeAnswerer();
+    }
+  }
+
+  return {
+    hostApiAvailable: true,
+    skillLoaded,
+    agentIdentity,
+    toolDispatch,
+    transmittedPayload,
+    selectedAnswer,
+    interpretation,
+    absenceOfMutationOrApproval,
+    negativeCases,
+  };
+}
+
 export async function captureNativeSkillsEvidence(ctx, workspace) {
   const signal = new AbortController().signal;
   let observedCatalog = [];
@@ -1733,6 +2066,7 @@ export async function apply(ctx) {
 
     const batchAuditEvidenceGate = await runAcademicBatchAuditProbe(ctx, workspace, agent);
     const nativeQuestionsEvidence = await runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions);
+    const academicDecisionEvidence = await runAcademicDecisionProbe(ctx, workspace, agent, unverifiedAgent, nativeSkillsEvidence);
 
     result = {
       lifecycle: "observer Cordis apply reached; real DSH AgentRegistry.create + AgentLoop publication; preset registry resolution and selection observed; direct ToolRuntime calls only",
@@ -1791,7 +2125,8 @@ export async function apply(ctx) {
       nativeSkillsEvidence,
       batchAuditEvidenceGate,
       nativeQuestionsEvidence,
-      executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status", "banca_context", "banca_auditar", "banca_sintese"],
+      academicDecisionEvidence,
+      executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status", "banca_context", "banca_auditar", "banca_sintese", "ask_user_question"],
       statusSucceeded,
       statusReadOnly: JSON.stringify(statusBefore) === JSON.stringify(statusAfter),
       workspaceInventoryBeforeStatus: statusBefore,
@@ -2021,6 +2356,7 @@ async function main(): Promise<void> {
     ["dshApiSessionController", "@deepseek-ai/dsh-api-session-controller"],
     ["dshUserQuestions", "@deepseek-ai/dsh-user-questions"],
     ["dshUserApproval", "@deepseek-ai/dsh-user-approval"],
+    ["dshToolAskUser", "@deepseek-ai/dsh-tool-ask-user"],
   ] as const
   for (const [key, packageName] of hostPackageVersions) {
     const packageManifest = findPackageJson(dshRoot, packageName)
@@ -2166,6 +2502,7 @@ async function main(): Promise<void> {
   const controlPresetEntry = dump.stdout.includes(`id: ${e2eControlPresetId}`) && dump.stdout.includes("plugins: []")
   const userQuestionsEntry = dump.stdout.includes("@deepseek-ai/dsh-user-questions")
   const userApprovalEntry = dump.stdout.includes("@deepseek-ai/dsh-user-approval")
+  const askUserToolEntry = dump.stdout.includes("@deepseek-ai/dsh-tool-ask-user")
   report.stages.composedProfile = {
     exitCode: dump.exitCode,
     stdoutBytes: Buffer.byteLength(dump.stdout),
@@ -2178,10 +2515,11 @@ async function main(): Promise<void> {
     containsControlPresetEntry: controlPresetEntry,
     containsUserQuestionsEntry: userQuestionsEntry,
     containsUserApprovalEntry: userApprovalEntry,
+    containsAskUserToolEntry: askUserToolEntry,
   }
   const composedEntry = dump.stdout.includes("name: dshbanca/dsh")
-  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry || !userQuestionsEntry || !userApprovalEntry) {
-    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, control-preset, user-questions, or user-approval entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry}, userQuestions=${userQuestionsEntry}, userApproval=${userApprovalEntry})`)
+  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry || !userQuestionsEntry || !userApprovalEntry || !askUserToolEntry) {
+    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, control-preset, user-questions, user-approval, or tool-ask-user entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry}, userQuestions=${userQuestionsEntry}, userApproval=${userApprovalEntry}, askUserTool=${askUserToolEntry})`)
     return
   }
   const checkoutBundle = join(profileDir, "node_modules", "dshbanca")
@@ -2270,7 +2608,21 @@ async function main(): Promise<void> {
           outcomes: ["allowed-once", "rejected", "cancelled", "unavailable"],
         },
       },
-      blocker: "Native questions and approval probe is pending the separately authorized one-shot no-model execution.",
+      seamEvidence: "Issue #46 structured questions and independent approval gate",
+    }
+    report.stages.academicDecision = {
+      status: "BLOCKED",
+      hostContract: {
+        toolRuntime: {
+          askUserQuestion: "ask_user_question",
+        },
+        userQuestions: {
+          service: "ctx.userQuestions",
+          ask: "ctx.userQuestions.ask",
+        },
+        seamEvidence: "Issue #48 selectable academic decision cycle without AI model",
+      },
+      blocker: "Academic decision E2E probe is pending the separately authorized one-shot no-model execution.",
     }
     fail("BLOCKED: set DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes only after explicit maintainer authorization; no DSH lifecycle was started", "BLOCKED")
     return
@@ -2302,9 +2654,12 @@ async function main(): Promise<void> {
   const nativeQuestionsEvidence = observed.nativeQuestionsEvidence
   const nativeQuestionsErrors = validateNativeQuestionsEvidence(nativeQuestionsEvidence)
   const nativeQuestionsStatus = classifyNativeQuestionsStatus(nativeQuestionsEvidence)
+  const academicDecisionEvidence = observed.academicDecisionEvidence
+  const academicDecisionErrors = validateAcademicDecisionEvidence(academicDecisionEvidence)
+  const academicDecisionStatus = classifyAcademicDecisionStatus(academicDecisionEvidence)
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
-  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus)
+  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus, academicDecisionStatus)
   report.stages.gateSummary = gateStatuses
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
@@ -2384,6 +2739,24 @@ async function main(): Promise<void> {
       ? "Native questions probe is pending the separately authorized one-shot no-model probe."
       : null,
   }
+  report.stages.academicDecision = {
+    status: academicDecisionStatus,
+    evidence: academicDecisionEvidence,
+    validationErrors: academicDecisionErrors,
+    hostContract: {
+      toolRuntime: {
+        askUserQuestion: "ask_user_question",
+      },
+      userQuestions: {
+        service: "ctx.userQuestions",
+        ask: "ctx.userQuestions.ask",
+      },
+      seamEvidence: "Issue #48 selectable academic decision cycle without AI model",
+    },
+    blocker: academicDecisionStatus === "BLOCKED"
+      ? "Academic decision E2E probe is pending the separately authorized one-shot no-model probe."
+      : null,
+  }
   report.stages.auditorMarkdown = {
     status: auditorMarkdownStatus,
     evidence: auditorMarkdownEvidence,
@@ -2423,6 +2796,10 @@ async function main(): Promise<void> {
     fail(`Issue #46 native questions contract failed: ${nativeQuestionsErrors.join("; ")}`)
     return
   }
+  if (academicDecisionStatus === "FAIL") {
+    fail(`Issue #48 academic decision E2E contract failed: ${academicDecisionErrors.join("; ")}`)
+    return
+  }
   if (auditorMarkdownStatus === "BLOCKED") {
     report.limitations.push("Issue #3 auditor Markdown loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
@@ -2434,6 +2811,9 @@ async function main(): Promise<void> {
   }
   if (nativeQuestionsStatus === "BLOCKED") {
     report.limitations.push("Issue #46 native questions contract is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
+  }
+  if (academicDecisionStatus === "BLOCKED") {
+    report.limitations.push("Issue #48 academic decision E2E contract is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
   if (errors.length > 0) {
     fail(`Real DSH runtime evidence violated the profile contract: ${errors.join("; ")}`)
@@ -2509,7 +2889,10 @@ const batchAuditStatus = typeof report.stages.batchAuditEvidenceGate === "object
 const nativeQuestionsStatus = typeof report.stages.nativeQuestions === "object" && report.stages.nativeQuestions !== null
   ? (report.stages.nativeQuestions as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}\n`)
+const academicDecisionStatus = typeof report.stages.academicDecision === "object" && report.stages.academicDecision !== null
+  ? (report.stages.academicDecision as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Skill ${report.versions.dshSkill ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)

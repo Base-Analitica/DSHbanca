@@ -24,6 +24,10 @@ export function buildSdkPresetOverlayPatch(observerName: string): string {
         id: "user-approval",
         name: "@deepseek-ai/dsh-user-approval",
       },
+      {
+        id: "tool-ask-user",
+        name: "@deepseek-ai/dsh-tool-ask-user",
+      },
       { id: "dshbanca-e2e-observer", name: observerName },
     ],
   }])

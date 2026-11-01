@@ -23,6 +23,8 @@ import {
   classifyBatchAuditEvidenceStatus,
   validateNativeQuestionsEvidence,
   classifyNativeQuestionsStatus,
+  validateAcademicDecisionEvidence,
+  classifyAcademicDecisionStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateEvidence,
@@ -1253,5 +1255,358 @@ describe("DSH native questions evidence gate contract (#46)", () => {
     const errors = validateNativeQuestionsEvidence(invalidEvidence)
     expect(errors).toContain(expectedError)
     expect(classifyNativeQuestionsStatus(invalidEvidence)).toBe("FAIL")
+  })
+})
+
+const completeAcademicDecisionEvidence = {
+  hostApiAvailable: true,
+  skillLoaded: {
+    name: "banca-grille",
+    discovered: true,
+    loaded: true,
+    canonicalBodySha256: canonicalNativeSkills["banca-grille"].bodySha256,
+    integrityVerified: true,
+  },
+  agentIdentity: {
+    agentId: "agent-auditor-root",
+    sessionId: "agent-auditor-root",
+    agentAndSessionIdMatch: true,
+    isRoot: true,
+  },
+  toolDispatch: {
+    toolName: "ask_user_question",
+    callId: "dshbanca-e2e-academic-decision",
+    dispatched: true,
+    isError: false,
+  },
+  transmittedPayload: {
+    questionId: "f-academic-e2e-001",
+    prompt: "Como deseja estruturar o delineamento amostral no capítulo 1?",
+    fullQuestionText:
+      "Como deseja estruturar o delineamento amostral no capítulo 1?\n\nAchado: f-academic-e2e-001\nEvidência: capitulos/lote1.tex:1-1 — Deliberação metodológica necessária: escolha de técnica de amostragem\nJustificativa da recomendação: Recomendado para garantir validade estatística e comparabilidade dos estratos na pesquisa sintética.",
+    containsFindingId: true,
+    containsLocalizedEvidence: true,
+    containsRecommendationJustification: true,
+    detailFieldDroppedByHostTool: true,
+    optionsCount: 5,
+    hasRecommendedOption: true,
+    hasUncertaintyOption: true,
+    hasDeferOption: true,
+    hasConsequencesAndRisks: true,
+  },
+  selectedAnswer: {
+    id: "f-academic-e2e-001",
+    selected: [
+      "Adotar amostragem probabilística estratificada (Recommended)",
+    ],
+    isRecommendation: true,
+    isNonEmptySelection: true,
+    noFreeTextWhenStructured: true,
+  },
+  interpretation: {
+    outcome: "selected_recommendation",
+    mutationAuthorized: false,
+    nextSteps: [
+      "investigar_evidencias",
+      "preparar_proposta_examinavel",
+      "gerar_diff_proposto",
+    ],
+  },
+  absenceOfMutationOrApproval: {
+    approvalEventsCount: 0,
+    allowedOnceEmitted: false,
+    bancaCorrigirDispatched: false,
+    bancaRestoreDispatched: false,
+    manuscriptPreserved: true,
+  },
+  negativeCases: {
+    delegatedAgentBlocked: {
+      blocked: true,
+      errorCode: "DELEGATED_CALLER",
+      answererReached: false,
+    },
+    mismatchedOrIncompatibleRejected: true,
+    cancellationHandled: true,
+  },
+}
+
+describe("DSH native academic decision evidence gate contract (#48)", () => {
+  test("accepts complete valid academic decision evidence (PASS)", () => {
+    expect(validateAcademicDecisionEvidence(completeAcademicDecisionEvidence)).toEqual([])
+    expect(classifyAcademicDecisionStatus(completeAcademicDecisionEvidence)).toBe("PASS")
+  })
+
+  test("reports BLOCKED when evidence is missing or hostApiAvailable false", () => {
+    expect(classifyAcademicDecisionStatus(undefined)).toBe("BLOCKED")
+    expect(classifyAcademicDecisionStatus({})).toBe("BLOCKED")
+    expect(classifyAcademicDecisionStatus({ hostApiAvailable: false })).toBe("BLOCKED")
+  })
+
+  test("gate summary incorporates academicDecisionStatus while preserving earlier gates", () => {
+    expect(
+      classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "PASS"),
+    ).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "PASS",
+      academicDecisionStatus: "PASS",
+      overallStatus: "PASS",
+      exitCode: 0,
+    })
+    expect(
+      classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "BLOCKED"),
+    ).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "PASS",
+      academicDecisionStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+    expect(
+      classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "FAIL"),
+    ).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "PASS",
+      academicDecisionStatus: "FAIL",
+      overallStatus: "FAIL",
+      exitCode: 1,
+    })
+  })
+
+  test.each([
+    [
+      "skill banca-grille was not discovered",
+      {
+        ...completeAcademicDecisionEvidence,
+        skillLoaded: { ...completeAcademicDecisionEvidence.skillLoaded, discovered: false },
+      },
+      'required skill "banca-grille" was not discovered',
+    ],
+    [
+      "skill banca-grille could not be loaded",
+      {
+        ...completeAcademicDecisionEvidence,
+        skillLoaded: { ...completeAcademicDecisionEvidence.skillLoaded, loaded: false },
+      },
+      'skill "banca-grille" was discovered but could not be loaded',
+    ],
+    [
+      "skill banca-grille body content altered",
+      {
+        ...completeAcademicDecisionEvidence,
+        skillLoaded: { ...completeAcademicDecisionEvidence.skillLoaded, integrityVerified: false },
+      },
+      'skill "banca-grille" loaded content does not match canonical source',
+    ],
+    [
+      "tool dispatch not ask_user_question",
+      {
+        ...completeAcademicDecisionEvidence,
+        toolDispatch: { ...completeAcademicDecisionEvidence.toolDispatch, toolName: "banca_status" },
+      },
+      'academic decision must be dispatched through native tool "ask_user_question"',
+    ],
+    [
+      "tool dispatch omitted or errored",
+      {
+        ...completeAcademicDecisionEvidence,
+        toolDispatch: { ...completeAcademicDecisionEvidence.toolDispatch, dispatched: false },
+      },
+      'native tool "ask_user_question" was not successfully dispatched through ToolRuntime',
+    ],
+    [
+      "findingId omitted from transmitted question",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, containsFindingId: false },
+      },
+      "transmitted question text must contain stable academic finding identification",
+    ],
+    [
+      "localized evidence omitted from transmitted question",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, containsLocalizedEvidence: false },
+      },
+      "transmitted question text must contain localized file and line evidence",
+    ],
+    [
+      "recommendation justification omitted from transmitted question",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, containsRecommendationJustification: false },
+      },
+      "transmitted question text must contain recommendation justification",
+    ],
+    [
+      "host tool failed to forward because detail was not in question text",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, detailFieldDroppedByHostTool: false },
+      },
+      "evidence must prove host tool drops detail field and incorporates content into question text",
+    ],
+    [
+      "less than 4 options transmitted (requires 2-4 alternatives + safe controls)",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, optionsCount: 3 },
+      },
+      "transmitted question must contain at least 4 options (2-4 alternatives plus safe controls)",
+    ],
+    [
+      "recommended option missing from transmitted options",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasRecommendedOption: false },
+      },
+      "transmitted question must include a designated recommended option",
+    ],
+    [
+      "safe uncertainty control missing",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasUncertaintyOption: false },
+      },
+      'transmitted question must include safe uncertainty option "Não sei — explique/mostre evidências"',
+    ],
+    [
+      "safe defer control missing",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasDeferOption: false },
+      },
+      'transmitted question must include safe deferral option "Adiar / continuar outras etapas"',
+    ],
+    [
+      "consequences and risks missing from alternatives",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasConsequencesAndRisks: false },
+      },
+      "transmitted alternatives must document consequences and risks",
+    ],
+    [
+      "selected answer was empty",
+      {
+        ...completeAcademicDecisionEvidence,
+        selectedAnswer: { ...completeAcademicDecisionEvidence.selectedAnswer, isNonEmptySelection: false, selected: [] },
+      },
+      "observed answer must contain a non-empty selection",
+    ],
+    [
+      "selected answer used free text instead of structured choice",
+      {
+        ...completeAcademicDecisionEvidence,
+        selectedAnswer: { ...completeAcademicDecisionEvidence.selectedAnswer, noFreeTextWhenStructured: false, custom: "livre" },
+      },
+      "observed answer must choose a structured alternative without free text",
+    ],
+    [
+      "mutation authorized by decision selection (SAFETY INVARIANT VIOLATION)",
+      {
+        ...completeAcademicDecisionEvidence,
+        interpretation: { ...completeAcademicDecisionEvidence.interpretation, mutationAuthorized: true },
+      },
+      "central safety risk violation: academic decision must not grant mutation authorization",
+    ],
+    [
+      "interpretation suggests mutating tool",
+      {
+        ...completeAcademicDecisionEvidence,
+        interpretation: { ...completeAcademicDecisionEvidence.interpretation, nextSteps: ["banca_corrigir"] },
+      },
+      "academic decision nextSteps must not include mutation tools without independent approval",
+    ],
+    [
+      "approval events detected in academic session",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, approvalEventsCount: 1 },
+      },
+      "approval events were detected in academic session following decision",
+    ],
+    [
+      "allowed-once emitted from academic decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, allowedOnceEmitted: true },
+      },
+      "allowed-once must not be emitted from academic decision workflow",
+    ],
+    [
+      "banca_corrigir dispatched following decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, bancaCorrigirDispatched: true },
+      },
+      "mutation tool was dispatched without independent approval grant",
+    ],
+    [
+      "banca_restore dispatched following decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, bancaRestoreDispatched: true },
+      },
+      "restore tool was dispatched without independent approval grant",
+    ],
+    [
+      "manuscript modified following decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, manuscriptPreserved: false },
+      },
+      "academic manuscript was mutated by academic decision workflow",
+    ],
+    [
+      "delegated agent not blocked",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          delegatedAgentBlocked: { ...completeAcademicDecisionEvidence.negativeCases.delegatedAgentBlocked, blocked: false },
+        },
+      },
+      "delegated agent must be blocked from ask_user_question with DELEGATED_CALLER",
+    ],
+    [
+      "delegated agent reached answerer",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          delegatedAgentBlocked: { ...completeAcademicDecisionEvidence.negativeCases.delegatedAgentBlocked, answererReached: true },
+        },
+      },
+      "delegated agent question must not reach the answerer",
+    ],
+    [
+      "mismatched or incompatible answer not rejected",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: { ...completeAcademicDecisionEvidence.negativeCases, mismatchedOrIncompatibleRejected: false },
+      },
+      "mismatched or incompatible answer must be rejected",
+    ],
+    [
+      "cancellation not handled",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: { ...completeAcademicDecisionEvidence.negativeCases, cancellationHandled: false },
+      },
+      "cancellation must be handled fail-closed",
+    ],
+  ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
+    const errors = validateAcademicDecisionEvidence(invalidEvidence)
+    expect(errors).toContain(expectedError)
+    expect(classifyAcademicDecisionStatus(invalidEvidence)).toBe("FAIL")
   })
 })
