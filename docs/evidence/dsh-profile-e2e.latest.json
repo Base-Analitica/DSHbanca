@@ -1,25 +1,59 @@
 {
   "schemaVersion": 1,
-  "status": "PASS",
-  "startedAt": "2026-10-16T15:29:32.815Z",
+  "status": "BLOCKED",
+  "startedAt": "2026-11-01T19:12:21.345Z",
   "repository": {
-    "revision": "1988b8d31a864716c1645ccd0e98a168830528fc",
+    "revision": "3debe6fc69bece53df56d91fb682b4c4cf1268c8",
     "dirty": true
   },
   "versions": {
     "dsh": "0.2.0-rc.2",
     "cordis": "4.0.4",
     "cordisPluginLoader": "1.0.5",
-    "node": "v26.7.0",
+    "dshSkill": "0.2.0-rc.2",
+    "dshAgent": "0.2.0-rc.2",
+    "dshAgentLoop": "0.2.0-rc.2",
+    "dshTools": "0.2.0-rc.2",
+    "dshAgentPreset": "0.2.0-rc.2",
+    "dshAgentPresetRegistry": "0.2.0-rc.2",
+    "dshAgentInstructions": "0.2.0-rc.2",
+    "dshApiSessionController": "0.2.0-rc.2",
+    "dshUserQuestions": "0.2.0-rc.2",
+    "dshUserApproval": "0.2.0-rc.2",
+    "dshToolAskUser": "0.2.0-rc.2",
+    "node": "v22.23.2",
     "bun": "1.4.2",
-    "pnpm": "11.22.0"
+    "pnpm": "12.14.0"
   },
   "sandbox": {
     "isolated": true,
     "removed": true
   },
   "stages": {
-    "dshVersionExitCode": 0,
+    "nativePresetSchema": {
+      "accepted": true,
+      "bundleRegistryAbsent": true,
+      "bundleStandardAbsent": true,
+      "scratchRegistryAccepted": true,
+      "absentDefaultRejected": true,
+      "unknownDefaultRejected": true,
+      "duplicatePresetIdRejected": true,
+      "fixtureDefaultResolved": true,
+      "fixtureNeutralPresetAccepted": true,
+      "hostStandardPreserved": true,
+      "registryInjectionRequired": true,
+      "noDuplicates": true,
+      "duplicationErrors": [],
+      "presetAccepted": true,
+      "instructionConfigAccepted": true,
+      "childPluginStructureAccepted": true,
+      "scratchDefaultId": "dshbanca-e2e-control-neutral",
+      "presetId": "banca-auditor",
+      "instructionCandidates": [
+        "banca-auditor.md"
+      ]
+    },
+    "dshVersionSource": "package manifest adjacent to the resolved DSH CLI entrypoint; interactive preflight separately runs dsh --version",
     "pnpmVersionExitCode": 0,
     "profileName": "unique isolated SDK profile",
     "defaultProfile": "sdk",
@@ -27,6 +61,9 @@
     "externalActivity": {
       "telemetry": "DISABLED",
       "modelCalls": 0,
+      "sessionPromptCalls": 0,
+      "agentSendCalls": 0,
+      "credentialsUsed": false,
       "sdkJsonRpcRequestsSent": 0
     },
     "profileInitialization": {
@@ -53,8 +90,24 @@
     "localBundleResolution": "profile node_modules links to the checkout's dshbanca package; observer package is local and scratch-only",
     "composedProfile": {
       "exitCode": 0,
+      "stdoutBytes": 14806,
+      "stderrBytes": 0,
+      "outputTruncated": false,
       "containsDshbancaEntry": true,
-      "containsObserverEntry": true
+      "containsObserverEntry": true,
+      "containsPresetRegistryEntry": true,
+      "containsAuditorPresetEntry": true,
+      "containsControlPresetEntry": true,
+      "containsUserQuestionsEntry": true,
+      "containsUserApprovalEntry": true,
+      "containsAskUserToolEntry": true,
+      "userQuestionsCount": 1,
+      "userApprovalCount": 1,
+      "askUserToolCount": 1,
+      "userQuestionsUnique": true,
+      "userApprovalUnique": true,
+      "askUserToolPresent": true,
+      "pluginInstancesUnique": true
     },
     "entrypoint": {
       "composedEntry": "dshbanca/dsh",
@@ -62,105 +115,117 @@
       "profileResolutionPresent": true,
       "pointsToCheckout": true
     },
+    "packagedSkills": {
+      "canonicalCount": 8,
+      "allPackagedSkillsValid": true,
+      "verification": {
+        "banca-avaliacao": {
+          "exists": true,
+          "sourceSha256Matches": true
+        },
+        "banca-correcao": {
+          "exists": true,
+          "sourceSha256Matches": true
+        },
+        "banca-detector-ia": {
+          "exists": true,
+          "sourceSha256Matches": true
+        },
+        "banca-grille": {
+          "exists": true,
+          "sourceSha256Matches": true
+        },
+        "banca-plagio": {
+          "exists": true,
+          "sourceSha256Matches": true
+        },
+        "banca-planejador": {
+          "exists": true,
+          "sourceSha256Matches": true
+        },
+        "banca-referencias": {
+          "exists": true,
+          "sourceSha256Matches": true
+        },
+        "banca-revisor": {
+          "exists": true,
+          "sourceSha256Matches": true
+        }
+      }
+    },
     "profileBoot": {
-      "exitCode": 0,
-      "signal": null,
-      "timedOut": false,
-      "stdin": "EOF; no SDK request or model call sent"
+      "status": "BLOCKED",
+      "started": false,
+      "reason": "new human authorization is required for the one-shot no-model Agent pre-step probe"
     },
-    "observedRuntime": {
-      "lifecycle": "observer Cordis apply reached after DSHbanca registrations; target plugin application confirmed by actual tool and skill services",
-      "toolNames": [
-        "banca_auditar",
-        "banca_checklist",
-        "banca_compile",
-        "banca_context",
-        "banca_contract",
-        "banca_corrigir",
-        "banca_ia",
-        "banca_init",
-        "banca_loop",
-        "banca_plagio",
-        "banca_refs",
-        "banca_restore",
-        "banca_sintese",
-        "banca_snapshot",
-        "banca_status",
-        "banca_validate"
-      ],
-      "toolCount": 16,
-      "exactToolSet": true,
-      "skillFound": true,
-      "executedTools": [
-        "banca_init",
-        "banca_status"
-      ],
-      "statusSucceeded": true,
-      "statusReadOnly": true,
-      "workspaceInventoryBeforeStatus": {
-        ".banca/checklist.md": "a9866feb2ad784981b41058fc9f5e5048c7924ac19249b813a01003337afdadb",
-        ".banca/iterations.md": "780c3826d2c71f7acaa898a7de932e2daaa6b40def0f74460560b3f6dc9c2cc4",
-        ".banca/knowledge.md": "6156e5b4ac5756510a794c73ff07bc34f365b22e4b2331301f0470e6cddf9a90",
-        ".banca/project.json": "650384eca3ec2144a074e8b147be08795a32b40d60c04464b5e6aebaa71f6094",
-        ".banca/scorecard.md": "89fd3afb980fc9b1a6a77fcc60beda5cc8d89360275904679abfa77bce27db8d",
-        ".banca/state.json": "89614cc2affbecaf880105808e78d07bdd4f249f621f21b01db031d6b819295c",
-        ".banca/style-guide.md": "0b4f63ed4a612cf6c1088c7cfd04a80fa666df18c2240e1c1c5988e1ce956315",
-        ".dsh/agents/banca-auditor.md": "103cbdf191600d83a8becdb43ce89fc37aa0f5c532768238929524d0cbedaf7a",
-        ".dsh/agents/banca-corretor.md": "8326ce8ec91bde873ff313747fddfbf0fd63f3073c019c1faddbe9b340aa10ad",
-        ".dsh/agents/banca-fontes.md": "03982aec6439dfbc0852ee20960f81b48aa851d09702b112cccbfc4377ee5ed8",
-        ".dsh/agents/banca-integrador.md": "512611a5295c2251b05a805327665b685cfaf05b14f854046defccb39e936082",
-        ".dsh/agents/banca-loop.md": "c6a2fa41b34f4c9d668d1e764c1973901aa770ce0439b1f00d7ab306a86234c2",
-        ".dsh/commands/banca-auditar.md": "3ea6d1bc0ec5e30178038e4103b97e300cf60d67bd57760e107c1ecd302baaab",
-        ".dsh/commands/banca-init.md": "134250b4b129d008cc61c9ac2e5dede99b83e2647654b09e5379fa0d4da98eac",
-        ".dsh/commands/banca.md": "51850af110b9d1367206bddea9b8349b642fa310c316a414c1ea852c318439f2",
-        ".dsh/skills/banca-avaliacao/SKILL.md": "60bdcd97061da7748f7d1f9d6d7999fd62afac9b1269bf089eb23da7aab7c85e",
-        ".dsh/skills/banca-correcao/SKILL.md": "d0a05d3feb78f5ef05615a48892b3c5cdc88fc589b3fc2100f2d78a0a32d45c7",
-        ".dsh/skills/banca-detector-ia/SKILL.md": "db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b",
-        ".dsh/skills/banca-grille/SKILL.md": "c22d6bd6598117c491176fd1366c9c3974104bc3a349ebe791b1051f79682aa1",
-        ".dsh/skills/banca-plagio/SKILL.md": "1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661",
-        ".dsh/skills/banca-planejador/SKILL.md": "d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64",
-        ".dsh/skills/banca-referencias/SKILL.md": "b5b73abbbae029adc82980b2045c705b091b1629a44d14efab92aa731008d36b",
-        ".dsh/skills/banca-revisor/SKILL.md": "deb90fe58a8d334bddd9f4dc66810cb5c57621cc63bad313c44c199c042de798",
-        "capitulos/introducao.tex": "c83669242946b30489414729c0d70a4d97042ff11e62f436610fa1b31f634590",
-        "main.tex": "ac773600e11d7b7840a971e331443241ab52d1b0cf0f76a5a64797a75c97d355",
-        "referencias.bib": "9e6b6d1ad47d256524020e4f7e4a524a58e57795286a86c9eaaa53b195fa92a1"
+    "nativeSkills": {
+      "status": "BLOCKED",
+      "hostContract": {
+        "skillsRegistry": {
+          "version": "0.2.0-rc.2",
+          "service": "ctx.skills",
+          "list": "ctx.skills.list",
+          "get": "ctx.skills.get",
+          "snapshot": "ctx.skills.snapshot"
+        }
       },
-      "workspaceInventoryAfterStatus": {
-        ".banca/checklist.md": "a9866feb2ad784981b41058fc9f5e5048c7924ac19249b813a01003337afdadb",
-        ".banca/iterations.md": "780c3826d2c71f7acaa898a7de932e2daaa6b40def0f74460560b3f6dc9c2cc4",
-        ".banca/knowledge.md": "6156e5b4ac5756510a794c73ff07bc34f365b22e4b2331301f0470e6cddf9a90",
-        ".banca/project.json": "650384eca3ec2144a074e8b147be08795a32b40d60c04464b5e6aebaa71f6094",
-        ".banca/scorecard.md": "89fd3afb980fc9b1a6a77fcc60beda5cc8d89360275904679abfa77bce27db8d",
-        ".banca/state.json": "89614cc2affbecaf880105808e78d07bdd4f249f621f21b01db031d6b819295c",
-        ".banca/style-guide.md": "0b4f63ed4a612cf6c1088c7cfd04a80fa666df18c2240e1c1c5988e1ce956315",
-        ".dsh/agents/banca-auditor.md": "103cbdf191600d83a8becdb43ce89fc37aa0f5c532768238929524d0cbedaf7a",
-        ".dsh/agents/banca-corretor.md": "8326ce8ec91bde873ff313747fddfbf0fd63f3073c019c1faddbe9b340aa10ad",
-        ".dsh/agents/banca-fontes.md": "03982aec6439dfbc0852ee20960f81b48aa851d09702b112cccbfc4377ee5ed8",
-        ".dsh/agents/banca-integrador.md": "512611a5295c2251b05a805327665b685cfaf05b14f854046defccb39e936082",
-        ".dsh/agents/banca-loop.md": "c6a2fa41b34f4c9d668d1e764c1973901aa770ce0439b1f00d7ab306a86234c2",
-        ".dsh/commands/banca-auditar.md": "3ea6d1bc0ec5e30178038e4103b97e300cf60d67bd57760e107c1ecd302baaab",
-        ".dsh/commands/banca-init.md": "134250b4b129d008cc61c9ac2e5dede99b83e2647654b09e5379fa0d4da98eac",
-        ".dsh/commands/banca.md": "51850af110b9d1367206bddea9b8349b642fa310c316a414c1ea852c318439f2",
-        ".dsh/skills/banca-avaliacao/SKILL.md": "60bdcd97061da7748f7d1f9d6d7999fd62afac9b1269bf089eb23da7aab7c85e",
-        ".dsh/skills/banca-correcao/SKILL.md": "d0a05d3feb78f5ef05615a48892b3c5cdc88fc589b3fc2100f2d78a0a32d45c7",
-        ".dsh/skills/banca-detector-ia/SKILL.md": "db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b",
-        ".dsh/skills/banca-grille/SKILL.md": "c22d6bd6598117c491176fd1366c9c3974104bc3a349ebe791b1051f79682aa1",
-        ".dsh/skills/banca-plagio/SKILL.md": "1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661",
-        ".dsh/skills/banca-planejador/SKILL.md": "d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64",
-        ".dsh/skills/banca-referencias/SKILL.md": "b5b73abbbae029adc82980b2045c705b091b1629a44d14efab92aa731008d36b",
-        ".dsh/skills/banca-revisor/SKILL.md": "deb90fe58a8d334bddd9f4dc66810cb5c57621cc63bad313c44c199c042de798",
-        "capitulos/introducao.tex": "c83669242946b30489414729c0d70a4d97042ff11e62f436610fa1b31f634590",
-        "main.tex": "ac773600e11d7b7840a971e331443241ab52d1b0cf0f76a5a64797a75c97d355",
-        "referencias.bib": "9e6b6d1ad47d256524020e4f7e4a524a58e57795286a86c9eaaa53b195fa92a1"
-      },
-      "session": "live DSH SessionStore session with synthetic agent-shaped ToolRuntime context; no agent loop"
+      "blocker": "Native skills probe is pending the separately authorized one-shot no-model execution."
     },
-    "syntheticWorkspaceUnchangedByStatus": true,
-    "syntheticWorkspaceFilesCreatedByNativeInit": true
+    "batchAuditEvidenceGate": {
+      "status": "BLOCKED",
+      "hostContract": {
+        "toolRuntime": {
+          "bancaContext": "banca_context",
+          "bancaAuditar": "banca_auditar",
+          "bancaSintese": "banca_sintese"
+        },
+        "evidenceGate": "Issue #44 durable batch audit confirmation gate"
+      },
+      "blocker": "Academic batch audit evidence probe is pending the separately authorized one-shot no-model execution."
+    },
+    "nativeQuestions": {
+      "status": "BLOCKED",
+      "hostContract": {
+        "userQuestions": {
+          "service": "ctx.userQuestions",
+          "ask": "ctx.userQuestions.ask",
+          "askTimed": "ctx.userQuestions.askTimed"
+        },
+        "approval": {
+          "service": "ctx.approval",
+          "request": "ctx.approval.request",
+          "outcomes": [
+            "allowed-once",
+            "rejected",
+            "cancelled",
+            "unavailable"
+          ]
+        }
+      },
+      "seamEvidence": "Issue #46 structured questions and independent approval gate"
+    },
+    "academicDecision": {
+      "status": "BLOCKED",
+      "hostContract": {
+        "toolRuntime": {
+          "askUserQuestion": "ask_user_question"
+        },
+        "userQuestions": {
+          "service": "ctx.userQuestions",
+          "ask": "ctx.userQuestions.ask"
+        },
+        "seamEvidence": "Issue #48 selectable academic decision cycle without AI model"
+      },
+      "blocker": "Academic decision E2E probe is pending the separately authorized one-shot no-model execution."
+    }
   },
-  "failures": [],
-  "limitations": [
-    "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos."
+  "failures": [
+    "BLOCKED: set DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes only after explicit maintainer authorization; no DSH lifecycle was started"
   ],
-  "finishedAt": "2026-10-16T15:29:37.375Z"
+  "limitations": [
+    "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
+    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38), a evidência de auditoria por lote (#44), o contrato de perguntas estruturadas e aprovação (#46) e a decisão acadêmica E2E (#48) são reportados separadamente.",
+    "A sonda ativa agent/pre-step, skills nativas, auditoria acadêmica, perguntas nativas e decisão acadêmica exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil."
+  ],
+  "finishedAt": "2026-11-01T19:12:24.686Z"
 }

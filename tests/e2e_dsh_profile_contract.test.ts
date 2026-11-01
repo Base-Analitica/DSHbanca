@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
+import { parse as parseYaml } from "yaml"
+import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "../scripts/lib/dsh-profile-e2e-observer-control.js"
 import {
   canonicalAuditorMarkdownSha256,
@@ -23,11 +24,15 @@ import {
   classifyBatchAuditEvidenceStatus,
   validateNativeQuestionsEvidence,
   classifyNativeQuestionsStatus,
+  validateAcademicDecisionEvidence,
+  classifyAcademicDecisionStatus,
+  classifyCancellationOutcome,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
+  validateComposedProfilePlugins,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
 
 const completeAuditorMarkdownEvidence = {
@@ -1253,5 +1258,889 @@ describe("DSH native questions evidence gate contract (#46)", () => {
     const errors = validateNativeQuestionsEvidence(invalidEvidence)
     expect(errors).toContain(expectedError)
     expect(classifyNativeQuestionsStatus(invalidEvidence)).toBe("FAIL")
+  })
+})
+
+const completeAcademicDecisionEvidence = {
+  hostApiAvailable: true,
+  domainLibraryLoaded: true,
+  skillLoaded: {
+    name: "banca-grille",
+    discovered: true,
+    loaded: true,
+    canonicalBodySha256: canonicalNativeSkills["banca-grille"].bodySha256,
+    integrityVerified: true,
+  },
+  agentIdentity: {
+    agentId: "agent-auditor-root",
+    sessionId: "agent-auditor-root",
+    agentAndSessionIdMatch: true,
+    isRoot: true,
+  },
+  toolDispatch: {
+    toolName: "ask_user_question",
+    callId: "dshbanca-e2e-academic-decision",
+    dispatched: true,
+    isError: false,
+  },
+  transmittedPayload: {
+    questionId: "f-academic-e2e-001",
+    prompt: "Como deseja estruturar o delineamento amostral no capítulo 1?",
+    fullQuestionText:
+      "Como deseja estruturar o delineamento amostral no capítulo 1?\n\nAchado: f-academic-e2e-001\nEvidência: capitulos/lote1.tex:1-1 — Deliberação metodológica necessária: escolha de técnica de amostragem\nJustificativa da recomendação: Recomendado para garantir validade estatística e comparabilidade dos estratos na pesquisa sintética.",
+    containsFindingId: true,
+    containsLocalizedEvidence: true,
+    containsRecommendationJustification: true,
+    evidenceSnippetVerified: true,
+    detailFieldDroppedByHostTool: true,
+    optionsCount: 5,
+    hasRecommendedOption: true,
+    hasUncertaintyOption: true,
+    hasDeferOption: true,
+    hasConsequencesAndRisks: true,
+  },
+  selectedAnswer: {
+    id: "f-academic-e2e-001",
+    selected: [
+      "Adotar amostragem probabilística estratificada (Recommended)",
+    ],
+    isRecommendation: true,
+    isNonEmptySelection: true,
+    noFreeTextWhenStructured: true,
+  },
+  interpretation: {
+    outcome: "selected_recommendation",
+    mutationAuthorized: false,
+    nextSteps: [
+      "investigar_evidencias",
+      "preparar_proposta_examinavel",
+      "gerar_diff_proposto",
+    ],
+  },
+  absenceOfMutationOrApproval: {
+    approvalEventsCount: 0,
+    allowedOnceEmitted: false,
+    bancaCorrigirDispatched: false,
+    bancaRestoreDispatched: false,
+    manuscriptPreserved: true,
+  },
+  negativeCases: {
+    delegatedAgentBlocked: {
+      blocked: true,
+      errorCode: "DELEGATED_CALLER",
+      answererReached: false,
+    },
+    mismatchedOrIncompatibleRejected: true,
+    preDispatchAbort: {
+      handled: true,
+      observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+      phase: "before_dispatch",
+      rejectionObserved: true,
+    },
+    inFlightCancellation: {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
+      rejectionObserved: true,
+      requestReachedService: true,
+    },
+    cancellation: {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
+      rejectionObserved: true,
+      requestReachedService: true,
+    },
+    cancellationHandled: true,
+  },
+}
+
+describe("DSH native academic decision evidence gate contract (#48)", () => {
+  test("accepts complete valid academic decision evidence (PASS)", () => {
+    expect(validateAcademicDecisionEvidence(completeAcademicDecisionEvidence)).toEqual([])
+    expect(classifyAcademicDecisionStatus(completeAcademicDecisionEvidence)).toBe("PASS")
+  })
+
+  test("reports BLOCKED when evidence is missing or hostApiAvailable false", () => {
+    expect(classifyAcademicDecisionStatus(undefined)).toBe("BLOCKED")
+    expect(classifyAcademicDecisionStatus({})).toBe("BLOCKED")
+    expect(classifyAcademicDecisionStatus({ hostApiAvailable: false })).toBe("BLOCKED")
+  })
+
+  test("gate summary incorporates academicDecisionStatus while preserving earlier gates", () => {
+    expect(
+      classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "PASS"),
+    ).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "PASS",
+      academicDecisionStatus: "PASS",
+      overallStatus: "PASS",
+      exitCode: 0,
+    })
+    expect(
+      classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "BLOCKED"),
+    ).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "PASS",
+      academicDecisionStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+    expect(
+      classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "FAIL"),
+    ).toEqual({
+      issue2Status: "PASS",
+      auditorMarkdownStatus: "PASS",
+      nativeSkillsStatus: "PASS",
+      batchAuditStatus: "PASS",
+      nativeQuestionsStatus: "PASS",
+      academicDecisionStatus: "FAIL",
+      overallStatus: "FAIL",
+      exitCode: 1,
+    })
+  })
+
+  test.each([
+    [
+      "skill banca-grille was not discovered",
+      {
+        ...completeAcademicDecisionEvidence,
+        skillLoaded: { ...completeAcademicDecisionEvidence.skillLoaded, discovered: false },
+      },
+      'required skill "banca-grille" was not discovered',
+    ],
+    [
+      "skill banca-grille could not be loaded",
+      {
+        ...completeAcademicDecisionEvidence,
+        skillLoaded: { ...completeAcademicDecisionEvidence.skillLoaded, loaded: false },
+      },
+      'skill "banca-grille" was discovered but could not be loaded',
+    ],
+    [
+      "skill banca-grille body content altered",
+      {
+        ...completeAcademicDecisionEvidence,
+        skillLoaded: { ...completeAcademicDecisionEvidence.skillLoaded, integrityVerified: false },
+      },
+      'skill "banca-grille" loaded content does not match canonical source',
+    ],
+    [
+      "tool dispatch not ask_user_question",
+      {
+        ...completeAcademicDecisionEvidence,
+        toolDispatch: { ...completeAcademicDecisionEvidence.toolDispatch, toolName: "banca_status" },
+      },
+      'academic decision must be dispatched through native tool "ask_user_question"',
+    ],
+    [
+      "tool dispatch omitted or errored",
+      {
+        ...completeAcademicDecisionEvidence,
+        toolDispatch: { ...completeAcademicDecisionEvidence.toolDispatch, dispatched: false },
+      },
+      'native tool "ask_user_question" was not successfully dispatched through ToolRuntime',
+    ],
+    [
+      "findingId omitted from transmitted question",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, containsFindingId: false },
+      },
+      "transmitted question text must contain stable academic finding identification",
+    ],
+    [
+      "localized evidence omitted from transmitted question",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, containsLocalizedEvidence: false },
+      },
+      "transmitted question text must contain localized file and line evidence",
+    ],
+    [
+      "recommendation justification omitted from transmitted question",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, containsRecommendationJustification: false },
+      },
+      "transmitted question text must contain recommendation justification",
+    ],
+    [
+      "host tool failed to forward because detail was not in question text",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, detailFieldDroppedByHostTool: false },
+      },
+      "evidence must prove host tool drops detail field and incorporates content into question text",
+    ],
+    [
+      "less than 4 options transmitted (requires 2-4 alternatives + safe controls)",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, optionsCount: 3 },
+      },
+      "transmitted question must contain at least 4 options (2-4 alternatives plus safe controls)",
+    ],
+    [
+      "recommended option missing from transmitted options",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasRecommendedOption: false },
+      },
+      "transmitted question must include a designated recommended option",
+    ],
+    [
+      "safe uncertainty control missing",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasUncertaintyOption: false },
+      },
+      'transmitted question must include safe uncertainty option "Não sei — explique/mostre evidências"',
+    ],
+    [
+      "safe defer control missing",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasDeferOption: false },
+      },
+      'transmitted question must include safe deferral option "Adiar / continuar outras etapas"',
+    ],
+    [
+      "consequences and risks missing from alternatives",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: { ...completeAcademicDecisionEvidence.transmittedPayload, hasConsequencesAndRisks: false },
+      },
+      "transmitted alternatives must document consequences and risks",
+    ],
+    [
+      "selected answer was empty",
+      {
+        ...completeAcademicDecisionEvidence,
+        selectedAnswer: { ...completeAcademicDecisionEvidence.selectedAnswer, isNonEmptySelection: false, selected: [] },
+      },
+      "observed answer must contain a non-empty selection",
+    ],
+    [
+      "selected answer used free text instead of structured choice",
+      {
+        ...completeAcademicDecisionEvidence,
+        selectedAnswer: { ...completeAcademicDecisionEvidence.selectedAnswer, noFreeTextWhenStructured: false, custom: "livre" },
+      },
+      "observed answer must choose a structured alternative without free text",
+    ],
+    [
+      "mutation authorized by decision selection (SAFETY INVARIANT VIOLATION)",
+      {
+        ...completeAcademicDecisionEvidence,
+        interpretation: { ...completeAcademicDecisionEvidence.interpretation, mutationAuthorized: true },
+      },
+      "central safety risk violation: academic decision must not grant mutation authorization",
+    ],
+    [
+      "interpretation suggests mutating tool",
+      {
+        ...completeAcademicDecisionEvidence,
+        interpretation: { ...completeAcademicDecisionEvidence.interpretation, nextSteps: ["banca_corrigir"] },
+      },
+      "academic decision nextSteps must not include mutation tools without independent approval",
+    ],
+    [
+      "approval events detected in academic session",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, approvalEventsCount: 1 },
+      },
+      "approval events were detected in academic session following decision",
+    ],
+    [
+      "allowed-once emitted from academic decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, allowedOnceEmitted: true },
+      },
+      "allowed-once must not be emitted from academic decision workflow",
+    ],
+    [
+      "banca_corrigir dispatched following decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, bancaCorrigirDispatched: true },
+      },
+      "mutation tool was dispatched without independent approval grant",
+    ],
+    [
+      "banca_restore dispatched following decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, bancaRestoreDispatched: true },
+      },
+      "restore tool was dispatched without independent approval grant",
+    ],
+    [
+      "manuscript modified following decision",
+      {
+        ...completeAcademicDecisionEvidence,
+        absenceOfMutationOrApproval: { ...completeAcademicDecisionEvidence.absenceOfMutationOrApproval, manuscriptPreserved: false },
+      },
+      "academic manuscript was mutated by academic decision workflow",
+    ],
+    [
+      "delegated agent not blocked",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          delegatedAgentBlocked: { ...completeAcademicDecisionEvidence.negativeCases.delegatedAgentBlocked, blocked: false },
+        },
+      },
+      "delegated agent must be blocked from ask_user_question with DELEGATED_CALLER",
+    ],
+    [
+      "delegated agent reached answerer",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          delegatedAgentBlocked: { ...completeAcademicDecisionEvidence.negativeCases.delegatedAgentBlocked, answererReached: true },
+        },
+      },
+      "delegated agent question must not reach the answerer",
+    ],
+    [
+      "mismatched or incompatible answer not rejected",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: { ...completeAcademicDecisionEvidence.negativeCases, mismatchedOrIncompatibleRejected: false },
+      },
+      "mismatched or incompatible answer must be rejected",
+    ],
+    [
+      "cancellation not handled",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: { ...completeAcademicDecisionEvidence.negativeCases, cancellationHandled: false },
+      },
+      "cancellation must be handled fail-closed",
+    ],
+    [
+      "academic domain library missing or not loaded",
+      {
+        ...completeAcademicDecisionEvidence,
+        domainLibraryLoaded: false,
+      },
+      "academic decision domain library academic_decision.js was not loaded or required exports were missing",
+    ],
+    [
+      "evidence snippet on cited lines not verified in synthetic fixture",
+      {
+        ...completeAcademicDecisionEvidence,
+        transmittedPayload: {
+          ...completeAcademicDecisionEvidence.transmittedPayload,
+          evidenceSnippetVerified: false,
+        },
+      },
+      "evidence snippet on cited lines of synthetic manuscript fixture was not verified",
+    ],
+    [
+      "pre-dispatch abort not observing ABORTED_BEFORE_DISPATCH",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          preDispatchAbort: {
+            handled: false,
+            observedErrorCode: "ASK_ABORTED",
+            phase: "in_flight",
+            rejectionObserved: true,
+          },
+        },
+      },
+      "pre-dispatch abort must observe native ABORTED_BEFORE_DISPATCH error with phase before_dispatch",
+    ],
+    [
+      "in-flight cancellation request did not reach native service",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          inFlightCancellation: {
+            handled: true,
+            observedErrorCode: "ASK_ABORTED",
+            phase: "in_flight",
+            rejectionObserved: true,
+            requestReachedService: false,
+          },
+        },
+      },
+      "in-flight cancellation must prove request reached native service and observe native ASK_ABORTED error with phase in_flight",
+    ],
+    [
+      "in-flight cancellation observing wrong code instead of ASK_ABORTED",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          inFlightCancellation: {
+            handled: true,
+            observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+            phase: "before_dispatch",
+            rejectionObserved: true,
+            requestReachedService: true,
+          },
+        },
+      },
+      "in-flight cancellation must prove request reached native service and observe native ASK_ABORTED error with phase in_flight",
+    ],
+    [
+      "host ignores abort signal and returns success",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          cancellation: {
+            handled: false,
+            observedErrorCode: "IGNORED_ABORT_SUCCESS",
+            rejectionObserved: false,
+          },
+        },
+      },
+      "cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected",
+    ],
+    [
+      "cancellation observes generic error instead of native cancellation",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          cancellation: {
+            handled: false,
+            observedErrorCode: "GENERIC_ERROR",
+            rejectionObserved: true,
+          },
+        },
+      },
+      "cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected",
+    ],
+    [
+      "cancellation rejection not observed",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          cancellation: {
+            handled: false,
+            observedErrorCode: "",
+            rejectionObserved: false,
+          },
+        },
+      },
+      "cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected",
+    ],
+  ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
+    const errors = validateAcademicDecisionEvidence(invalidEvidence)
+    expect(errors).toContain(expectedError)
+    expect(classifyAcademicDecisionStatus(invalidEvidence)).toBe("FAIL")
+  })
+})
+
+describe("Cancellation outcome classification logic (#48)", () => {
+  // Test both the TypeScript contract classifier and the observer implementation generated in scripts/e2e-dsh-profile.ts
+  const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const fnStart = runnerSource.indexOf("export function classifyCancellationOutcome(resOrErr) {")
+  const fnEnd = runnerSource.indexOf("\nexport async function runAcademicDecisionProbe", fnStart)
+  const observerFnSource = runnerSource.slice(fnStart, fnEnd).replace("export function classifyCancellationOutcome", "function classifyCancellationOutcome")
+  const observerClassify = new Function(`${observerFnSource}; return classifyCancellationOutcome;`)()
+
+  const implementations = [
+    { name: "TypeScript contract classifier", classify: classifyCancellationOutcome },
+    { name: "Observer implementation from scripts/e2e-dsh-profile.ts", classify: observerClassify },
+  ]
+
+  for (const { name, classify } of implementations) {
+    describe(`${name}`, () => {
+      test("rejects TIMEOUT error even when message contains 'was aborted' (no false PASS)", () => {
+        const errorWithTimeout = {
+          code: "TIMEOUT",
+          message: "request was aborted during an unrelated network timeout",
+        }
+        const classification = classify(errorWithTimeout)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("TIMEOUT")
+        expect(classification.phase).toBe("unknown")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("rejects ToolRuntime result with code TIMEOUT and abort mention", () => {
+        const toolResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "operation was aborted due to timeout",
+              info: { name: "TimeoutError", code: "TIMEOUT" },
+            },
+          },
+        }
+        const classification = classify(toolResult)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("TIMEOUT")
+        expect(classification.phase).toBe("unknown")
+      })
+
+      test("rejects NETWORK_ERROR without reclassifying to ASK_ABORTED", () => {
+        const netError = {
+          code: "NETWORK_ERROR",
+          message: "socket was aborted by peer",
+        }
+        const classification = classify(netError)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("NETWORK_ERROR")
+        expect(classification.phase).toBe("unknown")
+      })
+
+      test("rejects generic error without code even when message contains 'was aborted'", () => {
+        const genericError = {
+          message: "request was aborted during an unrelated network timeout",
+        }
+        const classification = classify(genericError)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("GENERIC_ERROR")
+        expect(classification.phase).toBe("unknown")
+      })
+
+      test("rejects successful tool result even when caller signal was aborted (IGNORED_ABORT_SUCCESS)", () => {
+        const successResult = {
+          isError: false,
+          result: {
+            isError: false,
+            value: { answers: [{ id: "q1", selected: ["opt1"] }] },
+          },
+        }
+        const classification = classify(successResult)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("IGNORED_ABORT_SUCCESS")
+        expect(classification.phase).toBe("unknown")
+        expect(classification.rejectionObserved).toBe(false)
+      })
+
+      test("rejects generic exception fail-closed", () => {
+        const error = new TypeError("cannot read property of undefined")
+        const classification = classify(error)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("GENERIC_ERROR")
+        expect(classification.phase).toBe("unknown")
+      })
+
+      test("accepts native UserQuestionError with code ASK_ABORTED (phase: in_flight)", () => {
+        const nativeError = {
+          info: { code: "ASK_ABORTED" },
+          message: "ask_user_question was aborted before the user answered",
+        }
+        const classification = classify(nativeError)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("in_flight")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts ToolRuntime result carrying UserQuestionError ASK_ABORTED (phase: in_flight)", () => {
+        const toolRuntimeResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "ask_user_question was aborted before the user answered",
+              info: { name: "UserQuestionError", code: "ASK_ABORTED" },
+            },
+          },
+        }
+        const classification = classify(toolRuntimeResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("in_flight")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts ToolRuntime pre-dispatch abort ABORTED_BEFORE_DISPATCH without converting to ASK_ABORTED", () => {
+        const preDispatchResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted before dispatch",
+              info: { name: "AbortError", code: "ABORTED_BEFORE_DISPATCH" },
+            },
+          },
+        }
+        const classification = classify(preDispatchResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED_BEFORE_DISPATCH")
+        expect(classification.observedErrorCode).not.toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("before_dispatch")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts ToolRuntime started tool abort ABORTED (phase: tool_aborted)", () => {
+        const toolAbortResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted",
+              info: { name: "AbortError", code: "ABORTED" },
+            },
+          },
+        }
+        const classification = classify(toolAbortResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED")
+        expect(classification.phase).toBe("tool_aborted")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("rejects invented error codes like TOOL_ABORTED_BEFORE_DISPATCH and TOOL_ABORTED", () => {
+        const invented1 = {
+          isError: true,
+          error: {
+            message: "tool call aborted before dispatch",
+            info: { code: "TOOL_ABORTED_BEFORE_DISPATCH" },
+          },
+        }
+        const c1 = classify(invented1)
+        expect(c1.isCancellation).toBe(false)
+        expect(c1.handled).toBe(false)
+        expect(c1.observedErrorCode).toBe("TOOL_ABORTED_BEFORE_DISPATCH")
+        expect(c1.phase).toBe("unknown")
+
+        const invented2 = {
+          isError: true,
+          error: {
+            message: "tool call aborted",
+            info: { code: "TOOL_ABORTED" },
+          },
+        }
+        const c2 = classify(invented2)
+        expect(c2.isCancellation).toBe(false)
+        expect(c2.handled).toBe(false)
+        expect(c2.observedErrorCode).toBe("TOOL_ABORTED")
+        expect(c2.phase).toBe("unknown")
+      })
+
+      test("accepts exact canonical native message when code is stripped (ask_user_question)", () => {
+        const strippedResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "ask_user_question was aborted before the user answered",
+            },
+          },
+        }
+        const classification = classify(strippedResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("in_flight")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts exact canonical native message when code is stripped (tool call aborted before dispatch)", () => {
+        const strippedResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted before dispatch",
+            },
+          },
+        }
+        const classification = classify(strippedResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED_BEFORE_DISPATCH")
+        expect(classification.phase).toBe("before_dispatch")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts exact canonical native message when code is stripped (tool call aborted)", () => {
+        const strippedResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted",
+            },
+          },
+        }
+        const classification = classify(strippedResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED")
+        expect(classification.phase).toBe("tool_aborted")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+    })
+  }
+})
+
+describe("DSH Cordis composed profile plugin deduplication contract (#48 P1)", () => {
+  test("RED: rejects duplicate @deepseek-ai/dsh-user-approval across distinct row IDs (identity-based)", () => {
+    // Row IDs are deliberately DIFFERENT ("approval" vs "user-approval"), as reproduced in review #572922
+    const conflictingRows = [
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+      { id: "user-approval", name: "@deepseek-ai/dsh-user-approval" },
+    ]
+    const errors = validateComposedProfilePlugins(conflictingRows)
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    // Asserts detection is by package/service identity, NOT just repeating row ID
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-user-approval"))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "approval"'))).toBe(true)
+  })
+
+  test("RED: rejects duplicate @deepseek-ai/dsh-user-questions across duplicate row IDs", () => {
+    const conflictingRows = [
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+    ]
+    const errors = validateComposedProfilePlugins(conflictingRows)
+    expect(errors.length).toBeGreaterThanOrEqual(2)
+    expect(errors.some((e) => e.includes('duplicate row id "user-questions"'))).toBe(true)
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-user-questions"))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "userQuestions"'))).toBe(true)
+  })
+
+  test("RED: rejects duplicate @deepseek-ai/dsh-agent-preset-registry singleton", () => {
+    const conflictingRows = [
+      { id: "registry-1", name: "@deepseek-ai/dsh-agent-preset-registry" },
+      { id: "agent-preset-registry", name: "@deepseek-ai/dsh-agent-preset-registry" },
+    ]
+    const errors = validateComposedProfilePlugins(conflictingRows)
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-agent-preset-registry"))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "agentPresets"'))).toBe(true)
+  })
+
+  test("ignores disabled plugin rows without false rejection", () => {
+    const rowsWithDisabled = [
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+      { id: "user-approval-disabled", name: "@deepseek-ai/dsh-user-approval", disabled: true },
+    ]
+    const errors = validateComposedProfilePlugins(rowsWithDisabled)
+    expect(errors).toEqual([])
+  })
+
+  test("allows legitimate multi-instance factory plugins like @deepseek-ai/dsh-agent-preset", () => {
+    const rowsWithMultiplePresets = [
+      { id: "dshbanca-banca-auditor-preset", name: "@deepseek-ai/dsh-agent-preset" },
+      { id: e2eControlPresetId, name: "@deepseek-ai/dsh-agent-preset" },
+    ]
+    const errors = validateComposedProfilePlugins(rowsWithMultiplePresets)
+    expect(errors).toEqual([])
+  })
+
+  test("GREEN: accepts clean profile composition reusing dsh-base services without overlay duplication", () => {
+    const cleanComposedProfile = [
+      // Provided natively by dsh-base
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+      // Provided by dshbanca bundle
+      { id: "dshbanca", name: "dshbanca/dsh" },
+      { id: "dshbanca-banca-auditor-preset", name: "@deepseek-ai/dsh-agent-preset" },
+      // Provided by corrected overlay
+      { id: "agent-preset-registry", name: "@deepseek-ai/dsh-agent-preset-registry" },
+      { id: e2eControlPresetId, name: "@deepseek-ai/dsh-agent-preset" },
+      { id: "tool-ask-user", name: "@deepseek-ai/dsh-tool-ask-user" },
+      { id: "dshbanca-e2e-observer", name: "scratch-observer" },
+    ]
+    const errors = validateComposedProfilePlugins(cleanComposedProfile)
+    expect(errors).toEqual([])
+  })
+
+  test("reproduction of prior HEAD (b6f572ff) bug: overlay with duplicate rows fails contract check", () => {
+    // dsh-base native rows
+    const baseRows = [
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+    ]
+    // The flawed overlay from SHA b6f572ff:
+    const flawedOverlayRows = [
+      { id: "agent-preset-registry", name: "@deepseek-ai/dsh-agent-preset-registry" },
+      { id: e2eControlPresetId, name: "@deepseek-ai/dsh-agent-preset" },
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "user-approval", name: "@deepseek-ai/dsh-user-approval" },
+      { id: "tool-ask-user", name: "@deepseek-ai/dsh-tool-ask-user" },
+      { id: "dshbanca-e2e-observer", name: "test-observer" },
+    ]
+    const errors = validateComposedProfilePlugins([...baseRows, ...flawedOverlayRows])
+    expect(errors.length).toBeGreaterThanOrEqual(2)
+    // Proves detection catches both row-ID conflict and different-ID provider conflict
+    expect(errors.some((e) => e.includes('duplicate Cordis service "approval"'))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "userQuestions"'))).toBe(true)
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-user-approval"))).toBe(true)
+  })
+
+  test("verified overlay from buildSdkPresetOverlayPatch has ZERO duplicate rows against dsh-base", () => {
+    const overlayYaml = buildSdkPresetOverlayPatch("verified-observer")
+    const parsedOverlay = (parseYaml(overlayYaml) as any[])
+      .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
+
+    // Asserts that overlay no longer instantiates user-questions or user-approval
+    const approvalRows = parsedOverlay.filter((r) => r?.name === "@deepseek-ai/dsh-user-approval")
+    const questionRows = parsedOverlay.filter((r) => r?.name === "@deepseek-ai/dsh-user-questions")
+    const askUserToolRows = parsedOverlay.filter((r) => r?.name === "@deepseek-ai/dsh-tool-ask-user")
+
+    expect(approvalRows.length).toBe(0)
+    expect(questionRows.length).toBe(0)
+    expect(askUserToolRows.length).toBe(1)
+    expect(askUserToolRows[0].id).toBe("tool-ask-user")
+
+    // Combined with dsh-base, composition is valid
+    const baseRows = [
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+    ]
+    const errors = validateComposedProfilePlugins([...baseRows, ...parsedOverlay])
+    expect(errors).toEqual([])
+  })
+
+  test("validateProfileEvidence enforces uniqueness of user-questions and user-approval", () => {
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      userQuestionsUnique: false,
+    })).toContain("user-questions plugin package has duplicate instances in composed profile")
+
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      userApprovalUnique: false,
+    })).toContain("user-approval plugin package has duplicate instances in composed profile")
+
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      askUserToolPresent: false,
+    })).toContain("tool-ask-user entry missing from composed profile")
+
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      userQuestionsUnique: true,
+      userApprovalUnique: true,
+      askUserToolPresent: true,
+    })).toEqual([])
   })
 })
