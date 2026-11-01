@@ -62,9 +62,9 @@ export const canonicalNativeSkills: Record<ExpectedNativeSkillName, CanonicalNat
   },
   "banca-grille": {
     sourcePath: "skills/banca-grille/SKILL.md",
-    sourceSha256: "c22d6bd6598117c491176fd1366c9c3974104bc3a349ebe791b1051f79682aa1",
-    bodySha256: "46d86bfd7ad6cda4bc58f79961db784e71e4a50192b35acde882fe2756ec9f6e",
-    bodyLength: 1691,
+    sourceSha256: "9a861c773444a1fc537619202bb0818936bafd313efdd9438d3eb1985d0fc6e6",
+    bodySha256: "334cb1743f8542c1c05373361fe47d59ed94e47a39e10475105fecd7f8d443d3",
+    bodyLength: 4835,
   },
   "banca-plagio": {
     sourcePath: "skills/banca-plagio/SKILL.md",
