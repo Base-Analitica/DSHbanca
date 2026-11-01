@@ -27,12 +27,15 @@ import {
 } from "../lib/analysis_findings"
 import {
   ANALYSIS_FINDINGS_STORE_VERSION,
+  AnalysisAuditConfirmationError,
   AnalysisFindingsStoreError,
   getAnalysisFindingsRelativePath,
   loadAnalysisFindings,
+  recordBatchAuditConfirmation,
   saveAnalysisFindings,
   type AnalysisFindingsStoreV1,
 } from "../lib/state"
+import { createBatchAuditConfirmation } from "../lib/analysis_audit_confirmation"
 
 /** Stable receipt kind/version for successful batch finding validation + persistence. */
 export const AUDIT_RECEIPT_KIND = "openbanca-audit-receipt-v2" as const
@@ -317,6 +320,28 @@ export const bancaAuditar = defineBancaTool({
       return formatError(
         "unexpected",
         "an unexpected findings store save error occurred",
+      )
+    }
+
+    const batchFindings = merged.filter((f) => f.batchId === batch.batchId)
+
+    try {
+      const confirmation = createBatchAuditConfirmation(
+        plan,
+        batch,
+        {
+          findings: batchFindings,
+          disclaimer: AUDIT_RECEIPT_DISCLAIMER,
+        },
+      )
+      recordBatchAuditConfirmation(root, confirmation)
+    } catch (err) {
+      if (err instanceof AnalysisAuditConfirmationError) {
+        return formatError(err.code, err.message)
+      }
+      return formatError(
+        "unexpected",
+        "an unexpected audit confirmation save error occurred",
       )
     }
 

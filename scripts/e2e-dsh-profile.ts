@@ -30,10 +30,12 @@ import {
   failureExitCode,
   classifyAuditorMarkdownStatus,
   classifyNativeSkillsStatus,
+  classifyBatchAuditEvidenceStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateAuditorMarkdownEvidence,
   validateNativeSkillsEvidence,
+  validateBatchAuditEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -110,8 +112,8 @@ const report: GateReport = {
   failures: [],
   limitations: [
     "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
-    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3) e a descoberta/carregamento das skills nativas (#38) são reportados separadamente.",
-    "A sonda ativa agent/pre-step e skills nativas exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
+    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38) e a evidência de auditoria por lote (#44) são reportados separadamente.",
+    "A sonda ativa agent/pre-step, skills nativas e auditoria acadêmica exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
   ],
 }
 
@@ -532,6 +534,185 @@ const decoyOutput = {
   render: (_args, value) => [{ type: "text", text: value }],
 };
 ${renderControlPresetSelector(e2eControlPresetId)}
+
+const parseContextMeta = async (contextOutput) => {
+  const filePath = contextOutput.replace(/^context → /, "").trim();
+  const content = await readFile(filePath, "utf8");
+  const fence = String.fromCharCode(96, 96, 96);
+  const startMarker = fence + "json\\n";
+  const endMarker = "\\n" + fence;
+  const start = content.indexOf(startMarker);
+  if (start === -1) fail("academic probe: failed to find json start in " + filePath);
+  const end = content.indexOf(endMarker, start + startMarker.length);
+  if (end === -1) fail("academic probe: failed to find json end in " + filePath);
+  const jsonStr = content.slice(start + startMarker.length, end);
+  return JSON.parse(jsonStr);
+};
+
+export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
+  const configPath = join(workspace, ".banca", "project.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  const maxCharsPerBatch = 80;
+  config.analysis = { coverageMode: "exhaustive", maxCharactersPerBatch: maxCharsPerBatch };
+  await writeFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+
+  const chapterFiles = [
+    "capitulos/lote1.tex",
+    "capitulos/lote2.tex",
+    "capitulos/lote3.tex",
+    "capitulos/lote4.tex",
+    "capitulos/lote5.tex",
+  ];
+  const manuscriptFiles = [
+    "main.tex",
+    "referencias.bib",
+    ...chapterFiles,
+  ];
+  const initialManuscriptHashes = {};
+  for (const rel of manuscriptFiles) {
+    initialManuscriptHashes[rel] = await sha(join(workspace, rel));
+  }
+
+  let totalManuscriptChars = (await readFile(join(workspace, "main.tex"), "utf8")).length;
+  for (const rel of chapterFiles) {
+    totalManuscriptChars += (await readFile(join(workspace, rel), "utf8")).length;
+  }
+  const expectedTotalBatches = Math.ceil(totalManuscriptChars / maxCharsPerBatch);
+
+  const initRes = await runTool(ctx, "dshbanca-e2e-academic-init", "banca_context", {}, agent);
+  if (initRes.result.isError) fail("academic probe: banca_context init failed: " + initRes.message);
+  let currentMeta = await parseContextMeta(initRes.message);
+  const planId = currentMeta.plan.planId;
+  const manuscriptFingerprint = currentMeta.manuscript.fingerprint;
+  const totalBatches = currentMeta.checkpoint.totalBatches;
+  if (totalBatches !== expectedTotalBatches) {
+    fail("academic probe: expected " + expectedTotalBatches + " batches for known chapters (" + totalManuscriptChars + " chars, budget " + maxCharsPerBatch + "), got " + totalBatches);
+  }
+
+  let unverifiedAdvancesBlocked = 0;
+  let prematureSynthesisBlocked = 0;
+  let auditsCompletedWithZeroFindings = 0;
+  let orderlyAdvances = 0;
+  let resumesWithoutSpuriousAdvance = 0;
+
+  for (let bIndex = 0; bIndex < totalBatches; bIndex++) {
+    const batchId = currentMeta.batch.batchId;
+    if (!batchId) fail("academic probe: missing batchId for batch " + bIndex);
+
+    const rejAdvance = await runTool(
+      ctx,
+      "dshbanca-e2e-advance-unverified-" + bIndex,
+      "banca_context",
+      { completedBatchId: batchId },
+      agent,
+    );
+    if (!rejAdvance.message.includes("missing_batch_audit")) {
+      fail("academic probe: advance without audit was not rejected with missing_batch_audit; got: " + rejAdvance.message);
+    }
+    unverifiedAdvancesBlocked++;
+
+    const rejSynth = await runTool(
+      ctx,
+      "dshbanca-e2e-premature-synth-" + bIndex,
+      "banca_sintese",
+      {},
+      agent,
+    );
+    if (!rejSynth.message.includes("synthesis input error")) {
+      fail("academic probe: premature synthesis was not rejected with synthesis input error; got: " + rejSynth.message);
+    }
+    prematureSynthesisBlocked++;
+
+    const auditRes = await runTool(
+      ctx,
+      "dshbanca-e2e-audit-" + bIndex,
+      "banca_auditar",
+      {
+        manuscriptFingerprint,
+        batchId,
+        findings: [],
+      },
+      agent,
+    );
+    if (auditRes.result.isError || !auditRes.message.includes('\\"acceptedCount\\":0')) {
+      fail("academic probe: banca_auditar failed for batch " + bIndex + ": " + auditRes.message);
+    }
+    auditsCompletedWithZeroFindings++;
+
+    const advRes = await runTool(
+      ctx,
+      "dshbanca-e2e-advance-" + bIndex,
+      "banca_context",
+      { completedBatchId: batchId },
+      agent,
+    );
+    if (advRes.result.isError || advRes.message.includes("context checkpoint error")) {
+      fail("academic probe: banca_context advance failed for batch " + bIndex + ": " + advRes.message);
+    }
+    orderlyAdvances++;
+    const advMeta = await parseContextMeta(advRes.message);
+    if (advMeta.checkpoint.completedBatches !== bIndex + 1) {
+      fail("academic probe: advance completedBatches mismatch; expected " + (bIndex + 1) + " got " + advMeta.checkpoint.completedBatches);
+    }
+
+    const resRes = await runTool(
+      ctx,
+      "dshbanca-e2e-resume-" + bIndex,
+      "banca_context",
+      {},
+      agent,
+    );
+    if (resRes.result.isError || resRes.message.includes("context checkpoint error")) {
+      fail("academic probe: resume failed for batch " + bIndex + ": " + resRes.message);
+    }
+    const resMeta = await parseContextMeta(resRes.message);
+    if (resMeta.checkpoint.completedBatches !== bIndex + 1) {
+      fail("academic probe: resume spurious advance; expected " + (bIndex + 1) + " got " + resMeta.checkpoint.completedBatches);
+    }
+    resumesWithoutSpuriousAdvance++;
+
+    currentMeta = advMeta;
+  }
+
+  const finalSynth = await runTool(
+    ctx,
+    "dshbanca-e2e-final-synthesis",
+    "banca_sintese",
+    {},
+    agent,
+  );
+  if (finalSynth.result.isError || finalSynth.message.includes("synthesis input error")) {
+    fail("academic probe: final synthesis release failed: " + finalSynth.message);
+  }
+  const synthPayload = JSON.parse(finalSynth.message);
+  if (synthPayload.coverage?.state !== "complete" || synthPayload.coverage?.completedBatches !== totalBatches) {
+    fail("academic probe: synthesis coverage state not complete; got: " + JSON.stringify(synthPayload.coverage));
+  }
+
+  let manuscriptPreserved = true;
+  for (const rel of manuscriptFiles) {
+    const postHash = await sha(join(workspace, rel));
+    if (postHash !== initialManuscriptHashes[rel]) {
+      manuscriptPreserved = false;
+      fail("academic probe: synthetic manuscript file " + rel + " was mutated by analysis tools");
+    }
+  }
+
+  return {
+    totalBatches,
+    completedBatches: totalBatches,
+    planId,
+    manuscriptFingerprint,
+    unverifiedAdvancesBlocked,
+    prematureSynthesisBlocked,
+    auditsCompletedWithZeroFindings,
+    orderlyAdvances,
+    resumesWithoutSpuriousAdvance,
+    synthesisReleased: true,
+    synthesisInputCoverageState: synthPayload.coverage.state,
+    manuscriptPreserved,
+  };
+}
 
 export async function captureNativeSkillsEvidence(ctx, workspace) {
   const signal = new AbortController().signal;
@@ -980,6 +1161,8 @@ export async function apply(ctx) {
     const childModelEvents = modelEventCount(unverifiedAgent.session);
     if (auditorEventsAfterChecks !== 0 || childModelEvents !== 0) fail("the profile E2E unexpectedly entered a model-facing turn");
 
+    const batchAuditEvidenceGate = await runAcademicBatchAuditProbe(ctx, workspace, agent);
+
     result = {
       lifecycle: "observer Cordis apply reached; real DSH AgentRegistry.create + AgentLoop publication; preset registry resolution and selection observed; direct ToolRuntime calls only",
       profileRuntime: true,
@@ -1035,7 +1218,8 @@ export async function apply(ctx) {
       exactToolSet: true,
       skillFound,
       nativeSkillsEvidence,
-      executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status"],
+      batchAuditEvidenceGate,
+      executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status", "banca_context", "banca_auditar", "banca_sintese"],
       statusSucceeded,
       statusReadOnly: JSON.stringify(statusBefore) === JSON.stringify(statusAfter),
       workspaceInventoryBeforeStatus: statusBefore,
@@ -1345,7 +1529,9 @@ async function main(): Promise<void> {
   mkdirSync(join(workspace, "capitulos"), { recursive: true, mode: 0o700 })
   writeFileSync(join(workspace, "main.tex"), "\\documentclass{article}\n\\begin{document}\nTexto acadêmico sintético de validação.\\end{document}\n", { mode: 0o600 })
   writeFileSync(join(workspace, "referencias.bib"), "@article{synthetic2026, title={Referência Sintética}, author={Pessoa, Exemplo}, year={2026}}\n", { mode: 0o600 })
-  writeFileSync(join(workspace, "capitulos", "introducao.tex"), "Introdução sintética para teste do DSHbanca.\n", { mode: 0o600 })
+  for (let i = 1; i <= 5; i++) {
+    writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
+  }
   createObserverPackage(observerRoot, workspace, observerResult, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1)
   const overlayPath = join(scratch, "observer.patch.yml")
   writeFileSync(overlayPath, buildSdkPresetOverlayPatch(observerName), { mode: 0o600 })
@@ -1476,6 +1662,18 @@ async function main(): Promise<void> {
       },
       blocker: "Native skills probe is pending the separately authorized one-shot no-model execution.",
     }
+    report.stages.batchAuditEvidenceGate = {
+      status: "BLOCKED",
+      hostContract: {
+        toolRuntime: {
+          bancaContext: "banca_context",
+          bancaAuditar: "banca_auditar",
+          bancaSintese: "banca_sintese",
+        },
+        evidenceGate: "Issue #44 durable batch audit confirmation gate",
+      },
+      blocker: "Academic batch audit evidence probe is pending the separately authorized one-shot no-model execution.",
+    }
     fail("BLOCKED: set DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes only after explicit maintainer authorization; no DSH lifecycle was started", "BLOCKED")
     return
   }
@@ -1500,9 +1698,12 @@ async function main(): Promise<void> {
   const nativeSkillsEvidence = observed.nativeSkillsEvidence
   const nativeSkillsErrors = validateNativeSkillsEvidence(nativeSkillsEvidence)
   const nativeSkillsStatus = classifyNativeSkillsStatus(nativeSkillsEvidence)
+  const batchAuditEvidence = observed.batchAuditEvidenceGate
+  const batchAuditErrors = validateBatchAuditEvidence(batchAuditEvidence)
+  const batchAuditStatus = classifyBatchAuditEvidenceStatus(batchAuditEvidence)
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
-  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus)
+  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus)
   report.stages.gateSummary = gateStatuses
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
@@ -1545,6 +1746,22 @@ async function main(): Promise<void> {
       ? "Native skills probe is pending the separately authorized one-shot no-model probe."
       : null,
   }
+  report.stages.batchAuditEvidenceGate = {
+    status: batchAuditStatus,
+    evidence: batchAuditEvidence,
+    validationErrors: batchAuditErrors,
+    hostContract: {
+      toolRuntime: {
+        bancaContext: "banca_context",
+        bancaAuditar: "banca_auditar",
+        bancaSintese: "banca_sintese",
+      },
+      evidenceGate: "Issue #44 durable batch audit confirmation gate",
+    },
+    blocker: batchAuditStatus === "BLOCKED"
+      ? "Academic batch audit evidence probe is pending the separately authorized one-shot no-model probe."
+      : null,
+  }
   report.stages.auditorMarkdown = {
     status: auditorMarkdownStatus,
     evidence: auditorMarkdownEvidence,
@@ -1576,11 +1793,18 @@ async function main(): Promise<void> {
     fail(`Issue #38 native skills discovery/loading integrity failed: ${nativeSkillsErrors.join("; ")}`)
     return
   }
+  if (batchAuditStatus === "FAIL") {
+    fail(`Issue #44 batch audit evidence gate failed: ${batchAuditErrors.join("; ")}`)
+    return
+  }
   if (auditorMarkdownStatus === "BLOCKED") {
     report.limitations.push("Issue #3 auditor Markdown loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
   if (nativeSkillsStatus === "BLOCKED") {
     report.limitations.push("Issue #38 native skills discovery/loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
+  }
+  if (batchAuditStatus === "BLOCKED") {
+    report.limitations.push("Issue #44 batch audit evidence gate is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
   if (errors.length > 0) {
     fail(`Real DSH runtime evidence violated the profile contract: ${errors.join("; ")}`)
@@ -1650,7 +1874,10 @@ const auditorMarkdownStatus = typeof report.stages.auditorMarkdown === "object" 
 const nativeSkillsStatus = typeof report.stages.nativeSkills === "object" && report.stages.nativeSkills !== null
   ? (report.stages.nativeSkills as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}\n`)
+const batchAuditStatus = typeof report.stages.batchAuditEvidenceGate === "object" && report.stages.batchAuditEvidenceGate !== null
+  ? (report.stages.batchAuditEvidenceGate as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Skill ${report.versions.dshSkill ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)

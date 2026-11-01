@@ -65,6 +65,22 @@ O resultado é registrado de forma independente em `stages.nativeSkills`:
 
 A aprovação em discovery não produz automaticamente `PASS` no carregamento. Ausência de API nativa (`BLOCKED`), catálogo incompleto ou não comprovado (`FAIL`), provider incorreto ou hash divergente resultam em `FAIL` ou `BLOCKED` imediatos. A invocação de `ctx.skills.get` comprova carregamento pelo serviço de skills do DSH, mas não equivale à execução ou aplicação das instruções por um agente ou modelo de IA.
 
+## Issue #44: gate E2E de evidência durável de auditoria por lote e síntese
+
+A issue #44 exige que o avanço de checkpoints e a liberação da síntese estrutural dependam de evidência durável e coerente de auditoria acadêmica por lote. A sonda E2E acadêmica nativa formaliza esse fluxo diretamente no `ToolRuntime` do DSH (`ctx.tools.execute`), utilizando o `Agent` e a `Session` reais criados pelo host via `AgentRegistry`.
+
+O cenário cobre de forma reproduzível e hermética:
+1. **Planejamento de múltiplos lotes sintéticos**: o manuscrito sintético LaTeX (`main.tex` e 5 capítulos) é planejado com `maxCharactersPerBatch: 80`, gerando 5 lotes distintos com ordenação determinística.
+2. **Rejeição de avanço sem auditoria**: para cada lote, a tentativa de avançar via `banca_context(advance: true)` sem auditoria prévia é estritamente rejeitada com `missing_batch_audit`.
+3. **Auditoria explícita com zero findings**: execução de `banca_auditar` com `findings: []` para o lote corrente, persistindo confirmação durável e canônica.
+4. **Avanço ordenado após confirmação**: com a confirmação válida e persistida, o avanço via `banca_context(advance: true)` é aceito, incrementando `completedBatches` em ordem rigorosa.
+5. **Retomada idempotente sem avanço indevido**: consulta repetida a `banca_context` sem flag de avanço não altera o progresso registrado no checkpoint.
+6. **Bloqueio de síntese prematura**: chamadas a `banca_sintese` antes da conclusão de todos os lotes são bloqueadas com erro de cobertura incompleta (`synthesis input error`).
+7. **Liberação da entrada de síntese**: somente após todos os lotes serem auditados e confirmados (`state === "complete"`), `banca_sintese` emite a chave de síntese global (`global-analysis-synthesis-input-v1`) com metadados estruturados.
+8. **Preservação e teardown**: os arquivos sintéticos originais têm seus digests SHA-256 verificados antes e depois da sonda, e os handles dos agentes são descartados via `dispose()`.
+
+O resultado é registrado em `stages.batchAuditEvidenceGate` com status (`PASS`, `FAIL`, `BLOCKED`), contagens detalhadas de operações executadas e auditoria sanitizada, sem chamada a modelos ou vazamento de caminhos. Assim como os demais estágios ativos, a sonda permanece `BLOCKED` por padrão antes do boot do perfil até autorização explícita (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`).
+
 ## Cenário, integridade e teardown
 
 O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo. Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
@@ -106,7 +122,7 @@ Os testes em `tests/e2e_dsh_profile_contract.test.ts` validam rejeições do con
 - Não cobre loop real de agente, `SessionController.prompt`, chamadas a modelo, identidade originada pelo gerenciador de subagents, avaliação acadêmica ou julgamento humano.
 - O `Agent` com `origin: "subagent"` é criado pelo `AgentRegistry` nativo com metadados de origem e sessão pai, sem chamar o serviço que executa delegação. O teste comprova enforcement fail-closed para essa identidade DSH, não o lifecycle completo de spawn do subagent manager.
 - `--dump-config` e os testes de contrato não comprovam associação no Agent real. A etapa ativa está bloqueada sem autorização específica e seu resultado não foi executado neste slice.
-- O E2E mantém o status de identidade/guard da issue #2 separado de `stages.auditorMarkdown.status` (issue #3) e `stages.nativeSkills.status` (issue #38). Ambas as etapas continuam `BLOCKED` até existir evidência nativa autorizada no host DSH real, sem executar modelo.
+- O E2E mantém o status de identidade/guard da issue #2 separado de `stages.auditorMarkdown.status` (issue #3), `stages.nativeSkills.status` (issue #38) e `stages.batchAuditEvidenceGate.status` (issue #44). Todas as etapas ativas continuam `BLOCKED` até existir evidência nativa autorizada no host DSH real, sem executar modelo.
 - Os testes determinísticos locais em `tests/e2e_dsh_profile_contract.test.ts` comprovam que o contrato rejeita catálogos incompletos, skills ausentes, providers incorretos e divergências de conteúdo, mas não equivalem à execução no host DSH.
 - Os hashes são de arquivos sintéticos e relativos ao workspace temporário. Nenhum manuscrito real é usado.
 
