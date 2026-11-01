@@ -3,11 +3,16 @@
  *
  * Implements the non-mutating academic decision cycle for banca-grille:
  * - 2 to 4 concrete, evidence-grounded alternatives
- * - Grounded recommendation with explicit justification (marked with "(Recommended)")
- * - Standard safe controls: "Não sei / mostrar evidências", "Adiar", "Outro" (custom response)
+ * - Grounded recommendation with explicit, verifiable justification (marked with "(Recommended)")
+ * - Preservation of localized evidence and justification in the native AskUserQuestionItem.detail field
+ * - Strict rejection of recommendations lacking verifiable justification or presenting conflicting indicators
+ * - Standard safe controls: "Não sei — explique/mostre evidências", "Adiar / continuar outras etapas", "Outro" (custom response)
+ * - Strict answer validation: rejecting multi-select in single-select decisions, duplicate options,
+ *   unauthorized custom answers, and incompatible combinations of selection and custom text
  * - Strict safety invariant: selection NEVER authorizes manuscript mutation (mutationAuthorized = false)
- * - Fail-closed error handling: invalid alternatives, missing evidence, duplicate questions,
- *   subagent callers, service unavailability, timeouts and cancellations all terminate safely.
+ * - Integration role: serves programmatic callers, test harnesses, automated review loops, and downstream
+ *   result handlers. In the live agent workflow, the agent calls the host tool ask_user_question directly,
+ *   which dispatches to ctx.userQuestions.ask under host-level root authorization and dshbanca tool guards.
  */
 
 export const SAFE_OPTION_EVIDENCE = "Não sei — explique/mostre evidências" as const
@@ -20,6 +25,7 @@ export interface AcademicAlternative {
   risks?: string
   evidence?: string
   isRecommendation?: boolean
+  justification?: string
 }
 
 export interface AcademicDecisionInput {
@@ -41,6 +47,7 @@ export interface AcademicDecisionInput {
 export interface AcademicDecisionQuestion {
   id: string
   question: string
+  detail?: string
   header?: string
   options: Array<{
     label: string
@@ -76,6 +83,8 @@ export class AcademicDecisionError extends Error {
 
 /**
  * Validates and formats an academic decision input into a native DSH question schema.
+ * Preserves evidence and justification in AskUserQuestionItem.detail and option descriptions.
+ * Rejects recommendations that lack verifiable justification or contain conflicting definitions.
  */
 export function formatAcademicDecisionQuestion(
   input: AcademicDecisionInput,
@@ -116,11 +125,29 @@ export function formatAcademicDecisionQuestion(
     seenLabels.add(cleanLabel)
   }
 
+  // Identify alternatives flagged with isRecommendation
+  const flagRecIndices: number[] = []
+  for (let i = 0; i < input.alternatives.length; i++) {
+    if (input.alternatives[i].isRecommendation === true) {
+      flagRecIndices.push(i)
+    }
+  }
+
+  if (flagRecIndices.length > 1) {
+    throw new AcademicDecisionError(
+      "INVALID_RECOMMENDATION",
+      "Apenas uma alternativa pode ser indicada como recomendada.",
+    )
+  }
+
   let recommendedIdx = -1
+  let recommendedJustification: string | undefined = undefined
+
   if (input.recommendation !== undefined) {
     const { alternativeIndex, justification } = input.recommendation
     if (
       typeof alternativeIndex !== "number" ||
+      !Number.isInteger(alternativeIndex) ||
       alternativeIndex < 0 ||
       alternativeIndex >= input.alternatives.length
     ) {
@@ -135,14 +162,39 @@ export function formatAcademicDecisionQuestion(
         "Recomendação acadêmica exige justificativa fundamentada.",
       )
     }
-    recommendedIdx = alternativeIndex
-  } else {
-    // Check if any alternative has isRecommendation=true
-    const foundIdx = input.alternatives.findIndex((a) => a.isRecommendation === true)
-    if (foundIdx !== -1) {
-      recommendedIdx = foundIdx
+
+    if (flagRecIndices.length === 1 && flagRecIndices[0] !== alternativeIndex) {
+      throw new AcademicDecisionError(
+        "INVALID_RECOMMENDATION",
+        "Conflito entre alternativeIndex da recomendação e a alternativa marcada com isRecommendation.",
+      )
     }
+
+    recommendedIdx = alternativeIndex
+    recommendedJustification = justification.trim()
+  } else if (flagRecIndices.length === 1) {
+    const altIdx = flagRecIndices[0]
+    const alt = input.alternatives[altIdx]
+    if (!alt.justification || typeof alt.justification !== "string" || alt.justification.trim() === "") {
+      throw new AcademicDecisionError(
+        "INVALID_RECOMMENDATION",
+        "Recomendação acadêmica exige justificativa fundamentada.",
+      )
+    }
+    recommendedIdx = altIdx
+    recommendedJustification = alt.justification.trim()
   }
+
+  // Format supporting detail preserving evidence and justification
+  const detailParts: string[] = []
+  if (input.findingId && typeof input.findingId === "string" && input.findingId.trim() !== "") {
+    detailParts.push(`Achado: ${input.findingId.trim()}`)
+  }
+  detailParts.push(`Evidência: ${input.evidence.trim()}`)
+  if (recommendedJustification) {
+    detailParts.push(`Justificativa da recomendação: ${recommendedJustification}`)
+  }
+  const detail = detailParts.join("\n")
 
   const options: Array<{ label: string; description: string }> = []
 
@@ -152,9 +204,13 @@ export function formatAcademicDecisionQuestion(
     const labelWithRec = recAlt.label.includes("(Recommended)")
       ? recAlt.label
       : `${recAlt.label} (Recommended)`
+    let desc = recAlt.description ? recAlt.description.trim() : ""
+    if (recommendedJustification && !desc.includes(recommendedJustification)) {
+      desc = desc ? `${desc} Justificativa: ${recommendedJustification}` : `Justificativa: ${recommendedJustification}`
+    }
     options.push({
       label: labelWithRec,
-      description: recAlt.description || "Recomendado com base nas evidências disponíveis.",
+      description: desc,
     })
   }
 
@@ -184,6 +240,7 @@ export function formatAcademicDecisionQuestion(
   return {
     id: input.id,
     question: input.prompt,
+    detail,
     ...(input.header ? { header: input.header } : { header: "Decisão Acadêmica" }),
     options,
   }
@@ -191,13 +248,22 @@ export function formatAcademicDecisionQuestion(
 
 /**
  * Validates and processes a raw answer from the native DSH userQuestions seam.
- * Enforces strictly that mutationAuthorized is false and maps user choice to non-mutating orientation.
+ * Enforces strictly single-select constraints, prevents repeated alternatives,
+ * rejects incompatible combinations or unauthorized custom inputs, guarantees
+ * mutationAuthorized is false, and maps user choice to non-mutating orientation.
  */
 export function processAcademicDecisionAnswer(
   input: AcademicDecisionInput,
   question: AcademicDecisionQuestion,
   rawAnswer: { id: string; selected?: string[]; custom?: string },
 ): AcademicDecisionResult {
+  if (!rawAnswer || typeof rawAnswer !== "object") {
+    throw new AcademicDecisionError(
+      "INVALID_ANSWER",
+      "Resposta inválida: objeto de resposta não fornecido ou malformado.",
+    )
+  }
+
   if (rawAnswer.id !== question.id) {
     throw new AcademicDecisionError(
       "MISMATCHED_ID",
@@ -205,12 +271,36 @@ export function processAcademicDecisionAnswer(
     )
   }
 
-  const validOptionLabels = new Set(question.options.map((o) => o.label))
-  const selected = Array.isArray(rawAnswer.selected) ? rawAnswer.selected : []
-  const custom = typeof rawAnswer.custom === "string" && rawAnswer.custom.trim() !== ""
-    ? rawAnswer.custom.trim()
-    : undefined
+  if (rawAnswer.selected !== undefined && !Array.isArray(rawAnswer.selected)) {
+    throw new AcademicDecisionError(
+      "INVALID_ANSWER",
+      "Campo selected deve ser uma lista de strings.",
+    )
+  }
 
+  const selected = Array.isArray(rawAnswer.selected) ? rawAnswer.selected : []
+  for (const sel of selected) {
+    if (typeof sel !== "string" || sel.trim() === "") {
+      throw new AcademicDecisionError(
+        "INVALID_ANSWER",
+        "Opção selecionada inválida ou vazia.",
+      )
+    }
+  }
+
+  // Check for duplicate selections
+  const seenSelections = new Set<string>()
+  for (const sel of selected) {
+    if (seenSelections.has(sel)) {
+      throw new AcademicDecisionError(
+        "INVALID_ANSWER",
+        `Alternativa repetida detectada na seleção: "${sel}".`,
+      )
+    }
+    seenSelections.add(sel)
+  }
+
+  const validOptionLabels = new Set(question.options.map((o) => o.label))
   for (const sel of selected) {
     if (!validOptionLabels.has(sel)) {
       throw new AcademicDecisionError(
@@ -220,6 +310,36 @@ export function processAcademicDecisionAnswer(
     }
   }
 
+  const custom =
+    typeof rawAnswer.custom === "string" && rawAnswer.custom.trim() !== ""
+      ? rawAnswer.custom.trim()
+      : undefined
+
+  // Single-select constraint: rejecting multiple selections
+  if (selected.length > 1) {
+    throw new AcademicDecisionError(
+      "INVALID_ANSWER",
+      "Seleções múltiplas não são permitidas para decisão acadêmica unívoca (single-select).",
+    )
+  }
+
+  // Incompatible combination of predefined option selection and custom response
+  if (selected.length > 0 && custom !== undefined) {
+    throw new AcademicDecisionError(
+      "INVALID_ANSWER",
+      "Combinação incompatível: não é permitido fornecer seleção de alternativa e resposta personalizada simultaneamente.",
+    )
+  }
+
+  // Custom response explicitly forbidden when allowCustom is false
+  if (input.allowCustom === false && custom !== undefined) {
+    throw new AcademicDecisionError(
+      "INVALID_ANSWER",
+      "Resposta personalizada não é permitida para esta decisão acadêmica (allowCustom=false).",
+    )
+  }
+
+  // Empty response
   if (selected.length === 0 && !custom) {
     throw new AcademicDecisionError(
       "INVALID_ANSWER",
@@ -249,7 +369,6 @@ export function processAcademicDecisionAnswer(
     return {
       id: question.id,
       selected,
-      ...(custom ? { custom } : {}),
       outcome: "requested_evidence",
       selectedLabel: primarySelection,
       mutationAuthorized: false,
@@ -267,7 +386,6 @@ export function processAcademicDecisionAnswer(
     return {
       id: question.id,
       selected,
-      ...(custom ? { custom } : {}),
       outcome: "deferred",
       selectedLabel: primarySelection,
       mutationAuthorized: false,
@@ -283,7 +401,6 @@ export function processAcademicDecisionAnswer(
   return {
     id: question.id,
     selected,
-    ...(custom ? { custom } : {}),
     outcome: isRec ? "selected_recommendation" : "selected_alternative",
     selectedLabel: primarySelection,
     mutationAuthorized: false,
@@ -351,13 +468,13 @@ export async function runAcademicDecisionCycle(
       )
     }
 
-    const question = formatAcademicDecisionQuestion(decisionInput)
-
     if (signal?.aborted) {
       const err: any = new AcademicDecisionError("ASK_ABORTED", "Pergunta cancelada antes do envio.")
       err.code = "ASK_ABORTED"
       throw err
     }
+
+    const question = formatAcademicDecisionQuestion(decisionInput)
 
     activeQuestionIds?.add(decisionInput.id)
 

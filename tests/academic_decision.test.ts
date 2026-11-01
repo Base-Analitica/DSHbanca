@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
-import { join } from "node:path"
+import { readFileSync, existsSync, realpathSync } from "node:fs"
+import { join, dirname } from "node:path"
+import { spawnSync } from "node:child_process"
+import { createRequire } from "node:module"
 import {
   formatAcademicDecisionQuestion,
   processAcademicDecisionAnswer,
@@ -30,6 +32,7 @@ const sampleAlternatives: AcademicAlternative[] = [
     consequence: "Define critérios estatísticos formais.",
     risks: "Exige dados adicionais de estratificação.",
     evidence: "capitulos/metodologia.tex:45-60",
+    justification: "Fortalecer rigor metodológico da amostragem com base no capítulo 3.",
     isRecommendation: true,
   },
   {
@@ -60,6 +63,141 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
 
     test("banca-grille SKILL.md enforces mandatory non-mutation safety rule", () => {
       expect(skillContent).toContain("NÃO autoriza corrigir")
+    })
+  })
+
+  describe("RED reproduction: Maintainer review PR #49 blockers (P1 & P2)", () => {
+    test("P1 RED: formatAcademicDecisionQuestion must preserve evidence and justification in detail field", () => {
+      const input: AcademicDecisionInput = {
+        id: "q",
+        prompt: "Escolha",
+        evidence: "capitulo.tex:12",
+        alternatives: [
+          { label: "A", description: "Sem fundamento" },
+          { label: "B", description: "Outra opção" },
+        ],
+        recommendation: {
+          alternativeIndex: 0,
+          justification: "Fundamento acadêmico X",
+        },
+      }
+      const question = formatAcademicDecisionQuestion(input)
+      expect((question as any).detail).toBeDefined()
+      expect((question as any).detail).toContain("capitulo.tex:12")
+      expect((question as any).detail).toContain("Fundamento acadêmico X")
+    })
+
+    test("P1 RED: formatAcademicDecisionQuestion must reject alternative marked isRecommendation without justification", () => {
+      const input: AcademicDecisionInput = {
+        id: "q2",
+        prompt: "Escolha",
+        evidence: "capitulo.tex:12",
+        alternatives: [
+          { label: "A", description: "Sem fundamento", isRecommendation: true },
+          { label: "B", description: "Outra opção" },
+        ],
+      }
+      expect(() => formatAcademicDecisionQuestion(input)).toThrow(AcademicDecisionError)
+      try {
+        formatAcademicDecisionQuestion(input)
+      } catch (err: any) {
+        expect(err.code).toBe("INVALID_RECOMMENDATION")
+      }
+    })
+
+    test("P2 RED: processAcademicDecisionAnswer must reject multiple selections for single-select question", () => {
+      const input: AcademicDecisionInput = {
+        id: "q-single",
+        prompt: "Pergunta single select?",
+        evidence: sampleFinding.evidence,
+        alternatives: [
+          { label: "A", description: "Desc A" },
+          { label: "B", description: "Desc B" },
+        ],
+      }
+      const question = formatAcademicDecisionQuestion(input)
+      const rawAnswer = {
+        id: "q-single",
+        selected: [question.options[0].label, question.options[1].label],
+      }
+      expect(() => processAcademicDecisionAnswer(input, question, rawAnswer)).toThrow(AcademicDecisionError)
+      try {
+        processAcademicDecisionAnswer(input, question, rawAnswer)
+      } catch (err: any) {
+        expect(err.code).toBe("INVALID_ANSWER")
+      }
+    })
+
+    test("P2 RED: processAcademicDecisionAnswer must reject duplicate options in selection", () => {
+      const input: AcademicDecisionInput = {
+        id: "q-dup-sel",
+        prompt: "Pergunta?",
+        evidence: sampleFinding.evidence,
+        alternatives: [
+          { label: "A", description: "Desc A" },
+          { label: "B", description: "Desc B" },
+        ],
+      }
+      const question = formatAcademicDecisionQuestion(input)
+      const rawAnswer = {
+        id: "q-dup-sel",
+        selected: [question.options[0].label, question.options[0].label],
+      }
+      expect(() => processAcademicDecisionAnswer(input, question, rawAnswer)).toThrow(AcademicDecisionError)
+      try {
+        processAcademicDecisionAnswer(input, question, rawAnswer)
+      } catch (err: any) {
+        expect(err.code).toBe("INVALID_ANSWER")
+      }
+    })
+
+    test("P2 RED: processAcademicDecisionAnswer must reject combination of selected option and custom response", () => {
+      const input: AcademicDecisionInput = {
+        id: "q-comb",
+        prompt: "Pergunta?",
+        evidence: sampleFinding.evidence,
+        alternatives: [
+          { label: "A", description: "Desc A" },
+          { label: "B", description: "Desc B" },
+        ],
+      }
+      const question = formatAcademicDecisionQuestion(input)
+      const rawAnswer = {
+        id: "q-comb",
+        selected: [question.options[0].label],
+        custom: "Tentativa de resposta custom concorrente",
+      }
+      expect(() => processAcademicDecisionAnswer(input, question, rawAnswer)).toThrow(AcademicDecisionError)
+      try {
+        processAcademicDecisionAnswer(input, question, rawAnswer)
+      } catch (err: any) {
+        expect(err.code).toBe("INVALID_ANSWER")
+      }
+    })
+
+    test("P2 RED: processAcademicDecisionAnswer must reject custom response when allowCustom is false", () => {
+      const input: AcademicDecisionInput = {
+        id: "q-no-custom",
+        prompt: "Pergunta sem custom?",
+        evidence: sampleFinding.evidence,
+        alternatives: [
+          { label: "A", description: "Desc A" },
+          { label: "B", description: "Desc B" },
+        ],
+        allowCustom: false,
+      }
+      const question = formatAcademicDecisionQuestion(input)
+      const rawAnswer = {
+        id: "q-no-custom",
+        selected: [],
+        custom: "Resposta custom não autorizada",
+      }
+      expect(() => processAcademicDecisionAnswer(input, question, rawAnswer)).toThrow(AcademicDecisionError)
+      try {
+        processAcademicDecisionAnswer(input, question, rawAnswer)
+      } catch (err: any) {
+        expect(err.code).toBe("INVALID_ANSWER")
+      }
     })
   })
 
@@ -489,6 +627,7 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
           {
             label: "Revisar a referência e propor a correção",
             description: "Investigar a referência e preparar proposta examinável.",
+            justification: "Fundamentação metodológica da proposta de revisão bibliográfica.",
             isRecommendation: true,
           },
           {
@@ -541,6 +680,167 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
       }
 
       expect(cleanedUp).toBe(true)
+    })
+  })
+
+  function resolveDshHostPackage(): string | undefined {
+    if (process.env.DSH_TEST_HOST_PACKAGE) return process.env.DSH_TEST_HOST_PACKAGE
+    const which = spawnSync("which", ["dsh"], { encoding: "utf8" })
+    if (which.status !== 0) return undefined
+    const bin = (which.stdout ?? "").trim().split("\n")[0]
+    if (!bin) return undefined
+    try {
+      const real = realpathSync(bin)
+      const pkg = join(dirname(real), "..", "package.json")
+      return existsSync(pkg) ? pkg : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  describe("Agent accessible path: Native host ask_user_question integration (Correction 2)", () => {
+    const hostPackage = resolveDshHostPackage()
+
+    test("1. Agent path executes native ask_user_question with questions conforming to banca-grille", async () => {
+      if (!hostPackage) {
+        console.warn("Skipping native tool execution proof: no DSH host package available")
+        return
+      }
+
+      const hostRequire = createRequire(hostPackage)
+      const { Context } = await import(hostRequire.resolve("@deepseek-ai/cordis"))
+      const { default: SystemPrompt } = await import(hostRequire.resolve("@deepseek-ai/dsh-system-prompt"))
+      const { default: ToolRuntime } = await import(hostRequire.resolve("@deepseek-ai/dsh-tools"))
+      const { UserQuestionService } = await import(hostRequire.resolve("@deepseek-ai/dsh-user-questions"))
+      const ToolAskUser = await import(hostRequire.resolve("@deepseek-ai/dsh-tool-ask-user"))
+
+      const hostCtx = new Context()
+      new SystemPrompt(hostCtx, {})
+      new ToolRuntime(hostCtx)
+      new UserQuestionService(hostCtx)
+      ToolAskUser.apply(hostCtx)
+
+      const formattedQuestion = formatAcademicDecisionQuestion({
+        id: "q-agent-path-001",
+        prompt: "Como conduzir o aprofundamento metodológico no capítulo 3?",
+        evidence: sampleFinding.evidence,
+        findingId: sampleFinding.findingId,
+        alternatives: sampleAlternatives,
+        recommendation: {
+          alternativeIndex: 0,
+          justification: "Recomendado para fortalecer rigor metodológico da dissertação.",
+        },
+      })
+
+      // Wire a human answerer waterfall
+      hostCtx.on("user-questions/request", async (request: any) => {
+        expect(request.questions[0].id).toBe("q-agent-path-001")
+        return {
+          answers: [
+            {
+              id: request.questions[0].id,
+              selected: [request.questions[0].options[0].label],
+            },
+          ],
+        }
+      })
+
+      const askTool = hostCtx.tools.get("ask_user_question")
+      expect(askTool).toBeDefined()
+
+      const rootAgent = { id: "agent-root-test", session: { id: "sess-test" } }
+      hostCtx.provide("agents", {
+        get: (id: string) => (id === "agent-root-test" ? rootAgent : undefined),
+        roots: () => [rootAgent],
+        isOwnedBy: () => false,
+      })
+
+      const exec = {
+        agent: rootAgent,
+        signal: new AbortController().signal,
+      }
+
+      // Execute via the tool accessible to the model in the Agent loop
+      const toolOutput = await askTool.execute(
+        {
+          questions: [
+            {
+              id: formattedQuestion.id,
+              question: formattedQuestion.question,
+              header: formattedQuestion.header,
+              options: formattedQuestion.options,
+            },
+          ],
+        },
+        exec,
+      )
+
+      expect(toolOutput.answers).toBeDefined()
+      expect(toolOutput.answers.length).toBe(1)
+      expect(toolOutput.answers[0].selected).toContain(formattedQuestion.options[0].label)
+
+      // Downstream interpretation preserves mutationAuthorized=false
+      const result = processAcademicDecisionAnswer(
+        {
+          id: "q-agent-path-001",
+          prompt: "Como conduzir o aprofundamento metodológico no capítulo 3?",
+          evidence: sampleFinding.evidence,
+          alternatives: sampleAlternatives,
+        },
+        formattedQuestion,
+        toolOutput.answers[0],
+      )
+
+      expect(result.mutationAuthorized).toBe(false)
+      expect(result.outcome).toBe("selected_recommendation")
+      expect(result.nextSteps).not.toContain("banca_corrigir")
+    })
+
+    test("2. Host native ask_user_question directly blocks delegated subagents fail-closed (DELEGATED_CALLER)", async () => {
+      if (!hostPackage) {
+        console.warn("Skipping native tool subagent proof: no DSH host package available")
+        return
+      }
+
+      const hostRequire = createRequire(hostPackage)
+      const { Context } = await import(hostRequire.resolve("@deepseek-ai/cordis"))
+      const { default: SystemPrompt } = await import(hostRequire.resolve("@deepseek-ai/dsh-system-prompt"))
+      const { default: ToolRuntime } = await import(hostRequire.resolve("@deepseek-ai/dsh-tools"))
+      const { UserQuestionService } = await import(hostRequire.resolve("@deepseek-ai/dsh-user-questions"))
+      const ToolAskUser = await import(hostRequire.resolve("@deepseek-ai/dsh-tool-ask-user"))
+
+      const hostCtx = new Context()
+      new SystemPrompt(hostCtx, {})
+      new ToolRuntime(hostCtx)
+      new UserQuestionService(hostCtx)
+      ToolAskUser.apply(hostCtx)
+
+      const rootAgent = { id: "agent-root", session: { id: "s-root" } }
+      const subAgent = { id: "agent-sub", session: { id: "s-sub", header: { origin: "subagent" } } }
+
+      hostCtx.provide("agents", {
+        get: (id: string) => (id === "agent-sub" ? subAgent : rootAgent),
+        roots: () => [rootAgent],
+        isOwnedBy: (id: string, parent: any) => id === "agent-sub",
+      })
+
+      const askTool = hostCtx.tools.get("ask_user_question")
+      expect(askTool).toBeDefined()
+
+      let thrownErr: any = null
+      try {
+        await askTool.execute(
+          {
+            questions: [{ id: "q-sub-test", question: "Subagent asking human?" }],
+          },
+          { agent: subAgent, signal: new AbortController().signal },
+        )
+      } catch (err: any) {
+        thrownErr = err
+      }
+
+      expect(thrownErr).toBeDefined()
+      expect(thrownErr.code).toBe("DELEGATED_CALLER")
     })
   })
 })
