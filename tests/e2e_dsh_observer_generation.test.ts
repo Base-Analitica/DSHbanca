@@ -61,6 +61,11 @@ test("actual generated observer module binds the control preset ID without runne
     expect(generatedModuleSource).toContain("sessionAuditAvailable")
     expect(generatedModuleSource).toContain("sessionEventsRead")
     expect(generatedModuleSource).toContain("approval.request() outside an open turn")
+    expect(generatedModuleSource).toContain("academic_approval_allowed_action")
+    expect(generatedModuleSource).toContain("academic_approval_rejected_action")
+    expect(generatedModuleSource).toContain("academic_approval_cancelled_action")
+    expect(generatedModuleSource).toContain("academic_approval_unavailable_action")
+    expect(generatedModuleSource).toContain("approval/request")
     expect(generatedModuleSource).not.toContain("dshbanca-e2e-unauthorized-selection-mutation")
     const agent = { id: "control-agent", ctx: {} }
     let selectedId: string | undefined

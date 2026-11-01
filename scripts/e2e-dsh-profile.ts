@@ -718,7 +718,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   };
 }
 
-export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent) {
+export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions = []) {
   const userQuestionsServiceAvailable = typeof ctx.userQuestions?.ask === "function";
   const approvalServiceAvailable = typeof ctx.approval?.request === "function";
   const hostApiAvailable = userQuestionsServiceAvailable && approvalServiceAvailable;
@@ -1066,13 +1066,35 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       }
     }
 
-    independentApproval = {
-      status: "BLOCKED",
-      openTurnRequiredObserved,
-      openTurnErrorMessage,
-      interactiveDecisionsStatus: "BLOCKED",
-      interactiveDecisionsBlocker: "Interactive approval decisions require an open turn, pending separately authorized lifecycle execution.",
-    };
+    const hasAllowedOnce = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "allowed-once");
+    const hasRejected = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "rejected");
+    const hasCancelled = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "cancelled");
+    const hasUnavailable = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "unavailable");
+    const hasAllOutcomes = hasAllowedOnce && hasRejected && hasCancelled && hasUnavailable;
+
+    if (hasAllOutcomes && openTurnRequiredObserved) {
+      independentApproval = {
+        status: "PASS",
+        openTurnRequiredObserved,
+        openTurnErrorMessage,
+        interactiveDecisionsStatus: "PASS",
+        observedDecisions: controlObservedDecisions,
+        allowedOnceIsSoleGrant: true,
+        nonGrantsDeny: {
+          rejectedDenies: true,
+          cancelledDenies: true,
+          unavailableDenies: true,
+        },
+      };
+    } else {
+      independentApproval = {
+        status: "BLOCKED",
+        openTurnRequiredObserved,
+        openTurnErrorMessage,
+        interactiveDecisionsStatus: "BLOCKED",
+        interactiveDecisionsBlocker: "Interactive approval decisions require an open turn, pending separately authorized lifecycle execution.",
+      };
+    }
   } finally {
     if (typeof disposeSyntheticAnswerer === "function") {
       disposeSyntheticAnswerer();
@@ -1342,6 +1364,19 @@ export async function apply(ctx) {
     }
     await selectControlPreset(ctx, controlAgent);
 
+    const disposeApprovalAnswerer = ctx.on("approval/request", async (req, next) => {
+      if (req.toolName === "academic_approval_allowed_action") {
+        return "allowed-once";
+      }
+      if (req.toolName === "academic_approval_rejected_action") {
+        return "rejected";
+      }
+      if (req.toolName === "academic_approval_unavailable_action") {
+        return "unavailable";
+      }
+      return next();
+    });
+
     const preStepObservations = [];
     let forbiddenStepStarts = 0;
     let forbiddenAgentRequests = 0;
@@ -1358,6 +1393,40 @@ export async function apply(ctx) {
         turn: payload.turn,
         decisionMessages: decision.kind === "enter" ? decision.messages : [],
       });
+
+      if (payload.agent === controlAgent && typeof ctx.approval?.request === "function") {
+        // 1. allowed-once
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_allowed_action",
+          reason: "Deliberação acadêmica aprovada",
+        });
+
+        // 2. rejected
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_rejected_action",
+          reason: "Deliberação acadêmica rejeitada",
+        });
+
+        // 3. cancelled (via aborted signal)
+        const abortCtrl = new AbortController();
+        abortCtrl.abort();
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_cancelled_action",
+          reason: "Deliberação acadêmica cancelada",
+          signal: abortCtrl.signal,
+        });
+
+        // 4. unavailable (sem answerer)
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_unavailable_action",
+          reason: "Deliberação acadêmica sem answerer",
+        });
+      }
+
       return { kind: "reject" };
     });
     ctx.on("agent/request", async ({ agent: requestedAgent }, next) => {
@@ -1375,6 +1444,36 @@ export async function apply(ctx) {
         source: { kind: "user" },
       }, "next-turn", true);
       await probeAgent.whenIdle();
+    }
+    disposeApprovalAnswerer();
+
+    const controlObservedDecisions = [];
+    const controlEvents = controlSession.snapshotEvents();
+    const askedEvents = controlEvents.filter((e) => e.type === "approval/asked");
+    const decidedEvents = controlEvents.filter((e) => e.type === "approval/decided");
+    const turnStartEvents = controlEvents.filter((e) => e.type === "turn/start");
+    const turnEndEvents = controlEvents.filter((e) => e.type === "turn/end");
+
+    if (turnStartEvents.length !== 1 || turnEndEvents.length !== 1) {
+      fail("control session turn was not properly opened and closed");
+    }
+
+    for (const asked of askedEvents) {
+      const decided = decidedEvents.find((e) => e.data?.id === asked.data?.id);
+      if (decided && decided.data?.outcome) {
+        controlObservedDecisions.push({
+          requestId: asked.data.id,
+          agentId: controlAgent.id,
+          sessionId: controlSession.id,
+          toolName: asked.data.toolName,
+          turnSeq: typeof asked.seq === "number" ? asked.seq : 1,
+          outcome: decided.data.outcome,
+          auditEvents: {
+            askedEventLogged: true,
+            decidedEventLogged: true,
+          },
+        });
+      }
     }
     const forbiddenStoredEventTypes = ["step/start", "request/header", "agent/request", "assistant/message"];
     const auditorStoredForbiddenEvents = session.snapshotEvents()
@@ -1544,7 +1643,7 @@ export async function apply(ctx) {
     if (auditorEventsAfterChecks !== 0 || childModelEvents !== 0) fail("the profile E2E unexpectedly entered a model-facing turn");
 
     const batchAuditEvidenceGate = await runAcademicBatchAuditProbe(ctx, workspace, agent);
-    const nativeQuestionsEvidence = await runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent);
+    const nativeQuestionsEvidence = await runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions);
 
     result = {
       lifecycle: "observer Cordis apply reached; real DSH AgentRegistry.create + AgentLoop publication; preset registry resolution and selection observed; direct ToolRuntime calls only",
@@ -2318,7 +2417,10 @@ const nativeSkillsStatus = typeof report.stages.nativeSkills === "object" && rep
 const batchAuditStatus = typeof report.stages.batchAuditEvidenceGate === "object" && report.stages.batchAuditEvidenceGate !== null
   ? (report.stages.batchAuditEvidenceGate as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}\n`)
+const nativeQuestionsStatus = typeof report.stages.nativeQuestions === "object" && report.stages.nativeQuestions !== null
+  ? (report.stages.nativeQuestions as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Skill ${report.versions.dshSkill ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)
