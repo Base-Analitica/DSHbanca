@@ -1134,6 +1134,98 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
   };
 }
 
+export function classifyCancellationOutcome(resOrErr) {
+  if (resOrErr === null || resOrErr === undefined) {
+    return {
+      handled: false,
+      observedErrorCode: "NULL_OR_UNDEFINED",
+      rejectionObserved: false,
+      isCancellation: false,
+    };
+  }
+
+  const isSuccessResult =
+    typeof resOrErr === "object" &&
+    resOrErr !== null &&
+    ("isError" in resOrErr ? resOrErr.isError === false : false ||
+     ("result" in resOrErr && typeof resOrErr.result === "object" ? resOrErr.result?.isError === false : false));
+
+  const hasSuccessfulAnswers =
+    typeof resOrErr === "object" &&
+    resOrErr !== null &&
+    (Array.isArray(resOrErr.answers) || Array.isArray(resOrErr.result?.value?.answers));
+
+  if (isSuccessResult || (hasSuccessfulAnswers && !("isError" in resOrErr && resOrErr.isError === true))) {
+    return {
+      handled: false,
+      observedErrorCode: "IGNORED_ABORT_SUCCESS",
+      rejectionObserved: false,
+      isCancellation: false,
+    };
+  }
+
+  const obj = resOrErr;
+  const rawCode =
+    obj.result?.error?.info?.code ??
+    obj.result?.error?.code ??
+    obj.info?.code ??
+    obj.code ??
+    obj.error?.info?.code ??
+    obj.error?.code;
+  const errorCode = typeof rawCode === "string" ? rawCode.trim() : undefined;
+
+  const rawMessage =
+    obj.result?.error?.message ??
+    obj.error?.message ??
+    obj.message ??
+    (typeof resOrErr === "string" ? resOrErr : "");
+  const normalizedMessage = typeof rawMessage === "string"
+    ? rawMessage.replace(/^Error:\s*/, "").trim()
+    : "";
+
+  if (
+    errorCode === "ASK_ABORTED" ||
+    errorCode === "TOOL_ABORTED" ||
+    errorCode === "TOOL_ABORTED_BEFORE_DISPATCH"
+  ) {
+    return {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      rejectionObserved: true,
+      isCancellation: true,
+    };
+  }
+
+  if (errorCode !== undefined && errorCode.length > 0) {
+    return {
+      handled: false,
+      observedErrorCode: errorCode,
+      rejectionObserved: true,
+      isCancellation: false,
+    };
+  }
+
+  if (
+    normalizedMessage === "ask_user_question was aborted before the user answered" ||
+    normalizedMessage === "tool call aborted before dispatch" ||
+    normalizedMessage === "tool call aborted"
+  ) {
+    return {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      rejectionObserved: true,
+      isCancellation: true,
+    };
+  }
+
+  return {
+    handled: false,
+    observedErrorCode: normalizedMessage.length > 0 ? "GENERIC_ERROR" : "UNKNOWN_ERROR",
+    rejectionObserved: true,
+    isCancellation: false,
+  };
+}
+
 export async function runAcademicDecisionProbe(ctx, workspace, agent, unverifiedAgent, nativeSkillsEvidence) {
   const userQuestionsServiceAvailable = typeof ctx.userQuestions?.ask === "function";
   const toolsExecuteAvailable = typeof ctx.tools?.execute === "function";
@@ -1406,9 +1498,12 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
       }
     }
 
-    let cancellationHandled = false;
-    let cancellationErrorCode = "";
-    let cancellationRejectionObserved = false;
+    let cancellationClassification = {
+      handled: false,
+      observedErrorCode: "NOT_EVALUATED",
+      rejectionObserved: false,
+      isCancellation: false,
+    };
     try {
       const cancelCtrl = new AbortController();
       cancelCtrl.abort();
@@ -1419,33 +1514,13 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
         agent,
         signal: cancelCtrl.signal,
       });
-      if (cancelRes && cancelRes.isError === true) {
-        cancellationRejectionObserved = true;
-        const errInfo = cancelRes.result?.error?.info?.code ?? cancelRes.result?.error?.code;
-        const errMsg = String(cancelRes.message || cancelRes.result?.error?.message || "");
-        if (errInfo === "ASK_ABORTED" || errMsg.includes("ASK_ABORTED") || errMsg.includes("was aborted")) {
-          cancellationErrorCode = "ASK_ABORTED";
-          cancellationHandled = true;
-        } else {
-          cancellationErrorCode = errInfo || "GENERIC_ERROR";
-        }
-      } else {
-        cancellationErrorCode = "IGNORED_ABORT_SUCCESS";
-      }
+      cancellationClassification = classifyCancellationOutcome(cancelRes);
     } catch (err) {
-      const errCode = (err && typeof err === "object") ? (err.info?.code ?? err.code) : undefined;
-      const errMsg = String(err?.message || err);
-      if (errCode === "ASK_ABORTED" || errMsg.includes("ASK_ABORTED") || errMsg.includes("was aborted")) {
-        cancellationRejectionObserved = true;
-        cancellationErrorCode = "ASK_ABORTED";
-        cancellationHandled = true;
-      } else {
-        cancellationErrorCode = errCode || "UNEXPECTED_EXCEPTION";
-      }
+      cancellationClassification = classifyCancellationOutcome(err);
     }
 
-    if (!cancellationHandled || cancellationErrorCode !== "ASK_ABORTED") {
-      fail("academic probe: cancellation of ask_user_question was not handled with ASK_ABORTED; got: " + cancellationErrorCode);
+    if (!cancellationClassification.handled || cancellationClassification.observedErrorCode !== "ASK_ABORTED") {
+      fail("academic probe: cancellation of ask_user_question was not handled with ASK_ABORTED; got: " + cancellationClassification.observedErrorCode);
     }
 
     negativeCases = {
@@ -1456,11 +1531,11 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
       },
       mismatchedOrIncompatibleRejected,
       cancellation: {
-        handled: cancellationHandled,
-        observedErrorCode: cancellationErrorCode,
-        rejectionObserved: cancellationRejectionObserved,
+        handled: cancellationClassification.handled,
+        observedErrorCode: cancellationClassification.observedErrorCode,
+        rejectionObserved: cancellationClassification.rejectionObserved,
       },
-      cancellationHandled,
+      cancellationHandled: cancellationClassification.handled,
     };
   } finally {
     if (typeof disposeAnswerer === "function") {

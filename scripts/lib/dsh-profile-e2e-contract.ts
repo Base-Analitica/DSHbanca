@@ -1347,6 +1347,117 @@ export interface AcademicDecisionCancellationEvidence {
   rejectionObserved: boolean
 }
 
+export interface CancellationClassification {
+  handled: boolean
+  observedErrorCode: string
+  rejectionObserved: boolean
+  isCancellation: boolean
+}
+
+/**
+ * Classify a tool execution result or thrown error from ask_user_question under cancellation fail-closed.
+ * Rejects contradictory codes like TIMEOUT/NETWORK_ERROR even if message contains "was aborted".
+ * Rejects success outcomes where host ignored AbortSignal.
+ * Accepts only true native ASK_ABORTED/TOOL_ABORTED codes or exact canonical message when code is stripped.
+ */
+export function classifyCancellationOutcome(resOrErr: unknown): CancellationClassification {
+  if (resOrErr === null || resOrErr === undefined) {
+    return {
+      handled: false,
+      observedErrorCode: "NULL_OR_UNDEFINED",
+      rejectionObserved: false,
+      isCancellation: false,
+    }
+  }
+
+  // 1. Success despite aborted signal is rejected
+  const isSuccessResult =
+    typeof resOrErr === "object" &&
+    resOrErr !== null &&
+    ("isError" in resOrErr ? (resOrErr as any).isError === false : false ||
+     ("result" in resOrErr && typeof (resOrErr as any).result === "object" ? (resOrErr as any).result?.isError === false : false))
+
+  const hasSuccessfulAnswers =
+    typeof resOrErr === "object" &&
+    resOrErr !== null &&
+    (Array.isArray((resOrErr as any).answers) || Array.isArray((resOrErr as any).result?.value?.answers))
+
+  if (isSuccessResult || (hasSuccessfulAnswers && !("isError" in resOrErr && (resOrErr as any).isError === true))) {
+    return {
+      handled: false,
+      observedErrorCode: "IGNORED_ABORT_SUCCESS",
+      rejectionObserved: false,
+      isCancellation: false,
+    }
+  }
+
+  // 2. Extract error code and message
+  const obj = resOrErr as Record<string, any>
+  const rawCode =
+    obj.result?.error?.info?.code ??
+    obj.result?.error?.code ??
+    obj.info?.code ??
+    obj.code ??
+    obj.error?.info?.code ??
+    obj.error?.code
+  const errorCode = typeof rawCode === "string" ? rawCode.trim() : undefined
+
+  const rawMessage =
+    obj.result?.error?.message ??
+    obj.error?.message ??
+    obj.message ??
+    (typeof resOrErr === "string" ? resOrErr : "")
+  const normalizedMessage = typeof rawMessage === "string"
+    ? rawMessage.replace(/^Error:\s*/, "").trim()
+    : ""
+
+  // 3. Known valid cancellation error codes
+  if (
+    errorCode === "ASK_ABORTED" ||
+    errorCode === "TOOL_ABORTED" ||
+    errorCode === "TOOL_ABORTED_BEFORE_DISPATCH"
+  ) {
+    return {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      rejectionObserved: true,
+      isCancellation: true,
+    }
+  }
+
+  // 4. Reject contradictory codes immediately without inspecting message substring
+  if (errorCode !== undefined && errorCode.length > 0) {
+    return {
+      handled: false,
+      observedErrorCode: errorCode,
+      rejectionObserved: true,
+      isCancellation: false,
+    }
+  }
+
+  // 5. Code absent or stripped: accept only EXACT canonical native messages
+  if (
+    normalizedMessage === "ask_user_question was aborted before the user answered" ||
+    normalizedMessage === "tool call aborted before dispatch" ||
+    normalizedMessage === "tool call aborted"
+  ) {
+    return {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      rejectionObserved: true,
+      isCancellation: true,
+    }
+  }
+
+  // 6. Generic or unknown error fail-closed
+  return {
+    handled: false,
+    observedErrorCode: normalizedMessage.length > 0 ? "GENERIC_ERROR" : "UNKNOWN_ERROR",
+    rejectionObserved: true,
+    isCancellation: false,
+  }
+}
+
 export interface AcademicDecisionNegativeCasesEvidence {
   delegatedAgentBlocked: {
     blocked: boolean

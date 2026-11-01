@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "status": "BLOCKED",
-  "startedAt": "2026-11-01T16:32:52.725Z",
+  "startedAt": "2026-11-01T16:44:34.587Z",
   "repository": {
-    "revision": "839b3cda673519f235941e654c88b2364f4be1e6",
+    "revision": "248f6a7ed07666afed3dbdfc091f8d2b04a819f5",
     "dirty": true
   },
   "versions": {
@@ -218,5 +218,5 @@
     "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38), a evidência de auditoria por lote (#44), o contrato de perguntas estruturadas e aprovação (#46) e a decisão acadêmica E2E (#48) são reportados separadamente.",
     "A sonda ativa agent/pre-step, skills nativas, auditoria acadêmica, perguntas nativas e decisão acadêmica exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil."
   ],
-  "finishedAt": "2026-11-01T16:32:54.791Z"
+  "finishedAt": "2026-11-01T16:44:36.557Z"
 }
