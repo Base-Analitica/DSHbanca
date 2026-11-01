@@ -1389,14 +1389,14 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
       );
       if (subResult.result.isError) {
         delegatedBlocked = true;
-        delegatedErrorCode = subResult.result?.error?.code ?? (subResult.message.includes("DELEGATED_CALLER") ? "DELEGATED_CALLER" : "ERROR");
+        delegatedErrorCode = subResult.result?.error?.info?.code ??
+          subResult.result?.error?.code ??
+          (subResult.message.includes("child agents may not ask user questions") || subResult.message.includes("DELEGATED_CALLER") ? "DELEGATED_CALLER" : "ERROR");
       }
     } catch (err) {
-      if (err && typeof err === "object" && err.code === "DELEGATED_CALLER") {
+      if (err && typeof err === "object") {
         delegatedBlocked = true;
-        delegatedErrorCode = err.code;
-      } else {
-        delegatedErrorCode = String(err?.code || err?.message || err);
+        delegatedErrorCode = err.info?.code ?? err.code ?? (String(err.message || err).includes("child agents may not ask user questions") || String(err.message || err).includes("DELEGATED_CALLER") ? "DELEGATED_CALLER" : "ERROR");
       }
     }
 
