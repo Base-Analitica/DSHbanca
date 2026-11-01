@@ -199,6 +199,39 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
         expect(err.code).toBe("INVALID_ANSWER")
       }
     })
+
+    test("P1-B RED: demonstrate loss of evidence and justification when question relies solely on detail field dropped by ask_user_question", () => {
+      // In @deepseek-ai/dsh-tool-ask-user, the host tool parameter schema and execute()
+      // only accept and forward: id, question, header, options, multi_select.
+      // It does NOT expose or forward detail.
+      const input: AcademicDecisionInput = {
+        id: "q-detail-loss-proof",
+        prompt: "Como conduzir o aprofundamento metodológico no capítulo 3?",
+        evidence: "capitulos/metodologia.tex:45-60",
+        findingId: "f-academic-001",
+        alternatives: sampleAlternatives,
+        recommendation: {
+          alternativeIndex: 0,
+          justification: "Recomendado para fortalecer rigor metodológico da dissertação.",
+        },
+      }
+      const formatted = formatAcademicDecisionQuestion(input)
+
+      // When the host tool ask_user_question maps the question to ctx.userQuestions.ask,
+      // it takes formatted.question and drops formatted.detail:
+      const forwardedToHostService = {
+        id: formatted.id,
+        question: formatted.question,
+        header: formatted.header,
+        options: formatted.options,
+      }
+
+      // RED assertion: the effective question forwarded to the user must contain the prompt,
+      // the localized evidence, and the recommendation justification:
+      expect(forwardedToHostService.question).toContain(input.prompt)
+      expect(forwardedToHostService.question).toContain(input.evidence)
+      expect(forwardedToHostService.question).toContain("Recomendado para fortalecer rigor metodológico da dissertação.")
+    })
   })
 
   describe("Positive paths", () => {
@@ -217,7 +250,10 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
 
       const question = formatAcademicDecisionQuestion(input)
       expect(question.id).toBe("q-decision-001")
-      expect(question.question).toBe(input.prompt)
+      expect(question.question).toContain(input.prompt)
+      expect(question.question).toContain(`Achado: ${sampleFinding.findingId}`)
+      expect(question.question).toContain(`Evidência: ${sampleFinding.evidence}`)
+      expect(question.question).toContain("Recomendado para fortalecer rigor metodológico da dissertação.")
       expect(question.options.length).toBe(4) // 2 alternatives + Não sei + Adiar
       expect(question.options[0].label).toContain("(Recommended)")
       expect(question.options[0].description).toContain("Consequência:")
@@ -698,16 +734,17 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
     }
   }
 
-  describe("Agent accessible path: Native host ask_user_question integration (Correction 2)", () => {
+  describe("Isolated tool contract: ask_user_question schema and answerer payload observation", () => {
+    // Note: These tests verify the isolated contract and parameter schema of the installed
+    // @deepseek-ai/dsh-tool-ask-user tool function within an isolated Context using synthetic
+    // agent mocks. They do NOT prove end-to-end agent lifecycle execution (AgentRegistry,
+    // Agent loop, SessionStore, etc.), which is validated separately via scripts/e2e-dsh-profile.ts
+    // (reporting BLOCKED until authorized by maintainers).
     const hostPackage = resolveDshHostPackage()
+    const hostTest = hostPackage ? test : test.skip
 
-    test("1. Agent path executes native ask_user_question with questions conforming to banca-grille", async () => {
-      if (!hostPackage) {
-        console.warn("Skipping native tool execution proof: no DSH host package available")
-        return
-      }
-
-      const hostRequire = createRequire(hostPackage)
+    hostTest("1. Agent path executes native ask_user_question with questions conforming to banca-grille", async () => {
+      const hostRequire = createRequire(hostPackage!)
       const { Context } = await import(hostRequire.resolve("@deepseek-ai/cordis"))
       const { default: SystemPrompt } = await import(hostRequire.resolve("@deepseek-ai/dsh-system-prompt"))
       const { default: ToolRuntime } = await import(hostRequire.resolve("@deepseek-ai/dsh-tools"))
@@ -720,10 +757,11 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
       new UserQuestionService(hostCtx)
       ToolAskUser.apply(hostCtx)
 
+      const localizedEvidence = `${sampleFinding.file}:${sampleFinding.startLine}-${sampleFinding.endLine} — ${sampleFinding.evidence}`
       const formattedQuestion = formatAcademicDecisionQuestion({
         id: "q-agent-path-001",
         prompt: "Como conduzir o aprofundamento metodológico no capítulo 3?",
-        evidence: sampleFinding.evidence,
+        evidence: localizedEvidence,
         findingId: sampleFinding.findingId,
         alternatives: sampleAlternatives,
         recommendation: {
@@ -732,8 +770,10 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
         },
       })
 
-      // Wire a human answerer waterfall
+      // Wire a human answerer waterfall and observe the received payload
+      let payloadReceivedByAnswerer: any = null
       hostCtx.on("user-questions/request", async (request: any) => {
+        payloadReceivedByAnswerer = request
         expect(request.questions[0].id).toBe("q-agent-path-001")
         return {
           answers: [
@@ -775,6 +815,32 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
         exec,
       )
 
+      // Observe and prove the payload actually received by the human answerer waterfall:
+      expect(payloadReceivedByAnswerer).toBeDefined()
+      const answererQuestion = payloadReceivedByAnswerer.questions[0]
+      expect(answererQuestion.id).toBe("q-agent-path-001")
+
+      // 1. A pergunta acadêmica
+      expect(answererQuestion.question).toContain("Como conduzir o aprofundamento metodológico no capítulo 3?")
+      // 2. A evidência localizada
+      expect(answererQuestion.question).toContain("capitulos/metodologia.tex:45-60")
+      expect(answererQuestion.question).toContain("Achado: f-academic-001")
+      // 3. A justificativa da recomendação
+      expect(answererQuestion.question).toContain("Recomendado para fortalecer rigor metodológico da dissertação.")
+      // Comprova que o campo detail NÃO foi transmitido pelo ask_user_question do host
+      expect((answererQuestion as any).detail).toBeUndefined()
+
+      // 4. As alternativas e consequências pertinentes
+      expect(answererQuestion.options.length).toBe(4)
+      expect(answererQuestion.options[0].label).toContain("(Recommended)")
+      expect(answererQuestion.options[0].description).toContain("Consequência:")
+      expect(answererQuestion.options[0].description).toContain("Riscos:")
+
+      // 5. Os controles de incerteza e adiamento
+      expect(answererQuestion.options[2].label).toBe(SAFE_OPTION_EVIDENCE)
+      expect(answererQuestion.options[3].label).toBe(SAFE_OPTION_DEFER)
+
+      // Assert tool output
       expect(toolOutput.answers).toBeDefined()
       expect(toolOutput.answers.length).toBe(1)
       expect(toolOutput.answers[0].selected).toContain(formattedQuestion.options[0].label)
@@ -784,7 +850,7 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
         {
           id: "q-agent-path-001",
           prompt: "Como conduzir o aprofundamento metodológico no capítulo 3?",
-          evidence: sampleFinding.evidence,
+          evidence: localizedEvidence,
           alternatives: sampleAlternatives,
         },
         formattedQuestion,
@@ -796,13 +862,8 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
       expect(result.nextSteps).not.toContain("banca_corrigir")
     })
 
-    test("2. Host native ask_user_question directly blocks delegated subagents fail-closed (DELEGATED_CALLER)", async () => {
-      if (!hostPackage) {
-        console.warn("Skipping native tool subagent proof: no DSH host package available")
-        return
-      }
-
-      const hostRequire = createRequire(hostPackage)
+    hostTest("2. Host native ask_user_question directly blocks delegated subagents fail-closed (DELEGATED_CALLER)", async () => {
+      const hostRequire = createRequire(hostPackage!)
       const { Context } = await import(hostRequire.resolve("@deepseek-ai/cordis"))
       const { default: SystemPrompt } = await import(hostRequire.resolve("@deepseek-ai/dsh-system-prompt"))
       const { default: ToolRuntime } = await import(hostRequire.resolve("@deepseek-ai/dsh-tools"))

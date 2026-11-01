@@ -1,18 +1,21 @@
 /**
- * Pure domain module for selectable academic decisions over the native DSH userQuestions seam.
+ * Pure domain library for structuring, formatting, and interpreting selectable academic decisions
+ * conforming to banca-grille specifications.
  *
- * Implements the non-mutating academic decision cycle for banca-grille:
- * - 2 to 4 concrete, evidence-grounded alternatives
- * - Grounded recommendation with explicit, verifiable justification (marked with "(Recommended)")
- * - Preservation of localized evidence and justification in the native AskUserQuestionItem.detail field
- * - Strict rejection of recommendations lacking verifiable justification or presenting conflicting indicators
- * - Standard safe controls: "Não sei — explique/mostre evidências", "Adiar / continuar outras etapas", "Outro" (custom response)
- * - Strict answer validation: rejecting multi-select in single-select decisions, duplicate options,
- *   unauthorized custom answers, and incompatible combinations of selection and custom text
- * - Strict safety invariant: selection NEVER authorizes manuscript mutation (mutationAuthorized = false)
- * - Integration role: serves programmatic callers, test harnesses, automated review loops, and downstream
- *   result handlers. In the live agent workflow, the agent calls the host tool ask_user_question directly,
- *   which dispatches to ctx.userQuestions.ask under host-level root authorization and dshbanca tool guards.
+ * Scope and Architecture:
+ * - Pure domain library: provides functions to format structured decision questions and parse/validate
+ *   answers for programmatic callers, test harnesses, and downstream handlers.
+ * - NOT a runtime interceptor: this module does NOT intercept the agent's runtime execution or impose
+ *   enforcement on the model loop. In production, the agent follows instructions in skills/banca-grille/SKILL.md
+ *   and invokes the host's native ask_user_question tool directly.
+ * - Effective evidence delivery: the installed host tool ask_user_question (@deepseek-ai/dsh-tool-ask-user)
+ *   accepts and forwards only id, question, header, options, and multi_select to ctx.userQuestions.ask,
+ *   dropping any extra fields (such as detail). To ensure the human author receives localized evidence,
+ *   finding IDs, and recommendation justifications in the effective path, formatAcademicDecisionQuestion
+ *   embeds them directly in the question text (and option descriptions), while also populating detail for
+ *   direct callers of ctx.userQuestions.ask.
+ * - Strict safety invariant: selection NEVER authorizes manuscript mutation (mutationAuthorized = false).
+ *   Any subsequent mutation requires separate explicit authorization via ctx.approval.
  */
 
 export const SAFE_OPTION_EVIDENCE = "Não sei — explique/mostre evidências" as const
@@ -185,7 +188,13 @@ export function formatAcademicDecisionQuestion(
     recommendedJustification = alt.justification.trim()
   }
 
-  // Format supporting detail preserving evidence and justification
+  // Format context block preserving finding, evidence, and justification.
+  // The host's model-facing tool ask_user_question (@deepseek-ai/dsh-tool-ask-user) only
+  // accepts and forwards: id, question, header, options, multi_select. It does NOT expose
+  // or forward the detail field to ctx.userQuestions.ask.
+  // Therefore, to guarantee the human user receives the localized evidence and justification
+  // in the effective path through ask_user_question, we format them directly into the question text
+  // (while also setting detail for direct callers of ctx.userQuestions.ask).
   const detailParts: string[] = []
   if (input.findingId && typeof input.findingId === "string" && input.findingId.trim() !== "") {
     detailParts.push(`Achado: ${input.findingId.trim()}`)
@@ -195,6 +204,7 @@ export function formatAcademicDecisionQuestion(
     detailParts.push(`Justificativa da recomendação: ${recommendedJustification}`)
   }
   const detail = detailParts.join("\n")
+  const fullQuestionText = `${input.prompt.trim()}\n\n${detail}`
 
   const options: Array<{ label: string; description: string }> = []
 
@@ -239,7 +249,7 @@ export function formatAcademicDecisionQuestion(
 
   return {
     id: input.id,
-    question: input.prompt,
+    question: fullQuestionText,
     detail,
     ...(input.header ? { header: input.header } : { header: "Decisão Acadêmica" }),
     options,
