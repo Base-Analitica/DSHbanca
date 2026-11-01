@@ -774,11 +774,25 @@ export interface ObservedApprovalDecision {
   sessionId: string
   toolName: string
   turnSeq: number
+  askedSeq?: number
+  decidedSeq?: number
   outcome: "allowed-once" | "rejected" | "cancelled" | "unavailable"
   auditEvents: {
     askedEventLogged: boolean
     decidedEventLogged: boolean
   }
+  turnBoundaries?: {
+    turnStartSeq: number
+    turnEndSeq: number
+    isEnclosed: boolean
+  }
+  unansweredByProvider?: boolean
+}
+
+export interface ApprovalTurnIntegrityEvidence {
+  singleTurnClosed: boolean
+  turnStartSeq: number
+  turnEndSeq: number
 }
 
 export interface SelectionMutationEvidence {
@@ -834,6 +848,9 @@ export interface IndependentApprovalEvidence {
     unavailableDenies: boolean
   }
   contractVerified?: boolean
+  turnIntegrity?: ApprovalTurnIntegrityEvidence
+  unavailableProvedByAbsenceOfProvider?: boolean
+  syntheticAnswererInterceptedUnavailable?: boolean
 }
 
 export interface NativeQuestionsEvidence {
@@ -1109,26 +1126,53 @@ export function validateNativeQuestionsEvidence(value: unknown): string[] {
       if (approval.interactiveDecisionsStatus !== "PASS") {
         errors.push("approval.status cannot be PASS when interactiveDecisionsStatus is not PASS")
       }
+
+      // P1: Unavailable must be proved by absence of provider (host fallback), not voluntary answerer return
+      if (approval.unavailableProvedByAbsenceOfProvider !== true) {
+        errors.push("unavailable outcome must be proved by absence of provider (host fallback), not voluntary answerer return")
+      }
+      if (approval.syntheticAnswererInterceptedUnavailable === true) {
+        errors.push("synthetic answerer intercepted unavailable request instead of exercising host fallback")
+      }
+
+      // P2: Turn integrity and strict single closed turn
+      const turnIntegrity = isRecord(approval.turnIntegrity) ? (approval.turnIntegrity as unknown as ApprovalTurnIntegrityEvidence) : undefined
+      if (!turnIntegrity || turnIntegrity.singleTurnClosed !== true) {
+        errors.push("approval turn integrity must prove a single closed turn")
+      }
+      const turnStartSeq = typeof turnIntegrity?.turnStartSeq === "number" ? turnIntegrity.turnStartSeq : NaN
+      const turnEndSeq = typeof turnIntegrity?.turnEndSeq === "number" ? turnIntegrity.turnEndSeq : NaN
+      if (isNaN(turnStartSeq) || isNaN(turnEndSeq) || turnStartSeq >= turnEndSeq) {
+        errors.push("turnIntegrity must contain valid numeric turnStartSeq < turnEndSeq")
+      }
+
+      // P2: Exactly 4 pairs, unique IDs, tool/outcome 1:1 mapping, strict ordering
       if (!Array.isArray(approval.observedDecisions) || approval.observedDecisions.length === 0) {
         errors.push("approval.status cannot be PASS without verified native observedDecisions containing turn-enclosed audit events")
+      } else if (approval.observedDecisions.length !== 4) {
+        errors.push("observedDecisions must contain exactly 4 observed decisions, one for each native outcome")
       } else {
         const decisions = approval.observedDecisions as ObservedApprovalDecision[]
-        const hasAllowedOnce = decisions.some((d) => d.outcome === "allowed-once")
-        const hasRejected = decisions.some((d) => d.outcome === "rejected")
-        const hasCancelled = decisions.some((d) => d.outcome === "cancelled")
-        const hasUnavailable = decisions.some((d) => d.outcome === "unavailable")
 
-        if (!hasAllowedOnce) {
-          errors.push("observedDecisions must contain an observed allowed-once outcome")
+        const seenRequestIds = new Set<string>()
+        const expectedToolOutcomes: Record<string, string> = {
+          academic_approval_allowed_action: "allowed-once",
+          academic_approval_rejected_action: "rejected",
+          academic_approval_cancelled_action: "cancelled",
+          academic_approval_unavailable_action: "unavailable",
         }
-        if (!hasRejected || !hasCancelled || !hasUnavailable) {
-          errors.push("observedDecisions must contain observed non-grant outcomes (rejected, cancelled, unavailable)")
-        }
+        const matchedTools = new Set<string>()
 
         for (const dec of decisions) {
           if (typeof dec.requestId !== "string" || dec.requestId.trim().length === 0) {
             errors.push("observedDecision must contain a non-empty requestId")
+          } else {
+            if (seenRequestIds.has(dec.requestId)) {
+              errors.push(`duplicate requestId in observedDecisions: ${dec.requestId}`)
+            }
+            seenRequestIds.add(dec.requestId)
           }
+
           if (typeof dec.agentId !== "string" || dec.agentId.trim().length === 0) {
             errors.push("observedDecision must contain a non-empty agentId")
           }
@@ -1138,11 +1182,63 @@ export function validateNativeQuestionsEvidence(value: unknown): string[] {
           if (typeof dec.toolName !== "string" || dec.toolName.trim().length === 0) {
             errors.push("observedDecision must contain a non-empty toolName")
           }
-          if (typeof dec.turnSeq !== "number" || dec.turnSeq < 0) {
-            errors.push("observedDecision must contain a non-negative turnSeq proving turn-enclosed audit")
+
+          // Strict numeric sequence verification (no fallbacks)
+          if (
+            typeof dec.turnSeq !== "number" ||
+            dec.turnSeq < 0 ||
+            typeof dec.askedSeq !== "number" ||
+            dec.askedSeq < 0 ||
+            typeof dec.decidedSeq !== "number" ||
+            dec.decidedSeq < 0
+          ) {
+            errors.push("observedDecision must contain strict numeric turnSeq, askedSeq, and decidedSeq without fallbacks")
+          } else {
+            if (dec.turnSeq !== dec.askedSeq) {
+              errors.push("turnSeq must strictly match askedSeq without fallback substitution")
+            }
+            if (!isNaN(turnStartSeq) && !isNaN(turnEndSeq)) {
+              if (dec.askedSeq <= turnStartSeq) {
+                errors.push(`approval/asked event must occur strictly after turn/start (askedSeq ${dec.askedSeq} <= turnStartSeq ${turnStartSeq})`)
+              }
+              if (dec.decidedSeq <= dec.askedSeq) {
+                errors.push(`approval/decided event must occur strictly after approval/asked (decidedSeq ${dec.decidedSeq} <= askedSeq ${dec.askedSeq})`)
+              }
+              if (dec.decidedSeq >= turnEndSeq) {
+                errors.push(`approval/decided event must occur strictly before turn/end (decidedSeq ${dec.decidedSeq} >= turnEndSeq ${turnEndSeq})`)
+              }
+            }
           }
+
           if (!dec.auditEvents || dec.auditEvents.askedEventLogged !== true || dec.auditEvents.decidedEventLogged !== true) {
             errors.push("observedDecision must prove asked and decided audit events were logged in session")
+          }
+
+          // 1:1 mapping of toolName to outcome
+          const expectedOutcome = expectedToolOutcomes[dec.toolName]
+          if (!expectedOutcome || dec.outcome !== expectedOutcome) {
+            errors.push(`observedDecisions must contain 1:1 mapping of expected approval tools to native outcomes (mismatch for tool '${dec.toolName}' with outcome '${dec.outcome}')`)
+          } else {
+            matchedTools.add(dec.toolName)
+          }
+
+          // P1: For unavailable, unansweredByProvider must be true
+          if (dec.outcome === "unavailable" && dec.unansweredByProvider !== true) {
+            errors.push("unavailable decision must prove it was unanswered by any provider")
+          }
+        }
+
+        if (matchedTools.size !== 4) {
+          errors.push("observedDecisions must cover all 4 expected approval tool actions 1:1")
+        }
+
+        // Sequential ordering across decision pairs
+        const sortedDecisions = [...decisions].filter((d) => typeof d.askedSeq === "number" && typeof d.decidedSeq === "number")
+        sortedDecisions.sort((a, b) => (a.askedSeq ?? 0) - (b.askedSeq ?? 0))
+        for (let i = 0; i < sortedDecisions.length - 1; i++) {
+          if ((sortedDecisions[i].decidedSeq ?? 0) >= (sortedDecisions[i + 1].askedSeq ?? 0)) {
+            errors.push("approval decisions must be strictly sequentially ordered without overlap")
+            break
           }
         }
       }

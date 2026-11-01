@@ -1070,9 +1070,20 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
     const hasRejected = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "rejected");
     const hasCancelled = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "cancelled");
     const hasUnavailable = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "unavailable");
-    const hasAllOutcomes = hasAllowedOnce && hasRejected && hasCancelled && hasUnavailable;
+    const unavailDecision = Array.isArray(controlObservedDecisions) && controlObservedDecisions.find((d) => d.outcome === "unavailable");
+    const unavailableProvedByAbsenceOfProvider = unavailDecision?.unansweredByProvider === true;
+    const hasAllOutcomes = hasAllowedOnce && hasRejected && hasCancelled && hasUnavailable && controlObservedDecisions.length === 4;
 
-    if (hasAllOutcomes && openTurnRequiredObserved) {
+    const firstDecision = Array.isArray(controlObservedDecisions) && controlObservedDecisions[0];
+    const turnIntegrity = firstDecision?.turnBoundaries
+      ? {
+          singleTurnClosed: true,
+          turnStartSeq: firstDecision.turnBoundaries.turnStartSeq,
+          turnEndSeq: firstDecision.turnBoundaries.turnEndSeq,
+        }
+      : undefined;
+
+    if (hasAllOutcomes && openTurnRequiredObserved && unavailableProvedByAbsenceOfProvider && turnIntegrity?.singleTurnClosed) {
       independentApproval = {
         status: "PASS",
         openTurnRequiredObserved,
@@ -1085,6 +1096,8 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
           cancelledDenies: true,
           unavailableDenies: true,
         },
+        turnIntegrity,
+        unavailableProvedByAbsenceOfProvider: true,
       };
     } else {
       independentApproval = {
@@ -1364,15 +1377,15 @@ export async function apply(ctx) {
     }
     await selectControlPreset(ctx, controlAgent);
 
+    const answeredApprovalTools = [];
     const disposeApprovalAnswerer = ctx.on("approval/request", async (req, next) => {
       if (req.toolName === "academic_approval_allowed_action") {
+        answeredApprovalTools.push(req.toolName);
         return "allowed-once";
       }
       if (req.toolName === "academic_approval_rejected_action") {
+        answeredApprovalTools.push(req.toolName);
         return "rejected";
-      }
-      if (req.toolName === "academic_approval_unavailable_action") {
-        return "unavailable";
       }
       return next();
     });
@@ -1419,7 +1432,7 @@ export async function apply(ctx) {
           signal: abortCtrl.signal,
         });
 
-        // 4. unavailable (sem answerer)
+        // 4. unavailable (sem answerer: reaches host waterfall fallback)
         await ctx.approval.request({
           agent: controlAgent,
           toolName: "academic_approval_unavailable_action",
@@ -1447,6 +1460,10 @@ export async function apply(ctx) {
     }
     disposeApprovalAnswerer();
 
+    if (answeredApprovalTools.includes("academic_approval_unavailable_action")) {
+      fail("synthetic answerer answered academic_approval_unavailable_action; must reach native host fallback without provider");
+    }
+
     const controlObservedDecisions = [];
     const controlEvents = controlSession.snapshotEvents();
     const askedEvents = controlEvents.filter((e) => e.type === "approval/asked");
@@ -1455,24 +1472,96 @@ export async function apply(ctx) {
     const turnEndEvents = controlEvents.filter((e) => e.type === "turn/end");
 
     if (turnStartEvents.length !== 1 || turnEndEvents.length !== 1) {
-      fail("control session turn was not properly opened and closed");
+      fail("control session turn was not properly opened and closed: expected exactly 1 turn/start and 1 turn/end");
+    }
+    const turnStart = turnStartEvents[0];
+    const turnEnd = turnEndEvents[0];
+    if (typeof turnStart.seq !== "number" || typeof turnEnd.seq !== "number" || turnStart.seq >= turnEnd.seq) {
+      fail("control session turn boundary seq numbers are invalid or out of order");
     }
 
+    if (askedEvents.length !== 4 || decidedEvents.length !== 4) {
+      fail("expected exactly 4 approval/asked and 4 approval/decided events in control session, found " + askedEvents.length + " asked and " + decidedEvents.length + " decided");
+    }
+
+    const seenRequestIds = new Set();
+    const expectedOutcomesByTool = {
+      academic_approval_allowed_action: "allowed-once",
+      academic_approval_rejected_action: "rejected",
+      academic_approval_cancelled_action: "cancelled",
+      academic_approval_unavailable_action: "unavailable",
+    };
+
     for (const asked of askedEvents) {
-      const decided = decidedEvents.find((e) => e.data?.id === asked.data?.id);
-      if (decided && decided.data?.outcome) {
-        controlObservedDecisions.push({
-          requestId: asked.data.id,
-          agentId: controlAgent.id,
-          sessionId: controlSession.id,
-          toolName: asked.data.toolName,
-          turnSeq: typeof asked.seq === "number" ? asked.seq : 1,
-          outcome: decided.data.outcome,
-          auditEvents: {
-            askedEventLogged: true,
-            decidedEventLogged: true,
-          },
-        });
+      if (typeof asked.seq !== "number") {
+        fail("approval/asked event missing valid numeric seq");
+      }
+      if (typeof asked.data?.id !== "string" || !asked.data.id) {
+        fail("approval/asked event missing valid requestId");
+      }
+      if (seenRequestIds.has(asked.data.id)) {
+        fail("duplicate requestId in approval/asked events: " + asked.data.id);
+      }
+      seenRequestIds.add(asked.data.id);
+
+      const matchingDecided = decidedEvents.filter((e) => e.data?.id === asked.data?.id);
+      if (matchingDecided.length !== 1) {
+        fail("expected exactly 1 matching approval/decided event for requestId " + asked.data.id + ", found " + matchingDecided.length);
+      }
+      const decided = matchingDecided[0];
+      if (typeof decided.seq !== "number") {
+        fail("approval/decided event missing valid numeric seq");
+      }
+
+      if (asked.seq <= turnStart.seq) {
+        fail("approval/asked event (seq " + asked.seq + ") occurred before or at turn/start (seq " + turnStart.seq + ")");
+      }
+      if (decided.seq <= asked.seq) {
+        fail("approval/decided event (seq " + decided.seq + ") occurred before or at approval/asked (seq " + asked.seq + ")");
+      }
+      if (decided.seq >= turnEnd.seq) {
+        fail("approval/decided event (seq " + decided.seq + ") occurred after or at turn/end (seq " + turnEnd.seq + ")");
+      }
+
+      const expectedOutcome = expectedOutcomesByTool[asked.data.toolName];
+      if (!expectedOutcome) {
+        fail("unexpected toolName in approval/asked event: " + asked.data.toolName);
+      }
+      if (decided.data?.outcome !== expectedOutcome) {
+        fail("mismatched outcome for " + asked.data.toolName + ": expected " + expectedOutcome + ", got " + decided.data?.outcome);
+      }
+
+      const isUnavailable = asked.data.toolName === "academic_approval_unavailable_action";
+      const unansweredByProvider = isUnavailable
+        ? !answeredApprovalTools.includes(asked.data.toolName)
+        : undefined;
+
+      controlObservedDecisions.push({
+        requestId: asked.data.id,
+        agentId: controlAgent.id,
+        sessionId: controlSession.id,
+        toolName: asked.data.toolName,
+        askedSeq: asked.seq,
+        decidedSeq: decided.seq,
+        turnSeq: asked.seq,
+        outcome: decided.data.outcome,
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+        turnBoundaries: {
+          turnStartSeq: turnStart.seq,
+          turnEndSeq: turnEnd.seq,
+          isEnclosed: true,
+        },
+        ...isUnavailable ? { unansweredByProvider } : {},
+      });
+    }
+
+    const sortedByAsked = [...controlObservedDecisions].sort((a, b) => a.askedSeq - b.askedSeq);
+    for (let i = 0; i < sortedByAsked.length - 1; i++) {
+      if (sortedByAsked[i].decidedSeq >= sortedByAsked[i + 1].askedSeq) {
+        fail("overlapping or out-of-order approval decisions: decision " + i + " decided at " + sortedByAsked[i].decidedSeq + " >= decision " + (i + 1) + " asked at " + sortedByAsked[i + 1].askedSeq);
       }
     }
     const forbiddenStoredEventTypes = ["step/start", "request/header", "agent/request", "assistant/message"];

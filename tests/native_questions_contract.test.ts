@@ -119,54 +119,89 @@ export const fullPassNativeQuestionsEvidence: NativeQuestionsEvidence = {
     openTurnErrorMessage:
       "approval.request() outside an open turn: the approval/asked + approval/decided audit pair must be turn-enclosed (a bare event between turns is crash-tail garbage on reload). Ask from inside the turn that needs the decision.",
     interactiveDecisionsStatus: "PASS",
+    turnIntegrity: {
+      singleTurnClosed: true,
+      turnStartSeq: 1,
+      turnEndSeq: 10,
+    },
+    unavailableProvedByAbsenceOfProvider: true,
     observedDecisions: [
       {
         requestId: "appr-req-001",
         agentId: "agent-root-test",
         sessionId: "sess-turn-001",
-        toolName: "academic_nonmutating_action",
-        turnSeq: 3,
+        toolName: "academic_approval_allowed_action",
+        askedSeq: 2,
+        decidedSeq: 3,
+        turnSeq: 2,
         outcome: "allowed-once",
         auditEvents: {
           askedEventLogged: true,
           decidedEventLogged: true,
+        },
+        turnBoundaries: {
+          turnStartSeq: 1,
+          turnEndSeq: 10,
+          isEnclosed: true,
         },
       },
       {
         requestId: "appr-req-002",
         agentId: "agent-root-test",
         sessionId: "sess-turn-001",
-        toolName: "academic_nonmutating_action",
+        toolName: "academic_approval_rejected_action",
+        askedSeq: 4,
+        decidedSeq: 5,
         turnSeq: 4,
         outcome: "rejected",
         auditEvents: {
           askedEventLogged: true,
           decidedEventLogged: true,
         },
+        turnBoundaries: {
+          turnStartSeq: 1,
+          turnEndSeq: 10,
+          isEnclosed: true,
+        },
       },
       {
         requestId: "appr-req-003",
         agentId: "agent-root-test",
         sessionId: "sess-turn-001",
-        toolName: "academic_nonmutating_action",
-        turnSeq: 5,
+        toolName: "academic_approval_cancelled_action",
+        askedSeq: 6,
+        decidedSeq: 7,
+        turnSeq: 6,
         outcome: "cancelled",
         auditEvents: {
           askedEventLogged: true,
           decidedEventLogged: true,
+        },
+        turnBoundaries: {
+          turnStartSeq: 1,
+          turnEndSeq: 10,
+          isEnclosed: true,
         },
       },
       {
         requestId: "appr-req-004",
         agentId: "agent-root-test",
         sessionId: "sess-turn-001",
-        toolName: "academic_nonmutating_action",
-        turnSeq: 6,
+        toolName: "academic_approval_unavailable_action",
+        askedSeq: 8,
+        decidedSeq: 9,
+        turnSeq: 8,
         outcome: "unavailable",
         auditEvents: {
           askedEventLogged: true,
           decidedEventLogged: true,
         },
+        turnBoundaries: {
+          turnStartSeq: 1,
+          turnEndSeq: 10,
+          isEnclosed: true,
+        },
+        unansweredByProvider: true,
       },
     ],
     allowedOnceIsSoleGrant: true,
@@ -962,6 +997,191 @@ describe("DSH native questions and independent approval contract (#46)", () => {
         "evidence must contain explicit disclaimer that synthetic answerer is not real Web UI",
       )
       expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+  })
+
+  describe("P1 & P2 approval review blockers (absence of provider, 1:1 pair cardinality & strict boundaries)", () => {
+    test("P1 RED: rejects when unavailable outcome is produced by voluntary answerer return instead of host fallback", () => {
+      const voluntaryUnavailable = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          unavailableProvedByAbsenceOfProvider: false,
+          syntheticAnswererInterceptedUnavailable: true,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d) =>
+            d.outcome === "unavailable" ? { ...d, unansweredByProvider: false } : d,
+          ),
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(voluntaryUnavailable)
+      expect(errors).toContain("unavailable outcome must be proved by absence of provider (host fallback), not voluntary answerer return")
+      expect(errors).toContain("synthetic answerer intercepted unavailable request instead of exercising host fallback")
+      expect(errors).toContain("unavailable decision must prove it was unanswered by any provider")
+      expect(classifyNativeQuestionsStatus(voluntaryUnavailable)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects when decision count is not exactly 4", () => {
+      const incomplete = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.slice(0, 3),
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(incomplete)
+      expect(errors).toContain("observedDecisions must contain exactly 4 observed decisions, one for each native outcome")
+      expect(classifyNativeQuestionsStatus(incomplete)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects duplicate requestId in observedDecisions", () => {
+      const duplicate = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 1 ? { ...d, requestId: "appr-req-001" } : d,
+          ),
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(duplicate)
+      expect(errors).toContain("duplicate requestId in observedDecisions: appr-req-001")
+      expect(classifyNativeQuestionsStatus(duplicate)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects missing numeric seq or fallback turnSeq substitution", () => {
+      // 1. Missing numeric seq
+      const missingSeq = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 0 ? { ...d, askedSeq: undefined as unknown as number } : d,
+          ),
+        },
+      }
+      expect(validateNativeQuestionsEvidence(missingSeq)).toContain(
+        "observedDecision must contain strict numeric turnSeq, askedSeq, and decidedSeq without fallbacks",
+      )
+
+      // 2. Fallback substitution where turnSeq is 1 while askedSeq is 4
+      const fallbackSeq = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 1 ? { ...d, turnSeq: 1, askedSeq: 4 } : d,
+          ),
+        },
+      }
+      expect(validateNativeQuestionsEvidence(fallbackSeq)).toContain(
+        "turnSeq must strictly match askedSeq without fallback substitution",
+      )
+    })
+
+    test("P2 RED: rejects when asked event occurs before or at turn/start", () => {
+      const beforeStart = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 0 ? { ...d, askedSeq: 1, turnSeq: 1 } : d,
+          ),
+        },
+      }
+      expect(validateNativeQuestionsEvidence(beforeStart)).toContain(
+        "approval/asked event must occur strictly after turn/start (askedSeq 1 <= turnStartSeq 1)",
+      )
+      expect(classifyNativeQuestionsStatus(beforeStart)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects when decided event occurs before or at asked event", () => {
+      const outOfOrderPair = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 0 ? { ...d, askedSeq: 3, decidedSeq: 2, turnSeq: 3 } : d,
+          ),
+        },
+      }
+      expect(validateNativeQuestionsEvidence(outOfOrderPair)).toContain(
+        "approval/decided event must occur strictly after approval/asked (decidedSeq 2 <= askedSeq 3)",
+      )
+      expect(classifyNativeQuestionsStatus(outOfOrderPair)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects when decided event occurs after or at turn/end", () => {
+      const afterEnd = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 3 ? { ...d, decidedSeq: 10 } : d,
+          ),
+        },
+      }
+      expect(validateNativeQuestionsEvidence(afterEnd)).toContain(
+        "approval/decided event must occur strictly before turn/end (decidedSeq 10 >= turnEndSeq 10)",
+      )
+      expect(classifyNativeQuestionsStatus(afterEnd)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects when turn integrity is missing or invalid", () => {
+      const missingIntegrity = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          turnIntegrity: undefined,
+        },
+      }
+      expect(validateNativeQuestionsEvidence(missingIntegrity)).toContain(
+        "approval turn integrity must prove a single closed turn",
+      )
+      expect(classifyNativeQuestionsStatus(missingIntegrity)).toBe("FAIL")
+
+      const invalidBoundaries = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          turnIntegrity: { singleTurnClosed: true, turnStartSeq: 10, turnEndSeq: 5 },
+        },
+      }
+      expect(validateNativeQuestionsEvidence(invalidBoundaries)).toContain(
+        "turnIntegrity must contain valid numeric turnStartSeq < turnEndSeq",
+      )
+      expect(classifyNativeQuestionsStatus(invalidBoundaries)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects when decision pairs overlap or are out of order across pairs", () => {
+      const overlapping = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 1 ? { ...d, askedSeq: 3, decidedSeq: 4, turnSeq: 3 } : d,
+          ),
+        },
+      }
+      expect(validateNativeQuestionsEvidence(overlapping)).toContain(
+        "approval decisions must be strictly sequentially ordered without overlap",
+      )
+      expect(classifyNativeQuestionsStatus(overlapping)).toBe("FAIL")
+    })
+
+    test("P2 RED: rejects when tool name does not match expected outcome", () => {
+      const mismatchedTool = {
+        ...fullPassNativeQuestionsEvidence,
+        independentApproval: {
+          ...fullPassNativeQuestionsEvidence.independentApproval,
+          observedDecisions: fullPassNativeQuestionsEvidence.independentApproval.observedDecisions?.map((d, i) =>
+            i === 0 ? { ...d, toolName: "academic_approval_rejected_action" } : d,
+          ),
+        },
+      }
+      expect(validateNativeQuestionsEvidence(mismatchedTool)).toContain(
+        "observedDecisions must contain 1:1 mapping of expected approval tools to native outcomes (mismatch for tool 'academic_approval_rejected_action' with outcome 'allowed-once')",
+      )
+      expect(classifyNativeQuestionsStatus(mismatchedTool)).toBe("FAIL")
     })
   })
 

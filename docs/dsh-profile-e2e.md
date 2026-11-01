@@ -111,9 +111,11 @@ O DSH provê esses serviços através dos pacotes `@deepseek-ai/dsh-user-questio
   1. `allowed-once`: decisão concedida por answerer sintético;
   2. `rejected`: decisão recusada por answerer sintético;
   3. `cancelled`: requisição abortada via `AbortSignal` no cliente antes ou durante a decisão;
-  4. `unavailable`: ausência de answerer registrado ou falha de resolução (fail-closed nativo).
+  4. `unavailable`: requisição sem answerer apto a decidir (a sonda permite o fluxo nativo via `next()`), alcançando o fallback nativo do DSH (`() => Promise.resolve("unavailable")`). A ausência de answerer é comprovada por instrumentação (`unansweredByProvider: true`), rejeitando estritamente qualquer answerer que responda voluntariamente `unavailable`.
   A etapa é imediatamente rejeitada com `{ kind: "reject" }` em `agent/pre-step`, garantindo que o turno seja encerrado (`turn/end`) com zero chamadas a modelo (`forbiddenAgentRequests: 0`), zero `step/start` (`forbiddenStepStarts: 0`) e sem despacho de tools mutantes.
-- **Pares de auditoria completos e correlacionados**: todos os eventos `approval/asked` e `approval/decided` são verificados no snapshot da sessão do `controlAgent`, correlacionados pelo mesmo `requestId`, vinculados ao agente, sessão e sequência de turno.
+- **Pares de auditoria completos, únicos e ordenados**: exatamente quatro pares 1:1 de `approval/asked` e `approval/decided` são verificados no snapshot da sessão do `controlAgent`, correlacionados pelo mesmo `requestId`, com ferramentas e outcomes esperados, garantindo a ordem estrita entre as fronteiras do turno único:
+  `turn/start < approval/asked < approval/decided < turn/end`
+  Sequências numéricas são estritamente reais (sem fallback de substituição como `turnSeq = 1`).
 - **Isolamento de autoridade e preservação do auditor**: a sessão de controle é separada do auditor. Na sessão do auditor (`agent`), zero eventos de aprovação são emitidos (`approvalEventsCount === 0`), comprovando que a seleção de opções pelo usuário jamais concede permissões ou emite aprovação de forma implícita.
 - **Anti-falso-positivo**: o validador exige correspondência estrita de IDs entre perguntas e respostas, opções selecionadas pertencentes a `validOptions`, códigos de erro reais sem fallbacks artificiais, telemetria de sessão auditada e recusa de afirmações estáticas não observadas.
 
