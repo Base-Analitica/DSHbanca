@@ -53,6 +53,8 @@ test("actual generated observer module binds the control preset ID without runne
     expect(generatedModuleSource).toContain("user-questions/request")
     expect(generatedModuleSource).toContain("DELEGATED_CALLER")
     expect(generatedModuleSource).toContain("noApprovalEmitted")
+    expect(generatedModuleSource).toContain("sessionAuditAvailable")
+    expect(generatedModuleSource).toContain("sessionEventsRead")
     expect(generatedModuleSource).toContain("approval.request() outside an open turn")
     expect(generatedModuleSource).not.toContain("dshbanca-e2e-unauthorized-selection-mutation")
     const agent = { id: "control-agent", ctx: {} }

@@ -898,6 +898,9 @@ const completeNativeQuestionsEvidence = {
     },
     selectionDoesNotAuthorizeMutation: {
       nonMutatingProof: true,
+      sessionAuditAvailable: true,
+      sessionEventsRead: 12,
+      approvalEventsCount: 0,
       noApprovalEmitted: true,
       mutationDispatched: false,
       manuscriptPreserved: true,
@@ -926,6 +929,56 @@ const fullPassNativeQuestionsEvidence = {
     openTurnErrorMessage:
       "approval.request() outside an open turn: the approval/asked + approval/decided audit pair must be turn-enclosed (a bare event between turns is crash-tail garbage on reload). Ask from inside the turn that needs the decision.",
     interactiveDecisionsStatus: "PASS",
+    observedDecisions: [
+      {
+        requestId: "appr-req-001",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 3,
+        outcome: "allowed-once",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+      {
+        requestId: "appr-req-002",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 4,
+        outcome: "rejected",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+      {
+        requestId: "appr-req-003",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 5,
+        outcome: "cancelled",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+      {
+        requestId: "appr-req-004",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 6,
+        outcome: "unavailable",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+    ],
     allowedOnceIsSoleGrant: true,
     nonGrantsDeny: {
       rejectedDenies: true,
@@ -1071,6 +1124,35 @@ describe("DSH native questions evidence gate contract (#46)", () => {
         },
       },
       "auditor read-only guard must not be presented as proof of independent approval boundary",
+    ],
+    [
+      "approval PASS status missing observedDecisions with turn audit",
+      {
+        ...completeNativeQuestionsEvidence,
+        independentApproval: {
+          status: "PASS",
+          openTurnRequiredObserved: true,
+          openTurnErrorMessage: "approval.request() outside an open turn",
+          interactiveDecisionsStatus: "PASS",
+          allowedOnceIsSoleGrant: true,
+          nonGrantsDeny: { rejectedDenies: true, cancelledDenies: true, unavailableDenies: true },
+        },
+      },
+      "approval.status cannot be PASS without verified native observedDecisions containing turn-enclosed audit events",
+    ],
+    [
+      "session audit unavailable to prove absence of approval",
+      {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          selectionDoesNotAuthorizeMutation: {
+            ...completeNativeQuestionsEvidence.behaviors.selectionDoesNotAuthorizeMutation,
+            sessionAuditAvailable: false,
+          },
+        },
+      },
+      "session event stream was not available or could not be verified to prove absence of approval",
     ],
   ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
     const errors = validateNativeQuestionsEvidence(invalidEvidence)

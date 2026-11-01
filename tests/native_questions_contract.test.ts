@@ -85,6 +85,9 @@ export const completeNativeQuestionsEvidence: NativeQuestionsEvidence = {
     },
     selectionDoesNotAuthorizeMutation: {
       nonMutatingProof: true,
+      sessionAuditAvailable: true,
+      sessionEventsRead: 12,
+      approvalEventsCount: 0,
       noApprovalEmitted: true,
       mutationDispatched: false,
       manuscriptPreserved: true,
@@ -113,6 +116,56 @@ export const fullPassNativeQuestionsEvidence: NativeQuestionsEvidence = {
     openTurnErrorMessage:
       "approval.request() outside an open turn: the approval/asked + approval/decided audit pair must be turn-enclosed (a bare event between turns is crash-tail garbage on reload). Ask from inside the turn that needs the decision.",
     interactiveDecisionsStatus: "PASS",
+    observedDecisions: [
+      {
+        requestId: "appr-req-001",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 3,
+        outcome: "allowed-once",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+      {
+        requestId: "appr-req-002",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 4,
+        outcome: "rejected",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+      {
+        requestId: "appr-req-003",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 5,
+        outcome: "cancelled",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+      {
+        requestId: "appr-req-004",
+        agentId: "agent-root-test",
+        sessionId: "sess-turn-001",
+        toolName: "academic_nonmutating_action",
+        turnSeq: 6,
+        outcome: "unavailable",
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+      },
+    ],
     allowedOnceIsSoleGrant: true,
     nonGrantsDeny: {
       rejectedDenies: true,
@@ -131,7 +184,10 @@ describe("DSH native questions and independent approval contract (#46)", () => {
         approvalServiceAvailable: true,
         syntheticScenarioCompleted: true,
         behaviors: {
-          selectionDoesNotAuthorizeMutation: { manuscriptPreserved: true },
+          selectionDoesNotAuthorizeMutation: {
+            manuscriptPreserved: true,
+            sessionAuditAvailable: false,
+          },
           cancelQuestion: { cancelled: true, errorCode: "ASK_ABORTED" },
           delegatedAgentBlocked: { blocked: true, errorCode: "DELEGATED_CALLER" },
           rejectIncompatibleAnswer: { rejected: true },
@@ -156,8 +212,33 @@ describe("DSH native questions and independent approval contract (#46)", () => {
       expect(errors).toContain("requestMoreEvidence behavior is required and missing")
       expect(errors).toContain("deferDecision behavior is required and missing")
       expect(errors).toContain("customResponse behavior is required and missing")
+      expect(errors).toContain("session event stream was not available or could not be verified to prove absence of approval")
       expect(errors).toContain("unobserved static boolean claim of approval contract verification is rejected")
       expect(classifyNativeQuestionsStatus(forged)).toBe("FAIL")
+    })
+
+    test("P1 residual RED: rejects approval.status=PASS when based purely on static booleans without observed native decisions", () => {
+      const staticPass = {
+        ...completeNativeQuestionsEvidence,
+        independentApproval: {
+          status: "PASS" as const,
+          openTurnRequiredObserved: true,
+          openTurnErrorMessage:
+            "approval.request() outside an open turn: the approval/asked + approval/decided audit pair must be turn-enclosed (a bare event between turns is crash-tail garbage on reload). Ask from inside the turn that needs the decision.",
+          interactiveDecisionsStatus: "PASS" as const,
+          allowedOnceIsSoleGrant: true,
+          nonGrantsDeny: {
+            rejectedDenies: true,
+            cancelledDenies: true,
+            unavailableDenies: true,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(staticPass)
+      expect(errors).toContain(
+        "approval.status cannot be PASS without verified native observedDecisions containing turn-enclosed audit events",
+      )
+      expect(classifyNativeQuestionsStatus(staticPass)).toBe("FAIL")
     })
   })
 
@@ -316,7 +397,6 @@ describe("DSH native questions and independent approval contract (#46)", () => {
 
     // 11. Ausência de answerer
     test("regression 11: confirms absence of answerer fails with NO_PROVIDER and is not accepted as answered", () => {
-      // If a question claims to be answered when no answerer was present, or error is not NO_PROVIDER
       const invalid = {
         ...completeNativeQuestionsEvidence,
         behaviors: {
@@ -325,7 +405,7 @@ describe("DSH native questions and independent approval contract (#46)", () => {
             ...completeNativeQuestionsEvidence.behaviors.selectRecommendation,
             observedAnswer: {
               id: "q-academic-rec-1",
-              selected: [], // empty answer, no answerer
+              selected: [],
             },
           },
         },
@@ -344,7 +424,6 @@ describe("DSH native questions and independent approval contract (#46)", () => {
         syntheticScenarioCompleted: true,
         behaviors: {
           selectRecommendation: completeNativeQuestionsEvidence.behaviors.selectRecommendation,
-          // missing requestMoreEvidence, deferDecision, customResponse, etc.
         },
         independentApproval: completeNativeQuestionsEvidence.independentApproval,
         uiWebDisclaimer: "synthetic",
@@ -353,6 +432,63 @@ describe("DSH native questions and independent approval contract (#46)", () => {
       const errors = validateNativeQuestionsEvidence(incomplete)
       expect(errors.length).toBeGreaterThan(0)
       expect(classifyNativeQuestionsStatus(incomplete)).toBe("FAIL")
+    })
+
+    // P1 Problem 2: Telemetria ausente / sessionAuditAvailable
+    test("regression: rejects when sessionAuditAvailable is false (session or seq unavailable)", () => {
+      const invalid = {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          selectionDoesNotAuthorizeMutation: {
+            ...completeNativeQuestionsEvidence.behaviors.selectionDoesNotAuthorizeMutation,
+            sessionAuditAvailable: false,
+            noApprovalEmitted: false,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(invalid)
+      expect(errors).toContain(
+        "session event stream was not available or could not be verified to prove absence of approval",
+      )
+      expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+
+    test("regression: rejects when sessionEventsRead is missing or negative", () => {
+      const invalid = {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          selectionDoesNotAuthorizeMutation: {
+            ...completeNativeQuestionsEvidence.behaviors.selectionDoesNotAuthorizeMutation,
+            sessionEventsRead: -1,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(invalid)
+      expect(errors).toContain(
+        "sessionEventsRead must be a non-negative number proving session events were inspected",
+      )
+      expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
+    })
+
+    test("regression: rejects when approval events were found in session log", () => {
+      const invalid = {
+        ...completeNativeQuestionsEvidence,
+        behaviors: {
+          ...completeNativeQuestionsEvidence.behaviors,
+          selectionDoesNotAuthorizeMutation: {
+            ...completeNativeQuestionsEvidence.behaviors.selectionDoesNotAuthorizeMutation,
+            approvalEventsCount: 1,
+            noApprovalEmitted: false,
+          },
+        },
+      }
+      const errors = validateNativeQuestionsEvidence(invalid)
+      expect(errors).toContain(
+        "approval events were detected in session log following question workflow",
+      )
+      expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
     })
   })
 
@@ -535,7 +671,7 @@ describe("DSH native questions and independent approval contract (#46)", () => {
       expect(classifyNativeQuestionsStatus(invalid)).toBe("FAIL")
     })
 
-    test("rejects evidence where non-grant approval outcomes (rejected, cancelled, unavailable) do not deny in PASS status", () => {
+    test("rejects evidence where non-grant approval outcomes do not deny in PASS status", () => {
       const invalid = {
         ...fullPassNativeQuestionsEvidence,
         independentApproval: {
@@ -590,7 +726,7 @@ describe("DSH native questions and independent approval contract (#46)", () => {
       expect(classifyNativeQuestionsStatus(completeNativeQuestionsEvidence)).toBe("BLOCKED")
     })
 
-    test("accepts complete valid evidence with PASS approval subgate (authorized lifecycle)", () => {
+    test("accepts complete valid evidence with PASS approval subgate only when observedDecisions with audit events are present", () => {
       expect(validateNativeQuestionsEvidence(fullPassNativeQuestionsEvidence)).toEqual([])
       expect(classifyNativeQuestionsStatus(fullPassNativeQuestionsEvidence)).toBe("PASS")
     })

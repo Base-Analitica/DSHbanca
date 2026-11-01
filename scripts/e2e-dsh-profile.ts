@@ -980,19 +980,40 @@ export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unv
       }
     }
 
+    let sessionAuditAvailable = false;
+    let sessionEventsRead = 0;
     let approvalEventsCount = 0;
-    if (typeof agent.session?.seq === "number") {
-      for (let seq = agent.session.seq - 1; seq >= 0; seq -= 1) {
-        const ev = agent.session.eventAt(seq);
-        if (ev?.type === "approval/asked" || ev?.type === "approval/decided") {
-          approvalEventsCount += 1;
+    let sessionAuditError = "";
+
+    try {
+      if (!agent || !agent.session || typeof agent.session.seq !== "number" || typeof agent.session.eventAt !== "function") {
+        sessionAuditAvailable = false;
+        sessionAuditError = "agent.session or session.seq/eventAt is unavailable";
+      } else {
+        const totalSeq = agent.session.seq;
+        for (let seq = totalSeq - 1; seq >= 0; seq -= 1) {
+          const ev = agent.session.eventAt(seq);
+          sessionEventsRead += 1;
+          if (ev?.type === "approval/asked" || ev?.type === "approval/decided") {
+            approvalEventsCount += 1;
+          }
         }
+        sessionAuditAvailable = true;
       }
+    } catch (err) {
+      sessionAuditAvailable = false;
+      sessionAuditError = String(err?.message || err);
     }
+
+    const noApprovalEmitted = sessionAuditAvailable && approvalEventsCount === 0;
 
     const b8 = {
       nonMutatingProof: true,
-      noApprovalEmitted: approvalEventsCount === 0,
+      sessionAuditAvailable,
+      sessionEventsRead,
+      approvalEventsCount,
+      sessionAuditError: sessionAuditError || undefined,
+      noApprovalEmitted,
       mutationDispatched: false,
       manuscriptPreserved,
       auditorGuardUsedAsProof: false,

@@ -768,6 +768,32 @@ export interface CustomQuestionBehaviorEvidence {
   mutationAuthorized: boolean
 }
 
+export interface ObservedApprovalDecision {
+  requestId: string
+  agentId: string
+  sessionId: string
+  toolName: string
+  turnSeq: number
+  outcome: "allowed-once" | "rejected" | "cancelled" | "unavailable"
+  auditEvents: {
+    askedEventLogged: boolean
+    decidedEventLogged: boolean
+  }
+}
+
+export interface SelectionMutationEvidence {
+  nonMutatingProof?: boolean
+  sessionAuditAvailable: boolean
+  sessionEventsRead: number
+  approvalEventsCount: number
+  sessionAuditError?: string
+  noApprovalEmitted: boolean
+  mutationDispatched: boolean
+  manuscriptPreserved: boolean
+  auditorGuardUsedAsProof?: boolean
+  attemptedTool?: string
+}
+
 export interface NativeQuestionsBehaviorsEvidence {
   selectRecommendation: QuestionBehaviorEvidence
   requestMoreEvidence: QuestionBehaviorEvidence
@@ -788,14 +814,7 @@ export interface NativeQuestionsBehaviorsEvidence {
     blocked: boolean
     errorCode: string
   }
-  selectionDoesNotAuthorizeMutation: {
-    nonMutatingProof?: boolean
-    noApprovalEmitted?: boolean
-    mutationDispatched: boolean
-    manuscriptPreserved: boolean
-    auditorGuardUsedAsProof?: boolean
-    attemptedTool?: string
-  }
+  selectionDoesNotAuthorizeMutation: SelectionMutationEvidence
 }
 
 export interface IndependentApprovalEvidence {
@@ -804,6 +823,7 @@ export interface IndependentApprovalEvidence {
   openTurnErrorMessage?: string
   interactiveDecisionsStatus?: "BLOCKED" | "NOT_EVALUATED" | "PASS" | "FAIL"
   interactiveDecisionsBlocker?: string
+  observedDecisions?: ObservedApprovalDecision[]
   allowedOnceIsSoleGrant?: boolean
   nonGrantsDeny?: {
     rejectedDenies: boolean
@@ -1028,14 +1048,23 @@ export function validateNativeQuestionsEvidence(value: unknown): string[] {
   if (!b8) {
     errors.push("selectionDoesNotAuthorizeMutation behavior is required and missing")
   } else {
+    if (b8.sessionAuditAvailable !== true) {
+      errors.push("session event stream was not available or could not be verified to prove absence of approval")
+    }
+    if (typeof b8.sessionEventsRead !== "number" || b8.sessionEventsRead < 0) {
+      errors.push("sessionEventsRead must be a non-negative number proving session events were inspected")
+    }
+    if (b8.approvalEventsCount !== 0) {
+      errors.push("approval events were detected in session log following question workflow")
+    }
+    if (b8.noApprovalEmitted !== true) {
+      errors.push("question selection must not emit approval grant")
+    }
     if (b8.mutationDispatched === true) {
       errors.push("mutation tool was dispatched without independent approval grant")
     }
     if (b8.manuscriptPreserved !== true) {
       errors.push("academic manuscript was mutated by question selection workflow")
-    }
-    if (b8.noApprovalEmitted !== true) {
-      errors.push("question selection must not emit approval grant")
     }
     if (b8.attemptedTool === "banca_corrigir" || b8.auditorGuardUsedAsProof === true) {
       errors.push("auditor read-only guard must not be presented as proof of independent approval boundary")
@@ -1062,6 +1091,47 @@ export function validateNativeQuestionsEvidence(value: unknown): string[] {
       errors.push("independent approval verification status is invalid or failed")
     }
     if (approval.status === "PASS") {
+      if (approval.interactiveDecisionsStatus !== "PASS") {
+        errors.push("approval.status cannot be PASS when interactiveDecisionsStatus is not PASS")
+      }
+      if (!Array.isArray(approval.observedDecisions) || approval.observedDecisions.length === 0) {
+        errors.push("approval.status cannot be PASS without verified native observedDecisions containing turn-enclosed audit events")
+      } else {
+        const decisions = approval.observedDecisions as ObservedApprovalDecision[]
+        const hasAllowedOnce = decisions.some((d) => d.outcome === "allowed-once")
+        const hasRejected = decisions.some((d) => d.outcome === "rejected")
+        const hasCancelled = decisions.some((d) => d.outcome === "cancelled")
+        const hasUnavailable = decisions.some((d) => d.outcome === "unavailable")
+
+        if (!hasAllowedOnce) {
+          errors.push("observedDecisions must contain an observed allowed-once outcome")
+        }
+        if (!hasRejected || !hasCancelled || !hasUnavailable) {
+          errors.push("observedDecisions must contain observed non-grant outcomes (rejected, cancelled, unavailable)")
+        }
+
+        for (const dec of decisions) {
+          if (typeof dec.requestId !== "string" || dec.requestId.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty requestId")
+          }
+          if (typeof dec.agentId !== "string" || dec.agentId.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty agentId")
+          }
+          if (typeof dec.sessionId !== "string" || dec.sessionId.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty sessionId")
+          }
+          if (typeof dec.toolName !== "string" || dec.toolName.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty toolName")
+          }
+          if (typeof dec.turnSeq !== "number" || dec.turnSeq < 0) {
+            errors.push("observedDecision must contain a non-negative turnSeq proving turn-enclosed audit")
+          }
+          if (!dec.auditEvents || dec.auditEvents.askedEventLogged !== true || dec.auditEvents.decidedEventLogged !== true) {
+            errors.push("observedDecision must prove asked and decided audit events were logged in session")
+          }
+        }
+      }
+
       if (approval.allowedOnceIsSoleGrant !== true) {
         errors.push("allowed-once must be the sole granting outcome in DSH approval contract")
       }
