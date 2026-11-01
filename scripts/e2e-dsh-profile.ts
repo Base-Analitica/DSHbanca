@@ -44,6 +44,7 @@ import {
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
+  validateComposedProfilePlugins,
 } from "./lib/dsh-profile-e2e-contract.js"
 import {
   buildPnpmCommand,
@@ -224,10 +225,18 @@ async function validateNativePresetConfig(dshExecutable: string) {
   const webStandardPreset = webStandardRows.find((row) => row?.name === "@deepseek-ai/dsh-agent-preset" && row?.config?.id === "standard")
   const hostStandardPreserved = webHostRegistry?.config?.default === "standard" && Boolean(webStandardPreset) && bundleRegistryAbsent && bundleStandardAbsent
   const registryInjectionRequired = Array.isArray(presetModule.default.inject) && presetModule.default.inject.includes("agentPresets")
+  const basePatchPath = join(packageRoot, "dsh-base", "cordis.patch.yml")
+  const baseRows = existsSync(basePatchPath)
+    ? (parseYaml(readFileSync(basePatchPath, "utf8")) as any[])
+        .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
+    : []
+  const duplicationErrors = validateComposedProfilePlugins([...baseRows, ...patchRows, ...overlayRows])
+  const noDuplicates = duplicationErrors.length === 0
   const accepted = bundleRegistryAbsent && bundleStandardAbsent && !registryResult.issues && rejectedMissingDefault &&
     fixtureDefaultResolved && !neutralPresetResult.issues && !presetResult.issues &&
     !instructionResult.issues && childProblem === undefined && unknownDefaultErrors.length > 0 &&
-    duplicatePresetErrors.length > 0 && hostStandardPreserved && registryInjectionRequired
+    duplicatePresetErrors.length > 0 && hostStandardPreserved && registryInjectionRequired &&
+    noDuplicates
   return {
     accepted,
     bundleRegistryAbsent,
@@ -240,6 +249,8 @@ async function validateNativePresetConfig(dshExecutable: string) {
     fixtureNeutralPresetAccepted: !neutralPresetResult.issues,
     hostStandardPreserved,
     registryInjectionRequired,
+    noDuplicates,
+    duplicationErrors,
     presetAccepted: !presetResult.issues,
     instructionConfigAccepted: !instructionResult.issues,
     childPluginStructureAccepted: childProblem === undefined,
@@ -2609,6 +2620,13 @@ async function main(): Promise<void> {
   const userQuestionsEntry = dump.stdout.includes("@deepseek-ai/dsh-user-questions")
   const userApprovalEntry = dump.stdout.includes("@deepseek-ai/dsh-user-approval")
   const askUserToolEntry = dump.stdout.includes("@deepseek-ai/dsh-tool-ask-user")
+  const userQuestionsCount = (dump.stdout.match(/@deepseek-ai\/dsh-user-questions/g) || []).length
+  const userApprovalCount = (dump.stdout.match(/@deepseek-ai\/dsh-user-approval/g) || []).length
+  const askUserToolCount = (dump.stdout.match(/@deepseek-ai\/dsh-tool-ask-user/g) || []).length
+  const userQuestionsUnique = userQuestionsCount === 1
+  const userApprovalUnique = userApprovalCount === 1
+  const askUserToolPresent = askUserToolCount >= 1
+  const pluginInstancesUnique = userQuestionsUnique && userApprovalUnique && askUserToolPresent
   report.stages.composedProfile = {
     exitCode: dump.exitCode,
     stdoutBytes: Buffer.byteLength(dump.stdout),
@@ -2622,10 +2640,17 @@ async function main(): Promise<void> {
     containsUserQuestionsEntry: userQuestionsEntry,
     containsUserApprovalEntry: userApprovalEntry,
     containsAskUserToolEntry: askUserToolEntry,
+    userQuestionsCount,
+    userApprovalCount,
+    askUserToolCount,
+    userQuestionsUnique,
+    userApprovalUnique,
+    askUserToolPresent,
+    pluginInstancesUnique,
   }
   const composedEntry = dump.stdout.includes("name: dshbanca/dsh")
-  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry || !userQuestionsEntry || !userApprovalEntry || !askUserToolEntry) {
-    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, control-preset, user-questions, user-approval, or tool-ask-user entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry}, userQuestions=${userQuestionsEntry}, userApproval=${userApprovalEntry}, askUserTool=${askUserToolEntry})`)
+  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry || !userQuestionsEntry || !userApprovalEntry || !askUserToolEntry || !pluginInstancesUnique) {
+    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, control-preset, user-questions, user-approval, or tool-ask-user entry, or has duplicate plugin instantiations (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry}, userQuestions=${userQuestionsEntry} (count=${userQuestionsCount}), userApproval=${userApprovalEntry} (count=${userApprovalCount}), askUserTool=${askUserToolEntry} (count=${askUserToolCount}))`)
     return
   }
   const checkoutBundle = join(profileDir, "node_modules", "dshbanca")
@@ -2643,6 +2668,9 @@ async function main(): Promise<void> {
     presetRegistryEntry,
     auditorPresetEntry,
     controlPresetEntry,
+    userQuestionsUnique,
+    userApprovalUnique,
+    askUserToolPresent,
   })
   if (profileErrors.length > 0) {
     fail(`Profile composition validation failed: ${profileErrors.join("; ")}`)

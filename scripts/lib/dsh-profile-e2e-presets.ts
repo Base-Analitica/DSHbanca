@@ -17,14 +17,6 @@ export function buildSdkPresetOverlayPatch(observerName: string): string {
         config: { id: e2eControlPresetId, name: e2eControlPresetId, plugins: [] },
       },
       {
-        id: "user-questions",
-        name: "@deepseek-ai/dsh-user-questions",
-      },
-      {
-        id: "user-approval",
-        name: "@deepseek-ai/dsh-user-approval",
-      },
-      {
         id: "tool-ask-user",
         name: "@deepseek-ai/dsh-tool-ask-user",
       },

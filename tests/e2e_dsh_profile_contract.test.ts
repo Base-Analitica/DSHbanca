@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
+import { parse as parseYaml } from "yaml"
+import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "../scripts/lib/dsh-profile-e2e-observer-control.js"
 import {
   canonicalAuditorMarkdownSha256,
@@ -31,6 +32,7 @@ import {
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
+  validateComposedProfilePlugins,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
 
 const completeAuditorMarkdownEvidence = {
@@ -1817,5 +1819,150 @@ describe("Cancellation outcome classification logic (#48)", () => {
     expect(classification.isCancellation).toBe(true)
     expect(classification.handled).toBe(true)
     expect(classification.observedErrorCode).toBe("ASK_ABORTED")
+  })
+})
+
+describe("DSH Cordis composed profile plugin deduplication contract (#48 P1)", () => {
+  test("RED: rejects duplicate @deepseek-ai/dsh-user-approval across distinct row IDs (identity-based)", () => {
+    // Row IDs are deliberately DIFFERENT ("approval" vs "user-approval"), as reproduced in review #572922
+    const conflictingRows = [
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+      { id: "user-approval", name: "@deepseek-ai/dsh-user-approval" },
+    ]
+    const errors = validateComposedProfilePlugins(conflictingRows)
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    // Asserts detection is by package/service identity, NOT just repeating row ID
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-user-approval"))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "approval"'))).toBe(true)
+  })
+
+  test("RED: rejects duplicate @deepseek-ai/dsh-user-questions across duplicate row IDs", () => {
+    const conflictingRows = [
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+    ]
+    const errors = validateComposedProfilePlugins(conflictingRows)
+    expect(errors.length).toBeGreaterThanOrEqual(2)
+    expect(errors.some((e) => e.includes('duplicate row id "user-questions"'))).toBe(true)
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-user-questions"))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "userQuestions"'))).toBe(true)
+  })
+
+  test("RED: rejects duplicate @deepseek-ai/dsh-agent-preset-registry singleton", () => {
+    const conflictingRows = [
+      { id: "registry-1", name: "@deepseek-ai/dsh-agent-preset-registry" },
+      { id: "agent-preset-registry", name: "@deepseek-ai/dsh-agent-preset-registry" },
+    ]
+    const errors = validateComposedProfilePlugins(conflictingRows)
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-agent-preset-registry"))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "agentPresets"'))).toBe(true)
+  })
+
+  test("ignores disabled plugin rows without false rejection", () => {
+    const rowsWithDisabled = [
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+      { id: "user-approval-disabled", name: "@deepseek-ai/dsh-user-approval", disabled: true },
+    ]
+    const errors = validateComposedProfilePlugins(rowsWithDisabled)
+    expect(errors).toEqual([])
+  })
+
+  test("allows legitimate multi-instance factory plugins like @deepseek-ai/dsh-agent-preset", () => {
+    const rowsWithMultiplePresets = [
+      { id: "dshbanca-banca-auditor-preset", name: "@deepseek-ai/dsh-agent-preset" },
+      { id: e2eControlPresetId, name: "@deepseek-ai/dsh-agent-preset" },
+    ]
+    const errors = validateComposedProfilePlugins(rowsWithMultiplePresets)
+    expect(errors).toEqual([])
+  })
+
+  test("GREEN: accepts clean profile composition reusing dsh-base services without overlay duplication", () => {
+    const cleanComposedProfile = [
+      // Provided natively by dsh-base
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+      // Provided by dshbanca bundle
+      { id: "dshbanca", name: "dshbanca/dsh" },
+      { id: "dshbanca-banca-auditor-preset", name: "@deepseek-ai/dsh-agent-preset" },
+      // Provided by corrected overlay
+      { id: "agent-preset-registry", name: "@deepseek-ai/dsh-agent-preset-registry" },
+      { id: e2eControlPresetId, name: "@deepseek-ai/dsh-agent-preset" },
+      { id: "tool-ask-user", name: "@deepseek-ai/dsh-tool-ask-user" },
+      { id: "dshbanca-e2e-observer", name: "scratch-observer" },
+    ]
+    const errors = validateComposedProfilePlugins(cleanComposedProfile)
+    expect(errors).toEqual([])
+  })
+
+  test("reproduction of prior HEAD (b6f572ff) bug: overlay with duplicate rows fails contract check", () => {
+    // dsh-base native rows
+    const baseRows = [
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+    ]
+    // The flawed overlay from SHA b6f572ff:
+    const flawedOverlayRows = [
+      { id: "agent-preset-registry", name: "@deepseek-ai/dsh-agent-preset-registry" },
+      { id: e2eControlPresetId, name: "@deepseek-ai/dsh-agent-preset" },
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "user-approval", name: "@deepseek-ai/dsh-user-approval" },
+      { id: "tool-ask-user", name: "@deepseek-ai/dsh-tool-ask-user" },
+      { id: "dshbanca-e2e-observer", name: "test-observer" },
+    ]
+    const errors = validateComposedProfilePlugins([...baseRows, ...flawedOverlayRows])
+    expect(errors.length).toBeGreaterThanOrEqual(2)
+    // Proves detection catches both row-ID conflict and different-ID provider conflict
+    expect(errors.some((e) => e.includes('duplicate Cordis service "approval"'))).toBe(true)
+    expect(errors.some((e) => e.includes('duplicate Cordis service "userQuestions"'))).toBe(true)
+    expect(errors.some((e) => e.includes("@deepseek-ai/dsh-user-approval"))).toBe(true)
+  })
+
+  test("verified overlay from buildSdkPresetOverlayPatch has ZERO duplicate rows against dsh-base", () => {
+    const overlayYaml = buildSdkPresetOverlayPatch("verified-observer")
+    const parsedOverlay = (parseYaml(overlayYaml) as any[])
+      .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
+
+    // Asserts that overlay no longer instantiates user-questions or user-approval
+    const approvalRows = parsedOverlay.filter((r) => r?.name === "@deepseek-ai/dsh-user-approval")
+    const questionRows = parsedOverlay.filter((r) => r?.name === "@deepseek-ai/dsh-user-questions")
+    const askUserToolRows = parsedOverlay.filter((r) => r?.name === "@deepseek-ai/dsh-tool-ask-user")
+
+    expect(approvalRows.length).toBe(0)
+    expect(questionRows.length).toBe(0)
+    expect(askUserToolRows.length).toBe(1)
+    expect(askUserToolRows[0].id).toBe("tool-ask-user")
+
+    // Combined with dsh-base, composition is valid
+    const baseRows = [
+      { id: "user-questions", name: "@deepseek-ai/dsh-user-questions" },
+      { id: "approval", name: "@deepseek-ai/dsh-user-approval" },
+    ]
+    const errors = validateComposedProfilePlugins([...baseRows, ...parsedOverlay])
+    expect(errors).toEqual([])
+  })
+
+  test("validateProfileEvidence enforces uniqueness of user-questions and user-approval", () => {
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      userQuestionsUnique: false,
+    })).toContain("user-questions plugin package has duplicate instances in composed profile")
+
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      userApprovalUnique: false,
+    })).toContain("user-approval plugin package has duplicate instances in composed profile")
+
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      askUserToolPresent: false,
+    })).toContain("tool-ask-user entry missing from composed profile")
+
+    expect(validateProfileEvidence({
+      ...completeProfile,
+      userQuestionsUnique: true,
+      userApprovalUnique: true,
+      askUserToolPresent: true,
+    })).toEqual([])
   })
 })

@@ -172,6 +172,9 @@ export interface ProfileEvidence {
   presetRegistryEntry?: boolean
   auditorPresetEntry?: boolean
   controlPresetEntry?: boolean
+  userQuestionsUnique?: boolean
+  userApprovalUnique?: boolean
+  askUserToolPresent?: boolean
 }
 
 export interface RuntimeEvidence {
@@ -223,6 +226,9 @@ export function validateProfileEvidence(evidence: ProfileEvidence): string[] {
   if (evidence.presetRegistryEntry !== true) errors.push("DSH AgentPresetRegistry entry missing")
   if (evidence.auditorPresetEntry !== true) errors.push("banca-auditor DSH AgentPreset entry missing")
   if (evidence.controlPresetEntry !== true) errors.push("scratch control DSH AgentPreset entry missing")
+  if (evidence.userQuestionsUnique === false) errors.push("user-questions plugin package has duplicate instances in composed profile")
+  if (evidence.userApprovalUnique === false) errors.push("user-approval plugin package has duplicate instances in composed profile")
+  if (evidence.askUserToolPresent === false) errors.push("tool-ask-user entry missing from composed profile")
   return errors
 }
 
@@ -234,6 +240,93 @@ export function validatePresetReferences(defaultId: unknown, presetIds: unknown[
     errors.push("AgentPresetRegistry default does not resolve to a declared preset")
   }
   if (new Set(ids).size !== ids.length) errors.push("AgentPreset declarations contain duplicate IDs")
+  return errors
+}
+
+/**
+ * Known Cordis singleton service providers shipped with DSH.
+ * Each of these packages registers a singleton service on Cordis ctx and cannot
+ * be instantiated multiple times without throwing runtime registration conflicts.
+ */
+export const knownCordisSingletonPluginServices: Record<string, string> = {
+  "@deepseek-ai/dsh-user-approval": "approval",
+  "@deepseek-ai/dsh-user-questions": "userQuestions",
+  "@deepseek-ai/dsh-agent-preset-registry": "agentPresets",
+}
+
+/**
+ * Validates that a composed Cordis profile does not contain duplicate plugin package
+ * instantiations or duplicate service registrations. Cordis enforces strict service
+ * uniqueness; instantiating multiple rows of a plugin that calls ctx.provide()
+ * (e.g., @deepseek-ai/dsh-user-approval for "approval") causes a fatal registration
+ * error during host boot.
+ *
+ * This validator checks:
+ * 1. Duplicate row IDs among active rows.
+ * 2. Duplicate package instantiations for singleton service providers.
+ * 3. Duplicate service registrations by provider/service identity, even if row IDs differ.
+ */
+export function validateComposedProfilePlugins(rows: unknown[]): string[] {
+  const errors: string[] = []
+  if (!Array.isArray(rows)) return ["composed profile rows must be an array"]
+
+  const activeRowIds = new Map<string, number>()
+  const packageInstances = new Map<string, string[]>()
+  const serviceProviders = new Map<string, Array<{ rowId: string; packageName: string }>>()
+
+  for (const rawRow of rows) {
+    if (!isRecord(rawRow) || typeof rawRow.name !== "string") continue
+    if (rawRow.disabled === true) continue
+
+    const packageName = rawRow.name
+    const rowId = typeof rawRow.id === "string" ? rawRow.id : "(anonymous)"
+
+    // 1. Check row ID uniqueness
+    if (typeof rawRow.id === "string") {
+      const prevCount = activeRowIds.get(rawRow.id) ?? 0
+      activeRowIds.set(rawRow.id, prevCount + 1)
+    }
+
+    // 2. Track package instances
+    const existing = packageInstances.get(packageName) ?? []
+    existing.push(rowId)
+    packageInstances.set(packageName, existing)
+
+    // 3. Track service provider identity
+    const providedService = knownCordisSingletonPluginServices[packageName]
+    if (providedService) {
+      const providers = serviceProviders.get(providedService) ?? []
+      providers.push({ rowId, packageName })
+      serviceProviders.set(providedService, providers)
+    }
+  }
+
+  // Report duplicate row IDs
+  for (const [id, count] of activeRowIds.entries()) {
+    if (count > 1) {
+      errors.push(`duplicate row id "${id}" in composed profile (appeared ${count} times)`)
+    }
+  }
+
+  // Report duplicate package instantiations for singleton providers
+  for (const [pkgName, rowIds] of packageInstances.entries()) {
+    if (pkgName in knownCordisSingletonPluginServices && rowIds.length > 1) {
+      errors.push(
+        `duplicate plugin package "${pkgName}" instantiated ${rowIds.length} times across rows (ids: ${rowIds.map((id) => `"${id}"`).join(", ")})`,
+      )
+    }
+  }
+
+  // Report duplicate service providers by service identity (even with different row IDs)
+  for (const [serviceName, providers] of serviceProviders.entries()) {
+    if (providers.length > 1) {
+      const providerDesc = providers.map((p) => `id "${p.rowId}" (${p.packageName})`).join(", ")
+      errors.push(
+        `duplicate Cordis service "${serviceName}" provided by multiple rows: ${providerDesc}`,
+      )
+    }
+  }
+
   return errors
 }
 
