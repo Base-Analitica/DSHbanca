@@ -19,34 +19,65 @@ O **OpenBanca** é um **projeto separado**, mantido para o harness **OpenCode**.
 
 ## Estado atual
 
-**Experimental / protótipo (`0.1.0`)** — pacote `dshbanca`, `private: true`, `UNLICENSED`, sem publicação em npm. Nada neste repositório deve ser tratado como integração DSH concluída.
+**Experimental / protótipo (`0.1.0`)** — pacote `dshbanca`, `private: true`, `UNLICENSED`, sem publicação em npm. O DSH é o único harness suportado.
 
-### Presente na `master` (`2302a75`)
+### Presente na `master` (`3c24a53`)
 
-- Empacotamento Cordis **declarado**: `package.json` expõe `./dsh` e `dsh.bundle.patch`; [`cordis.patch.yml`](cordis.patch.yml) monta `dshbanca/dsh`. Declarar o entrypoint não comprova que o host o carregou.
-- `src/dsh.ts` declara `name = "dshbanca"`, injeta `skills` e registra um **provider de skills** quando `ctx.skills.registerProvider` existe.
-- **16 módulos de ferramentas** em `src/tools/`, registrados no entry principal do pacote (`src/index.ts`), que ainda usa a interface `@opencode-ai/plugin`. A presença desses módulos não comprova dispatch nativo no DSH.
-- **8 skills acadêmicas** em `skills/`.
-- CI configurada e executada na `master`: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda `typecheck`, `build`, `bun test`, `scripts/validate.sh` e `scripts/check-secrets.sh --ci`.
+- **Empacotamento Cordis integrado**: `package.json` expõe `./dsh`, `./cordis.patch.yml` e `dsh.bundle.patch`; [`cordis.patch.yml`](cordis.patch.yml) monta `dshbanca/dsh` e o preset `banca-auditor` no host.
+- **Entrypoints nativos DSH-only**:
+  - `src/dsh.ts`: plugin Cordis (`name = "dshbanca"`, `inject = ["skills", "tools"]`) que carrega e registra as 16 ferramentas acadêmicas (`ctx.tools.register`), aplica guard monotônico read-only (`ctx.tools.guard` e verificação no executor) e registra o provider nativo de skills (`ctx.skills.registerProvider`).
+  - `src/index.ts`: entry principal DSH-only do pacote, reexportando `apply`, `name`, `inject` de `./dsh.js`, além dos utilitários de ferramentas e decisões acadêmicas (`src/lib/academic_decision.js`). A dependência legada `@opencode-ai/plugin` foi removida.
+- **16 ferramentas acadêmicas nativas** em `src/tools/`, registradas via `ctx.tools.register` no `ToolRuntime` do DSH.
+- **Guard read-only e enforcement de identidade**: bloqueio de ferramentas mutantes para o preset `banca-auditor*` e bloqueio de mutação de manuscrito para subagentes sem o preset `banca-corretor*`.
+- **8 skills acadêmicas empacotadas** na fonte canônica `skills/`, expostas via `ctx.skills.registerProvider` sob o identificador `dshbanca`.
+- **Corpus acadêmico sintético versionado v1** em `tests/fixtures/academic-coverage/v1/`: 10 cenários objetivos para regressão determinística de particionamento UTF-16, omissões e síntese (integrado na [PR #35](https://github.com/Base-Analitica/DSHbanca/pull/35)).
+- **Auditoria durável por lote e gate de síntese**: avanço de checkpoints condicionado a confirmação explícita de auditoria por lote e bloqueio de síntese global até cobertura exaustiva (integrado na [PR #45](https://github.com/Base-Analitica/DSHbanca/pull/45)).
+- **Contratos nativos de perguntas estruturadas e aprovação independente**: conformidade com `ctx.userQuestions` e `ctx.approval`, com garantia estrita de não-mutação na seleção de opções (integrado na [PR #47](https://github.com/Base-Analitica/DSHbanca/pull/47)).
+- **Primeira decisão acadêmica selecionável nativa**: ciclo acadêmico não-mutante fundamentado em evidências e findings estruturados (integrado na [PR #49](https://github.com/Base-Analitica/DSHbanca/pull/49)).
+- **Gate E2E de perfil DSH**: implementado em `scripts/e2e-dsh-profile.ts` (`bun run e2e:dsh:profile`) e documentado em [`docs/dsh-profile-e2e.md`](docs/dsh-profile-e2e.md).
+- **CI configurada e executando na `master`**: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa `typecheck`, `build`, `bun test`, `scripts/validate.sh` e `scripts/check-secrets.sh --ci`.
 
-### Proposto na PR #1 (draft, `CHANGES_REQUESTED`)
+### PRs integradas recentemente
 
-A [PR #1](https://github.com/Base-Analitica/DSHbanca/pull/1), branch `fix/dsh-native-tools` (HEAD consultado `c6e7bd5`), propõe o registro nativo das tools acadêmicas via Cordis/`ctx.tools`, o guard de autorização/read-only do auditor, o preset do auditor e um gate E2E de perfil DSH. Enquanto essa PR permanecer draft e com revisão solicitada, **nada nela pode ser descrito como presente na `master` nem como funcionalidade disponível**.
+- **PR #1** ([#1](https://github.com/Base-Analitica/DSHbanca/pull/1), merge `820910f`): registro nativo das 16 ferramentas via `ctx.tools`, guard read-only do auditor, preset Cordis `banca-auditor` e runner E2E nativo.
+- **PR #35** ([#35](https://github.com/Base-Analitica/DSHbanca/pull/35), merge `5ffedf4`): corpus sintético v1 para regressão determinística de particionamento e síntese.
+- **PR #39** ([#39](https://github.com/Base-Analitica/DSHbanca/pull/39), merge `5bfa86d`): comprovação de discovery e carregamento nativo das 8 skills.
+- **PR #41** ([#41](https://github.com/Base-Analitica/DSHbanca/pull/41), merge `e80d415`) e **PR #43** ([#43](https://github.com/Base-Analitica/DSHbanca/pull/43), merge `8371ba1`): consolidação da fonte canônica em `skills/` e desacoplamento do espelho legado.
+- **PR #45** ([#45](https://github.com/Base-Analitica/DSHbanca/pull/45), merge `e326de7`): exigência de evidência durável de auditoria por lote antes do avanço e gate de síntese.
+- **PR #47** ([#47](https://github.com/Base-Analitica/DSHbanca/pull/47), merge `9b8d672`): contratos nativos de perguntas estruturadas e aprovação independente.
+- **PR #49** ([#49](https://github.com/Base-Analitica/DSHbanca/pull/49), merge `3c24a53`): implementação da primeira decisão acadêmica selecionável nativa não-mutante.
+
+### Evidência E2E DSH real
+
+O gate E2E do perfil DSH real foi executado e aprovado (`PASS`, exit code 0) no HEAD específico `aa39d371962f8cb1349af19fbc6acba78f4f4a85` da [PR #49](https://github.com/Base-Analitica/DSHbanca/pull/49) (com DSH `0.2.0-rc.2`, Cordis `4.0.4` e loader `1.0.5`), comprovando em host real sem modelos:
+- Composição Cordis e montagem do bundle;
+- Registro nativo e despacho das 16 ferramentas;
+- Guard monotônico read-only bloqueando mutações para `banca-auditor*` e subagentes;
+- Descoberta e carregamento íntegro das 8 skills nativas;
+- Ciclo de auditoria durável por lote e liberação da síntese;
+- Perguntas estruturadas (`ctx.userQuestions`) com rejeição de chamador delegado (`DELEGATED_CALLER`), cancelamento (`ASK_ABORTED`) e garantia estrita de não-mutação;
+- Quatro pares ordenados 1:1 de solicitação e decisão de aprovação (`ctx.approval`) em turno aberto de controle;
+- Teardown limpo e descarte de agentes sem resíduos.
+
+> [!IMPORTANT]
+> A evidência E2E acima pertence estritamente ao SHA `aa39d371962f8cb1349af19fbc6acba78f4f4a85` no qual foi autorizada e executada. Ela **não** representa um novo teste E2E executado automaticamente no commit de merge da master (`3c24a53`).
 
 ### Pendente ou não comprovado
 
-- **E2E DSH real no SHA final**: não comprovado. Resultado observado em SHA anterior da PR não vale como prova do HEAD atual. CI convencional, build e teste unitário não substituem esse gate.
-- **Instruções Markdown do `banca-auditor`**: a associação e a projeção no Agent/sessão reais são o objeto da [issue #3](https://github.com/Base-Analitica/DSHbanca/issues/3), ainda bloqueada. Arquivo em `assets/`, nome de preset ou hash igual não provam carregamento.
-- **Decisões acadêmicas por opções selecionáveis** ([issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)): direção de produto registrada, dependente da #3; não implementada aqui.
-- **MCP, LaTeX/BibTeX real, corpus versionado e avaliação humana**: não validados de ponta a ponta por este plugin.
+- **Interface Web real e interativa do DSH** ([issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)): a renderização de componentes interativos e o fluxo de retomada em sessões persistidas ou reconectadas permanecem abertos (`agent:blocked` e `needs:e2e`).
+- **Execução com modelos de IA reais**: nenhuma inferência de LLM ou credencial de provedor foi utilizada. O comportamento qualitativo do modelo em cenários reais não é comprovado por testes herméticos ou E2E sem modelo.
+- **Avaliação acadêmica humana**: automações determinísticas, heurísticas de IA e similaridade fornecem sinais metodológicos, mas não constituem nota, aprovação, reprovação ou julgamento acadêmico institucional soberano.
+- **LaTeX/BibTeX real arbitrário**: validação com compilador `lualatex` em documentos externos complexos e arbitrários de terceiros não foi exaurida de ponta a ponta.
+- **Dívida residual da issue #50** ([issue #50](https://github.com/Base-Analitica/DSHbanca/issues/50)): follow-up não bloqueante (P3) para alinhar `phase: "unknown"` em entradas nulas de cancelamento no classificador do observer.
+- **Licença e release formal**: o projeto permanece `private: true` e `UNLICENSED` ([LICENSE_PENDING.md](LICENSE_PENDING.md)); definições de licença e release pertencem exclusivamente ao mantenedor.
 
 ### Níveis de evidência usados nesta documentação
 
-- `IMPLEMENTADO NA MASTER`: código presente na base `2302a75`.
-- `PROPOSTO NA PR #1 (DRAFT)`: existe apenas em branch de PR, não incorporado.
-- `TESTE LOCAL`: coberto por teste unitário/local; não prova integração nem host real.
-- `E2E DSH NÃO COMPROVADO`: exigiria execução no DSH real no SHA final.
-- `LEGADO OPENCODE`: artefato herdado de outro harness, preservado por histórico e não recomendado como integração DSH.
+- `IMPLEMENTADO`: código presente na base `master` verificada (`3c24a53`).
+- `TESTADO`: contrato validado por testes locais determinísticos ou CI (`bun test`, 1103 testes pass).
+- `E2E DSH REAL`: comportamento observado no host DSH real (`0.2.0-rc.2` / Cordis `4.0.4`), associado a SHA específico (`aa39d37` na PR #49; `cb066a1` na PR #1).
+- `NÃO COMPROVADO`: funcionalidade sem comprovação empírica no host real (ex.: interface Web, modelos de IA, avaliação acadêmica humana).
+- `LEGADO OPENCODE`: artefato inativo mantido como dívida histórica em migração (`assets/opencode/`, script `e2e:opencode`), sem suporte operacional.
 
 ## O que o DSHbanca faz
 
@@ -81,51 +112,53 @@ Validações LaTeX/BibTeX verificam estrutura, includes e referências. Análise
 ├── cordis.patch.yml             # Patch de bundle que monta dshbanca/dsh no DSH
 ├── docs/                        # Documentação técnica
 ├── src/
-│   ├── index.ts                 # Entry principal do pacote
-│   ├── dsh.ts                   # Entry Cordis/DSH (provider de skills na master)
+│   ├── index.ts                 # Entry principal do pacote (DSH-only)
+│   ├── dsh.ts                   # Entry Cordis/DSH (tools, guard e provider de skills)
 │   ├── lib/                     # Bibliotecas acadêmicas internas
 │   └── tools/                   # 16 módulos de ferramentas acadêmicas
-├── skills/                      # 8 skills acadêmicas empacotadas
+├── skills/                      # 8 skills acadêmicas empacotadas (fonte canônica)
 ├── assets/
-│   ├── opencode/                # LEGADO OPENCODE: agentes, comandos e skills
+│   ├── dsh/                     # Assets nativos DSH (agentes e presets)
+│   ├── opencode/                # LEGADO OPENCODE: agentes, comandos e skills inativos
 │   └── templates/               # Templates (style-guide)
-├── tests/                       # Testes (inclui runner legado de outro harness)
+├── tests/                       # Suíte de testes unitários e herméticos
 ├── prompts/                     # Prompts para revisão por IA
-└── scripts/                     # Scripts de validação
+└── scripts/                     # Scripts de validação e runner E2E DSH
 ```
 
 ## Instalação
 
 ### Pré-requisitos
 
-- **DSH (DeepSeek Harness)** instalado e capaz de carregar o bundle Cordis. A versão mínima **não está fixada nem comprovada** neste repositório.
+- **DSH (DeepSeek Harness)** instalado e capaz de carregar o bundle Cordis. A versão observada nas validações reais foi DSH `0.2.0-rc.2` com Cordis `4.0.4`.
 - Node.js >= 18 ou Bun >= 1.x.
 - LaTeX (TeX Live com `lualatex`) apenas para compilação; opcional.
 
-Não há instrução de instalação publicada e validada para o DSHbanca: o pacote é `private` e `UNLICENSED`.
+Não há instrução de instalação publicada para usuários finais: o pacote é `private: true` e `UNLICENSED`.
 
 ### Execução local do repositório
 
 ```bash
 git clone https://github.com/Base-Analitica/DSHbanca.git
 cd DSHbanca
-bun install
+bun install --frozen-lockfile
 bun run build
+bun test
 ```
 
-A instalação local foi exercitada apenas quanto a resolução de dependências e compilação TypeScript; não há validação de uso real no DSH.
+A instalação local executa resolução de dependências, compilação TypeScript e a suíte de testes unitários herméticos.
 
-> **Pacote npm: não publicado.** Não existe pacote público do DSHbanca no npm, e `@opencode/banca` não é um pacote aplicável a este projeto. O `package.json` marca `"private": true` e `"license": "UNLICENSED"`.
+> **Pacote npm: não publicado.** Não existe pacote público do DSHbanca no npm. O `package.json` marca `"private": true` e `"license": "UNLICENSED"`.
 
 ### Integração com o DSH
 
-O repositório declara o bundle em `package.json` e `cordis.patch.yml` (id `dshbanca`, entry `dshbanca/dsh`). O carregamento efetivo pelo DSH **não foi comprovado no SHA final**; não existe comando de instalação validado a documentar aqui.
+O repositório declara o bundle em `package.json` e `cordis.patch.yml` (id `dshbanca`, entry `dshbanca/dsh`). O carregamento e funcionamento em perfil DSH real sem modelo foram observados em SHAs específicos sob autorização (ver [docs/dsh-profile-e2e.md](docs/dsh-profile-e2e.md)); a automação contínua no HEAD da master e a interface Web real permanecem pendentes.
 
 ## Ferramentas e skills
 
 ### Ferramentas registradas na `master`
 
-`src/tools/` contém 16 módulos, registrados no entry principal do pacote (`src/index.ts`) com os nomes abaixo:
+`src/tools/` contém 16 módulos, registrados nativamente no entry DSH (`src/dsh.ts`) via `ctx.tools.register` e exportados no entry principal (`src/index.ts`):
 
 | Ferramenta | Função |
 |---|---|
@@ -146,11 +179,11 @@ O repositório declara o bundle em `package.json` e `cordis.patch.yml` (id `dshb
 | `banca_validate` | Valida `project.json` |
 | `banca_contract` | Contrato pós-correção |
 
-A exposição nativa dessas ferramentas no DSH depende da PR #1 (draft). Skills empacotadas em `skills/`: `banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias`, `banca-revisor` (8).
+As 16 ferramentas são expostas nativamente ao `ToolRuntime` do DSH com guard monotônico read-only (`ctx.tools.guard`) que bloqueia ferramentas mutantes para o auditor (`banca-auditor*`) e mutação do manuscrito para subagentes sem o preset corretor (`banca-corretor*`). As 8 skills empacotadas na fonte canônica `skills/` (`banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias`, `banca-revisor`) são registradas pelo provider nativo `dshbanca` via `ctx.skills.registerProvider`.
 
 ### Legado OpenCode
 
-`assets/opencode/` preserva agentes, comandos e skills do outro harness; `package.json` conserva o script `e2e:opencode` e a dependência `@opencode-ai/plugin`. Isso é **legado histórico em migração**: não é caminho de operação do DSHbanca e não deve ser apresentado como integração DSH. A variável `OPENBANCA_ENABLE_CROSSREF_MCP` (e a equivalente `DSHBANCA_ENABLE_CROSSREF_MCP`) é lida pelo entry legado para auto-registrar um MCP; MCPs e integrações com provedores pertencem ao host e não são instrução operacional deste projeto.
+`assets/opencode/` preserva agentes, comandos e skills herdados do outro harness; `package.json` conserva o script inativo `e2e:opencode` apenas para histórico de migração (a dependência `@opencode-ai/plugin` foi removida). Isso é **legado histórico em migração**: não é caminho de operação do DSHbanca e não deve ser apresentado como integração suportada. Configurações como `DSHBANCA_ENABLE_CROSSREF_MCP` pertencem a integrações legadas; no DSH, MCPs e integrações com provedores pertencem ao host e não são instruções operacionais deste plugin.
 
 ## Como revisar com IA
 
@@ -165,13 +198,13 @@ Consulte [docs/ai-review-protocol.md](docs/ai-review-protocol.md) para o protoco
 
 ## Limitações e riscos
 
-- Nenhum fluxo de DSH está comprovado de ponta a ponta; a integração nativa está em PR draft.
-- O detector de IA é heurístico e **não comprova autoria**; plágio e similaridade também são sinais, não vereditos.
-- Um índice interno de auditoria **não representa aprovação ou reprovação acadêmica**.
-- Referências via MCP não foram validadas com servidores reais nesta base.
-- LaTeX/BibTeX real, corpus versionado e avaliação humana continuam pendentes.
-- O consumo das instruções Markdown do `banca-auditor` pelo Agent depende da issue #3.
-- LaTeX (`lualatex`) é opcional; sem ele não há compilação real.
+- O gate E2E do perfil DSH real sem modelo foi validado em SHAs específicos (`aa39d37` na PR #49; `cb066a1` na PR #1) e não constitui execução automática no commit de merge da `master`.
+- A interface Web interativa e a retomada em sessões desconectadas permanecem abertas e pendentes de validação no DSH ([issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)).
+- Nenhum modelo de IA real foi executado nesta base; avaliações de qualidade, estilo ou deliberação dependentes de modelo não são comprovadas por testes herméticos.
+- O detector de IA é heurístico e **não comprova autoria**; detecção de plágio e similaridade também são sinais metodológicos, não vereditos.
+- Um índice interno de auditoria **não representa aprovação ou reprovação acadêmica** nem substitui avaliação acadêmica humana institucional.
+- Compilação LaTeX (`lualatex`) real de ponta a ponta em documentos arbitrários de terceiros e validação com servidores MCP externos permanecem não exauridas.
+- O projeto permanece `private: true` e `UNLICENSED` ([LICENSE_PENDING.md](LICENSE_PENDING.md)).
 
 ## Como contribuir
 
