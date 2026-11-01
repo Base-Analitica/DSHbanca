@@ -1170,6 +1170,7 @@ export function classifyCancellationOutcome(resOrErr) {
     return {
       handled: false,
       observedErrorCode: "IGNORED_ABORT_SUCCESS",
+      phase: "unknown",
       rejectionObserved: false,
       isCancellation: false,
     };
@@ -1194,14 +1195,31 @@ export function classifyCancellationOutcome(resOrErr) {
     ? rawMessage.replace(/^Error:\s*/, "").trim()
     : "";
 
-  if (
-    errorCode === "ASK_ABORTED" ||
-    errorCode === "TOOL_ABORTED" ||
-    errorCode === "TOOL_ABORTED_BEFORE_DISPATCH"
-  ) {
+  if (errorCode === "ASK_ABORTED") {
     return {
       handled: true,
       observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
+      rejectionObserved: true,
+      isCancellation: true,
+    };
+  }
+
+  if (errorCode === "ABORTED_BEFORE_DISPATCH") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+      phase: "before_dispatch",
+      rejectionObserved: true,
+      isCancellation: true,
+    };
+  }
+
+  if (errorCode === "ABORTED") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED",
+      phase: "tool_aborted",
       rejectionObserved: true,
       isCancellation: true,
     };
@@ -1211,19 +1229,37 @@ export function classifyCancellationOutcome(resOrErr) {
     return {
       handled: false,
       observedErrorCode: errorCode,
+      phase: "unknown",
       rejectionObserved: true,
       isCancellation: false,
     };
   }
 
-  if (
-    normalizedMessage === "ask_user_question was aborted before the user answered" ||
-    normalizedMessage === "tool call aborted before dispatch" ||
-    normalizedMessage === "tool call aborted"
-  ) {
+  if (normalizedMessage === "ask_user_question was aborted before the user answered") {
     return {
       handled: true,
       observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
+      rejectionObserved: true,
+      isCancellation: true,
+    };
+  }
+
+  if (normalizedMessage === "tool call aborted before dispatch") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+      phase: "before_dispatch",
+      rejectionObserved: true,
+      isCancellation: true,
+    };
+  }
+
+  if (normalizedMessage === "tool call aborted") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED",
+      phase: "tool_aborted",
       rejectionObserved: true,
       isCancellation: true,
     };
@@ -1232,6 +1268,7 @@ export function classifyCancellationOutcome(resOrErr) {
   return {
     handled: false,
     observedErrorCode: normalizedMessage.length > 0 ? "GENERIC_ERROR" : "UNKNOWN_ERROR",
+    phase: "unknown",
     rejectionObserved: true,
     isCancellation: false,
   };
@@ -1340,6 +1377,10 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
 
   let transmittedRequest = null;
   let answererReachedForDelegated = false;
+  let inFlightReachedService = false;
+
+  const inFlightQuestionId = "q-academic-in-flight-cancel";
+  const inFlightCancelCtrl = new AbortController();
 
   const disposeAnswerer = ctx.on("user-questions/request", async (req, next) => {
     const q0 = req.questions?.[0];
@@ -1356,6 +1397,22 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
           },
         ],
       };
+    }
+    if (q0?.id === inFlightQuestionId) {
+      inFlightReachedService = true;
+      return new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(new Error("in-flight cancellation timeout")), 3000);
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(req.signal?.reason ?? new Error("aborted"));
+        };
+        if (req.signal?.aborted) {
+          onAbort();
+        } else {
+          req.signal?.addEventListener("abort", onAbort, { once: true });
+          queueMicrotask(() => inFlightCancelCtrl.abort());
+        }
+      });
     }
     return next();
   });
@@ -1509,29 +1566,89 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
       }
     }
 
-    let cancellationClassification = {
+    // 8.1 Pre-dispatch abort probe: signal aborted before tool dispatch
+    let preDispatchClassification = {
       handled: false,
       observedErrorCode: "NOT_EVALUATED",
+      phase: "unknown",
       rejectionObserved: false,
       isCancellation: false,
     };
     try {
-      const cancelCtrl = new AbortController();
-      cancelCtrl.abort();
-      const cancelRes = await ctx.tools.execute({
-        callId: "dshbanca-e2e-academic-cancel",
+      const preDispatchCtrl = new AbortController();
+      preDispatchCtrl.abort();
+      const preDispatchRes = await ctx.tools.execute({
+        callId: "dshbanca-e2e-academic-pre-dispatch-cancel",
         name: "ask_user_question",
         arguments: { questions: [formattedQuestion] },
         agent,
-        signal: cancelCtrl.signal,
+        signal: preDispatchCtrl.signal,
       });
-      cancellationClassification = classifyCancellationOutcome(cancelRes);
+      preDispatchClassification = classifyCancellationOutcome(preDispatchRes);
     } catch (err) {
-      cancellationClassification = classifyCancellationOutcome(err);
+      preDispatchClassification = classifyCancellationOutcome(err);
     }
 
-    if (!cancellationClassification.handled || cancellationClassification.observedErrorCode !== "ASK_ABORTED") {
-      fail("academic probe: cancellation of ask_user_question was not handled with ASK_ABORTED; got: " + cancellationClassification.observedErrorCode);
+    if (
+      !preDispatchClassification.handled ||
+      preDispatchClassification.observedErrorCode !== "ABORTED_BEFORE_DISPATCH" ||
+      preDispatchClassification.phase !== "before_dispatch"
+    ) {
+      fail(
+        "academic probe: pre-dispatch cancellation was not handled with ABORTED_BEFORE_DISPATCH (phase before_dispatch); got: " +
+          preDispatchClassification.observedErrorCode +
+          " (phase: " +
+          preDispatchClassification.phase +
+          ")"
+      );
+    }
+
+    // 8.2 In-flight cancellation probe: request reaches native user-questions service before aborting
+    let inFlightClassification = {
+      handled: false,
+      observedErrorCode: "NOT_EVALUATED",
+      phase: "unknown",
+      rejectionObserved: false,
+      isCancellation: false,
+    };
+    const inFlightQuestion = {
+      id: inFlightQuestionId,
+      question: "In-flight cancellation: does signal abort cancel a question in progress?",
+      options: [
+        { label: "Option A", description: "First choice" },
+        { label: "Option B", description: "Second choice" },
+      ],
+    };
+
+    try {
+      const inFlightRes = await ctx.tools.execute({
+        callId: "dshbanca-e2e-academic-in-flight-cancel",
+        name: "ask_user_question",
+        arguments: { questions: [inFlightQuestion] },
+        agent,
+        signal: inFlightCancelCtrl.signal,
+      });
+      inFlightClassification = classifyCancellationOutcome(inFlightRes);
+    } catch (err) {
+      inFlightClassification = classifyCancellationOutcome(err);
+    }
+
+    if (!inFlightReachedService) {
+      fail("academic probe: in-flight cancellation failed to prove request reached native userQuestions service");
+    }
+
+    if (
+      !inFlightClassification.handled ||
+      inFlightClassification.observedErrorCode !== "ASK_ABORTED" ||
+      inFlightClassification.phase !== "in_flight"
+    ) {
+      fail(
+        "academic probe: in-flight cancellation was not handled with ASK_ABORTED (phase in_flight); got: " +
+          inFlightClassification.observedErrorCode +
+          " (phase: " +
+          inFlightClassification.phase +
+          ")"
+      );
     }
 
     negativeCases = {
@@ -1541,12 +1658,27 @@ export async function runAcademicDecisionProbe(ctx, workspace, agent, unverified
         answererReached: answererReachedForDelegated,
       },
       mismatchedOrIncompatibleRejected,
-      cancellation: {
-        handled: cancellationClassification.handled,
-        observedErrorCode: cancellationClassification.observedErrorCode,
-        rejectionObserved: cancellationClassification.rejectionObserved,
+      preDispatchAbort: {
+        handled: preDispatchClassification.handled,
+        observedErrorCode: preDispatchClassification.observedErrorCode,
+        phase: preDispatchClassification.phase,
+        rejectionObserved: preDispatchClassification.rejectionObserved,
       },
-      cancellationHandled: cancellationClassification.handled,
+      inFlightCancellation: {
+        handled: inFlightClassification.handled,
+        observedErrorCode: inFlightClassification.observedErrorCode,
+        phase: inFlightClassification.phase,
+        rejectionObserved: inFlightClassification.rejectionObserved,
+        requestReachedService: inFlightReachedService,
+      },
+      cancellation: {
+        handled: inFlightClassification.handled,
+        observedErrorCode: inFlightClassification.observedErrorCode,
+        phase: inFlightClassification.phase,
+        rejectionObserved: inFlightClassification.rejectionObserved,
+        requestReachedService: inFlightReachedService,
+      },
+      cancellationHandled: inFlightClassification.handled && preDispatchClassification.handled,
     };
   } finally {
     if (typeof disposeAnswerer === "function") {

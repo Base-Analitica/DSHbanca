@@ -1331,10 +1331,25 @@ const completeAcademicDecisionEvidence = {
       answererReached: false,
     },
     mismatchedOrIncompatibleRejected: true,
+    preDispatchAbort: {
+      handled: true,
+      observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+      phase: "before_dispatch",
+      rejectionObserved: true,
+    },
+    inFlightCancellation: {
+      handled: true,
+      observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
+      rejectionObserved: true,
+      requestReachedService: true,
+    },
     cancellation: {
       handled: true,
       observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
       rejectionObserved: true,
+      requestReachedService: true,
     },
     cancellationHandled: true,
   },
@@ -1634,6 +1649,56 @@ describe("DSH native academic decision evidence gate contract (#48)", () => {
       "evidence snippet on cited lines of synthetic manuscript fixture was not verified",
     ],
     [
+      "pre-dispatch abort not observing ABORTED_BEFORE_DISPATCH",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          preDispatchAbort: {
+            handled: false,
+            observedErrorCode: "ASK_ABORTED",
+            phase: "in_flight",
+            rejectionObserved: true,
+          },
+        },
+      },
+      "pre-dispatch abort must observe native ABORTED_BEFORE_DISPATCH error with phase before_dispatch",
+    ],
+    [
+      "in-flight cancellation request did not reach native service",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          inFlightCancellation: {
+            handled: true,
+            observedErrorCode: "ASK_ABORTED",
+            phase: "in_flight",
+            rejectionObserved: true,
+            requestReachedService: false,
+          },
+        },
+      },
+      "in-flight cancellation must prove request reached native service and observe native ASK_ABORTED error with phase in_flight",
+    ],
+    [
+      "in-flight cancellation observing wrong code instead of ASK_ABORTED",
+      {
+        ...completeAcademicDecisionEvidence,
+        negativeCases: {
+          ...completeAcademicDecisionEvidence.negativeCases,
+          inFlightCancellation: {
+            handled: true,
+            observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+            phase: "before_dispatch",
+            rejectionObserved: true,
+            requestReachedService: true,
+          },
+        },
+      },
+      "in-flight cancellation must prove request reached native service and observe native ASK_ABORTED error with phase in_flight",
+    ],
+    [
       "host ignores abort signal and returns success",
       {
         ...completeAcademicDecisionEvidence,
@@ -1649,7 +1714,7 @@ describe("DSH native academic decision evidence gate contract (#48)", () => {
       "cancellation must observe native ASK_ABORTED error from ToolRuntime; generic errors or unhandled aborts are rejected",
     ],
     [
-      "cancellation observes generic error instead of ASK_ABORTED",
+      "cancellation observes generic error instead of native cancellation",
       {
         ...completeAcademicDecisionEvidence,
         negativeCases: {
@@ -1686,140 +1751,253 @@ describe("DSH native academic decision evidence gate contract (#48)", () => {
 })
 
 describe("Cancellation outcome classification logic (#48)", () => {
-  test("rejects TIMEOUT error even when message contains 'was aborted' (no false PASS)", () => {
-    const errorWithTimeout = {
-      code: "TIMEOUT",
-      message: "request was aborted during an unrelated network timeout",
-    }
-    const classification = classifyCancellationOutcome(errorWithTimeout)
-    expect(classification.isCancellation).toBe(false)
-    expect(classification.handled).toBe(false)
-    expect(classification.observedErrorCode).toBe("TIMEOUT")
-    expect(classification.rejectionObserved).toBe(true)
-  })
+  // Test both the TypeScript contract classifier and the observer implementation generated in scripts/e2e-dsh-profile.ts
+  const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const fnStart = runnerSource.indexOf("export function classifyCancellationOutcome(resOrErr) {")
+  const fnEnd = runnerSource.indexOf("\nexport async function runAcademicDecisionProbe", fnStart)
+  const observerFnSource = runnerSource.slice(fnStart, fnEnd).replace("export function classifyCancellationOutcome", "function classifyCancellationOutcome")
+  const observerClassify = new Function(`${observerFnSource}; return classifyCancellationOutcome;`)()
 
-  test("rejects ToolRuntime result with code TIMEOUT and abort mention", () => {
-    const toolResult = {
-      isError: true,
-      result: {
-        isError: true,
-        error: {
-          message: "operation was aborted due to timeout",
-          info: { name: "TimeoutError", code: "TIMEOUT" },
-        },
-      },
-    }
-    const classification = classifyCancellationOutcome(toolResult)
-    expect(classification.isCancellation).toBe(false)
-    expect(classification.handled).toBe(false)
-    expect(classification.observedErrorCode).toBe("TIMEOUT")
-  })
+  const implementations = [
+    { name: "TypeScript contract classifier", classify: classifyCancellationOutcome },
+    { name: "Observer implementation from scripts/e2e-dsh-profile.ts", classify: observerClassify },
+  ]
 
-  test("rejects NETWORK_ERROR without reclassifying to ASK_ABORTED", () => {
-    const netError = {
-      code: "NETWORK_ERROR",
-      message: "socket was aborted by peer",
-    }
-    const classification = classifyCancellationOutcome(netError)
-    expect(classification.isCancellation).toBe(false)
-    expect(classification.handled).toBe(false)
-    expect(classification.observedErrorCode).toBe("NETWORK_ERROR")
-  })
+  for (const { name, classify } of implementations) {
+    describe(`${name}`, () => {
+      test("rejects TIMEOUT error even when message contains 'was aborted' (no false PASS)", () => {
+        const errorWithTimeout = {
+          code: "TIMEOUT",
+          message: "request was aborted during an unrelated network timeout",
+        }
+        const classification = classify(errorWithTimeout)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("TIMEOUT")
+        expect(classification.phase).toBe("unknown")
+        expect(classification.rejectionObserved).toBe(true)
+      })
 
-  test("rejects generic error without code even when message contains 'was aborted'", () => {
-    const genericError = {
-      message: "request was aborted during an unrelated network timeout",
-    }
-    const classification = classifyCancellationOutcome(genericError)
-    expect(classification.isCancellation).toBe(false)
-    expect(classification.handled).toBe(false)
-    expect(classification.observedErrorCode).toBe("GENERIC_ERROR")
-  })
+      test("rejects ToolRuntime result with code TIMEOUT and abort mention", () => {
+        const toolResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "operation was aborted due to timeout",
+              info: { name: "TimeoutError", code: "TIMEOUT" },
+            },
+          },
+        }
+        const classification = classify(toolResult)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("TIMEOUT")
+        expect(classification.phase).toBe("unknown")
+      })
 
-  test("rejects successful tool result even when caller signal was aborted (IGNORED_ABORT_SUCCESS)", () => {
-    const successResult = {
-      isError: false,
-      result: {
-        isError: false,
-        value: { answers: [{ id: "q1", selected: ["opt1"] }] },
-      },
-    }
-    const classification = classifyCancellationOutcome(successResult)
-    expect(classification.isCancellation).toBe(false)
-    expect(classification.handled).toBe(false)
-    expect(classification.observedErrorCode).toBe("IGNORED_ABORT_SUCCESS")
-    expect(classification.rejectionObserved).toBe(false)
-  })
+      test("rejects NETWORK_ERROR without reclassifying to ASK_ABORTED", () => {
+        const netError = {
+          code: "NETWORK_ERROR",
+          message: "socket was aborted by peer",
+        }
+        const classification = classify(netError)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("NETWORK_ERROR")
+        expect(classification.phase).toBe("unknown")
+      })
 
-  test("rejects generic exception fail-closed", () => {
-    const error = new TypeError("cannot read property of undefined")
-    const classification = classifyCancellationOutcome(error)
-    expect(classification.isCancellation).toBe(false)
-    expect(classification.handled).toBe(false)
-    expect(classification.observedErrorCode).toBe("GENERIC_ERROR")
-  })
+      test("rejects generic error without code even when message contains 'was aborted'", () => {
+        const genericError = {
+          message: "request was aborted during an unrelated network timeout",
+        }
+        const classification = classify(genericError)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("GENERIC_ERROR")
+        expect(classification.phase).toBe("unknown")
+      })
 
-  test("accepts native UserQuestionError with code ASK_ABORTED", () => {
-    const nativeError = {
-      info: { code: "ASK_ABORTED" },
-      message: "ask_user_question was aborted before the user answered",
-    }
-    const classification = classifyCancellationOutcome(nativeError)
-    expect(classification.isCancellation).toBe(true)
-    expect(classification.handled).toBe(true)
-    expect(classification.observedErrorCode).toBe("ASK_ABORTED")
-    expect(classification.rejectionObserved).toBe(true)
-  })
+      test("rejects successful tool result even when caller signal was aborted (IGNORED_ABORT_SUCCESS)", () => {
+        const successResult = {
+          isError: false,
+          result: {
+            isError: false,
+            value: { answers: [{ id: "q1", selected: ["opt1"] }] },
+          },
+        }
+        const classification = classify(successResult)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("IGNORED_ABORT_SUCCESS")
+        expect(classification.phase).toBe("unknown")
+        expect(classification.rejectionObserved).toBe(false)
+      })
 
-  test("accepts ToolRuntime result carrying UserQuestionError ASK_ABORTED", () => {
-    const toolRuntimeResult = {
-      isError: true,
-      result: {
-        isError: true,
-        error: {
+      test("rejects generic exception fail-closed", () => {
+        const error = new TypeError("cannot read property of undefined")
+        const classification = classify(error)
+        expect(classification.isCancellation).toBe(false)
+        expect(classification.handled).toBe(false)
+        expect(classification.observedErrorCode).toBe("GENERIC_ERROR")
+        expect(classification.phase).toBe("unknown")
+      })
+
+      test("accepts native UserQuestionError with code ASK_ABORTED (phase: in_flight)", () => {
+        const nativeError = {
+          info: { code: "ASK_ABORTED" },
           message: "ask_user_question was aborted before the user answered",
-          info: { name: "UserQuestionError", code: "ASK_ABORTED" },
-        },
-      },
-    }
-    const classification = classifyCancellationOutcome(toolRuntimeResult)
-    expect(classification.isCancellation).toBe(true)
-    expect(classification.handled).toBe(true)
-    expect(classification.observedErrorCode).toBe("ASK_ABORTED")
-  })
+        }
+        const classification = classify(nativeError)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("in_flight")
+        expect(classification.rejectionObserved).toBe(true)
+      })
 
-  test("accepts exact canonical native message when code is stripped", () => {
-    const strippedResult = {
-      isError: true,
-      result: {
-        isError: true,
-        error: {
-          message: "ask_user_question was aborted before the user answered",
-        },
-      },
-    }
-    const classification = classifyCancellationOutcome(strippedResult)
-    expect(classification.isCancellation).toBe(true)
-    expect(classification.handled).toBe(true)
-    expect(classification.observedErrorCode).toBe("ASK_ABORTED")
-  })
+      test("accepts ToolRuntime result carrying UserQuestionError ASK_ABORTED (phase: in_flight)", () => {
+        const toolRuntimeResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "ask_user_question was aborted before the user answered",
+              info: { name: "UserQuestionError", code: "ASK_ABORTED" },
+            },
+          },
+        }
+        const classification = classify(toolRuntimeResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("in_flight")
+        expect(classification.rejectionObserved).toBe(true)
+      })
 
-  test("accepts ToolRuntime dispatch-level abort error codes", () => {
-    const dispatchAbort = {
-      isError: true,
-      result: {
-        isError: true,
-        error: {
-          message: "tool call aborted before dispatch",
-          info: { name: "AbortError", code: "TOOL_ABORTED_BEFORE_DISPATCH" },
-        },
-      },
-    }
-    const classification = classifyCancellationOutcome(dispatchAbort)
-    expect(classification.isCancellation).toBe(true)
-    expect(classification.handled).toBe(true)
-    expect(classification.observedErrorCode).toBe("ASK_ABORTED")
-  })
+      test("accepts ToolRuntime pre-dispatch abort ABORTED_BEFORE_DISPATCH without converting to ASK_ABORTED", () => {
+        const preDispatchResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted before dispatch",
+              info: { name: "AbortError", code: "ABORTED_BEFORE_DISPATCH" },
+            },
+          },
+        }
+        const classification = classify(preDispatchResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED_BEFORE_DISPATCH")
+        expect(classification.observedErrorCode).not.toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("before_dispatch")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts ToolRuntime started tool abort ABORTED (phase: tool_aborted)", () => {
+        const toolAbortResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted",
+              info: { name: "AbortError", code: "ABORTED" },
+            },
+          },
+        }
+        const classification = classify(toolAbortResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED")
+        expect(classification.phase).toBe("tool_aborted")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("rejects invented error codes like TOOL_ABORTED_BEFORE_DISPATCH and TOOL_ABORTED", () => {
+        const invented1 = {
+          isError: true,
+          error: {
+            message: "tool call aborted before dispatch",
+            info: { code: "TOOL_ABORTED_BEFORE_DISPATCH" },
+          },
+        }
+        const c1 = classify(invented1)
+        expect(c1.isCancellation).toBe(false)
+        expect(c1.handled).toBe(false)
+        expect(c1.observedErrorCode).toBe("TOOL_ABORTED_BEFORE_DISPATCH")
+        expect(c1.phase).toBe("unknown")
+
+        const invented2 = {
+          isError: true,
+          error: {
+            message: "tool call aborted",
+            info: { code: "TOOL_ABORTED" },
+          },
+        }
+        const c2 = classify(invented2)
+        expect(c2.isCancellation).toBe(false)
+        expect(c2.handled).toBe(false)
+        expect(c2.observedErrorCode).toBe("TOOL_ABORTED")
+        expect(c2.phase).toBe("unknown")
+      })
+
+      test("accepts exact canonical native message when code is stripped (ask_user_question)", () => {
+        const strippedResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "ask_user_question was aborted before the user answered",
+            },
+          },
+        }
+        const classification = classify(strippedResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ASK_ABORTED")
+        expect(classification.phase).toBe("in_flight")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts exact canonical native message when code is stripped (tool call aborted before dispatch)", () => {
+        const strippedResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted before dispatch",
+            },
+          },
+        }
+        const classification = classify(strippedResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED_BEFORE_DISPATCH")
+        expect(classification.phase).toBe("before_dispatch")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+
+      test("accepts exact canonical native message when code is stripped (tool call aborted)", () => {
+        const strippedResult = {
+          isError: true,
+          result: {
+            isError: true,
+            error: {
+              message: "tool call aborted",
+            },
+          },
+        }
+        const classification = classify(strippedResult)
+        expect(classification.isCancellation).toBe(true)
+        expect(classification.handled).toBe(true)
+        expect(classification.observedErrorCode).toBe("ABORTED")
+        expect(classification.phase).toBe("tool_aborted")
+        expect(classification.rejectionObserved).toBe(true)
+      })
+    })
+  }
 })
 
 describe("DSH Cordis composed profile plugin deduplication contract (#48 P1)", () => {

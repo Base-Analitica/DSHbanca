@@ -1434,15 +1434,35 @@ export interface AcademicDecisionAbsenceOfMutationEvidence {
   manuscriptPreserved: boolean
 }
 
+export type CancellationPhase = "before_dispatch" | "in_flight" | "tool_aborted" | "unknown"
+
+export interface AcademicDecisionPreDispatchAbortEvidence {
+  handled: boolean
+  observedErrorCode: string
+  phase: string
+  rejectionObserved: boolean
+}
+
+export interface AcademicDecisionInFlightCancellationEvidence {
+  handled: boolean
+  observedErrorCode: string
+  phase: string
+  rejectionObserved: boolean
+  requestReachedService: boolean
+}
+
 export interface AcademicDecisionCancellationEvidence {
   handled: boolean
   observedErrorCode: string
+  phase?: string
   rejectionObserved: boolean
+  requestReachedService?: boolean
 }
 
 export interface CancellationClassification {
   handled: boolean
   observedErrorCode: string
+  phase: CancellationPhase
   rejectionObserved: boolean
   isCancellation: boolean
 }
@@ -1451,13 +1471,15 @@ export interface CancellationClassification {
  * Classify a tool execution result or thrown error from ask_user_question under cancellation fail-closed.
  * Rejects contradictory codes like TIMEOUT/NETWORK_ERROR even if message contains "was aborted".
  * Rejects success outcomes where host ignored AbortSignal.
- * Accepts only true native ASK_ABORTED/TOOL_ABORTED codes or exact canonical message when code is stripped.
+ * Accepts only true native ASK_ABORTED/ABORTED_BEFORE_DISPATCH/ABORTED codes or exact canonical message when code is stripped.
+ * Preserves the exact native code and phase without converting ABORTED_BEFORE_DISPATCH into ASK_ABORTED.
  */
 export function classifyCancellationOutcome(resOrErr: unknown): CancellationClassification {
   if (resOrErr === null || resOrErr === undefined) {
     return {
       handled: false,
       observedErrorCode: "NULL_OR_UNDEFINED",
+      phase: "unknown",
       rejectionObserved: false,
       isCancellation: false,
     }
@@ -1479,6 +1501,7 @@ export function classifyCancellationOutcome(resOrErr: unknown): CancellationClas
     return {
       handled: false,
       observedErrorCode: "IGNORED_ABORT_SUCCESS",
+      phase: "unknown",
       rejectionObserved: false,
       isCancellation: false,
     }
@@ -1504,15 +1527,32 @@ export function classifyCancellationOutcome(resOrErr: unknown): CancellationClas
     ? rawMessage.replace(/^Error:\s*/, "").trim()
     : ""
 
-  // 3. Known valid cancellation error codes
-  if (
-    errorCode === "ASK_ABORTED" ||
-    errorCode === "TOOL_ABORTED" ||
-    errorCode === "TOOL_ABORTED_BEFORE_DISPATCH"
-  ) {
+  // 3. Native DSH cancellation error codes
+  if (errorCode === "ASK_ABORTED") {
     return {
       handled: true,
       observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
+      rejectionObserved: true,
+      isCancellation: true,
+    }
+  }
+
+  if (errorCode === "ABORTED_BEFORE_DISPATCH") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+      phase: "before_dispatch",
+      rejectionObserved: true,
+      isCancellation: true,
+    }
+  }
+
+  if (errorCode === "ABORTED") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED",
+      phase: "tool_aborted",
       rejectionObserved: true,
       isCancellation: true,
     }
@@ -1523,20 +1563,38 @@ export function classifyCancellationOutcome(resOrErr: unknown): CancellationClas
     return {
       handled: false,
       observedErrorCode: errorCode,
+      phase: "unknown",
       rejectionObserved: true,
       isCancellation: false,
     }
   }
 
-  // 5. Code absent or stripped: accept only EXACT canonical native messages
-  if (
-    normalizedMessage === "ask_user_question was aborted before the user answered" ||
-    normalizedMessage === "tool call aborted before dispatch" ||
-    normalizedMessage === "tool call aborted"
-  ) {
+  // 5. Code absent or stripped: accept only EXACT canonical native messages with proper phase
+  if (normalizedMessage === "ask_user_question was aborted before the user answered") {
     return {
       handled: true,
       observedErrorCode: "ASK_ABORTED",
+      phase: "in_flight",
+      rejectionObserved: true,
+      isCancellation: true,
+    }
+  }
+
+  if (normalizedMessage === "tool call aborted before dispatch") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED_BEFORE_DISPATCH",
+      phase: "before_dispatch",
+      rejectionObserved: true,
+      isCancellation: true,
+    }
+  }
+
+  if (normalizedMessage === "tool call aborted") {
+    return {
+      handled: true,
+      observedErrorCode: "ABORTED",
+      phase: "tool_aborted",
       rejectionObserved: true,
       isCancellation: true,
     }
@@ -1546,6 +1604,7 @@ export function classifyCancellationOutcome(resOrErr: unknown): CancellationClas
   return {
     handled: false,
     observedErrorCode: normalizedMessage.length > 0 ? "GENERIC_ERROR" : "UNKNOWN_ERROR",
+    phase: "unknown",
     rejectionObserved: true,
     isCancellation: false,
   }
@@ -1558,6 +1617,8 @@ export interface AcademicDecisionNegativeCasesEvidence {
     answererReached: boolean
   }
   mismatchedOrIncompatibleRejected: boolean
+  preDispatchAbort: AcademicDecisionPreDispatchAbortEvidence
+  inFlightCancellation: AcademicDecisionInFlightCancellationEvidence
   cancellation: AcademicDecisionCancellationEvidence
   cancellationHandled: boolean
 }
@@ -1754,6 +1815,30 @@ export function validateAcademicDecisionEvidence(value: unknown): string[] {
     if (neg.mismatchedOrIncompatibleRejected !== true) {
       errors.push("mismatched or incompatible answer must be rejected")
     }
+
+    const preDispatch = isRecord(neg.preDispatchAbort) ? (neg.preDispatchAbort as unknown as AcademicDecisionPreDispatchAbortEvidence) : undefined
+    if (
+      !preDispatch ||
+      preDispatch.handled !== true ||
+      preDispatch.rejectionObserved !== true ||
+      preDispatch.observedErrorCode !== "ABORTED_BEFORE_DISPATCH" ||
+      preDispatch.phase !== "before_dispatch"
+    ) {
+      errors.push("pre-dispatch abort must observe native ABORTED_BEFORE_DISPATCH error with phase before_dispatch")
+    }
+
+    const inFlight = isRecord(neg.inFlightCancellation) ? (neg.inFlightCancellation as unknown as AcademicDecisionInFlightCancellationEvidence) : undefined
+    if (
+      !inFlight ||
+      inFlight.handled !== true ||
+      inFlight.rejectionObserved !== true ||
+      inFlight.observedErrorCode !== "ASK_ABORTED" ||
+      inFlight.phase !== "in_flight" ||
+      inFlight.requestReachedService !== true
+    ) {
+      errors.push("in-flight cancellation must prove request reached native service and observe native ASK_ABORTED error with phase in_flight")
+    }
+
     const cancel = isRecord(neg.cancellation) ? (neg.cancellation as unknown as AcademicDecisionCancellationEvidence) : undefined
     if (
       !cancel ||
