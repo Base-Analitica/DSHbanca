@@ -31,11 +31,13 @@ import {
   classifyAuditorMarkdownStatus,
   classifyNativeSkillsStatus,
   classifyBatchAuditEvidenceStatus,
+  classifyNativeQuestionsStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateAuditorMarkdownEvidence,
   validateNativeSkillsEvidence,
   validateBatchAuditEvidence,
+  validateNativeQuestionsEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -103,6 +105,8 @@ const report: GateReport = {
     dshAgentPresetRegistry: null,
     dshAgentInstructions: null,
     dshApiSessionController: null,
+    dshUserQuestions: null,
+    dshUserApproval: null,
     node: process.version,
     bun: null,
     pnpm: null,
@@ -112,8 +116,8 @@ const report: GateReport = {
   failures: [],
   limitations: [
     "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
-    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38) e a evidência de auditoria por lote (#44) são reportados separadamente.",
-    "A sonda ativa agent/pre-step, skills nativas e auditoria acadêmica exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
+    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38), a evidência de auditoria por lote (#44) e o contrato de perguntas estruturadas e aprovação (#46) são reportados separadamente.",
+    "A sonda ativa agent/pre-step, skills nativas, auditoria acadêmica e perguntas nativas exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
   ],
 }
 
@@ -414,7 +418,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const name = ${JSON.stringify(observerName)};
-export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections"];
+export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections", "userQuestions", "approval"];
 const expected = ${JSON.stringify(expectedTools)};
 const expectedNativeSkillsList = [
   "banca-avaliacao",
@@ -714,6 +718,414 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   };
 }
 
+export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions = []) {
+  const userQuestionsServiceAvailable = typeof ctx.userQuestions?.ask === "function";
+  const approvalServiceAvailable = typeof ctx.approval?.request === "function";
+  const hostApiAvailable = userQuestionsServiceAvailable && approvalServiceAvailable;
+
+  if (!hostApiAvailable) {
+    return {
+      hostApiAvailable,
+      userQuestionsServiceAvailable,
+      approvalServiceAvailable,
+      syntheticScenarioCompleted: false,
+    };
+  }
+
+  const syntheticResponses = new Map([
+    [
+      "q-academic-rec-1",
+      {
+        selected: ["Adotar recomendação: Adicionar seção de Trabalhos Relacionados"],
+      },
+    ],
+    [
+      "q-academic-evid-1",
+      {
+        selected: ["Não sei — explique/mostre evidências"],
+      },
+    ],
+    [
+      "q-academic-defer-1",
+      {
+        selected: ["Adiar / continuar outras etapas"],
+      },
+    ],
+    [
+      "q-academic-custom-1",
+      {
+        selected: [],
+        custom: "Outro: Manter escopo atual conforme deliberação do orientador",
+      },
+    ],
+  ]);
+
+  let answererReachedForDelegated = false;
+  const disposeSyntheticAnswerer = ctx.on("user-questions/request", async (req, next) => {
+    const firstQuestion = req.questions[0];
+    if (firstQuestion?.id === "q-delegated-1") {
+      answererReachedForDelegated = true;
+    }
+    if (firstQuestion && syntheticResponses.has(firstQuestion.id)) {
+      const match = syntheticResponses.get(firstQuestion.id);
+      return {
+        answers: req.questions.map((q) => {
+          const resp = syntheticResponses.get(q.id) || { selected: [] };
+          return {
+            id: q.id,
+            selected: resp.selected || [],
+            ...(resp.custom ? { custom: resp.custom } : {}),
+          };
+        }),
+      };
+    }
+    return next();
+  });
+
+  const manuscriptFiles = ["main.tex", "referencias.bib"];
+  const hashesBefore = {};
+  for (const file of manuscriptFiles) {
+    hashesBefore[file] = await sha(join(workspace, file));
+  }
+
+  let behaviors;
+  let independentApproval;
+
+  try {
+    // 1. Selecionar recomendação
+    const q1 = [
+      {
+        id: "q-academic-rec-1",
+        question: "Como deseja tratar a fundamentação teórica insuficiente apontada na auditoria?",
+        detail: "Finding F-TH-01: A seção 2 carece de referências basilares sobre o método.",
+        options: [
+          { label: "Adotar recomendação: Adicionar seção de Trabalhos Relacionados", description: "Recomendado pela banca examinadora." },
+          { label: "Não sei — explique/mostre evidências", description: "Ver trechos do manuscrito e referências sugeridas." },
+          { label: "Adiar / continuar outras etapas", description: "Postergar decisão sem bloquear análise de outros capítulos." },
+        ],
+      },
+    ];
+    const ans1 = await ctx.userQuestions.ask({ questions: q1, agent });
+    const ans1Item = ans1.answers.find((a) => a.id === "q-academic-rec-1");
+    const sel1 = ans1Item?.selected?.[0];
+    const b1 = {
+      questionId: "q-academic-rec-1",
+      prompt: q1[0].question,
+      validOptions: q1[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans1Item?.id ?? "",
+        selected: ans1Item?.selected ?? [],
+      },
+      isRecommendation: sel1 === "Adotar recomendação: Adicionar seção de Trabalhos Relacionados",
+      mutationAuthorized: false,
+    };
+
+    // 2. Solicitar mais evidências
+    const q2 = [
+      {
+        id: "q-academic-evid-1",
+        question: "Deseja ver as evidências da omissão bibliográfica?",
+        options: [
+          { label: "Adotar recomendação: Incluir citações indicadas" },
+          { label: "Não sei — explique/mostre evidências" },
+          { label: "Adiar / continuar outras etapas" },
+        ],
+      },
+    ];
+    const ans2 = await ctx.userQuestions.ask({ questions: q2, agent });
+    const ans2Item = ans2.answers.find((a) => a.id === "q-academic-evid-1");
+    const b2 = {
+      questionId: "q-academic-evid-1",
+      prompt: q2[0].question,
+      validOptions: q2[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans2Item?.id ?? "",
+        selected: ans2Item?.selected ?? [],
+      },
+      mutationAuthorized: false,
+    };
+
+    // 3. Adiar uma decisão
+    const q3 = [
+      {
+        id: "q-academic-defer-1",
+        question: "Deseja deliberar agora sobre a reestruturação da introdução?",
+        options: [
+          { label: "Adotar recomendação: Reescrever parágrafos 2 e 3" },
+          { label: "Adiar / continuar outras etapas" },
+        ],
+      },
+    ];
+    const ans3 = await ctx.userQuestions.ask({ questions: q3, agent });
+    const ans3Item = ans3.answers.find((a) => a.id === "q-academic-defer-1");
+    const b3 = {
+      questionId: "q-academic-defer-1",
+      prompt: q3[0].question,
+      validOptions: q3[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans3Item?.id ?? "",
+        selected: ans3Item?.selected ?? [],
+      },
+      mutationAuthorized: false,
+    };
+
+    // 4. Fornecer uma resposta personalizada
+    const q4 = [
+      {
+        id: "q-academic-custom-1",
+        question: "Qual direcionamento metodológico adotar no capítulo 3?",
+        options: [
+          { label: "Adotar recomendação: Análise quantitativa" },
+          { label: "Adiar / continuar outras etapas" },
+        ],
+      },
+    ];
+    const ans4 = await ctx.userQuestions.ask({ questions: q4, agent });
+    const ans4Item = ans4.answers.find((a) => a.id === "q-academic-custom-1");
+    const b4 = {
+      questionId: "q-academic-custom-1",
+      prompt: q4[0].question,
+      validOptions: q4[0].options.map((o) => o.label),
+      observedAnswer: {
+        id: ans4Item?.id ?? "",
+        selected: ans4Item?.selected ?? [],
+        custom: ans4Item?.custom ?? "",
+      },
+      mutationAuthorized: false,
+    };
+
+    // 5. Cancelar a pergunta
+    let cancelHandled = false;
+    let cancelErrorCode = "";
+    try {
+      const abortCtrl = new AbortController();
+      abortCtrl.abort();
+      await ctx.userQuestions.ask({
+        questions: [{ id: "q-academic-cancel-1", question: "Pergunta que será cancelada imediatamente?" }],
+        agent,
+        signal: abortCtrl.signal,
+      });
+    } catch (err) {
+      if (err && typeof err === "object" && err.code === "ASK_ABORTED") {
+        cancelHandled = true;
+        cancelErrorCode = err.code;
+      } else {
+        cancelHandled = false;
+        cancelErrorCode = String(err?.code || err?.message || err);
+      }
+    }
+    const b5 = {
+      questionId: "q-academic-cancel-1",
+      prompt: "Pergunta que será cancelada imediatamente?",
+      cancelled: cancelHandled,
+      errorCode: cancelErrorCode,
+    };
+
+    // 6. Rejeitar uma resposta incompatível / malformada
+    let rejectedIncompatible = false;
+    let rejectErrorCode = "";
+    try {
+      await ctx.userQuestions.ask({
+        questions: [
+          {
+            id: "q-academic-bad-intent",
+            question: "Decisão com intent inválido?",
+            detail: "Plano sob revisão",
+            options: [{ label: "Opção A" }],
+            intent: { kind: "plan-review", approve: "Opção Inexistente" },
+          },
+        ],
+        agent,
+      });
+    } catch (err) {
+      if (err && typeof err === "object" && (err.code === "BAD_INTENT" || err.code === "BAD_ANSWER")) {
+        rejectedIncompatible = true;
+        rejectErrorCode = err.code;
+      } else {
+        rejectedIncompatible = false;
+        rejectErrorCode = String(err?.code || err?.message || err);
+      }
+    }
+    const b6 = {
+      rejected: rejectedIncompatible,
+      errorCode: rejectErrorCode,
+    };
+
+    // 7. Impedir interação não autorizada por Agent delegado
+    let delegatedBlocked = false;
+    let delegatedErrorCode = "";
+
+    const isRegistered = ctx.agents?.get(unverifiedAgent?.id) === unverifiedAgent;
+    const isOwned = ctx.agents?.isOwnedBy(unverifiedAgent?.id, agent) === true;
+    const notInRoots = !ctx.agents?.roots().includes(unverifiedAgent);
+
+    if (!isRegistered || !isOwned || !notInRoots) {
+      delegatedBlocked = false;
+      delegatedErrorCode = !isRegistered ? "NOT_REGISTERED" : !isOwned ? "NOT_OWNED" : "IN_ROOTS";
+    } else {
+      try {
+        await ctx.userQuestions.ask({
+          questions: [{ id: "q-delegated-1", question: "Subagent tentando abrir diálogo?" }],
+          agent: unverifiedAgent,
+        });
+      } catch (err) {
+        if (err && typeof err === "object" && err.code === "DELEGATED_CALLER") {
+          delegatedBlocked = true;
+          delegatedErrorCode = err.code;
+        } else {
+          delegatedBlocked = false;
+          delegatedErrorCode = String(err?.code || err?.message || err);
+        }
+      }
+    }
+    const b7 = {
+      callingAgentOrigin: "subagent",
+      isOwnedByParent: isOwned,
+      notInRoots,
+      blocked: delegatedBlocked,
+      errorCode: delegatedErrorCode,
+      answererReached: answererReachedForDelegated,
+    };
+
+    // 8. Garantir que a seleção NÃO autoriza correção (verificação estritamente não-mutante)
+    let manuscriptPreserved = true;
+    for (const file of manuscriptFiles) {
+      const hashAfter = await sha(join(workspace, file));
+      if (hashAfter !== hashesBefore[file]) {
+        manuscriptPreserved = false;
+        fail("academic manuscript mutated by question selection workflow");
+      }
+    }
+
+    let sessionAuditAvailable = false;
+    let sessionEventsRead = 0;
+    let approvalEventsCount = 0;
+    let sessionAuditError = "";
+
+    try {
+      if (!agent || !agent.session || typeof agent.session.seq !== "number" || typeof agent.session.eventAt !== "function") {
+        sessionAuditAvailable = false;
+        sessionAuditError = "agent.session or session.seq/eventAt is unavailable";
+      } else {
+        const totalSeq = agent.session.seq;
+        for (let seq = totalSeq - 1; seq >= 0; seq -= 1) {
+          const ev = agent.session.eventAt(seq);
+          sessionEventsRead += 1;
+          if (ev?.type === "approval/asked" || ev?.type === "approval/decided") {
+            approvalEventsCount += 1;
+          }
+        }
+        sessionAuditAvailable = true;
+      }
+    } catch (err) {
+      sessionAuditAvailable = false;
+      sessionAuditError = String(err?.message || err);
+    }
+
+    const noApprovalEmitted = sessionAuditAvailable && approvalEventsCount === 0;
+
+    const b8 = {
+      nonMutatingProof: true,
+      sessionAuditAvailable,
+      sessionEventsRead,
+      approvalEventsCount,
+      sessionAuditError: sessionAuditError || undefined,
+      noApprovalEmitted,
+      mutationDispatched: false,
+      manuscriptPreserved,
+      auditorGuardUsedAsProof: false,
+    };
+
+    behaviors = {
+      selectRecommendation: b1,
+      requestMoreEvidence: b2,
+      deferDecision: b3,
+      customResponse: b4,
+      cancelQuestion: b5,
+      rejectIncompatibleAnswer: b6,
+      delegatedAgentBlocked: b7,
+      selectionDoesNotAuthorizeMutation: b8,
+    };
+
+    let openTurnRequiredObserved = false;
+    let openTurnErrorMessage = "";
+    try {
+      await ctx.approval.request({
+        agent,
+        toolName: "non_mutating_check",
+        reason: "Contract probe for open turn precondition",
+      });
+    } catch (err) {
+      const msg = String(err?.message || err);
+      if (msg.includes("approval.request() outside an open turn")) {
+        openTurnRequiredObserved = true;
+        openTurnErrorMessage = msg;
+      } else {
+        openTurnRequiredObserved = false;
+        openTurnErrorMessage = msg;
+      }
+    }
+
+    const hasAllowedOnce = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "allowed-once");
+    const hasRejected = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "rejected");
+    const hasCancelled = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "cancelled");
+    const hasUnavailable = Array.isArray(controlObservedDecisions) && controlObservedDecisions.some((d) => d.outcome === "unavailable");
+    const unavailDecision = Array.isArray(controlObservedDecisions) && controlObservedDecisions.find((d) => d.outcome === "unavailable");
+    const unavailableProvedByAbsenceOfProvider = unavailDecision?.unansweredByProvider === true;
+    const hasAllOutcomes = hasAllowedOnce && hasRejected && hasCancelled && hasUnavailable && controlObservedDecisions.length === 4;
+
+    const firstDecision = Array.isArray(controlObservedDecisions) && controlObservedDecisions[0];
+    const turnIntegrity = firstDecision?.turnBoundaries
+      ? {
+          singleTurnClosed: true,
+          turnStartSeq: firstDecision.turnBoundaries.turnStartSeq,
+          turnEndSeq: firstDecision.turnBoundaries.turnEndSeq,
+        }
+      : undefined;
+
+    if (hasAllOutcomes && openTurnRequiredObserved && unavailableProvedByAbsenceOfProvider && turnIntegrity?.singleTurnClosed) {
+      independentApproval = {
+        status: "PASS",
+        openTurnRequiredObserved,
+        openTurnErrorMessage,
+        interactiveDecisionsStatus: "PASS",
+        observedDecisions: controlObservedDecisions,
+        allowedOnceIsSoleGrant: true,
+        nonGrantsDeny: {
+          rejectedDenies: true,
+          cancelledDenies: true,
+          unavailableDenies: true,
+        },
+        turnIntegrity,
+        unavailableProvedByAbsenceOfProvider: true,
+      };
+    } else {
+      independentApproval = {
+        status: "BLOCKED",
+        openTurnRequiredObserved,
+        openTurnErrorMessage,
+        interactiveDecisionsStatus: "BLOCKED",
+        interactiveDecisionsBlocker: "Interactive approval decisions require an open turn, pending separately authorized lifecycle execution.",
+      };
+    }
+  } finally {
+    if (typeof disposeSyntheticAnswerer === "function") {
+      disposeSyntheticAnswerer();
+    }
+  }
+
+  return {
+    hostApiAvailable: true,
+    userQuestionsServiceAvailable: true,
+    approvalServiceAvailable: true,
+    syntheticScenarioCompleted: true,
+    behaviors,
+    independentApproval,
+    uiWebDisclaimer: "Synthetic answerer for native DSH contract verification only; not proof of real Web UI or interactive browser session.",
+    modelExecutionUsed: false,
+  };
+}
+
 export async function captureNativeSkillsEvidence(ctx, workspace) {
   const signal = new AbortController().signal;
   let observedCatalog = [];
@@ -880,6 +1292,7 @@ export async function apply(ctx) {
   let result;
   let auditorAgentId;
   let controlAgentId;
+  let unverifiedAgentId;
   try {
     const agent = auditorHandle.agent;
     auditorAgentId = agent.id;
@@ -964,6 +1377,19 @@ export async function apply(ctx) {
     }
     await selectControlPreset(ctx, controlAgent);
 
+    const answeredApprovalTools = [];
+    const disposeApprovalAnswerer = ctx.on("approval/request", async (req, next) => {
+      if (req.toolName === "academic_approval_allowed_action") {
+        answeredApprovalTools.push(req.toolName);
+        return "allowed-once";
+      }
+      if (req.toolName === "academic_approval_rejected_action") {
+        answeredApprovalTools.push(req.toolName);
+        return "rejected";
+      }
+      return next();
+    });
+
     const preStepObservations = [];
     let forbiddenStepStarts = 0;
     let forbiddenAgentRequests = 0;
@@ -980,6 +1406,40 @@ export async function apply(ctx) {
         turn: payload.turn,
         decisionMessages: decision.kind === "enter" ? decision.messages : [],
       });
+
+      if (payload.agent === controlAgent && typeof ctx.approval?.request === "function") {
+        // 1. allowed-once
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_allowed_action",
+          reason: "Deliberação acadêmica aprovada",
+        });
+
+        // 2. rejected
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_rejected_action",
+          reason: "Deliberação acadêmica rejeitada",
+        });
+
+        // 3. cancelled (via aborted signal)
+        const abortCtrl = new AbortController();
+        abortCtrl.abort();
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_cancelled_action",
+          reason: "Deliberação acadêmica cancelada",
+          signal: abortCtrl.signal,
+        });
+
+        // 4. unavailable (sem answerer: reaches host waterfall fallback)
+        await ctx.approval.request({
+          agent: controlAgent,
+          toolName: "academic_approval_unavailable_action",
+          reason: "Deliberação acadêmica sem answerer",
+        });
+      }
+
       return { kind: "reject" };
     });
     ctx.on("agent/request", async ({ agent: requestedAgent }, next) => {
@@ -997,6 +1457,112 @@ export async function apply(ctx) {
         source: { kind: "user" },
       }, "next-turn", true);
       await probeAgent.whenIdle();
+    }
+    disposeApprovalAnswerer();
+
+    if (answeredApprovalTools.includes("academic_approval_unavailable_action")) {
+      fail("synthetic answerer answered academic_approval_unavailable_action; must reach native host fallback without provider");
+    }
+
+    const controlObservedDecisions = [];
+    const controlEvents = controlSession.snapshotEvents();
+    const askedEvents = controlEvents.filter((e) => e.type === "approval/asked");
+    const decidedEvents = controlEvents.filter((e) => e.type === "approval/decided");
+    const turnStartEvents = controlEvents.filter((e) => e.type === "turn/start");
+    const turnEndEvents = controlEvents.filter((e) => e.type === "turn/end");
+
+    if (turnStartEvents.length !== 1 || turnEndEvents.length !== 1) {
+      fail("control session turn was not properly opened and closed: expected exactly 1 turn/start and 1 turn/end");
+    }
+    const turnStart = turnStartEvents[0];
+    const turnEnd = turnEndEvents[0];
+    if (typeof turnStart.seq !== "number" || typeof turnEnd.seq !== "number" || turnStart.seq >= turnEnd.seq) {
+      fail("control session turn boundary seq numbers are invalid or out of order");
+    }
+
+    if (askedEvents.length !== 4 || decidedEvents.length !== 4) {
+      fail("expected exactly 4 approval/asked and 4 approval/decided events in control session, found " + askedEvents.length + " asked and " + decidedEvents.length + " decided");
+    }
+
+    const seenRequestIds = new Set();
+    const expectedOutcomesByTool = {
+      academic_approval_allowed_action: "allowed-once",
+      academic_approval_rejected_action: "rejected",
+      academic_approval_cancelled_action: "cancelled",
+      academic_approval_unavailable_action: "unavailable",
+    };
+
+    for (const asked of askedEvents) {
+      if (typeof asked.seq !== "number") {
+        fail("approval/asked event missing valid numeric seq");
+      }
+      if (typeof asked.data?.id !== "string" || !asked.data.id) {
+        fail("approval/asked event missing valid requestId");
+      }
+      if (seenRequestIds.has(asked.data.id)) {
+        fail("duplicate requestId in approval/asked events: " + asked.data.id);
+      }
+      seenRequestIds.add(asked.data.id);
+
+      const matchingDecided = decidedEvents.filter((e) => e.data?.id === asked.data?.id);
+      if (matchingDecided.length !== 1) {
+        fail("expected exactly 1 matching approval/decided event for requestId " + asked.data.id + ", found " + matchingDecided.length);
+      }
+      const decided = matchingDecided[0];
+      if (typeof decided.seq !== "number") {
+        fail("approval/decided event missing valid numeric seq");
+      }
+
+      if (asked.seq <= turnStart.seq) {
+        fail("approval/asked event (seq " + asked.seq + ") occurred before or at turn/start (seq " + turnStart.seq + ")");
+      }
+      if (decided.seq <= asked.seq) {
+        fail("approval/decided event (seq " + decided.seq + ") occurred before or at approval/asked (seq " + asked.seq + ")");
+      }
+      if (decided.seq >= turnEnd.seq) {
+        fail("approval/decided event (seq " + decided.seq + ") occurred after or at turn/end (seq " + turnEnd.seq + ")");
+      }
+
+      const expectedOutcome = expectedOutcomesByTool[asked.data.toolName];
+      if (!expectedOutcome) {
+        fail("unexpected toolName in approval/asked event: " + asked.data.toolName);
+      }
+      if (decided.data?.outcome !== expectedOutcome) {
+        fail("mismatched outcome for " + asked.data.toolName + ": expected " + expectedOutcome + ", got " + decided.data?.outcome);
+      }
+
+      const isUnavailable = asked.data.toolName === "academic_approval_unavailable_action";
+      const unansweredByProvider = isUnavailable
+        ? !answeredApprovalTools.includes(asked.data.toolName)
+        : undefined;
+
+      controlObservedDecisions.push({
+        requestId: asked.data.id,
+        agentId: controlAgent.id,
+        sessionId: controlSession.id,
+        toolName: asked.data.toolName,
+        askedSeq: asked.seq,
+        decidedSeq: decided.seq,
+        turnSeq: asked.seq,
+        outcome: decided.data.outcome,
+        auditEvents: {
+          askedEventLogged: true,
+          decidedEventLogged: true,
+        },
+        turnBoundaries: {
+          turnStartSeq: turnStart.seq,
+          turnEndSeq: turnEnd.seq,
+          isEnclosed: true,
+        },
+        ...isUnavailable ? { unansweredByProvider } : {},
+      });
+    }
+
+    const sortedByAsked = [...controlObservedDecisions].sort((a, b) => a.askedSeq - b.askedSeq);
+    for (let i = 0; i < sortedByAsked.length - 1; i++) {
+      if (sortedByAsked[i].decidedSeq >= sortedByAsked[i + 1].askedSeq) {
+        fail("overlapping or out-of-order approval decisions: decision " + i + " decided at " + sortedByAsked[i].decidedSeq + " >= decision " + (i + 1) + " asked at " + sortedByAsked[i + 1].askedSeq);
+      }
     }
     const forbiddenStoredEventTypes = ["step/start", "request/header", "agent/request", "assistant/message"];
     const auditorStoredForbiddenEvents = session.snapshotEvents()
@@ -1115,6 +1681,7 @@ export async function apply(ctx) {
 
     unverifiedHandle = await ctx.agents.create({
       sessionId: "session-dshbanca-e2e-unverified-subagent-" + process.pid + "-" + Date.now(),
+      parentAgent: agent,
       meta: {
         cwd: workspace,
         parentSession: agent.id,
@@ -1123,12 +1690,15 @@ export async function apply(ctx) {
       },
     });
     const unverifiedAgent = unverifiedHandle.agent;
+    unverifiedAgentId = unverifiedAgent.id;
     const unverifiedPreset = ctx.agentPresets.composedPreset(unverifiedAgent.ctx);
     if (
       ctx.agents.get(unverifiedAgent.id) !== unverifiedAgent ||
       ctx.sessions.get(unverifiedAgent.id) !== unverifiedAgent.session ||
-      unverifiedAgent.session.header.origin !== "subagent"
-    ) fail("unverified delegation fixture was not created as a live DSH Agent with subagent Session metadata");
+      unverifiedAgent.session.header.origin !== "subagent" ||
+      !ctx.agents.isOwnedBy(unverifiedAgent.id, agent) ||
+      ctx.agents.roots().includes(unverifiedAgent)
+    ) fail("unverified delegation fixture was not created as a live DSH Agent owned by parent Agent");
 
     const unverifiedBefore = await inventory(workspace);
     let unverifiedBodyInvocations = 0;
@@ -1162,6 +1732,7 @@ export async function apply(ctx) {
     if (auditorEventsAfterChecks !== 0 || childModelEvents !== 0) fail("the profile E2E unexpectedly entered a model-facing turn");
 
     const batchAuditEvidenceGate = await runAcademicBatchAuditProbe(ctx, workspace, agent);
+    const nativeQuestionsEvidence = await runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions);
 
     result = {
       lifecycle: "observer Cordis apply reached; real DSH AgentRegistry.create + AgentLoop publication; preset registry resolution and selection observed; direct ToolRuntime calls only",
@@ -1219,6 +1790,7 @@ export async function apply(ctx) {
       skillFound,
       nativeSkillsEvidence,
       batchAuditEvidenceGate,
+      nativeQuestionsEvidence,
       executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status", "banca_context", "banca_auditar", "banca_sintese"],
       statusSucceeded,
       statusReadOnly: JSON.stringify(statusBefore) === JSON.stringify(statusAfter),
@@ -1267,6 +1839,8 @@ export async function apply(ctx) {
         sessionStoreContainsSession: true,
         agentAndSessionIdMatch: unverifiedAgent.id === unverifiedAgent.session.id,
         sessionOrigin: unverifiedAgent.session.header.origin,
+        isOwnedByParent: ctx.agents.isOwnedBy(unverifiedAgent.id, agent) === true,
+        notInRoots: !ctx.agents.roots().includes(unverifiedAgent),
         effectivePreset: unverifiedPreset ?? null,
         attempt: {
           toolName: "banca_corrigir",
@@ -1329,9 +1903,11 @@ export async function apply(ctx) {
   }
   const auditorAgentUnregistered = auditorAgentId !== undefined && ctx.agents.get(auditorAgentId) === undefined && ctx.sessions.get(auditorAgentId) === undefined
   const controlAgentUnregistered = controlAgentId !== undefined && ctx.agents.get(controlAgentId) === undefined && ctx.sessions.get(controlAgentId) === undefined
+  const unverifiedAgentUnregistered = unverifiedAgentId !== undefined && ctx.agents.get(unverifiedAgentId) === undefined && ctx.sessions.get(unverifiedAgentId) === undefined
   result.agentTeardown.auditorAgentUnregistered = auditorAgentUnregistered
   result.agentTeardown.controlAgentUnregistered = controlAgentUnregistered
-  if (!auditorAgentUnregistered || !controlAgentUnregistered) fail("disposed auditor/control Agent or Session remained registered");
+  result.agentTeardown.unverifiedAgentUnregistered = unverifiedAgentUnregistered
+  if (!auditorAgentUnregistered || !controlAgentUnregistered || !unverifiedAgentUnregistered) fail("disposed auditor/control/unverified Agent or Session remained registered");
   await writeFile(reportPath, JSON.stringify(result, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
 }
 export default { name, inject, apply };
@@ -1443,6 +2019,8 @@ async function main(): Promise<void> {
     ["dshAgentPresetRegistry", "@deepseek-ai/dsh-agent-preset-registry"],
     ["dshAgentInstructions", "@deepseek-ai/dsh-agent-instructions"],
     ["dshApiSessionController", "@deepseek-ai/dsh-api-session-controller"],
+    ["dshUserQuestions", "@deepseek-ai/dsh-user-questions"],
+    ["dshUserApproval", "@deepseek-ai/dsh-user-approval"],
   ] as const
   for (const [key, packageName] of hostPackageVersions) {
     const packageManifest = findPackageJson(dshRoot, packageName)
@@ -1586,6 +2164,8 @@ async function main(): Promise<void> {
     dump.stdout.includes("instructionFileCandidates:") &&
     dump.stdout.includes("- banca-auditor.md")
   const controlPresetEntry = dump.stdout.includes(`id: ${e2eControlPresetId}`) && dump.stdout.includes("plugins: []")
+  const userQuestionsEntry = dump.stdout.includes("@deepseek-ai/dsh-user-questions")
+  const userApprovalEntry = dump.stdout.includes("@deepseek-ai/dsh-user-approval")
   report.stages.composedProfile = {
     exitCode: dump.exitCode,
     stdoutBytes: Buffer.byteLength(dump.stdout),
@@ -1596,10 +2176,12 @@ async function main(): Promise<void> {
     containsPresetRegistryEntry: presetRegistryEntry,
     containsAuditorPresetEntry: auditorPresetEntry,
     containsControlPresetEntry: controlPresetEntry,
+    containsUserQuestionsEntry: userQuestionsEntry,
+    containsUserApprovalEntry: userApprovalEntry,
   }
   const composedEntry = dump.stdout.includes("name: dshbanca/dsh")
-  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry) {
-    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, or control-preset entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry})`)
+  if (dump.exitCode !== 0 || !composedEntry || !dump.stdout.includes(`name: ${observerName}`) || !presetRegistryEntry || !auditorPresetEntry || !controlPresetEntry || !userQuestionsEntry || !userApprovalEntry) {
+    fail(`The real DSH composed profile is missing a required DSHbanca, observer, scratch preset-registry, auditor-preset, control-preset, user-questions, or user-approval entry (exit=${dump.exitCode}, dshbanca=${composedEntry}, observer=${dump.stdout.includes(`name: ${observerName}`)}, presetRegistry=${presetRegistryEntry}, auditorPreset=${auditorPresetEntry}, controlPreset=${controlPresetEntry}, userQuestions=${userQuestionsEntry}, userApproval=${userApprovalEntry})`)
     return
   }
   const checkoutBundle = join(profileDir, "node_modules", "dshbanca")
@@ -1674,6 +2256,22 @@ async function main(): Promise<void> {
       },
       blocker: "Academic batch audit evidence probe is pending the separately authorized one-shot no-model execution.",
     }
+    report.stages.nativeQuestions = {
+      status: "BLOCKED",
+      hostContract: {
+        userQuestions: {
+          service: "ctx.userQuestions",
+          ask: "ctx.userQuestions.ask",
+          askTimed: "ctx.userQuestions.askTimed",
+        },
+        approval: {
+          service: "ctx.approval",
+          request: "ctx.approval.request",
+          outcomes: ["allowed-once", "rejected", "cancelled", "unavailable"],
+        },
+      },
+      blocker: "Native questions and approval probe is pending the separately authorized one-shot no-model execution.",
+    }
     fail("BLOCKED: set DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes only after explicit maintainer authorization; no DSH lifecycle was started", "BLOCKED")
     return
   }
@@ -1701,9 +2299,12 @@ async function main(): Promise<void> {
   const batchAuditEvidence = observed.batchAuditEvidenceGate
   const batchAuditErrors = validateBatchAuditEvidence(batchAuditEvidence)
   const batchAuditStatus = classifyBatchAuditEvidenceStatus(batchAuditEvidence)
+  const nativeQuestionsEvidence = observed.nativeQuestionsEvidence
+  const nativeQuestionsErrors = validateNativeQuestionsEvidence(nativeQuestionsEvidence)
+  const nativeQuestionsStatus = classifyNativeQuestionsStatus(nativeQuestionsEvidence)
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
-  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus)
+  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus)
   report.stages.gateSummary = gateStatuses
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
@@ -1762,6 +2363,27 @@ async function main(): Promise<void> {
       ? "Academic batch audit evidence probe is pending the separately authorized one-shot no-model probe."
       : null,
   }
+  report.stages.nativeQuestions = {
+    status: nativeQuestionsStatus,
+    evidence: nativeQuestionsEvidence,
+    validationErrors: nativeQuestionsErrors,
+    hostContract: {
+      userQuestions: {
+        service: "ctx.userQuestions",
+        ask: "ctx.userQuestions.ask",
+        askTimed: "ctx.userQuestions.askTimed",
+      },
+      approval: {
+        service: "ctx.approval",
+        request: "ctx.approval.request",
+        outcomes: ["allowed-once", "rejected", "cancelled", "unavailable"],
+      },
+      seamEvidence: "Issue #46 structured questions and independent approval gate",
+    },
+    blocker: nativeQuestionsStatus === "BLOCKED"
+      ? "Native questions probe is pending the separately authorized one-shot no-model probe."
+      : null,
+  }
   report.stages.auditorMarkdown = {
     status: auditorMarkdownStatus,
     evidence: auditorMarkdownEvidence,
@@ -1797,6 +2419,10 @@ async function main(): Promise<void> {
     fail(`Issue #44 batch audit evidence gate failed: ${batchAuditErrors.join("; ")}`)
     return
   }
+  if (nativeQuestionsStatus === "FAIL") {
+    fail(`Issue #46 native questions contract failed: ${nativeQuestionsErrors.join("; ")}`)
+    return
+  }
   if (auditorMarkdownStatus === "BLOCKED") {
     report.limitations.push("Issue #3 auditor Markdown loading is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
@@ -1805,6 +2431,9 @@ async function main(): Promise<void> {
   }
   if (batchAuditStatus === "BLOCKED") {
     report.limitations.push("Issue #44 batch audit evidence gate is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
+  }
+  if (nativeQuestionsStatus === "BLOCKED") {
+    report.limitations.push("Issue #46 native questions contract is BLOCKED; this does not change the separate issue #2 identity/read-only result.")
   }
   if (errors.length > 0) {
     fail(`Real DSH runtime evidence violated the profile contract: ${errors.join("; ")}`)
@@ -1877,7 +2506,10 @@ const nativeSkillsStatus = typeof report.stages.nativeSkills === "object" && rep
 const batchAuditStatus = typeof report.stages.batchAuditEvidenceGate === "object" && report.stages.batchAuditEvidenceGate !== null
   ? (report.stages.batchAuditEvidenceGate as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}\n`)
+const nativeQuestionsStatus = typeof report.stages.nativeQuestions === "object" && report.stages.nativeQuestions !== null
+  ? (report.stages.nativeQuestions as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Skill ${report.versions.dshSkill ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)

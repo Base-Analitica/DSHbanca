@@ -110,23 +110,36 @@ export function classifyNativeSkillsStatus(value: unknown): ProfileGateStatus {
   return validateNativeSkillsEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
-/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills and batch audit verification. */
+/** Classify the native questions/approval verification gate status. */
+export function classifyNativeQuestionsStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.hostApiAvailable !== true) return "BLOCKED"
+  const errors = validateNativeQuestionsEvidence(value)
+  if (errors.length > 0) return "FAIL"
+  const approval = isRecord(value.independentApproval) ? value.independentApproval : undefined
+  if (approval?.status === "BLOCKED") return "BLOCKED"
+  return "PASS"
+}
+
+/** Keep the legacy identity/read-only and Markdown gates visible while incorporating native skills, batch audit, and native questions verification. */
 export function classifyProfileGateStatuses(
   issue2Status: ProfileGateStatus,
   auditorMarkdownStatus: ProfileGateStatus,
   nativeSkillsStatus?: ProfileGateStatus,
   batchAuditStatus?: ProfileGateStatus,
+  nativeQuestionsStatus?: ProfileGateStatus,
 ): {
   issue2Status: ProfileGateStatus
   auditorMarkdownStatus: ProfileGateStatus
   nativeSkillsStatus?: ProfileGateStatus
   batchAuditStatus?: ProfileGateStatus
+  nativeQuestionsStatus?: ProfileGateStatus
   overallStatus: ProfileGateStatus
   exitCode: number
 } {
   const statuses = [issue2Status, auditorMarkdownStatus]
   if (nativeSkillsStatus !== undefined) statuses.push(nativeSkillsStatus)
   if (batchAuditStatus !== undefined) statuses.push(batchAuditStatus)
+  if (nativeQuestionsStatus !== undefined) statuses.push(nativeQuestionsStatus)
   const overallStatus: ProfileGateStatus = statuses.includes("FAIL")
     ? "FAIL"
     : statuses.includes("BLOCKED") ? "BLOCKED" : "PASS"
@@ -135,6 +148,7 @@ export function classifyProfileGateStatuses(
     auditorMarkdownStatus,
     ...(nativeSkillsStatus !== undefined ? { nativeSkillsStatus } : {}),
     ...(batchAuditStatus !== undefined ? { batchAuditStatus } : {}),
+    ...(nativeQuestionsStatus !== undefined ? { nativeQuestionsStatus } : {}),
     overallStatus,
     exitCode: overallStatus === "PASS" ? passExitCode() : overallStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
   }
@@ -728,6 +742,533 @@ export function classifyBatchAuditEvidenceStatus(value: unknown): ProfileGateSta
   return validateBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
+
+export interface QuestionBehaviorEvidence {
+  questionId: string
+  prompt: string
+  validOptions: string[]
+  observedAnswer: {
+    id: string
+    selected: string[]
+    custom?: string
+  }
+  isRecommendation?: boolean
+  mutationAuthorized: boolean
+}
+
+export interface CustomQuestionBehaviorEvidence {
+  questionId: string
+  prompt: string
+  validOptions?: string[]
+  observedAnswer: {
+    id: string
+    selected?: string[]
+    custom: string
+  }
+  mutationAuthorized: boolean
+}
+
+export interface ObservedApprovalDecision {
+  requestId: string
+  agentId: string
+  sessionId: string
+  toolName: string
+  turnSeq: number
+  askedSeq?: number
+  decidedSeq?: number
+  outcome: "allowed-once" | "rejected" | "cancelled" | "unavailable"
+  auditEvents: {
+    askedEventLogged: boolean
+    decidedEventLogged: boolean
+  }
+  turnBoundaries?: {
+    turnStartSeq: number
+    turnEndSeq: number
+    isEnclosed: boolean
+  }
+  unansweredByProvider?: boolean
+}
+
+export interface ApprovalTurnIntegrityEvidence {
+  singleTurnClosed: boolean
+  turnStartSeq: number
+  turnEndSeq: number
+}
+
+export interface SelectionMutationEvidence {
+  nonMutatingProof?: boolean
+  sessionAuditAvailable: boolean
+  sessionEventsRead: number
+  approvalEventsCount: number
+  sessionAuditError?: string
+  noApprovalEmitted: boolean
+  mutationDispatched: boolean
+  manuscriptPreserved: boolean
+  auditorGuardUsedAsProof?: boolean
+  attemptedTool?: string
+}
+
+export interface NativeQuestionsBehaviorsEvidence {
+  selectRecommendation: QuestionBehaviorEvidence
+  requestMoreEvidence: QuestionBehaviorEvidence
+  deferDecision: QuestionBehaviorEvidence
+  customResponse: CustomQuestionBehaviorEvidence
+  cancelQuestion: {
+    questionId: string
+    prompt?: string
+    cancelled: boolean
+    errorCode: string
+  }
+  rejectIncompatibleAnswer: {
+    rejected: boolean
+    errorCode: string
+  }
+  delegatedAgentBlocked: {
+    callingAgentOrigin?: string
+    isOwnedByParent?: boolean
+    notInRoots?: boolean
+    blocked: boolean
+    errorCode: string
+    answererReached?: boolean
+  }
+  selectionDoesNotAuthorizeMutation: SelectionMutationEvidence
+}
+
+export interface IndependentApprovalEvidence {
+  status: "PASS" | "BLOCKED" | "FAIL"
+  openTurnRequiredObserved?: boolean
+  openTurnErrorMessage?: string
+  interactiveDecisionsStatus?: "BLOCKED" | "NOT_EVALUATED" | "PASS" | "FAIL"
+  interactiveDecisionsBlocker?: string
+  observedDecisions?: ObservedApprovalDecision[]
+  allowedOnceIsSoleGrant?: boolean
+  nonGrantsDeny?: {
+    rejectedDenies: boolean
+    cancelledDenies: boolean
+    unavailableDenies: boolean
+  }
+  contractVerified?: boolean
+  turnIntegrity?: ApprovalTurnIntegrityEvidence
+  unavailableProvedByAbsenceOfProvider?: boolean
+  syntheticAnswererInterceptedUnavailable?: boolean
+}
+
+export interface NativeQuestionsEvidence {
+  hostApiAvailable: boolean
+  userQuestionsServiceAvailable: boolean
+  approvalServiceAvailable: boolean
+  syntheticScenarioCompleted: boolean
+  behaviors: NativeQuestionsBehaviorsEvidence
+  independentApproval: IndependentApprovalEvidence
+  uiWebDisclaimer: string
+  modelExecutionUsed: boolean
+}
+
+/**
+ * Validate proof that native DSH user-questions and independent approval contracts
+ * were exercised, proving that option selection does not grant mutation authorization.
+ */
+export function validateNativeQuestionsEvidence(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) {
+    return ["native questions evidence gate lacks required host verification"]
+  }
+  if (value.hostApiAvailable !== true) {
+    errors.push("native questions host API was not available")
+  }
+  if (value.userQuestionsServiceAvailable !== true) {
+    errors.push("ctx.userQuestions service is unavailable on host")
+  }
+  if (value.approvalServiceAvailable !== true) {
+    errors.push("ctx.approval service is unavailable on host")
+  }
+  if (value.syntheticScenarioCompleted !== true) {
+    errors.push("synthetic academic question scenario was not completed")
+  }
+
+  const behaviors = isRecord(value.behaviors) ? value.behaviors : undefined
+  if (!behaviors) {
+    errors.push("native questions behaviors object is missing")
+    return errors
+  }
+
+  // 1. selectRecommendation
+  const b1 = isRecord(behaviors.selectRecommendation) ? behaviors.selectRecommendation : undefined
+  if (!b1) {
+    errors.push("selectRecommendation behavior is required and missing")
+  } else {
+    if (typeof b1.questionId !== "string" || b1.questionId.trim().length === 0) {
+      errors.push("selectRecommendation questionId must be a non-empty string")
+    }
+    if (typeof b1.prompt !== "string" || b1.prompt.trim().length === 0) {
+      errors.push("selectRecommendation prompt must be a non-empty string")
+    }
+    if (!Array.isArray(b1.validOptions) || b1.validOptions.length < 2) {
+      errors.push("selectRecommendation validOptions must contain at least two options")
+    }
+    const ans1 = isRecord(b1.observedAnswer) ? b1.observedAnswer : undefined
+    if (!ans1) {
+      errors.push("selectRecommendation observedAnswer is missing")
+    } else {
+      if (ans1.id !== b1.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (!Array.isArray(ans1.selected) || ans1.selected.length === 0) {
+        errors.push("selectRecommendation observedAnswer must have non-empty selected array")
+      } else if (Array.isArray(b1.validOptions)) {
+        for (const opt of ans1.selected as string[]) {
+          if (!b1.validOptions.includes(opt)) {
+            errors.push("observed answer selected option is not in valid options list")
+          }
+        }
+      }
+    }
+    if (b1.isRecommendation !== true) {
+      errors.push("selectRecommendation must observe selection of a recommended option")
+    }
+    if (b1.mutationAuthorized !== false) {
+      errors.push("central safety risk violation: selecting a recommendation must not grant mutation authorization")
+    }
+  }
+
+  // 2. requestMoreEvidence
+  const b2 = isRecord(behaviors.requestMoreEvidence) ? behaviors.requestMoreEvidence : undefined
+  if (!b2) {
+    errors.push("requestMoreEvidence behavior is required and missing")
+  } else {
+    if (typeof b2.questionId !== "string" || b2.questionId.trim().length === 0) {
+      errors.push("requestMoreEvidence questionId must be a non-empty string")
+    }
+    if (typeof b2.prompt !== "string" || b2.prompt.trim().length === 0) {
+      errors.push("requestMoreEvidence prompt must be a non-empty string")
+    }
+    if (!Array.isArray(b2.validOptions) || b2.validOptions.length === 0) {
+      errors.push("requestMoreEvidence validOptions must be a non-empty array")
+    }
+    const ans2 = isRecord(b2.observedAnswer) ? b2.observedAnswer : undefined
+    if (!ans2) {
+      errors.push("requestMoreEvidence observedAnswer is missing")
+    } else {
+      if (ans2.id !== b2.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (!Array.isArray(ans2.selected) || ans2.selected.length === 0) {
+        errors.push("requestMoreEvidence observedAnswer must have non-empty selected array")
+      } else if (Array.isArray(b2.validOptions)) {
+        for (const opt of ans2.selected as string[]) {
+          if (!b2.validOptions.includes(opt)) {
+            errors.push("observed answer selected option is not in valid options list")
+          }
+        }
+      }
+    }
+    if (b2.mutationAuthorized !== false) {
+      errors.push("requesting more evidence must not grant mutation authorization")
+    }
+  }
+
+  // 3. deferDecision
+  const b3 = isRecord(behaviors.deferDecision) ? behaviors.deferDecision : undefined
+  if (!b3) {
+    errors.push("deferDecision behavior is required and missing")
+  } else {
+    if (typeof b3.questionId !== "string" || b3.questionId.trim().length === 0) {
+      errors.push("deferDecision questionId must be a non-empty string")
+    }
+    if (typeof b3.prompt !== "string" || b3.prompt.trim().length === 0) {
+      errors.push("deferDecision prompt must be a non-empty string")
+    }
+    if (!Array.isArray(b3.validOptions) || b3.validOptions.length === 0) {
+      errors.push("deferDecision validOptions must be a non-empty array")
+    }
+    const ans3 = isRecord(b3.observedAnswer) ? b3.observedAnswer : undefined
+    if (!ans3) {
+      errors.push("deferDecision observedAnswer is missing")
+    } else {
+      if (ans3.id !== b3.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (!Array.isArray(ans3.selected) || ans3.selected.length === 0) {
+        errors.push("deferDecision observedAnswer must have non-empty selected array")
+      } else if (Array.isArray(b3.validOptions)) {
+        for (const opt of ans3.selected as string[]) {
+          if (!b3.validOptions.includes(opt)) {
+            errors.push("observed answer selected option is not in valid options list")
+          }
+        }
+      }
+    }
+    if (b3.mutationAuthorized !== false) {
+      errors.push("deferring a decision must not grant mutation authorization")
+    }
+  }
+
+  // 4. customResponse
+  const b4 = isRecord(behaviors.customResponse) ? behaviors.customResponse : undefined
+  if (!b4) {
+    errors.push("customResponse behavior is required and missing")
+  } else {
+    if (typeof b4.questionId !== "string" || b4.questionId.trim().length === 0) {
+      errors.push("customResponse questionId must be a non-empty string")
+    }
+    if (typeof b4.prompt !== "string" || b4.prompt.trim().length === 0) {
+      errors.push("customResponse prompt must be a non-empty string")
+    }
+    const ans4 = isRecord(b4.observedAnswer) ? b4.observedAnswer : undefined
+    if (!ans4) {
+      errors.push("customResponse observedAnswer is missing")
+    } else {
+      if (ans4.id !== b4.questionId) {
+        errors.push("observed answer id does not match requested question id")
+      }
+      if (typeof ans4.custom !== "string" || ans4.custom.trim().length === 0) {
+        errors.push("customResponse observedAnswer must contain a non-empty custom string")
+      }
+    }
+    if (b4.mutationAuthorized !== false) {
+      errors.push("providing a custom answer must not grant mutation authorization")
+    }
+  }
+
+  // 5. cancelQuestion
+  const b5 = isRecord(behaviors.cancelQuestion) ? behaviors.cancelQuestion : undefined
+  if (!b5) {
+    errors.push("cancelQuestion behavior is required and missing")
+  } else {
+    if (b5.cancelled !== true || b5.errorCode !== "ASK_ABORTED") {
+      errors.push("question cancellation was not verified with ASK_ABORTED error")
+    }
+  }
+
+  // 6. rejectIncompatibleAnswer
+  const b6 = isRecord(behaviors.rejectIncompatibleAnswer) ? behaviors.rejectIncompatibleAnswer : undefined
+  if (!b6) {
+    errors.push("rejectIncompatibleAnswer behavior is required and missing")
+  } else {
+    if (b6.rejected !== true) {
+      errors.push("incompatible or mismatched answer was not rejected")
+    }
+    if (b6.errorCode !== "BAD_ANSWER" && b6.errorCode !== "BAD_INTENT") {
+      errors.push("incompatible answer error code must be BAD_ANSWER or BAD_INTENT")
+    }
+  }
+
+  // 7. delegatedAgentBlocked
+  const b7 = isRecord(behaviors.delegatedAgentBlocked) ? behaviors.delegatedAgentBlocked : undefined
+  if (!b7) {
+    errors.push("delegatedAgentBlocked behavior is required and missing")
+  } else {
+    if (b7.isOwnedByParent !== true) {
+      errors.push("delegated agent must be verified as owned by parent in runtime")
+    }
+    if (b7.notInRoots !== true) {
+      errors.push("delegated agent must not be present in runtime roots")
+    }
+    if (b7.answererReached === true) {
+      errors.push("delegated agent question must not reach the answerer")
+    }
+    if (b7.errorCode === "NO_PROVIDER") {
+      errors.push("NO_PROVIDER must not be accepted as proof of delegated agent blocking")
+    }
+    if (b7.blocked !== true || b7.errorCode !== "DELEGATED_CALLER") {
+      errors.push("delegated agent must be blocked from userQuestions with DELEGATED_CALLER")
+    }
+  }
+
+  // 8. selectionDoesNotAuthorizeMutation (strictly non-mutating proof, no auditor guard reliance)
+  const b8 = isRecord(behaviors.selectionDoesNotAuthorizeMutation) ? behaviors.selectionDoesNotAuthorizeMutation : undefined
+  if (!b8) {
+    errors.push("selectionDoesNotAuthorizeMutation behavior is required and missing")
+  } else {
+    if (b8.sessionAuditAvailable !== true) {
+      errors.push("session event stream was not available or could not be verified to prove absence of approval")
+    }
+    if (typeof b8.sessionEventsRead !== "number" || b8.sessionEventsRead < 0) {
+      errors.push("sessionEventsRead must be a non-negative number proving session events were inspected")
+    }
+    if (b8.approvalEventsCount !== 0) {
+      errors.push("approval events were detected in session log following question workflow")
+    }
+    if (b8.noApprovalEmitted !== true) {
+      errors.push("question selection must not emit approval grant")
+    }
+    if (b8.mutationDispatched === true) {
+      errors.push("mutation tool was dispatched without independent approval grant")
+    }
+    if (b8.manuscriptPreserved !== true) {
+      errors.push("academic manuscript was mutated by question selection workflow")
+    }
+    if (b8.attemptedTool === "banca_corrigir" || b8.auditorGuardUsedAsProof === true) {
+      errors.push("auditor read-only guard must not be presented as proof of independent approval boundary")
+    }
+  }
+
+  // 9. Independent approval contract
+  const approval = isRecord(value.independentApproval) ? value.independentApproval : undefined
+  if (!approval) {
+    errors.push("independent approval verification object is missing")
+  } else {
+    // Unverified static booleans are explicitly rejected
+    if (approval.contractVerified === true) {
+      errors.push("unobserved static boolean claim of approval contract verification is rejected")
+    }
+    if (
+      approval.openTurnRequiredObserved !== true ||
+      typeof approval.openTurnErrorMessage !== "string" ||
+      !approval.openTurnErrorMessage.includes("outside an open turn")
+    ) {
+      errors.push("approval service threw generic error instead of open turn precondition error")
+    }
+    if (approval.status !== "PASS" && approval.status !== "BLOCKED") {
+      errors.push("independent approval verification status is invalid or failed")
+    }
+    if (approval.status === "PASS") {
+      if (approval.interactiveDecisionsStatus !== "PASS") {
+        errors.push("approval.status cannot be PASS when interactiveDecisionsStatus is not PASS")
+      }
+
+      // P1: Unavailable must be proved by absence of provider (host fallback), not voluntary answerer return
+      if (approval.unavailableProvedByAbsenceOfProvider !== true) {
+        errors.push("unavailable outcome must be proved by absence of provider (host fallback), not voluntary answerer return")
+      }
+      if (approval.syntheticAnswererInterceptedUnavailable === true) {
+        errors.push("synthetic answerer intercepted unavailable request instead of exercising host fallback")
+      }
+
+      // P2: Turn integrity and strict single closed turn
+      const turnIntegrity = isRecord(approval.turnIntegrity) ? (approval.turnIntegrity as unknown as ApprovalTurnIntegrityEvidence) : undefined
+      if (!turnIntegrity || turnIntegrity.singleTurnClosed !== true) {
+        errors.push("approval turn integrity must prove a single closed turn")
+      }
+      const turnStartSeq = typeof turnIntegrity?.turnStartSeq === "number" ? turnIntegrity.turnStartSeq : NaN
+      const turnEndSeq = typeof turnIntegrity?.turnEndSeq === "number" ? turnIntegrity.turnEndSeq : NaN
+      if (isNaN(turnStartSeq) || isNaN(turnEndSeq) || turnStartSeq >= turnEndSeq) {
+        errors.push("turnIntegrity must contain valid numeric turnStartSeq < turnEndSeq")
+      }
+
+      // P2: Exactly 4 pairs, unique IDs, tool/outcome 1:1 mapping, strict ordering
+      if (!Array.isArray(approval.observedDecisions) || approval.observedDecisions.length === 0) {
+        errors.push("approval.status cannot be PASS without verified native observedDecisions containing turn-enclosed audit events")
+      } else if (approval.observedDecisions.length !== 4) {
+        errors.push("observedDecisions must contain exactly 4 observed decisions, one for each native outcome")
+      } else {
+        const decisions = approval.observedDecisions as ObservedApprovalDecision[]
+
+        const seenRequestIds = new Set<string>()
+        const expectedToolOutcomes: Record<string, string> = {
+          academic_approval_allowed_action: "allowed-once",
+          academic_approval_rejected_action: "rejected",
+          academic_approval_cancelled_action: "cancelled",
+          academic_approval_unavailable_action: "unavailable",
+        }
+        const matchedTools = new Set<string>()
+
+        for (const dec of decisions) {
+          if (typeof dec.requestId !== "string" || dec.requestId.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty requestId")
+          } else {
+            if (seenRequestIds.has(dec.requestId)) {
+              errors.push(`duplicate requestId in observedDecisions: ${dec.requestId}`)
+            }
+            seenRequestIds.add(dec.requestId)
+          }
+
+          if (typeof dec.agentId !== "string" || dec.agentId.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty agentId")
+          }
+          if (typeof dec.sessionId !== "string" || dec.sessionId.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty sessionId")
+          }
+          if (typeof dec.toolName !== "string" || dec.toolName.trim().length === 0) {
+            errors.push("observedDecision must contain a non-empty toolName")
+          }
+
+          // Strict numeric sequence verification (no fallbacks)
+          if (
+            typeof dec.turnSeq !== "number" ||
+            dec.turnSeq < 0 ||
+            typeof dec.askedSeq !== "number" ||
+            dec.askedSeq < 0 ||
+            typeof dec.decidedSeq !== "number" ||
+            dec.decidedSeq < 0
+          ) {
+            errors.push("observedDecision must contain strict numeric turnSeq, askedSeq, and decidedSeq without fallbacks")
+          } else {
+            if (dec.turnSeq !== dec.askedSeq) {
+              errors.push("turnSeq must strictly match askedSeq without fallback substitution")
+            }
+            if (!isNaN(turnStartSeq) && !isNaN(turnEndSeq)) {
+              if (dec.askedSeq <= turnStartSeq) {
+                errors.push(`approval/asked event must occur strictly after turn/start (askedSeq ${dec.askedSeq} <= turnStartSeq ${turnStartSeq})`)
+              }
+              if (dec.decidedSeq <= dec.askedSeq) {
+                errors.push(`approval/decided event must occur strictly after approval/asked (decidedSeq ${dec.decidedSeq} <= askedSeq ${dec.askedSeq})`)
+              }
+              if (dec.decidedSeq >= turnEndSeq) {
+                errors.push(`approval/decided event must occur strictly before turn/end (decidedSeq ${dec.decidedSeq} >= turnEndSeq ${turnEndSeq})`)
+              }
+            }
+          }
+
+          if (!dec.auditEvents || dec.auditEvents.askedEventLogged !== true || dec.auditEvents.decidedEventLogged !== true) {
+            errors.push("observedDecision must prove asked and decided audit events were logged in session")
+          }
+
+          // 1:1 mapping of toolName to outcome
+          const expectedOutcome = expectedToolOutcomes[dec.toolName]
+          if (!expectedOutcome || dec.outcome !== expectedOutcome) {
+            errors.push(`observedDecisions must contain 1:1 mapping of expected approval tools to native outcomes (mismatch for tool '${dec.toolName}' with outcome '${dec.outcome}')`)
+          } else {
+            matchedTools.add(dec.toolName)
+          }
+
+          // P1: For unavailable, unansweredByProvider must be true
+          if (dec.outcome === "unavailable" && dec.unansweredByProvider !== true) {
+            errors.push("unavailable decision must prove it was unanswered by any provider")
+          }
+        }
+
+        if (matchedTools.size !== 4) {
+          errors.push("observedDecisions must cover all 4 expected approval tool actions 1:1")
+        }
+
+        // Sequential ordering across decision pairs
+        const sortedDecisions = [...decisions].filter((d) => typeof d.askedSeq === "number" && typeof d.decidedSeq === "number")
+        sortedDecisions.sort((a, b) => (a.askedSeq ?? 0) - (b.askedSeq ?? 0))
+        for (let i = 0; i < sortedDecisions.length - 1; i++) {
+          if ((sortedDecisions[i].decidedSeq ?? 0) >= (sortedDecisions[i + 1].askedSeq ?? 0)) {
+            errors.push("approval decisions must be strictly sequentially ordered without overlap")
+            break
+          }
+        }
+      }
+
+      if (approval.allowedOnceIsSoleGrant !== true) {
+        errors.push("allowed-once must be the sole granting outcome in DSH approval contract")
+      }
+      const nonGrants = isRecord(approval.nonGrantsDeny) ? approval.nonGrantsDeny : undefined
+      if (!nonGrants || nonGrants.rejectedDenies !== true) {
+        errors.push("non-grant approval outcome 'rejected' must deny authorization")
+      }
+      if (!nonGrants || nonGrants.cancelledDenies !== true) {
+        errors.push("non-grant approval outcome 'cancelled' must deny authorization")
+      }
+      if (!nonGrants || nonGrants.unavailableDenies !== true) {
+        errors.push("non-grant approval outcome 'unavailable' must deny authorization")
+      }
+    }
+  }
+
+  if (typeof value.uiWebDisclaimer !== "string" || value.uiWebDisclaimer.trim().length === 0) {
+    errors.push("evidence must contain explicit disclaimer that synthetic answerer is not real Web UI")
+  }
+
+  if (value.modelExecutionUsed !== false) {
+    errors.push("native questions probe used unauthorized model execution")
+  }
+
+  return errors
+}
 
 export function missingHostExitCode(): number {
   return 2

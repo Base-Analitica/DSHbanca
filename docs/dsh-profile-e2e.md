@@ -81,6 +81,46 @@ O cenário cobre de forma reproduzível e hermética:
 
 O resultado é registrado em `stages.batchAuditEvidenceGate` com status (`PASS`, `FAIL`, `BLOCKED`), contagens detalhadas de operações executadas e auditoria sanitizada, sem chamada a modelos ou vazamento de caminhos. Assim como os demais estágios ativos, a sonda permanece `BLOCKED` por padrão antes do boot do perfil até autorização explícita (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`).
 
+## Issue #46: contratos nativos de perguntas estruturadas e aprovação independente
+
+A issue #46 investiga e comprova os contratos nativos do DSH para perguntas estruturadas (`ctx.userQuestions`) e aprovação independente de ações de mutação (`ctx.approval`), com foco no invariant fundamental: **a escolha ou resposta de uma alternativa em `userQuestions` nunca constitui e não pode ser convertida implicitamente em concessão de autorização de mutação (`allowed-once`)**.
+
+O DSH provê esses serviços através dos pacotes `@deepseek-ai/dsh-user-questions` e `@deepseek-ai/dsh-user-approval` (ambos na versão instalada `0.2.0-rc.2`).
+
+### Contratos verificados de perguntas estruturadas (`ctx.userQuestions`)
+
+- **Invocação nativa**: `ctx.userQuestions.ask({ question, options, defaultCustom, signal })`.
+- **Restrição de Agent root e identidade**: apenas agents vivos de primeiro nível podem interagir com o usuário. A chamada por um agente delegado (`origin: "subagent"`) é estritamente rejeitada pelo DSH com o erro `DELEGATED_CALLER` (`"human interaction is unavailable while the calling agent is owned by another live agent"`). Chamada com agent não registrado ou descartado falha com `CALLER_NOT_LIVE`.
+- **Cancelamento**: o suporte nativo a `AbortSignal` cancela a pergunta pendente, rejeitando com `ASK_ABORTED`.
+- **Tratamento de respostas e validações**: o host valida integridade de opções e intenções. Uma resposta incompatível ou intent inconsistente falha com `BAD_INTENT` ou `BAD_ANSWER`.
+- **Comportamentos acadêmicos exercitados**:
+  1. *Selecionar uma recomendação*: resposta a pergunta estruturada escolhendo a opção recomendada pela banca (`validOptions` e `observedAnswer` verificados).
+  2. *Solicitar mais evidências*: resposta selecionando solicitação de subsídios adicionais antes de deliberação.
+  3. *Adiar uma decisão*: escolha explícita de adiamento estruturado.
+  4. *Fornecer resposta personalizada*: resposta `custom` informando decisão orientada pelo usuário.
+  5. *Cancelar a pergunta*: interrupção da pergunta via `AbortSignal`, verificando estritamente `ASK_ABORTED` (sem fallbacks genéricos).
+  6. *Rejeitar resposta incompatível*: validação fail-closed rejeitando opção fora do catálogo ou intent inválido com `BAD_INTENT` ou `BAD_ANSWER`.
+  7. *Impedir interação por Agent delegado*: recusa imediata de tentativa de pergunta estruturada por subagente delegado com `DELEGATED_CALLER`. O subagente deve ser criado no runtime com `parentAgent: agent`, estabelecendo vínculo real de propriedade comprovado por `ctx.agents.isOwnedBy(child.id, agent) === true` e ausência em `ctx.agents.roots()`. A chamada falha antes de alcançar qualquer answerer (`answererReached: false`); `NO_PROVIDER` é estritamente rejeitado como prova de bloqueio por delegação. Ao final, comprova-se o teardown e o desregistro completo do agente filho em `ctx.agents` e `ctx.sessions`.
+  8. *Garantir que a seleção NÃO autoriza correção*: verificação estritamente não mutante dos contratos de autoridade (nenhuma ferramenta mutante como `banca_corrigir` ou `banca_restore` é despachada nesta sonda, eliminando qualquer dependência da guarda read-only do auditor). Comprova que a execução de `userQuestions` não emite eventos de aprovação (`approval/asked` ou `approval/decided`) na sessão, preservando integralmente os digests do manuscrito. Exige verificação positiva do fluxo de auditoria da sessão (`sessionAuditAvailable: true`, contagem de eventos lidos não negativa e zero eventos de aprovação detectados; falha de leitura ou ausência de telemetria de sessão invalida o teste fail-closed).
+
+### Contrato de aprovação independente (`ctx.approval`)
+
+- **Invocação nativa**: `ctx.approval.request({ ... })`.
+- **Precondição de turno aberto**: `ctx.approval.request` exige estritamente um turno ativo (`hasOpenTurn(session) === true`); chamadas fora de turno lançam o erro característico do DSH (`approval.request() outside an open turn`). Exceções genéricas são rejeitadas pelo validador fail-closed.
+- **Comprovação em turno aberto sem modelo**: durante a sonda autorizada, o DSH executa `turn/start` antes do callback `agent/pre-step` de cada turno (`AgentLoop.turn()`). O observador aproveita esse turno aberto em uma sessão de controle dedicada (`controlAgent`) para exercitar `ctx.approval.request` para todos os quatro outcomes nativos:
+  1. `allowed-once`: decisão concedida por answerer sintético;
+  2. `rejected`: decisão recusada por answerer sintético;
+  3. `cancelled`: requisição abortada via `AbortSignal` no cliente antes ou durante a decisão;
+  4. `unavailable`: requisição sem answerer apto a decidir (a sonda permite o fluxo nativo via `next()`), alcançando o fallback nativo do DSH (`() => Promise.resolve("unavailable")`). A ausência de answerer é comprovada por instrumentação (`unansweredByProvider: true`), rejeitando estritamente qualquer answerer que responda voluntariamente `unavailable`.
+  A etapa é imediatamente rejeitada com `{ kind: "reject" }` em `agent/pre-step`, garantindo que o turno seja encerrado (`turn/end`) com zero chamadas a modelo (`forbiddenAgentRequests: 0`), zero `step/start` (`forbiddenStepStarts: 0`) e sem despacho de tools mutantes.
+- **Pares de auditoria completos, únicos e ordenados**: exatamente quatro pares 1:1 de `approval/asked` e `approval/decided` são verificados no snapshot da sessão do `controlAgent`, correlacionados pelo mesmo `requestId`, com ferramentas e outcomes esperados, garantindo a ordem estrita entre as fronteiras do turno único:
+  `turn/start < approval/asked < approval/decided < turn/end`
+  Sequências numéricas são estritamente reais (sem fallback de substituição como `turnSeq = 1`).
+- **Isolamento de autoridade e preservação do auditor**: a sessão de controle é separada do auditor. Na sessão do auditor (`agent`), zero eventos de aprovação são emitidos (`approvalEventsCount === 0`), comprovando que a seleção de opções pelo usuário jamais concede permissões ou emite aprovação de forma implícita.
+- **Anti-falso-positivo**: o validador exige correspondência estrita de IDs entre perguntas e respostas, opções selecionadas pertencentes a `validOptions`, códigos de erro reais sem fallbacks artificiais, telemetria de sessão auditada e recusa de afirmações estáticas não observadas.
+
+O resultado é registrado de forma independente em `stages.nativeQuestions` com status (`PASS`, `FAIL`, `BLOCKED`). Na ausência do DSH ou quando a execução ativa não foi autorizada (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`), o estágio permanece estritamente `BLOCKED`. A sonda sintética controlada exercita a conformidade de contratos e APIs sem simular ou reivindicar interface Web de usuário real e sem qualquer execução de modelos de IA.
+
 ## Cenário, integridade e teardown
 
 O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo. Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
@@ -122,8 +162,9 @@ Os testes em `tests/e2e_dsh_profile_contract.test.ts` validam rejeições do con
 - Não cobre loop real de agente, `SessionController.prompt`, chamadas a modelo, identidade originada pelo gerenciador de subagents, avaliação acadêmica ou julgamento humano.
 - O `Agent` com `origin: "subagent"` é criado pelo `AgentRegistry` nativo com metadados de origem e sessão pai, sem chamar o serviço que executa delegação. O teste comprova enforcement fail-closed para essa identidade DSH, não o lifecycle completo de spawn do subagent manager.
 - `--dump-config` e os testes de contrato não comprovam associação no Agent real. A etapa ativa está bloqueada sem autorização específica e seu resultado não foi executado neste slice.
-- O E2E mantém o status de identidade/guard da issue #2 separado de `stages.auditorMarkdown.status` (issue #3), `stages.nativeSkills.status` (issue #38) e `stages.batchAuditEvidenceGate.status` (issue #44). Todas as etapas ativas continuam `BLOCKED` até existir evidência nativa autorizada no host DSH real, sem executar modelo.
-- Os testes determinísticos locais em `tests/e2e_dsh_profile_contract.test.ts` comprovam que o contrato rejeita catálogos incompletos, skills ausentes, providers incorretos e divergências de conteúdo, mas não equivalem à execução no host DSH.
+- O E2E mantém o status de identidade/guard da issue #2 separado de `stages.auditorMarkdown.status` (issue #3), `stages.nativeSkills.status` (issue #38), `stages.batchAuditEvidenceGate.status` (issue #44) e `stages.nativeQuestions.status` (issue #46). Todas as etapas ativas continuam `BLOCKED` até existir evidência nativa autorizada no host DSH real, sem executar modelo.
+- O gate de perguntas estruturadas e aprovação independente (issue #46) comprova a conformidade das APIs do DSH instalado (`ctx.userQuestions` e `ctx.approval`) através de uma sonda sintética controlada. Não constitui evidência de interface Web de usuário em produção, não executa modelos de IA e não transfere autorização de mutação acadêmica para a seleção de alternativas.
+- Os testes determinísticos locais em `tests/e2e_dsh_profile_contract.test.ts` e `tests/native_questions_contract.test.ts` comprovam que o contrato rejeita catálogos incompletos, skills ausentes, providers incorretos, divergências de conteúdo e violações de autorização de mutação, mas não equivalem à execução no host DSH.
 - Os hashes são de arquivos sintéticos e relativos ao workspace temporário. Nenhum manuscrito real é usado.
 
 ## Segurança da suíte de testes

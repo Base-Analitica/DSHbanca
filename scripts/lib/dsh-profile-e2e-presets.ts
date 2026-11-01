@@ -16,6 +16,14 @@ export function buildSdkPresetOverlayPatch(observerName: string): string {
         name: "@deepseek-ai/dsh-agent-preset",
         config: { id: e2eControlPresetId, name: e2eControlPresetId, plugins: [] },
       },
+      {
+        id: "user-questions",
+        name: "@deepseek-ai/dsh-user-questions",
+      },
+      {
+        id: "user-approval",
+        name: "@deepseek-ai/dsh-user-approval",
+      },
       { id: "dshbanca-e2e-observer", name: observerName },
     ],
   }])
