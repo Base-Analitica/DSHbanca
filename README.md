@@ -51,7 +51,10 @@ O **OpenBanca** é um **projeto separado**, mantido para o harness **OpenCode**.
 
 O gate E2E do perfil DSH real foi executado e aprovado (`PASS`, exit code 0) no HEAD específico `aa39d371962f8cb1349af19fbc6acba78f4f4a85` da [PR #49](https://github.com/Base-Analitica/DSHbanca/pull/49) (com DSH `0.2.0-rc.2`, Cordis `4.0.4` e loader `1.0.5`), comprovando em host real sem modelos:
 - Composição Cordis e montagem do bundle;
-- Registro nativo e despacho das 16 ferramentas;
+- Registro nativo das 16 ferramentas acadêmicas no DSH (`ctx.tools.register`);
+- Descoberta e indexação das 16 ferramentas pelo `ToolRuntime` do host (`exactToolSet: true`);
+- Despacho efetivo via `ctx.tools.execute` de um subconjunto de 8 ferramentas acadêmicas (`banca_init`, `banca_snapshot`, `banca_corrigir`, `banca_restore`, `banca_status`, `banca_context`, `banca_auditar`, `banca_sintese`) e da ferramenta nativa do host `ask_user_question`;
+- Delimitação das 8 ferramentas acadêmicas não exercitadas individualmente na sonda E2E (`banca_refs`, `banca_ia`, `banca_plagio`, `banca_loop`, `banca_compile`, `banca_checklist`, `banca_validate`, `banca_contract`), validadas em testes unitários e herméticos locais (`bun test`);
 - Guard monotônico read-only bloqueando mutações para `banca-auditor*` e subagentes;
 - Descoberta e carregamento íntegro das 8 skills nativas;
 - Ciclo de auditoria durável por lote e liberação da síntese;
@@ -179,7 +182,7 @@ O repositório declara o bundle em `package.json` e `cordis.patch.yml` (id `dshb
 | `banca_validate` | Valida `project.json` |
 | `banca_contract` | Contrato pós-correção |
 
-As 16 ferramentas são expostas nativamente ao `ToolRuntime` do DSH com guard monotônico read-only (`ctx.tools.guard`) que bloqueia ferramentas mutantes para o auditor (`banca-auditor*`) e mutação do manuscrito para subagentes sem o preset corretor (`banca-corretor*`). As 8 skills empacotadas na fonte canônica `skills/` (`banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias`, `banca-revisor`) são registradas pelo provider nativo `dshbanca` via `ctx.skills.registerProvider`.
+As 16 ferramentas são registradas nativamente no `ToolRuntime` do DSH via `ctx.tools.register` com guard monotônico read-only (`ctx.tools.guard`) que bloqueia ferramentas mutantes para o auditor (`banca-auditor*`) e mutação do manuscrito para subagentes sem o preset corretor (`banca-corretor*`). O host DSH descobre e cataloga as 16 ferramentas (`exactToolSet: true`). A sonda E2E sem modelo (`scripts/e2e-dsh-profile.ts`) exercita o despacho de um subconjunto de 8 ferramentas acadêmicas (`banca_init`, `banca_snapshot`, `banca_corrigir`, `banca_restore`, `banca_status`, `banca_context`, `banca_auditar`, `banca_sintese`), além de `ask_user_question` do host; as 8 ferramentas restantes (`banca_refs`, `banca_ia`, `banca_plagio`, `banca_loop`, `banca_compile`, `banca_checklist`, `banca_validate`, `banca_contract`) são cobertas por testes unitários e herméticos locais (`bun test`), sem despacho individual no E2E. As 8 skills empacotadas na fonte canônica `skills/` (`banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias`, `banca-revisor`) são registradas pelo provider nativo `dshbanca` via `ctx.skills.registerProvider`.
 
 ### Legado OpenCode
 

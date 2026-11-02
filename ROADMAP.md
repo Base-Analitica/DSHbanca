@@ -107,6 +107,6 @@ Legenda de status:
 - [x] CI executando na `master`
 - [x] Corpus acadêmico sintético versionado coberto por testes determinísticos (PR #35)
 - [/] E2E DSH real validado em perfil real nos SHAs autorizados (`cb066a1`, `aa39d37`); automação contínua em CI provisionada pendente
-- [x] Nenhum segredo ou manuscrito real exposto em repositório, issue, commit ou PR
+- [/] Verificação de segredos no checkout atual aprovada pelo scanner em CI (`bash scripts/check-secrets.sh --ci` sem ocorrências nos caminhos e padrões inspecionados); ausência global em histórico Git, issues, PRs ou manuscritos externos não auditada
 - [ ] Interface Web interativa e fluxo de sessão reconectada comprovados (issue #4)
 - [ ] Licença definida e release aprovado pelo mantenedor
