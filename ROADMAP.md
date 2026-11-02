@@ -84,7 +84,7 @@ Legenda de status:
 
 - [ ] Revisões por IA registradas a partir dos prompts existentes em `prompts/`
 - [ ] Definição de licença (`LICENSE_PENDING.md` permanece pendente)
-- [ ] Remoção ou migração definitiva do legado inativo de outro harness (`assets/opencode/`, script `e2e:opencode`) — tratada como dívida histórica
+- [ ] Remoção ou migração definitiva do legado inativo de outro harness (`assets/opencode/`, runner e testes históricos após remoção do comando `e2e:opencode` do manifesto na issue #53) — tratada como dívida histórica
 - [ ] Alinhamento residual da issue #50 (follow-up menor P3 de classificação de cancelamento nulo)
 - [ ] Interface Web real e retomada de UX (issue #4)
 - [ ] Preparação de release e cutover — **decisão exclusiva do mantenedor; não autorizada por este roadmap**

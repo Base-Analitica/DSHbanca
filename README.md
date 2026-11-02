@@ -80,7 +80,7 @@ O gate E2E do perfil DSH real foi executado e aprovado (`PASS`, exit code 0) no 
 - `TESTADO`: contrato validado por testes locais determinísticos ou CI (`bun test`, 1103 testes pass).
 - `E2E DSH REAL`: comportamento observado no host DSH real (`0.2.0-rc.2` / Cordis `4.0.4`), associado a SHA específico (`aa39d37` na PR #49; `cb066a1` na PR #1).
 - `NÃO COMPROVADO`: funcionalidade sem comprovação empírica no host real (ex.: interface Web, modelos de IA, avaliação acadêmica humana).
-- `LEGADO OPENCODE`: artefato inativo mantido como dívida histórica em migração (`assets/opencode/`, script `e2e:opencode`), sem suporte operacional.
+- `LEGADO OPENCODE`: artefato inativo mantido como dívida histórica em migração (`assets/opencode/`, runner `scripts/e2e-opencode.ts` e testes históricos), sem comando operacional no manifesto e sem suporte operacional.
 
 ## O que o DSHbanca faz
 
@@ -186,7 +186,7 @@ As 16 ferramentas são registradas nativamente no `ToolRuntime` do DSH via `ctx.
 
 ### Legado OpenCode
 
-`assets/opencode/` preserva agentes, comandos e skills herdados do outro harness; `package.json` conserva o script inativo `e2e:opencode` apenas para histórico de migração (a dependência `@opencode-ai/plugin` foi removida). Isso é **legado histórico em migração**: não é caminho de operação do DSHbanca e não deve ser apresentado como integração suportada. Configurações como `DSHBANCA_ENABLE_CROSSREF_MCP` pertencem a integrações legadas; no DSH, MCPs e integrações com provedores pertencem ao host e não são instruções operacionais deste plugin.
+`assets/opencode/` preserva agentes, comandos e skills herdados do outro harness; o runner `scripts/e2e-opencode.ts` e seus testes históricos permanecem no repositório como dívida técnica isolada, mas o script operacional `e2e:opencode` foi removido de `package.json` (a dependência `@opencode-ai/plugin` já havia sido removida). Isso é **legado histórico em migração**: não é caminho de operação do DSHbanca e não deve ser apresentado como integração suportada. Configurações como `DSHBANCA_ENABLE_CROSSREF_MCP` pertencem a integrações legadas; no DSH, MCPs e integrações com provedores pertencem ao host e não são instruções operacionais deste plugin.
 
 ## Como revisar com IA
 

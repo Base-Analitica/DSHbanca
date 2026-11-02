@@ -100,7 +100,7 @@ A prova de um asset, ferramenta ou agente é uma cadeia: fonte canônica → emp
 | Local | Estado observado |
 |---|---|
 | `README.md`, `ROADMAP.md`, `docs/architecture.md` | Reconciliados na issue #51 com o estado factual da master (`3c24a53`), PRs integradas e limites reais. |
-| `package.json` | Removida a dependência legada `@opencode-ai/plugin`. Conserva o script inativo `e2e:opencode` como dívida histórica. |
+| `package.json` | Removida a dependência legada `@opencode-ai/plugin` e removido o script operacional `e2e:opencode` (issue #53); o runner `scripts/e2e-opencode.ts` e testes históricos permanecem isolados como dívida técnica. |
 | `src/index.ts` | Reexporta diretamente `src/dsh.ts`, utilitários de ferramentas e decisões acadêmicas (DSH-only). |
 | `assets/opencode/` | Preservado como histórico inativo de migração de outro harness; não faz parte do fluxo operacional do DSHbanca. |
 | `docs/ai-review-protocol.md`, `docs/issue-labeling-policy.md`, `.github/labels.yml` | Taxonomia e documentação conservam nomenclaturas legadas; catalogadas para tratamento documental próprio. |
