@@ -17,14 +17,28 @@ Defina `WORKTREE` como um **checkout separado da master atual**, sem alteraçõe
 
 ```bash
 # Executar manualmente no terminal do operador, fora do Creator Agent.
+set -euo pipefail
 export WORKTREE=/caminho/para/DSHbanca-worktree
 export DSH_DEV_PREFIX="$HOME/.local/opt/dsh-creator-0.2.1-rc.5"
 export DSH_HOME="$HOME/.local/state/dshbanca-creator"
 export DSH_CREATOR_CLI="$DSH_DEV_PREFIX/node_modules/@deepseek-ai/dsh/lib/bin.js"
+CREATOR_PROFILE="$DSH_HOME/profiles/creator-dev"
 
-# Não sobrescreva uma instalação paralela preexistente.
-test ! -e "$DSH_DEV_PREFIX" &&
-  npm install --prefix "$DSH_DEV_PREFIX" --no-audit --no-fund --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.5
+# Validar todos os destinos antes de npm/bun, perfil, plugin ou servidor.
+if [ ! -d "$WORKTREE" ]; then
+  printf 'BLOCKED: WORKTREE must be an existing scratch checkout; no persistent operation was executed.\n' >&2
+  exit 1
+fi
+if [ -e "$DSH_DEV_PREFIX" ] || [ -L "$DSH_DEV_PREFIX" ]; then
+  printf 'BLOCKED: DSH_DEV_PREFIX already exists; choose a fresh isolated prefix. No persistent operation was executed.\n' >&2
+  exit 1
+fi
+if [ -e "$CREATOR_PROFILE" ] || [ -L "$CREATOR_PROFILE" ]; then
+  printf 'BLOCKED: creator-dev profile already exists; choose a fresh isolated DSH_HOME. No persistent operation was executed.\n' >&2
+  exit 1
+fi
+
+npm install --prefix "$DSH_DEV_PREFIX" --no-audit --no-fund --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.5
 node "$DSH_CREATOR_CLI" --version
 
 cd "$WORKTREE"
@@ -36,10 +50,9 @@ bun run validate:skills
 bun run validate:agents
 git diff --check
 
-# O flag --from-default-profile substitui o perfil alvo se ele já existir.
-# Portanto, use-o somente na PRIMEIRA criação de um perfil novo.
-test ! -e "$DSH_HOME/profiles/creator-dev" &&
-  node "$DSH_CREATOR_CLI" --profile creator-dev --from-default-profile web --dump-config >/dev/null
+# O flag --from-default-profile substitui o perfil alvo; a guarda acima o rejeita
+# antes de qualquer operação persistente se o destino já existir.
+node "$DSH_CREATOR_CLI" --profile creator-dev --from-default-profile web --dump-config >/dev/null
 
 node "$DSH_CREATOR_CLI" plugin --profile creator-dev add --ignore-scripts "file:$WORKTREE"
 node "$DSH_CREATOR_CLI" --profile creator-dev --dump-config >/dev/null
