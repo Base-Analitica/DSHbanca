@@ -11,9 +11,12 @@
 
 ## Preparação reproduzível (Linux, Node 22, Bun e pnpm)
 
+> **Bootstrap manual do operador — fora da sessão Creator.** Todos os comandos deste bloco, inclusive instalação, build, testes, criação do perfil, `plugin add` e inicialização do servidor, devem ser executados manualmente pelo mantenedor em um terminal confiável do host, separado da sessão/Agent do DSH. Não os peça ao Creator nem os execute via tool dispatch ou `Agent.send`. O sandbox da sessão Creator não protege esse bootstrap; o preflight abaixo não o autoriza retroativamente. Antes de executar, confira no host que worktree, prefixo e `DSH_HOME` são scratch e isolados, que os destinos ainda não existem quando o bloco exige isso e que o terminal usado tem escopo de escrita apropriado. Se não conseguir verificar esses pontos, pare em `BLOCKED`; não amplie as permissões do Agent para executar o setup.
+
 Defina `WORKTREE` como um **checkout separado da master atual**, sem alterações alheias, e não como o checkout de outra PR.
 
 ```bash
+# Executar manualmente no terminal do operador, fora do Creator Agent.
 export WORKTREE=/caminho/para/DSHbanca-worktree
 export DSH_DEV_PREFIX="$HOME/.local/opt/dsh-creator-0.2.1-rc.5"
 export DSH_HOME="$HOME/.local/state/dshbanca-creator"
@@ -45,19 +48,11 @@ node "$DSH_CREATOR_CLI" --profile creator-dev --host 127.0.0.1 --port 38087 --no
 
 O Web imprime uma URL de acesso **com token**. Abra a URL apenas na máquina local; não compartilhe o token em relatórios, PRs, capturas ou logs públicos. Se a porta estiver ocupada, escolha outra porta exclusivamente em loopback.
 
-No Web, selecione **o workspace correspondente ao worktree de desenvolvimento** e o preset **Creator** antes de solicitar trabalho. O preset exibido inicialmente pode ser `Standard mode`: a presença de Creator na configuração não significa que ele foi selecionado. Não encaminhe um TCC real para esta sessão.
-
-## Ciclo de implementação recomendado
-
-1. Selecionar **uma issue-folha**, trabalhar em **uma branch/PR** baseada na `master` verificada e preservar alterações existentes.
-2. No Creator, fornecer contexto de `AGENTS.md` e do escopo da issue; solicitar inspeção **nativa** de Cordis, APIs, tools e skills antes de criar infraestrutura. Exigir hipótese, teste negativo e mudança mínima.
-3. O executor altera apenas os arquivos permitidos. Depois do build e testes, **reinstalar/sincronizar o bundle local no perfil de desenvolvimento quando necessário** (dependência `file:` do pnpm é uma cópia, não um link vivo); não declarar HMR, recarga ou atualização como comprovados sem inspeção da ativação. Se houver dúvidas, encerrar e reiniciar o perfil de desenvolvimento antes do teste.
-4. Revisar diff, resultados e proveniência. E2E DSH/Cordis **no SHA final**, com permissão adequada; reportar `PASS`, `FAIL` ou `BLOCKED` por gate. Publicar PR draft; aplicar revisão independente, correção e merge apenas com gates satisfeitos.
-5. O plugin instalado no perfil Creator é **experimental**. A distribuição e os presets acadêmicos permanecem separados, com auditor read-only e mudanças de manuscrito condicionadas a autorização específica.
+No Web, selecione **o workspace correspondente ao worktree de desenvolvimento** e o preset **Creator** antes de solicitar trabalho. O preset exibido inicialmente pode ser `Standard mode`: a presença de Creator na configuração não significa que ele foi selecionado. **A primeira atividade no Creator deve ser cumprir o preflight obrigatório abaixo; até concluí-lo, não solicite trabalho nem permita qualquer outra ação, comando ou dispatch do Agent.** Não encaminhe um TCC real para esta sessão.
 
 ## Preflight obrigatório de permissões efetivas
 
-O Creator é um preset de desenvolvimento, não um papel acadêmico nem uma fronteira de segurança própria. Antes de qualquer edição, teste que escreva arquivos, alteração de perfil ou instalação de plugin, valide **a política efetiva da mesma sessão Agent**; não use o nome visual `Workspace Write` nem `--dump-config` como prova.
+O Creator é um preset de desenvolvimento, não um papel acadêmico nem uma fronteira de segurança própria. Antes de qualquer ação, comando ou dispatch iniciado pelo Creator Agent que edite, execute teste que escreva arquivos, altere perfil ou instale plugin, valide **a política efetiva da mesma sessão Agent**; não use o nome visual `Workspace Write` nem `--dump-config` como prova. O bootstrap manual da seção anterior é uma etapa do operador fora dessa sessão e não é autorizado retroativamente por este preflight.
 
 1. Selecione o workspace correspondente ao worktree scratch e registre o `workspaceRoot` canônico esperado.
 2. No DSH `0.2.1-rc.5`, consulte `/permission` e selecione `/permission workspace-write` quando necessário. Em seguida, confira o runtime context daquela sessão: modo `workspace-write`, aprovação `ask` e raiz do workspace correta. A seleção visual é apenas uma pista; um valor ausente, `custom`, divergente ou desconhecido bloqueia a tarefa.
@@ -86,6 +81,14 @@ Antes de iniciar trabalho de escrita, faça o teste no DSH real com diretório e
 4. Compare os hashes dos dois fixtures, confirme a ausência dos marcadores e remova a pasta temporária somente depois de verificar com `realpath` que ela permanece sob o workspace. Se o pai externo não for gravável pelo sistema operacional, o teste é inconclusivo, não `PASS`.
 
 **Resultado observado neste ambiente em 03/11/2026, HEAD `277b04c89c359761710f436bb1fbac5b422645ce`:** o runtime context informou `workspace-write` + `ask`; a `write` externa foi recusada com `file access denied under workspace-write mode`; a escrita Bash externa recebeu `EROFS`. Marcadores ausentes, hashes dos fixtures sintéticos inalterados e teardown concluído. Isso prova somente esses dois caminhos no perfil/sessão observados; não declara toda operação do Creator read-only.
+
+## Ciclo de implementação recomendado
+
+1. Selecionar **uma issue-folha**, trabalhar em **uma branch/PR** baseada na `master` verificada e preservar alterações existentes.
+2. No Creator, fornecer contexto de `AGENTS.md` e do escopo da issue; solicitar inspeção **nativa** de Cordis, APIs, tools e skills antes de criar infraestrutura. Exigir hipótese, teste negativo e mudança mínima.
+3. O executor altera apenas os arquivos permitidos. Depois do build e testes, **reinstalar/sincronizar o bundle local no perfil de desenvolvimento quando necessário** (dependência `file:` do pnpm é uma cópia, não um link vivo); não declarar HMR, recarga ou atualização como comprovados sem inspeção da ativação. Se houver dúvidas, encerrar e reiniciar o perfil de desenvolvimento antes do teste.
+4. Revisar diff, resultados e proveniência. E2E DSH/Cordis **no SHA final**, com permissão adequada; reportar `PASS`, `FAIL` ou `BLOCKED` por gate. Publicar PR draft; aplicar revisão independente, correção e merge apenas com gates satisfeitos.
+5. O plugin instalado no perfil Creator é **experimental**. A distribuição e os presets acadêmicos permanecem separados, com auditor read-only e mudanças de manuscrito condicionadas a autorização específica.
 
 ## Perfis acadêmicos não intercambiáveis
 
