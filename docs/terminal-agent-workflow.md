@@ -15,7 +15,7 @@ Este manual complementa `AGENTS.md`, não o substitui. Leia também, conforme o 
 | E2E DSH do perfil | `docs/dsh-profile-e2e.md`, se estiver disponível no checkout e a tarefa solicitar ou depender desse gate |
 | Criar PR | `CONTRIBUTING.md` e `.github/PULL_REQUEST_TEMPLATE.md`, se disponíveis |
 
-O contrato explícito da issue/PR determina escopo, arquivos permitidos, base, critérios e operações autorizadas. Código e execução no SHA real prevalecem sobre intenção, comentários, planos e arquivos presentes sem discovery comprovada. A [governança permanente de papéis](../AGENTS.md#papeis-permanentes-e-independencia-de-revisao) é normativa: ChatGPT mantém/revisa, DSH Creator executa por padrão, o proprietário humano conserva as decisões reservadas e um terceiro agente DSH participa adicionalmente quando o risco exigir. Agentes acadêmicos do produto não são revisores de código.
+O contrato explícito da issue/PR determina escopo, arquivos permitidos, base, critérios e operações autorizadas. Código e execução no SHA real prevalecem sobre intenção, comentários, planos e arquivos presentes sem discovery comprovada. A [governança permanente de papéis](../AGENTS.md#papéis-permanentes-e-independência-de-revisão) é normativa: ChatGPT mantém/revisa, DSH Creator executa por padrão, o proprietário humano conserva as decisões reservadas e um terceiro agente DSH participa adicionalmente quando o risco exigir. Agentes acadêmicos do produto não são revisores de código.
 
 ## 1. Preflight de Git e preservação do trabalho
 
