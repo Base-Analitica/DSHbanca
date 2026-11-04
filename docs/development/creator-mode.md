@@ -18,30 +18,51 @@ Defina `WORKTREE` como um **checkout separado da master atual**, sem alteraçõe
 ```bash
 # Executar manualmente no terminal do operador, fora do Creator Agent.
 set -euo pipefail
-export WORKTREE=/caminho/para/DSHbanca-worktree
+export WORKTREE=/caminho/canonico/para/DSHbanca-worktree
+# Exemplo da issue #57: conferir branch e merge-base no GitHub e atualizar em outras issues.
+export EXPECTED_BRANCH=chore/57-creator-dev-workflow
+export EXPECTED_BASE_SHA=f3c22a901907f792633a6ed8979192e8dae34bd4
 export DSH_DEV_PREFIX="$HOME/.local/opt/dsh-creator-0.2.1-rc.5"
 export DSH_HOME="$HOME/.local/state/dshbanca-creator"
 export DSH_CREATOR_CLI="$DSH_DEV_PREFIX/node_modules/@deepseek-ai/dsh/lib/bin.js"
-CREATOR_PROFILE="$DSH_HOME/profiles/creator-dev"
 
-# Validar todos os destinos antes de npm/bun, perfil, plugin ou servidor.
-if [ ! -d "$WORKTREE" ]; then
-  printf 'BLOCKED: WORKTREE must be an existing scratch checkout; no persistent operation was executed.\n' >&2
-  exit 1
-fi
-if [ -e "$DSH_DEV_PREFIX" ] || [ -L "$DSH_DEV_PREFIX" ]; then
-  printf 'BLOCKED: DSH_DEV_PREFIX already exists; choose a fresh isolated prefix. No persistent operation was executed.\n' >&2
-  exit 1
-fi
-if [ -e "$CREATOR_PROFILE" ] || [ -L "$CREATOR_PROFILE" ]; then
-  printf 'BLOCKED: creator-dev profile already exists; choose a fresh isolated DSH_HOME. No persistent operation was executed.\n' >&2
-  exit 1
-fi
-
+# Preflight SOMENTE LEITURA: nenhuma instalação ou criação antes de todos os guards.
+blocked() { printf 'BLOCKED: %s; no persistent operation was executed.\n' "$1" >&2; exit 1; }
+for path in "$WORKTREE" "$DSH_DEV_PREFIX" "$DSH_HOME"; do
+  [ "$path" = "$(realpath -m -- "$path")" ] || blocked "path must be absolute/canonical and contain no symlink ancestors: $path"
+done
+[ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] ||
+  blocked "WORKTREE must be an existing canonical directory"
+# Um linked worktree tem .git como arquivo; o checkout principal tem .git como diretório.
+[ -f "$WORKTREE/.git" ] && [ ! -L "$WORKTREE/.git" ] ||
+  blocked "WORKTREE must be a separate Git linked worktree"
+export GIT_OPTIONAL_LOCKS=0  # Evita atualização incidental do índice no preflight.
+[ "$(git -C "$WORKTREE" rev-parse --show-toplevel 2>/dev/null)" = "$WORKTREE" ] ||
+  blocked "WORKTREE is not the Git repository root"
+[ "$(git -C "$WORKTREE" remote get-url origin 2>/dev/null)" = "https://github.com/Base-Analitica/DSHbanca.git" ] ||
+  blocked "unexpected repository origin; verify the scratch checkout"
+[ "$EXPECTED_BRANCH" != master ] &&
+  [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null)" = "$EXPECTED_BRANCH" ] ||
+  blocked "wrong branch or detached checkout"
+[[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  blocked "EXPECTED_BASE_SHA must be a verified full commit SHA"
+[ "$(git -C "$WORKTREE" merge-base refs/remotes/origin/master HEAD 2>/dev/null)" = "$EXPECTED_BASE_SHA" ] ||
+  blocked "incorrect or unverified branch base (refresh/verify origin/master separately)"
+git_status="$(git -C "$WORKTREE" status --porcelain=v1 --untracked-files=all 2>/dev/null)" ||
+  blocked "cannot inspect WORKTREE status"
+[ -z "$git_status" ] ||
+  blocked "WORKTREE contains staged, unstaged or untracked changes"
+case "$DSH_HOME/" in "$WORKTREE/"*|"$DSH_DEV_PREFIX/"*) blocked "DSH_HOME must be outside worktree and installation prefix" ;; esac
+case "$DSH_DEV_PREFIX/" in "$WORKTREE/"*|"$DSH_HOME/"*) blocked "installation prefix must be outside worktree and DSH_HOME" ;; esac
+for destination in "$DSH_DEV_PREFIX" "$DSH_HOME"; do
+  [ ! -e "$destination" ] && [ ! -L "$destination" ] ||
+    blocked "scratch destination already exists (including DSH_HOME/global configuration): $destination"
+done
+# Home NOVO impede herdar cordis.patch.yml, perfis, sessões e credenciais preexistentes.
+# Mantenha WORKTREE, DSH_DEV_PREFIX e DSH_HOME em árvores distintas e dedicadas.
+cd "$WORKTREE"
 npm install --prefix "$DSH_DEV_PREFIX" --no-audit --no-fund --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.5
 node "$DSH_CREATOR_CLI" --version
-
-cd "$WORKTREE"
 bun install --frozen-lockfile
 bun run typecheck
 bun run build
@@ -50,8 +71,8 @@ bun run validate:skills
 bun run validate:agents
 git diff --check
 
-# O flag --from-default-profile substitui o perfil alvo; a guarda acima o rejeita
-# antes de qualquer operação persistente se o destino já existir.
+# O flag --from-default-profile substitui o perfil alvo; a guarda acima exige
+# DSH_HOME inteiro novo, inclusive ausência de cordis.patch.yml global e perfis antigos.
 node "$DSH_CREATOR_CLI" --profile creator-dev --from-default-profile web --dump-config >/dev/null
 
 node "$DSH_CREATOR_CLI" plugin --profile creator-dev add --ignore-scripts "file:$WORKTREE"
@@ -111,15 +132,17 @@ Antes de iniciar trabalho de escrita, faça o teste no DSH real com diretório e
 
 ## Matriz de evidências e limites
 
+**Proveniência obrigatória:** as três provas de discovery, dispatch e negação de escrita abaixo ocorreram em **03/11/2026 no SHA histórico `277b04c89c359761710f436bb1fbac5b422645ce`**. **Não foram repetidas no HEAD `7f1bdcaa6246148ccf0c5ff977b8aaccbe9ae3f6` nem nos commits posteriores desta correção documental.** O resultado é `PASS` *histórico e restrito ao ambiente observado*, nunca E2E no HEAD final.
+
 | Gate | Estado | Evidência/limite |
 |---|---|---|
-| Discovery de tools e skills | `PASS` | DSH real listou 16 tools DSHbanca e 8 skills no contexto ativo. |
-| Dispatch acadêmico read-only | `PASS` | `banca_checklist` retornou `6/6` em LaTeX/BibTeX sintéticos; nenhum arquivo foi alterado. |
-| Escrita fora do workspace | `PASS` (escopo testado) | DSH `write` e Bash confinado recusaram os marcadores externos; hashes preservados e teardown concluído. |
+| Discovery de tools e skills | `PASS histórico (277b04c)` | DSH real listou 16 tools DSHbanca e 8 skills no contexto ativo do ensaio histórico; não repetido no HEAD posterior. |
+| Dispatch acadêmico read-only | `PASS histórico (277b04c)` | `banca_checklist` retornou `6/6` em LaTeX/BibTeX sintéticos; não repetido no HEAD posterior. |
+| Escrita fora do workspace | `PASS histórico (277b04c)` | DSH `write` e Bash confinado recusaram marcadores externos; hashes e teardown do ensaio histórico, não revalidados no HEAD posterior. |
 | Segurança geral de escrita do Creator | `FAIL` para alegação ampla | A prova cobre somente esses caminhos/sessão. `workspace-write` permite mutações no workspace e temp roots; Creator não é read-only nem herda o guard do auditor. |
 | Prompt/answerer de aprovação em uma operação ampliada | `BLOCKED` | Política efetiva `ask` e contrato one-shot verificados, mas não foi solicitada nem observada uma aprovação interativa; disponibilidade do answerer não foi validada. |
 | Inferência, uso de credenciais e instalação demonstrativa | `BLOCKED` / não validados | Nenhum modelo, credencial ou `plugin_manager.install_bundle` foi usado. |
-| E2E nativo executado pela CI | `BLOCKED` / não executado | A CI da PR #58 aprovou `validate`, mas o step nativo só roda com `vars.DSH_PROFILE_E2E_ENABLED == 'true'`; sucesso convencional não prova esse E2E. Ver [workflow de CI](../../.github/workflows/ci.yml#L33-L39) e [run da PR #58](https://github.com/Base-Analitica/DSHbanca/actions/runs/41687842806). |
+| E2E nativo executado pela CI | `BLOCKED` / não executado | A CI da PR #58 aprovou `validate`, mas o step nativo só roda com `vars.DSH_PROFILE_E2E_ENABLED == 'true'`; sucesso convencional não prova esse E2E. Ver [workflow de CI](../../.github/workflows/ci.yml#L33-L39) e [CI no SHA 7f1bdc](https://github.com/Base-Analitica/DSHbanca/actions/runs/41713952279) (`validate: PASS`; E2E nativo: `SKIPPED/BLOCKED`). Novo commit exige CI e E2E próprios antes de qualquer alegação de PASS final. |
 
 O gerenciador nativo de plugins pode alterar o perfil persistente e carregar código com privilégios do Host. Não usar `pnpm approve --all` ou `plugin_manager.install_bundle` indiscriminadamente. Skills pendentes em `pnpm approve` exigem análise e consentimento pontual. Nenhuma inferência paga, acesso a credenciais de outro perfil, `Agent.send`, mutação acadêmica ou alteração da instalação global é autorizada por este guia.
 
