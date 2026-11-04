@@ -13,6 +13,8 @@
 
 > **Bootstrap manual do operador — fora da sessão Creator.** Todos os comandos deste bloco, inclusive instalação, build, testes, criação do perfil, `plugin add` e inicialização do servidor, devem ser executados manualmente pelo mantenedor em um terminal confiável do host, separado da sessão/Agent do DSH. Não os peça ao Creator nem os execute via tool dispatch ou `Agent.send`. O sandbox da sessão Creator não protege esse bootstrap; o preflight abaixo não o autoriza retroativamente. Antes de executar, confira no host que worktree, prefixo e `DSH_HOME` são scratch e isolados, que os destinos ainda não existem quando o bloco exige isso e que o terminal usado tem escopo de escrita apropriado. Se não conseguir verificar esses pontos, pare em `BLOCKED`; não amplie as permissões do Agent para executar o setup.
 
+**Limite de isolamento:** `DSH_HOME` novo, sozinho, não impede herdar variáveis de autenticação nem os fallbacks `.env` do projeto/usuário (`@deepseek-ai/dsh-credentials-local` 0.2.1-rc.5). Este bootstrap verifica apenas os **nomes** `.env*` (inclusive ignorados por Git), reserva destinos novos em modo 0700 e executa os comandos de DSH em processo com ambiente allowlist (`env -i`), `HOME`/XDG isolados e cwd fora do projeto. O `PATH` é fornecido pelo terminal confiável do operador. A instalação e os testes manuais continuam fora do sandbox do Creator. Outro processo do **mesmo usuário** pode ainda interferir entre verificações e usos; reserva exclusiva e revalidação reduzem, não eliminam todo TOCTOU. Nenhuma credencial real deve ser importada neste ensaio.
+
 Defina `WORKTREE` como um **checkout separado da master atual**, sem alterações alheias, e não como o checkout de outra PR.
 
 ```bash
@@ -27,16 +29,25 @@ export DSH_HOME="$HOME/.local/state/dshbanca-creator"
 export DSH_CREATOR_CLI="$DSH_DEV_PREFIX/node_modules/@deepseek-ai/dsh/lib/bin.js"
 
 # Preflight SOMENTE LEITURA: nenhuma instalação ou criação antes de todos os guards.
-blocked() { printf 'BLOCKED: %s; no persistent operation was executed.\n' "$1" >&2; exit 1; }
+blocked() { printf 'BLOCKED: %s; downstream operations stopped (inspect new scratch reservations, if any).\n' "$1" >&2; exit 1; }
 for path in "$WORKTREE" "$DSH_DEV_PREFIX" "$DSH_HOME"; do
   [ "$path" = "$(realpath -m -- "$path")" ] || blocked "path must be absolute/canonical and contain no symlink ancestors: $path"
 done
 [ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] ||
   blocked "WORKTREE must be an existing canonical directory"
-# Um linked worktree tem .git como arquivo; o checkout principal tem .git como diretório.
+# O gitfile não basta (submódulos também usam .git como arquivo).
 [ -f "$WORKTREE/.git" ] && [ ! -L "$WORKTREE/.git" ] ||
-  blocked "WORKTREE must be a separate Git linked worktree"
+  blocked "WORKTREE must have a Git linked-worktree gitfile"
 export GIT_OPTIONAL_LOCKS=0  # Evita atualização incidental do índice no preflight.
+GIT_DIR="$(git -C "$WORKTREE" rev-parse --absolute-git-dir 2>/dev/null)" ||
+  blocked "cannot resolve linked worktree Git directory"
+GIT_COMMON_DIR="$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+  blocked "cannot resolve shared Git common directory"
+[ "$GIT_DIR" != "$GIT_COMMON_DIR" ] ||
+  blocked "WORKTREE is a main checkout/submodule rather than linked worktree"
+git -C "$WORKTREE" worktree list --porcelain 2>/dev/null |
+  grep -Fx -- "worktree $WORKTREE" >/dev/null ||
+  blocked "WORKTREE is not registered as a linked worktree"
 [ "$(git -C "$WORKTREE" rev-parse --show-toplevel 2>/dev/null)" = "$WORKTREE" ] ||
   blocked "WORKTREE is not the Git repository root"
 [ "$(git -C "$WORKTREE" remote get-url origin 2>/dev/null)" = "https://github.com/Base-Analitica/DSHbanca.git" ] ||
@@ -52,17 +63,70 @@ git_status="$(git -C "$WORKTREE" status --porcelain=v1 --untracked-files=all 2>/
   blocked "cannot inspect WORKTREE status"
 [ -z "$git_status" ] ||
   blocked "WORKTREE contains staged, unstaged or untracked changes"
+# Arquivos .env* são ignorados pelo Git: detecte NOMES, sem ler conteúdo ou seguir links.
+env_candidate="$(find "$WORKTREE" -name '.env*' -print -quit 2>/dev/null)" ||
+  blocked "cannot inspect worktree for ignored .env files"
+[ -z "$env_candidate" ] ||
+  blocked "worktree contains .env* (including ignored files); do not load any credentials"
 case "$DSH_HOME/" in "$WORKTREE/"*|"$DSH_DEV_PREFIX/"*) blocked "DSH_HOME must be outside worktree and installation prefix" ;; esac
 case "$DSH_DEV_PREFIX/" in "$WORKTREE/"*|"$DSH_HOME/"*) blocked "installation prefix must be outside worktree and DSH_HOME" ;; esac
 for destination in "$DSH_DEV_PREFIX" "$DSH_HOME"; do
   [ ! -e "$destination" ] && [ ! -L "$destination" ] ||
     blocked "scratch destination already exists (including DSH_HOME/global configuration): $destination"
+  [ -d "$(dirname "$destination")" ] ||
+    blocked "destination parent does not exist; prepare it separately in a trusted terminal"
 done
-# Home NOVO impede herdar cordis.patch.yml, perfis, sessões e credenciais preexistentes.
-# Mantenha WORKTREE, DSH_DEV_PREFIX e DSH_HOME em árvores distintas e dedicadas.
+# Reserva exclusiva/atômica: sem -p, sem reuso, proprietário somente (0700).
+# Falha parcial deixa diretório NOVO vazio para inspeção manual; nunca remova estado alheio.
+umask 077
+mkdir -m 700 -- "$DSH_DEV_PREFIX" ||
+  blocked "exclusive prefix reservation failed; inspect any new empty scratch directory"
+mkdir -m 700 -- "$DSH_HOME" ||
+  blocked "exclusive DSH_HOME reservation failed; inspect prefix reservation before cleanup"
+DSH_BOOT_HOME="$DSH_HOME/operator-home"
+mkdir -m 700 -- "$DSH_BOOT_HOME" ||
+  blocked "cannot create isolated operator home; inspect reserved scratch paths"
+PREFIX_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_DEV_PREFIX")"
+HOME_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_HOME")"
+BOOT_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_BOOT_HOME")"
+NODE_BIN="$(command -v node)" || blocked "Node unavailable"
+NPM_BIN="$(command -v npm)" || blocked "npm unavailable"
+
+check_scratch() {
+  [ "$DSH_DEV_PREFIX" = "$(realpath -m -- "$DSH_DEV_PREFIX")" ] &&
+    [ "$DSH_HOME" = "$(realpath -m -- "$DSH_HOME")" ] &&
+    [ ! -L "$DSH_DEV_PREFIX" ] && [ ! -L "$DSH_HOME" ] &&
+    [ ! -L "$DSH_BOOT_HOME" ] &&
+    [ "$(stat -Lc '%d:%i:%u' -- "$DSH_DEV_PREFIX")" = "$PREFIX_ID" ] &&
+    [ "$(stat -Lc '%d:%i:%u' -- "$DSH_HOME")" = "$HOME_ID" ] &&
+    [ "$(stat -Lc '%d:%i:%u' -- "$DSH_BOOT_HOME")" = "$BOOT_ID" ] ||
+    blocked "reserved scratch path changed; stop before writing"
+  env_candidate="$(find "$WORKTREE" -name '.env*' -print -quit 2>/dev/null)" ||
+    blocked "cannot recheck ignored environment files"
+  [ -z "$env_candidate" ] ||
+    blocked "new .env* appeared; stop before launching DSH"
+}
+# Não herde variáveis de autenticação, NODE_OPTIONS, XDG, HOME nem .env do operador.
+# Execute CLI/Plugin Manager/Web a partir do HOME isolado, nunca do cwd do projeto.
+# PATH vem apenas do terminal confiável do operador; verifique seus executáveis.
+safe_exec() {
+  check_scratch
+  (
+    cd "$DSH_BOOT_HOME"
+    env -i HOME="$DSH_BOOT_HOME" DSH_HOME="$DSH_HOME" PATH="$PATH" \
+      XDG_CONFIG_HOME="$DSH_HOME/xdg-config" \
+      XDG_STATE_HOME="$DSH_HOME/xdg-state" \
+      XDG_CACHE_HOME="$DSH_HOME/xdg-cache" \
+      XDG_DATA_HOME="$DSH_HOME/xdg-data" \
+      "$@"
+  )
+}
+safe_dsh() { safe_exec "$NODE_BIN" "$DSH_CREATOR_CLI" "$@"; }
+
+# FIM DO PREFLIGHT; início das instalações.
+safe_exec "$NPM_BIN" install --prefix "$DSH_DEV_PREFIX" --no-audit --no-fund --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.5
+safe_dsh --version
 cd "$WORKTREE"
-npm install --prefix "$DSH_DEV_PREFIX" --no-audit --no-fund --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.5
-node "$DSH_CREATOR_CLI" --version
 bun install --frozen-lockfile
 bun run typecheck
 bun run build
@@ -71,14 +135,19 @@ bun run validate:skills
 bun run validate:agents
 git diff --check
 
-# O flag --from-default-profile substitui o perfil alvo; a guarda acima exige
-# DSH_HOME inteiro novo, inclusive ausência de cordis.patch.yml global e perfis antigos.
-node "$DSH_CREATOR_CLI" --profile creator-dev --from-default-profile web --dump-config >/dev/null
+# --from-default-profile pode sobrescrever perfil: falhe se criado por outro processo.
+check_scratch
+[ ! -e "$DSH_HOME/profiles/creator-dev" ] &&
+  [ ! -L "$DSH_HOME/profiles/creator-dev" ] ||
+  blocked "creator-dev appeared before profile bootstrap; do not overwrite"
+safe_dsh --profile creator-dev --from-default-profile web --dump-config >/dev/null
 
-node "$DSH_CREATOR_CLI" plugin --profile creator-dev add --ignore-scripts "file:$WORKTREE"
-node "$DSH_CREATOR_CLI" --profile creator-dev --dump-config >/dev/null
-node "$DSH_CREATOR_CLI" --profile creator-dev --host 127.0.0.1 --port 38087 --no-open
+safe_dsh plugin --profile creator-dev add --ignore-scripts "file:$WORKTREE"
+safe_dsh --profile creator-dev --dump-config >/dev/null
+safe_dsh --profile creator-dev --host 127.0.0.1 --port 38087 --no-open
 ```
+
+**Provas sintéticas executáveis:** `bun test tests/creator_mode_bootstrap.test.ts` exercita bloqueios de `.env*`, isolamento do ambiente filho, reserva exclusiva, metadados Git e sentinelas sem executar npm, plugin manager, Web ou chamadas de modelo. A execução real do bootstrap continua um gate separado e requer autorização específica quando envolver instalação/perfil.
 
 O Web imprime uma URL de acesso **com token**. Abra a URL apenas na máquina local; não compartilhe o token em relatórios, PRs, capturas ou logs públicos. Se a porta estiver ocupada, escolha outra porta exclusivamente em loopback.
 
