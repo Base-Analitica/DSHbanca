@@ -46,7 +46,7 @@ describe("Creator Mode bootstrap guards (only synthetic files and Git repositori
   });
   afterAll(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 
-  function probe(params: { worktree?: string; home?: string; prefix?: string; expectedBranch?: string; expectedSha?: string; sentinel?: boolean; swapAfterReservation?: boolean } = {}) {
+  function probe(params: { worktree?: string; home?: string; prefix?: string; expectedBranch?: string; expectedSha?: string; sentinel?: boolean; repoSentinel?: boolean; swapAfterReservation?: boolean } = {}) {
     const script = [
       "set -euo pipefail",
       "export WORKTREE=" + quote(params.worktree ?? scratch),
@@ -63,10 +63,12 @@ describe("Creator Mode bootstrap guards (only synthetic files and Git repositori
         "safe_exec \"$NODE_BIN\" -e 'process.exit(0)'"
       ] : []),
       "printf 'DOWNSTREAM_REACHED\\n'",
-      ...(params.sentinel ? ["safe_exec node " + quote(fresh("fake-dsh.js"))] : [])
+      ...(params.sentinel ? ["safe_exec node " + quote(fresh("fake-dsh.js"))] : []),
+      ...(params.repoSentinel ? ["safe_repo_exec \"$NODE_BIN\" " + quote(fresh("fake-dsh.js"))] : [])
     ].join("\n");
+    // Explicit synthetic environment; do not forward actual operator credentials into fixtures.
     return spawnSync("bash", ["-c", script], {
-      env: { ...process.env, CREDENTIAL_SENTINEL: "synthetic-credential-do-not-use" },
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: fresh("synthetic-parent-home"), CREDENTIAL_SENTINEL: "synthetic-credential-do-not-use" },
       encoding: "utf8", timeout: 15000
     });
   }
@@ -120,6 +122,34 @@ describe("Creator Mode bootstrap guards (only synthetic files and Git repositori
     expect(data.secret).toBeNull();
     expect(data.home).toBe(join(fresh("home"), "operator-home"));
     expect(data.cwd).toBe(data.home);
+    rmSync(fresh("home"), { recursive: true, force: true });
+    rmSync(fresh("prefix"), { recursive: true, force: true });
+  });
+
+  test("Bun installation and all build/test validators use sanitized project runner", () => {
+    const md = readFileSync(guide, "utf8");
+    const fence = String.fromCharCode(96).repeat(3);
+    const block = md.split(fence + "bash\n")[1]?.split("\n" + fence)[0] ?? "";
+    const commands = [
+      "install --frozen-lockfile", "run typecheck", "run build", "test",
+      "run validate:skills", "run validate:agents"
+    ];
+    for (const args of commands) {
+      const line = block.split("\n").find(l => l.includes('"$BUN_BIN" ' + args));
+      expect(line).toBe('safe_repo_exec "$BUN_BIN" ' + args);
+    }
+    expect(source).toContain("safe_repo_exec()");
+  });
+
+  test("Bun-like synthetic child gets workspace cwd without inherited credentials", () => {
+    writeFileSync(fresh("fake-dsh.js"),
+      "console.log(JSON.stringify({secret:process.env.CREDENTIAL_SENTINEL??null,home:process.env.HOME,cwd:process.cwd()}))\n");
+    const p = probe({ repoSentinel: true });
+    expect(p.status).toBe(0);
+    const data = JSON.parse(p.stdout.trim().split("\n").at(-1) ?? "{}");
+    expect(data.secret).toBeNull();
+    expect(data.home).toBe(join(fresh("home"), "operator-home"));
+    expect(data.cwd).toBe(scratch);
     rmSync(fresh("home"), { recursive: true, force: true });
     rmSync(fresh("prefix"), { recursive: true, force: true });
   });

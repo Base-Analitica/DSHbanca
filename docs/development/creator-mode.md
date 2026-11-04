@@ -13,7 +13,7 @@
 
 > **Bootstrap manual do operador — fora da sessão Creator.** Todos os comandos deste bloco, inclusive instalação, build, testes, criação do perfil, `plugin add` e inicialização do servidor, devem ser executados manualmente pelo mantenedor em um terminal confiável do host, separado da sessão/Agent do DSH. Não os peça ao Creator nem os execute via tool dispatch ou `Agent.send`. O sandbox da sessão Creator não protege esse bootstrap; o preflight abaixo não o autoriza retroativamente. Antes de executar, confira no host que worktree, prefixo e `DSH_HOME` são scratch e isolados, que os destinos ainda não existem quando o bloco exige isso e que o terminal usado tem escopo de escrita apropriado. Se não conseguir verificar esses pontos, pare em `BLOCKED`; não amplie as permissões do Agent para executar o setup.
 
-**Limite de isolamento:** `DSH_HOME` novo, sozinho, não impede herdar variáveis de autenticação nem os fallbacks `.env` do projeto/usuário (`@deepseek-ai/dsh-credentials-local` 0.2.1-rc.5). Este bootstrap verifica apenas os **nomes** `.env*` (inclusive ignorados por Git), reserva destinos novos em modo 0700 e executa os comandos de DSH em processo com ambiente allowlist (`env -i`), `HOME`/XDG isolados e cwd fora do projeto. O `PATH` é fornecido pelo terminal confiável do operador. A instalação e os testes manuais continuam fora do sandbox do Creator. Outro processo do **mesmo usuário** pode ainda interferir entre verificações e usos; reserva exclusiva e revalidação reduzem, não eliminam todo TOCTOU. Nenhuma credencial real deve ser importada neste ensaio.
+**Limite de isolamento:** `DSH_HOME` novo, sozinho, não impede herdar variáveis de autenticação nem os fallbacks `.env` do projeto/usuário (`@deepseek-ai/dsh-credentials-local` 0.2.1-rc.5). Este bootstrap verifica apenas os **nomes** `.env*` (inclusive ignorados por Git), reserva destinos novos em modo 0700 e executa os comandos de DSH e Bun com ambiente allowlist (`env -i`), `HOME`/XDG isolados e cwd fora do projeto. O `PATH` é fornecido pelo terminal confiável do operador. A instalação e os testes manuais continuam fora do sandbox do Creator. Outro processo do **mesmo usuário** pode ainda interferir entre verificações e usos; reserva exclusiva e revalidação reduzem, não eliminam todo TOCTOU. Nenhuma credencial real deve ser importada neste ensaio.
 
 Defina `WORKTREE` como um **checkout separado da master atual**, sem alterações alheias, e não como o checkout de outra PR.
 
@@ -91,6 +91,7 @@ HOME_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_HOME")"
 BOOT_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_BOOT_HOME")"
 NODE_BIN="$(command -v node)" || blocked "Node unavailable"
 NPM_BIN="$(command -v npm)" || blocked "npm unavailable"
+BUN_BIN="$(command -v bun)" || blocked "Bun unavailable"
 
 check_scratch() {
   [ "$DSH_DEV_PREFIX" = "$(realpath -m -- "$DSH_DEV_PREFIX")" ] &&
@@ -104,15 +105,17 @@ check_scratch() {
   env_candidate="$(find "$WORKTREE" -name '.env*' -print -quit 2>/dev/null)" ||
     blocked "cannot recheck ignored environment files"
   [ -z "$env_candidate" ] ||
-    blocked "new .env* appeared; stop before launching DSH"
+    blocked "new .env* appeared; stop before running isolated commands"
 }
 # Não herde variáveis de autenticação, NODE_OPTIONS, XDG, HOME nem .env do operador.
-# Execute CLI/Plugin Manager/Web a partir do HOME isolado, nunca do cwd do projeto.
-# PATH vem apenas do terminal confiável do operador; verifique seus executáveis.
-safe_exec() {
+# CLI/Plugin Manager/Web usam cwd HOME isolado; Bun exige cwd no checkout,
+# mas deve usar o MESMO ambiente limpo. PATH é do terminal confiável do operador.
+safe_exec_in() {
+  local target_dir="$1"
+  shift
   check_scratch
   (
-    cd "$DSH_BOOT_HOME"
+    cd "$target_dir" || blocked "cannot enter isolated command working directory"
     env -i HOME="$DSH_BOOT_HOME" DSH_HOME="$DSH_HOME" PATH="$PATH" \
       XDG_CONFIG_HOME="$DSH_HOME/xdg-config" \
       XDG_STATE_HOME="$DSH_HOME/xdg-state" \
@@ -121,19 +124,20 @@ safe_exec() {
       "$@"
   )
 }
+safe_exec() { safe_exec_in "$DSH_BOOT_HOME" "$@"; }
+safe_repo_exec() { safe_exec_in "$WORKTREE" "$@"; }
 safe_dsh() { safe_exec "$NODE_BIN" "$DSH_CREATOR_CLI" "$@"; }
 
 # FIM DO PREFLIGHT; início das instalações.
 safe_exec "$NPM_BIN" install --prefix "$DSH_DEV_PREFIX" --no-audit --no-fund --ignore-scripts --save-exact @deepseek-ai/dsh@0.2.1-rc.5
 safe_dsh --version
-cd "$WORKTREE"
-bun install --frozen-lockfile
-bun run typecheck
-bun run build
-bun test
-bun run validate:skills
-bun run validate:agents
-git diff --check
+safe_repo_exec "$BUN_BIN" install --frozen-lockfile
+safe_repo_exec "$BUN_BIN" run typecheck
+safe_repo_exec "$BUN_BIN" run build
+safe_repo_exec "$BUN_BIN" test
+safe_repo_exec "$BUN_BIN" run validate:skills
+safe_repo_exec "$BUN_BIN" run validate:agents
+git -C "$WORKTREE" diff --check
 
 # --from-default-profile pode sobrescrever perfil: falhe se criado por outro processo.
 check_scratch
