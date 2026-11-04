@@ -10,7 +10,11 @@ const origin = "https://github.com/Base-Analitica/DSHbanca.git";
 const branch = "chore/57-creator-dev-workflow";
 
 function run(command: string, args: string[], cwd?: string) {
-  const p = spawnSync(command, args, { cwd, encoding: "utf8", timeout: 15000 });
+  const p = spawnSync(command, args, {
+    cwd, encoding: "utf8", timeout: 15000,
+    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tmpdir(),
+      GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" }
+  });
   if (p.error || p.status !== 0) throw new Error(command + " " + args.join(" ") + ": " + (p.stderr || p.error));
   return p.stdout.trim();
 }
@@ -64,7 +68,7 @@ describe("Creator Mode bootstrap guards (only synthetic files and Git repositori
       ] : []),
       "printf 'DOWNSTREAM_REACHED\\n'",
       ...(params.sentinel ? ["safe_exec node " + quote(fresh("fake-dsh.js"))] : []),
-      ...(params.repoSentinel ? ["safe_repo_exec \"$NODE_BIN\" " + quote(fresh("fake-dsh.js"))] : [])
+      ...(params.repoSentinel ? ["safe_repo_exec \"$BUN_BIN\" " + quote(fresh("fake-dsh.js"))] : [])
     ].join("\n");
     // Explicit synthetic environment; do not forward actual operator credentials into fixtures.
     return spawnSync("bash", ["-c", script], {
@@ -141,17 +145,29 @@ describe("Creator Mode bootstrap guards (only synthetic files and Git repositori
     expect(source).toContain("safe_repo_exec()");
   });
 
-  test("Bun-like synthetic child gets workspace cwd without inherited credentials", () => {
+  test("real Bun child runs inside the project with a sanitized environment", () => {
     writeFileSync(fresh("fake-dsh.js"),
-      "console.log(JSON.stringify({secret:process.env.CREDENTIAL_SENTINEL??null,home:process.env.HOME,cwd:process.cwd()}))\n");
+      "console.log(JSON.stringify({runtime:typeof Bun !== 'undefined' ? 'bun' : 'node',secret:process.env.CREDENTIAL_SENTINEL??null,home:process.env.HOME,cwd:process.cwd()}))\n");
     const p = probe({ repoSentinel: true });
     expect(p.status).toBe(0);
     const data = JSON.parse(p.stdout.trim().split("\n").at(-1) ?? "{}");
     expect(data.secret).toBeNull();
+    expect(data.runtime).toBe("bun");
     expect(data.home).toBe(join(fresh("home"), "operator-home"));
     expect(data.cwd).toBe(scratch);
     rmSync(fresh("home"), { recursive: true, force: true });
     rmSync(fresh("prefix"), { recursive: true, force: true });
+  });
+
+  test("Git fixture subprocess environment is isolated", () => {
+    const previous = process.env.GIT_FIXTURE_CHECK;
+    process.env.GIT_FIXTURE_CHECK = "synthetic";
+    try {
+      expect(run("node", ["-e", "process.stdout.write(process.env.GIT_FIXTURE_CHECK ?? \"absent\")"])).toBe("absent");
+    } finally {
+      if (previous === undefined) delete process.env.GIT_FIXTURE_CHECK;
+      else process.env.GIT_FIXTURE_CHECK = previous;
+    }
   });
 
   test("existing home and prefix block without destroying sentinel", () => {
