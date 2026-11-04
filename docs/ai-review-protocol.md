@@ -15,6 +15,23 @@ Este documento define o protocolo para revisão deste repositório por modelos d
 
 Menções a OpenCode neste repositório são **legado histórico em migração**. Elas não são critério de aceite, não definem o runtime e não devem orientar a revisão. Avalie o contrato do DSH/Cordis efetivamente instalado no SHA revisado, não afirmações de documentação de outro harness nem de código legado.
 
+## Governança de papéis, decisão e histórico
+
+`AGENTS.md` é a fonte normativa da governança. Para desenvolvimento e revisão técnica:
+
+- **ChatGPT é o mantenedor e revisor técnico principal:** investiga e prioriza o backlog, define issue, escopo, aceite e gates, prepara o prompt do executor, revisa cada PR de modo independente, solicita correções e decide se a PR pode avançar para merge, respeitadas as proteções. Não implementa código por padrão.
+- **DSH Creator é o executor padrão:** recebe issue e prompt autorizados, realiza as mudanças, testes e commits, e publica uma branch dedicada com uma PR draft por issue. Não decide o próprio aceite, não aprova a própria implementação e não muda escopo ou gates sem decisão autorizada.
+- **O proprietário humano** retém decisões de visão/estratégia e exceções, segurança, custos, credenciais e uso de modelos, dados acadêmicos, licenças, rubricas, trust model, permissões especiais, cutover e release.
+- **Um terceiro agente DSH** é uma revisão técnica adicional baseada em risco, em sessão/contexto separados, sem participar da implementação e read-only quando disponível. Acione-o para casos críticos, P0/P1 relevantes, riscos de identidade/enforcement, credenciais/trust model, riscos acadêmicos graves, achados controversos ou conflito de independência do mantenedor. Não é requisito para toda PR de baixo risco.
+
+Nenhum agente pode aprovar a própria implementação ou apresentar autoavaliação como revisão independente. Se o mantenedor excepcionalmente implementar código após autorização humana registrada, uma revisão independente adicional é obrigatória antes do aceite. Revisores de agentes acadêmicos, como `banca-auditor` e `banca-corretor`, não substituem a revisão técnica do código.
+
+Proteções de branch e revisão humana obrigatória não podem ser dispensadas por um agente, CI ou parecer do terceiro revisor. Cada novo HEAD exige revalidar os gates aplicáveis naquele SHA; CI convencional não substitui E2E DSH quando o aceite depender de integração/enforcement observado no host.
+
+### Histórico da decisão da issue #59
+
+Em 3 de novembro de 2026, o proprietário autorizou substituir a exigência interna de revisor humano externo por um segundo agente de IA independente. Em 4 de novembro, a decisão explícita redefiniu o padrão operacional: ChatGPT revisa como mantenedor independente do DSH Creator executor, e uma revisão DSH separada é adicional por risco, não obrigatória em toda PR. O registro da primeira aplicação na [PR #58](https://github.com/Base-Analitica/DSHbanca/pull/58) demonstrou viabilidade técnica, mas não constituiu aprovação formal no GitHub. A reconciliação não remove revisões humanas nem proteções formais eventualmente exigidas.
+
 ## Regras para a IA Revisora
 
 1. **Não invente funcionalidades** — avalie apenas o que existe no código.
@@ -69,6 +86,7 @@ Regras da cadeia:
 Regras da hierarquia:
 
 - Não promova evidência inferior a categoria superior. Registre `PASS`, `FAIL` ou `BLOCKED` por gate.
+- Cada novo HEAD exige revalidar os gates aplicáveis naquele SHA; evidência de um commit anterior não prova o estado atual.
 - E2E de integração DSH deve ser observado no SHA final quando a alegação depender dele.
 - Este protocolo **não autoriza executar** E2E, modelo, credenciais ou OpenCode. Revisão documental não produz E2E real.
 - Detector de IA e similaridade são sinais metodológicos, não prova de autoria. Índice interno ou scoring não é nota institucional.
@@ -204,7 +222,7 @@ O comentário de fechamento deve registrar:
 
 Arquivos presentes, build aprovado ou testes unitários isolados não provam, por si só, integração real com o DSH, MCP, LaTeX ou GitHub Actions. Somente E2E real no DSH, no SHA final, comprova os comportamentos nativos observados; mock, CI convencional e resultado de outro SHA não substituem esse gate.
 
-Uma correção puramente documental pode ser encerrada com revisão editorial, diff restrito e CI do SHA final, **sem** alegar integração DSH. Integração declarada sem a etapa correspondente da cadeia de verificação permanece não comprovada.
+Uma correção puramente documental pode ser validada com revisão editorial, diff restrito e CI do SHA final, **sem** alegar integração DSH; proteções de branch e qualquer revisão humana obrigatória continuam aplicáveis. Integração declarada sem a etapa correspondente da cadeia de verificação permanece não comprovada.
 
 ## Prompts Disponíveis
 

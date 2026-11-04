@@ -15,7 +15,7 @@ Este manual complementa `AGENTS.md`, não o substitui. Leia também, conforme o 
 | E2E DSH do perfil | `docs/dsh-profile-e2e.md`, se estiver disponível no checkout e a tarefa solicitar ou depender desse gate |
 | Criar PR | `CONTRIBUTING.md` e `.github/PULL_REQUEST_TEMPLATE.md`, se disponíveis |
 
-O contrato explícito da issue/PR determina escopo, arquivos permitidos, base, critérios e operações autorizadas. Código e execução no SHA real prevalecem sobre intenção, comentários, planos e arquivos presentes sem discovery comprovada.
+O contrato explícito da issue/PR determina escopo, arquivos permitidos, base, critérios e operações autorizadas. Código e execução no SHA real prevalecem sobre intenção, comentários, planos e arquivos presentes sem discovery comprovada. A [governança permanente de papéis](../AGENTS.md#papéis-permanentes-e-independência-de-revisão) é normativa: ChatGPT mantém/revisa, DSH Creator executa por padrão, o proprietário humano conserva as decisões reservadas e um terceiro agente DSH participa adicionalmente quando o risco exigir. Agentes acadêmicos do produto não são revisores de código.
 
 ## 1. Preflight de Git e preservação do trabalho
 
@@ -122,9 +122,18 @@ Níveis de evidência que não devem ser confundidos:
 | E2E com modelo | Prova comportamento dependente do modelo apenas naquela configuração e execução autorizada. |
 | CI verde | Não transforma teste unitário em E2E DSH ou teste de modelo. |
 
-Quando o critério exigir integração, execute o E2E DSH real no SHA final e em checkout limpo, se provisionado e autorizado. Não use artefato de um SHA anterior como prova do HEAD final. Preserve, sanitize e vincule relatório JSON com versões, revisão, status de limpeza, etapas observadas, checks de segurança, hashes relativos quando pertinentes, exit codes e teardown. Não grave credenciais nem caminhos privados.
+Quando o critério exigir integração, execute o E2E DSH real no SHA final e em checkout limpo, se provisionado e autorizado. Qualquer novo HEAD exige revalidar os gates aplicáveis, inclusive esse E2E quando pertinente; não use artefato de um SHA anterior como prova do HEAD atual. CI convencional não substitui E2E DSH. Preserve, sanitize e vincule relatório JSON com versões, revisão, status de limpeza, etapas observadas, checks de segurança, hashes relativos quando pertinentes, exit codes e teardown. Não grave credenciais nem caminhos privados.
 
 ## 6. Revisão e publicação
+
+### Fluxo issue → PR → revisão
+
+1. O mantenedor ChatGPT investiga duplicatas, branch/base, evidências e gates; abre/atualiza a issue-folha antes do prompt, definindo escopo, exclusões, aceite e validação. Decisões reservadas ao proprietário humano não são inferidas.
+2. O DSH Creator executa a issue autorizada, faz a revisão local do próprio diff e dos testes, cria uma branch dedicada e uma PR draft vinculada à issue. Seu relatório é evidência de execução, não aprovação independente. Para correção de PR existente, continua na mesma branch, sem duplicar.
+3. O mantenedor revisa a PR no GitHub de forma independente, verifica diff, SHA, gates e CI, e pode solicitar correções ao Creator. Cada novo HEAD exige reexecutar os gates aplicáveis naquele SHA final.
+4. Um terceiro agente DSH, em contexto separado e sem ter implementado a mudança, é acionado adicionalmente em casos críticos, P0/P1 relevantes, riscos de identidade/enforcement, credenciais/trust model, riscos acadêmicos graves, achados controversos ou conflito de independência. Não é revisão padrão de toda PR de baixo risco.
+5. Nenhum agente aprova a própria implementação. Proteções de branch e qualquer revisão humana formalmente obrigatória continuam obrigatórias; parecer de IA, CI verde ou revisão do DSH não as substitui. Se o mantenedor excepcionalmente implementar código com autorização humana registrada, uma revisão independente adicional é exigida antes do aceite.
+6. CI convencional não equivale a E2E DSH. Quando a alegação de aceite depende de integração ou enforcement no host, o E2E DSH aplicável deve observar o HEAD final; mudanças puramente documentais não alegam esse comportamento.
 
 Antes de commit:
 
@@ -169,6 +178,7 @@ Registre:
 7. cada gate com comando, exit code, `PASS`, `FAIL` ou `BLOCKED` e evidência;
 8. E2E DSH real executado ou não executado, URL do artefato e limitações;
 9. modelo, credenciais, rede, dados acadêmicos e custo: utilizados ou não, sem revelar segredos;
-10. CI do SHA final, dívida restante e dependência para revisão humana.
+10. CI do SHA final, dívida restante, gates repetidos em cada HEAD relevante e dependência para revisão humana.
+11. Terceiro revisor DSH acionado ou não, com o gatilho de risco; se não acionado, não o descreva como bloqueio.
 
 Não declare integração DSH, descoberta de skill/preset, carregamento Markdown, enforcement, uso de modelo ou resultado acadêmico sem a prova correspondente. Se qualquer critério de aceite permanecer não validado, diga precisamente o que falta e deixe o aceite para o mantenedor.
