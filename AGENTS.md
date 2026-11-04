@@ -12,6 +12,19 @@ Estas regras orientam revisão de código, implementação, testes, documentaç�
 6. Registre branch, SHA inicial, base autorizada, merge-base, runtime e alterações locais preexistentes. Preserve todo trabalho alheio.
 7. Antes de executar testes, inspecione os scripts em `package.json`, os workflows de CI e o próprio caminho de execução para identificar subprocessos, rede, credenciais e inferência.
 
+## Papéis permanentes e independência de revisão
+
+A decisão humana ratificada na [issue #59](https://github.com/Base-Analitica/DSHbanca/issues/59) define a divisão permanente de responsabilidades de desenvolvimento:
+
+- **Mantenedor técnico principal (ChatGPT):** investiga e prioriza o backlog, abre issues com escopo/aceite/gates, prepara prompts para o executor, revisa independentemente cada PR, solicita correções e decide se a mudança está apta a merge. Não implementa código por padrão.
+- **Executor padrão (DSH Creator):** executa a issue e o prompt autorizados, implementa, testa, commita e publica uma única branch e PR draft. Não altera silenciosamente escopo ou gates, não decide o aceite e não aprova nem mescla a própria implementação.
+- **Proprietário humano:** conserva as decisões de visão, estratégia e exceções, segurança, custos, credenciais e modelos, dados acadêmicos, licenças, rubricas, trust model, permissões especiais, cutover e release.
+- **Terceiro revisor DSH:** agente em sessão/contexto separados, sem participação na implementação e read-only quando disponível. É uma revisão técnica adicional por risco — para casos críticos, P0/P1 relevantes, identidade/enforcement, credenciais ou trust model, risco acadêmico grave, achados controversos e conflito de independência —, não uma etapa obrigatória em toda PR.
+
+Nenhum agente aprova a própria implementação nem apresenta autoavaliação como revisão independente. Excepcionalmente, se o mantenedor implementar código após autorização humana registrada, uma revisão independente adicional deve ocorrer antes do aceite. Os agentes acadêmicos (`banca-auditor`, `banca-corretor` e demais presets) têm função de produto e não substituem a revisão técnica do código.
+
+Proteções de branch e revisão humana obrigatória permanecem exigidas e não podem ser dispensadas por agente, CI ou parecer de IA. Cada novo HEAD exige revalidação dos gates aplicáveis naquele SHA; CI convencional não substitui E2E DSH quando a alegação depender de integração ou enforcement no host. O histórico da decisão anterior e sua reconciliação estão registrados em `docs/ai-review-protocol.md`.
+
 ## Invariante arquitetural: DSH é o único harness
 
 O DSH é o único harness deste repositório. Cordis é a integração nativa do plugin com o host. O DSH é proprietário das capacidades gerais do harness, incluindo runtime, modelos e autenticação de provedores, sessões, identidade e lifecycle de agentes, tool dispatch, permissões, skills, plugins e configuração do ambiente.
@@ -100,6 +113,8 @@ A taxonomia de labels ainda contém nomes históricos de outro harness. Ela não
 
 - Trabalhe na branch e PR autorizadas. Para trabalho novo, parta de `origin/master` atualizada e crie uma única branch dedicada e, quando solicitado, uma PR draft.
 - Não crie PR duplicada para correção que pertence a uma PR existente. Não faça push direto em `master`, force-push, merge, release ou publicação sem autorização explícita.
+- Preserve todas as proteções de branch e revisões humanas obrigatórias; nenhum agente pode dispensá-las ou aprovar a própria implementação.
+- Um novo HEAD invalida evidência dos gates que ele afeta; reexecute os gates aplicáveis no HEAD final. CI convencional não substitui E2E DSH exigido por alegações de integração/enforcement.
 - Use worktree separado quando mudanças locais preexistentes puderem ser afetadas. Não execute `git reset --hard`, `git clean -fd` nem restore destrutivo como atalho.
 - Modifique apenas arquivos do escopo. Faça stage explícito dos arquivos autorizados e revise o diff local e o range completo `BASE_REF...HEAD` antes de publicar.
 - Não exponha tokens, chaves, credenciais, conteúdo de `.env`, caminhos privados, dados pessoais ou manuscritos reais em terminal, logs, issues, commits ou PRs.
