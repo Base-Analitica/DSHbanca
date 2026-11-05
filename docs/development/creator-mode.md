@@ -1,37 +1,60 @@
-# Creator Mode para desenvolvimento do DSHbanca
+# Creator Mode: desenvolvimento e validação do DSHbanca
 
-**Escopo:** usar o Creator do DeepSeek Harness (DSH) como **ambiente de desenvolvimento** do plugin acadêmico DSHbanca. Não instalar Creator nos presets `banca-auditor`/`banca-corretor`, não tratar prompts como autorização de correção e não criar segundo harness. Ver [issue #57](https://github.com/Base-Analitica/DSHbanca/issues/57).
+O **DSH é o único harness** do DSHbanca; Cordis compõe o plugin no host. Esta página separa duas trilhas no mesmo DSH, sem outro harness:
 
-## Estado e versão verificados em 03/11/2026
+## Trilha 1 — Creator Mode: desenvolvimento
 
-- Versão adotada para desenvolvimento: `@deepseek-ai/dsh@0.2.1-rc.5` (tag npm `latest` na data). Canal `0.2.2-alpha.3` não adotado.
-- A instalação global anterior `0.2.0-rc.2` foi preservada. O Creator usa instalação paralela e `DSH_HOME` **independente**.
-- No host DSH real, `creator-dev` compôs `preset-cordis` (Creator), `dshbanca` e `banca-auditor`. O servidor Web iniciou em loopback. Isso comprova **instalação, composição e boot**, não execução por agente ou uso de modelo.
-- `pnpm` sinalizou aprovação pendente para skills do pacote. Não aprovar automaticamente todos os pacotes: revisar solicitações e escopo antes de consentir.
+O Creator é o ambiente padrão para manter o plugin: ler o repositório, editar somente o escopo autorizado, executar testes herméticos, build e validadores, criar commits e atualizar a PR existente. O Creator é um preset/ferramenta de desenvolvimento, não um papel acadêmico nem uma fronteira de segurança própria. Ele **não herda automaticamente** o guard acadêmico de `banca-auditor`; texto, nome visível ou presença do bundle não comprovam associação nem enforcement. Ver [issue #57](https://github.com/Base-Analitica/DSHbanca/issues/57).
 
-## Preparação reproduzível (Linux, Node 22, Bun e pnpm)
+## Trilha 2 — DSHbanca: validação do produto
 
-> **Bootstrap manual do operador — fora da sessão Creator.** Todos os comandos deste bloco, inclusive instalação, build, testes, criação do perfil, `plugin add` e inicialização do servidor, devem ser executados manualmente pelo mantenedor em um terminal confiável do host, separado da sessão/Agent do DSH. Não os peça ao Creator nem os execute via tool dispatch ou `Agent.send`. O sandbox da sessão Creator não protege esse bootstrap; o preflight abaixo não o autoriza retroativamente. Antes de executar, confira no host que worktree, prefixo e `DSH_HOME` são scratch e isolados, que os destinos ainda não existem quando o bloco exige isso e que o terminal usado tem escopo de escrita apropriado. Se não conseguir verificar esses pontos, pare em `BLOCKED`; não amplie as permissões do Agent para executar o setup.
+A validação acadêmica nativa usa o preset `banca-auditor` registrado em [`cordis.patch.yml`](../../cordis.patch.yml), por meio de um perfil DSH apropriado e isolado. O gate nativo existente é [`bun run e2e:dsh:profile`](../dsh-profile-e2e.md): ele não é executado por esta atualização documental e não deve ser declarado como passado sem execução autorizada no SHA correspondente.
 
-**Limite de isolamento:** `DSH_HOME` novo, sozinho, não impede herdar variáveis de autenticação nem os fallbacks `.env` do projeto/usuário (`@deepseek-ai/dsh-credentials-local` 0.2.1-rc.5). Este bootstrap verifica apenas os **nomes** `.env*` (inclusive ignorados por Git), reserva destinos novos em modo 0700 e executa os comandos de DSH e Bun com ambiente allowlist (`env -i`), `HOME`/XDG isolados e cwd fora do projeto. O `PATH` é fornecido pelo terminal confiável do operador. A instalação e os testes manuais continuam fora do sandbox do Creator. Outro processo do **mesmo usuário** pode ainda interferir entre verificações e usos; reserva exclusiva e revalidação reduzem, não eliminam todo TOCTOU. Nenhuma credencial real deve ser importada neste ensaio.
+Separe quatro resultados que não se substituem:
 
-Defina `WORKTREE` como um **checkout separado da master atual**, sem alterações alheias, e não como o checkout de outra PR.
+- **E2E DSH nativo sem modelo:** boot/composição, discovery, associação, dispatch, guardas e ferramentas com entradas sintéticas, quando observados pelo gate real.
+- **Teste com modelo:** comportamento dependente de modelo; opt-in e autorização humana, credenciais/custo e provedor explicitamente definidos. Não faz parte do E2E hermético sem modelo.
+- **UX Web interativa:** seleção/renderização real no DSH Web, sessão aberta/reconectada e associação visível; não é provada por fixture nem por boot de servidor.
+- **Avaliação acadêmica humana:** juízo sobre qualidade, rubrica, nota ou instituição; não é provado por ferramenta, síntese determinística ou modelo.
+
+## Versões e proveniência do contrato
+
+Em 05/11/2026, o CLI instalado neste ambiente reportou `@deepseek-ai/dsh@0.2.1-rc.5`; os manifests instalados informam Cordis `4.0.5` e `cordis-plugin-loader@1.0.6`. O Host Inspect confirmou os contratos públicos `permissionPresets.current(session)`, `sandboxPolicy.resolve(request?)` / `overrideOf(session)`, `approval.overrideOf(session)` e `sandbox.confine(argv, policy, signal?)`. Isso confirma **assinaturas disponíveis**, não os valores efetivos de uma sessão Creator, a composição do perfil, o runner ativo ou enforcement observado.
+
+O histórico de 03/11 registrou instalação/composição/boot de Creator em `creator-dev` e E2E DSH sem modelo em SHAs próprios. Isso é histórico, não evidência nova deste checkout ou de um novo HEAD. O bundle atual do DSHbanca registra `banca-auditor`; não declare `banca-corretor` integralmente implementado/registrado porque o código atual apenas contém verificações de identidade com esse prefixo. Consulte também [`src/dsh.ts`](../../src/dsh.ts) e [`docs/dsh-profile-e2e.md`](../dsh-profile-e2e.md).
+
+## Bootstrap inicial confiável (uma vez, somente se indispensável)
+
+O bootstrap abaixo serve somente quando ainda não há um Creator de desenvolvimento devidamente preparado. Faça-o com autorização humana e em perfil/worktree scratch separados; **não reinstale o host nem recrie o perfil para cada PR**. Uma instalação/perfil já configurados seguem a rotina cotidiana dentro do Creator mais adiante. Não copie configuração, sessão, plugin ou credencial de perfil produtivo; não trate `file:` como symlink vivo.
+
+Se um bootstrap for realmente indispensável, use terminal confiável do operador, fora da sessão Creator. O guard abaixo não autoriza por si só instalação, criação de perfil, `plugin add` ou boot Web. Não use credenciais, não aprove scripts em lote e não prossiga se a política efetiva ou o isolamento não puderem ser comprovados.
+
+**Limite de isolamento:** `DSH_HOME` novo, sozinho, não impede fallbacks `.env` do projeto/usuário nem herança de ambiente. O preflight verifica apenas nomes `.env*` (inclusive ignorados por Git, sem ler valores), reserva destinos novos com modo 0700 e, depois dos guards, executa cada subprocesso com ambiente `env -i` e variáveis explicitamente permitidas. Antes de cada subprocesso (inclusive `plugin add`), `check_scratch` revalida identidade/inode do linked worktree e dirs Git, branch/HEAD/base/merge-base, estado limpo e ausência de `.env*`. `PATH` vem do terminal confiável, deve ser conferido antes do uso e não carrega as demais variáveis do operador. `HOME`/XDG e cwd ficam isolados, exceto Bun, que usa o cwd do checkout para validar/buildar. TOCTOU de outro processo sob o mesmo usuário entre verificações e uso não é eliminado. Nenhuma credencial real deve ser importada.
+
+Antes do script, obtenha **para a PR em execução** `EXPECTED_BRANCH` e `EXPECTED_BASE_BRANCH` pela metadata da PR; `EXPECTED_HEAD_SHA` pelo head SHA da PR; `EXPECTED_BASE_SHA` pela ref atual do branch base no GitHub; e `EXPECTED_MERGE_BASE_SHA` pelo `merge_base_commit.sha` da comparação entre essas refs exatas. Não use valores históricos deste issue nem derive a expectativa apenas do mesmo checkout que será validado. Atualize a ref local `origin/<base>` para esse SHA em etapa separada e confirme `origin` como o repositório esperado. O script não buscará nem adivinhará refs: qualquer divergência bloqueia antes de reservar destinos.
+
+Defina `WORKTREE` como raiz canônica de um **linked worktree** da branch da PR em execução, limpo e sem alterações alheias; `DSH_DEV_PREFIX` e `DSH_HOME` devem ser destinos novos, exclusivos e fora do checkout/perfil produtivo.
 
 ```bash
-# Executar manualmente no terminal do operador, fora do Creator Agent.
+# Executar manualmente no terminal confiável do operador, fora do Creator Agent.
 set -euo pipefail
 export WORKTREE=/caminho/canonico/para/DSHbanca-worktree
-# Exemplo da issue #57: conferir branch e merge-base no GitHub e atualizar em outras issues.
-export EXPECTED_BRANCH=chore/57-creator-dev-workflow
-export EXPECTED_BASE_SHA=f3c22a901907f792633a6ed8979192e8dae34bd4
+# Forneça EXPECTED_BRANCH, EXPECTED_BASE_BRANCH, EXPECTED_HEAD_SHA,
+# EXPECTED_BASE_SHA e EXPECTED_MERGE_BASE_SHA conforme a PR verificada acima.
 export DSH_DEV_PREFIX="$HOME/.local/opt/dsh-creator-0.2.1-rc.5"
 export DSH_HOME="$HOME/.local/state/dshbanca-creator"
 export DSH_CREATOR_CLI="$DSH_DEV_PREFIX/node_modules/@deepseek-ai/dsh/lib/bin.js"
 
-# Preflight SOMENTE LEITURA: nenhuma instalação ou criação antes de todos os guards.
+# Preflight SOMENTE LEITURA até validar todas as pré-condições; depois reserva destinos scratch.
 blocked() { printf 'BLOCKED: %s; downstream operations stopped (inspect new scratch reservations, if any).\n' "$1" >&2; exit 1; }
+: "${EXPECTED_BRANCH:?supply PR head branch verified from GitHub}"
+: "${EXPECTED_BASE_BRANCH:?supply PR base branch verified from GitHub}"
+: "${EXPECTED_HEAD_SHA:?supply exact PR head SHA verified from GitHub}"
+: "${EXPECTED_BASE_SHA:?supply current base ref SHA verified from GitHub}"
+: "${EXPECTED_MERGE_BASE_SHA:?supply expected merge-base SHA from GitHub compare}"
+BASE_REF="refs/remotes/origin/$EXPECTED_BASE_BRANCH"
 for path in "$WORKTREE" "$DSH_DEV_PREFIX" "$DSH_HOME"; do
-  [ "$path" = "$(realpath -m -- "$path")" ] || blocked "path must be absolute/canonical and contain no symlink ancestors: $path"
+  [ "$path" = "$(realpath -m -- "$path")" ] || blocked "path must be absolute/canonical and contain no symlink ancestors"
 done
 [ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] ||
   blocked "WORKTREE must be an existing canonical directory"
@@ -52,13 +75,24 @@ git -C "$WORKTREE" worktree list --porcelain 2>/dev/null |
   blocked "WORKTREE is not the Git repository root"
 [ "$(git -C "$WORKTREE" remote get-url origin 2>/dev/null)" = "https://github.com/Base-Analitica/DSHbanca.git" ] ||
   blocked "unexpected repository origin; verify the scratch checkout"
-[ "$EXPECTED_BRANCH" != master ] &&
+git check-ref-format --branch "$EXPECTED_BRANCH" >/dev/null 2>&1 &&
+  [ "$EXPECTED_BRANCH" != "$EXPECTED_BASE_BRANCH" ] &&
   [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null)" = "$EXPECTED_BRANCH" ] ||
-  blocked "wrong branch or detached checkout"
+  blocked "wrong PR branch or detached checkout"
+git check-ref-format --branch "$EXPECTED_BASE_BRANCH" >/dev/null 2>&1 ||
+  blocked "invalid PR base branch"
+[[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  blocked "EXPECTED_HEAD_SHA must be the independently verified full PR head SHA"
 [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
-  blocked "EXPECTED_BASE_SHA must be a verified full commit SHA"
-[ "$(git -C "$WORKTREE" merge-base refs/remotes/origin/master HEAD 2>/dev/null)" = "$EXPECTED_BASE_SHA" ] ||
-  blocked "incorrect or unverified branch base (refresh/verify origin/master separately)"
+  blocked "EXPECTED_BASE_SHA must be the independently verified full base-tip SHA"
+[[ "$EXPECTED_MERGE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+  blocked "EXPECTED_MERGE_BASE_SHA must be the independently verified full merge-base SHA"
+[ "$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" = "$EXPECTED_HEAD_SHA" ] ||
+  blocked "checkout HEAD does not match the verified PR head SHA"
+[ "$(git -C "$WORKTREE" rev-parse --verify "$BASE_REF^{commit}" 2>/dev/null)" = "$EXPECTED_BASE_SHA" ] ||
+  blocked "current origin base ref does not match the independently verified GitHub base SHA"
+[ "$(git -C "$WORKTREE" merge-base "$BASE_REF" HEAD 2>/dev/null)" = "$EXPECTED_MERGE_BASE_SHA" ] ||
+  blocked "local merge-base does not match the independently verified GitHub compare result"
 git_status="$(git -C "$WORKTREE" status --porcelain=v1 --untracked-files=all 2>/dev/null)" ||
   blocked "cannot inspect WORKTREE status"
 [ -z "$git_status" ] ||
@@ -72,10 +106,21 @@ case "$DSH_HOME/" in "$WORKTREE/"*|"$DSH_DEV_PREFIX/"*) blocked "DSH_HOME must b
 case "$DSH_DEV_PREFIX/" in "$WORKTREE/"*|"$DSH_HOME/"*) blocked "installation prefix must be outside worktree and DSH_HOME" ;; esac
 for destination in "$DSH_DEV_PREFIX" "$DSH_HOME"; do
   [ ! -e "$destination" ] && [ ! -L "$destination" ] ||
-    blocked "scratch destination already exists (including DSH_HOME/global configuration): $destination"
+    blocked "scratch destination already exists; do not reuse existing state"
   [ -d "$(dirname "$destination")" ] ||
     blocked "destination parent does not exist; prepare it separately in a trusted terminal"
 done
+# Confira executáveis requeridos antes de criar qualquer destino scratch.
+NODE_BIN="$(command -v node)" || blocked "Node unavailable before scratch reservation"
+NPM_BIN="$(command -v npm)" || blocked "npm unavailable before scratch reservation"
+BUN_BIN="$(command -v bun)" || blocked "Bun unavailable before scratch reservation"
+command -v stat >/dev/null 2>&1 || blocked "stat unavailable before scratch reservation"
+command -v mkdir >/dev/null 2>&1 || blocked "mkdir unavailable before scratch reservation"
+command -v env >/dev/null 2>&1 || blocked "env unavailable before scratch reservation"
+# Snapshot de identidade do checkout e do Git antes de qualquer reserva.
+WORKTREE_ID="$(stat -Lc '%d:%i:%u' -- "$WORKTREE")" || blocked "cannot record worktree identity"
+GIT_DIR_ID="$(stat -Lc '%d:%i:%u' -- "$GIT_DIR")" || blocked "cannot record linked worktree Git identity"
+GIT_COMMON_DIR_ID="$(stat -Lc '%d:%i:%u' -- "$GIT_COMMON_DIR")" || blocked "cannot record shared Git identity"
 # Reserva exclusiva/atômica: sem -p, sem reuso, proprietário somente (0700).
 # Falha parcial deixa diretório NOVO vazio para inspeção manual; nunca remova estado alheio.
 umask 077
@@ -89,9 +134,6 @@ mkdir -m 700 -- "$DSH_BOOT_HOME" ||
 PREFIX_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_DEV_PREFIX")"
 HOME_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_HOME")"
 BOOT_ID="$(stat -Lc '%d:%i:%u' -- "$DSH_BOOT_HOME")"
-NODE_BIN="$(command -v node)" || blocked "Node unavailable"
-NPM_BIN="$(command -v npm)" || blocked "npm unavailable"
-BUN_BIN="$(command -v bun)" || blocked "Bun unavailable"
 
 check_scratch() {
   [ "$DSH_DEV_PREFIX" = "$(realpath -m -- "$DSH_DEV_PREFIX")" ] &&
@@ -102,6 +144,25 @@ check_scratch() {
     [ "$(stat -Lc '%d:%i:%u' -- "$DSH_HOME")" = "$HOME_ID" ] &&
     [ "$(stat -Lc '%d:%i:%u' -- "$DSH_BOOT_HOME")" = "$BOOT_ID" ] ||
     blocked "reserved scratch path changed; stop before writing"
+  [ "$WORKTREE" = "$(realpath -m -- "$WORKTREE")" ] && [ ! -L "$WORKTREE" ] &&
+    [ "$(stat -Lc '%d:%i:%u' -- "$WORKTREE")" = "$WORKTREE_ID" ] &&
+    [ -f "$WORKTREE/.git" ] && [ ! -L "$WORKTREE/.git" ] &&
+    [ "$(git -C "$WORKTREE" rev-parse --show-toplevel 2>/dev/null)" = "$WORKTREE" ] &&
+    [ "$(git -C "$WORKTREE" rev-parse --absolute-git-dir 2>/dev/null)" = "$GIT_DIR" ] &&
+    [ "$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" = "$GIT_COMMON_DIR" ] &&
+    [ "$(stat -Lc '%d:%i:%u' -- "$GIT_DIR")" = "$GIT_DIR_ID" ] &&
+    [ "$(stat -Lc '%d:%i:%u' -- "$GIT_COMMON_DIR")" = "$GIT_COMMON_DIR_ID" ] &&
+    git -C "$WORKTREE" worktree list --porcelain 2>/dev/null | grep -Fx -- "worktree $WORKTREE" >/dev/null ||
+    blocked "linked worktree identity changed; stop before writing"
+  [ "$(git -C "$WORKTREE" remote get-url origin 2>/dev/null)" = "https://github.com/Base-Analitica/DSHbanca.git" ] &&
+    [ "$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null)" = "$EXPECTED_BRANCH" ] &&
+    [ "$(git -C "$WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" = "$EXPECTED_HEAD_SHA" ] &&
+    [ "$(git -C "$WORKTREE" rev-parse --verify "$BASE_REF^{commit}" 2>/dev/null)" = "$EXPECTED_BASE_SHA" ] &&
+    [ "$(git -C "$WORKTREE" merge-base "$BASE_REF" HEAD 2>/dev/null)" = "$EXPECTED_MERGE_BASE_SHA" ] ||
+    blocked "PR branch, head, base or merge-base changed; stop before writing"
+  git_status="$(git -C "$WORKTREE" status --porcelain=v1 --untracked-files=all 2>/dev/null)" ||
+    blocked "cannot recheck worktree status"
+  [ -z "$git_status" ] || blocked "worktree became dirty; stop before writing"
   env_candidate="$(find "$WORKTREE" -name '.env*' -print -quit 2>/dev/null)" ||
     blocked "cannot recheck ignored environment files"
   [ -z "$env_candidate" ] ||
@@ -134,7 +195,7 @@ safe_dsh --version
 safe_repo_exec "$BUN_BIN" install --frozen-lockfile
 safe_repo_exec "$BUN_BIN" run typecheck
 safe_repo_exec "$BUN_BIN" run build
-safe_repo_exec "$BUN_BIN" test
+safe_repo_exec "$BUN_BIN" test tests/creator_mode_bootstrap.test.ts
 safe_repo_exec "$BUN_BIN" run validate:skills
 safe_repo_exec "$BUN_BIN" run validate:agents
 git -C "$WORKTREE" diff --check
@@ -151,72 +212,66 @@ safe_dsh --profile creator-dev --dump-config >/dev/null
 safe_dsh --profile creator-dev --host 127.0.0.1 --port 38087 --no-open
 ```
 
-**Provas sintéticas executáveis:** `bun test tests/creator_mode_bootstrap.test.ts` exercita bloqueios de `.env*`, isolamento do ambiente filho, reserva exclusiva, metadados Git e sentinelas sem executar npm, plugin manager, Web ou chamadas de modelo. A execução real do bootstrap continua um gate separado e requer autorização específica quando envolver instalação/perfil.
+O teste sintético `bun test tests/creator_mode_bootstrap.test.ts` valida somente as guardas descritas e nunca executa instalação, Plugin Manager, perfil Web, `Agent.send` ou modelo. O bootstrap real permanece um gate separado, pontual e sujeito a autorização humana; não o repita para cada PR.
 
-O Web imprime uma URL de acesso **com token**. Abra a URL apenas na máquina local; não compartilhe o token em relatórios, PRs, capturas ou logs públicos. Se a porta estiver ocupada, escolha outra porta exclusivamente em loopback.
+Se o operador inicializar o Web durante esse bootstrap, mantenha a URL local e não compartilhe token em PR, relatório, captura ou log público. Esse boot histórico não prova associação do Creator a Agent/Session, UX interativa ou enforcement.
 
-No Web, selecione **o workspace correspondente ao worktree de desenvolvimento** e o preset **Creator** antes de solicitar trabalho. O preset exibido inicialmente pode ser `Standard mode`: a presença de Creator na configuração não significa que ele foi selecionado. **A primeira atividade no Creator deve ser cumprir o preflight obrigatório abaixo; até concluí-lo, não solicite trabalho nem permita qualquer outra ação, comando ou dispatch do Agent.** Não encaminhe um TCC real para esta sessão.
+Depois de um perfil de desenvolvimento já configurado, selecione no Web o worktree correto e Creator apenas como contexto de desenvolvimento. A presença ou seleção visual de Creator não prova a política efetiva da sessão; siga o preflight abaixo antes de qualquer ação mutante. Nunca encaminhe manuscrito real para essa sessão.
 
-## Preflight obrigatório de permissões efetivas
+## Preflight obrigatório da sessão Creator
 
-O Creator é um preset de desenvolvimento, não um papel acadêmico nem uma fronteira de segurança própria. Antes de qualquer ação, comando ou dispatch iniciado pelo Creator Agent que edite, execute teste que escreva arquivos, altere perfil ou instale plugin, valide **a política efetiva da mesma sessão Agent**; não use o nome visual `Workspace Write` nem `--dump-config` como prova. O bootstrap manual da seção anterior é uma etapa do operador fora dessa sessão e não é autorizado retroativamente por este preflight.
+A política efetiva e os limites vêm do DSH real, não do nome visual do preset. Antes de editar ou executar qualquer validação que escreva, confirme a mesma sessão/Agent, o workspace canônico, a branch/PR em andamento e a política observável no runtime context. Não use `--dump-config`, um YAML, manifesto, nome de preset ou teste fixture como prova de enforcement.
 
-1. Selecione o workspace correspondente ao worktree scratch e registre o `workspaceRoot` canônico esperado.
-2. No DSH `0.2.1-rc.5`, consulte `/permission` e selecione `/permission workspace-write` quando necessário. Em seguida, confira o runtime context daquela sessão: modo `workspace-write`, aprovação `ask` e raiz do workspace correta. A seleção visual é apenas uma pista; um valor ausente, `custom`, divergente ou desconhecido bloqueia a tarefa.
-3. Quando a verificação Host estiver disponível, confira os contratos públicos instalados: `permissionPresets.current(session)`, `sandboxPolicy.resolve({ session })` e `approval.overrideOf(session)` (com a configuração padrão como fallback). `sandboxPolicy.resolve` usa o `session.cwd` como limite da sessão; `workspaceRoot` configurado é fallback para chamadas sem cwd. Confirme também que `ctx.fs.sandboxMode` e `ctx.shell.sandboxMode` indicam implementações confinadas e que `ctx.sandbox.confine(argv, policy)` retorna execução efetivamente confinada. Para afirmar uma fronteira estrita, exija `enforcement: full`; `partial`, runner ausente, `SANDBOX_UNAVAILABLE` ou impossibilidade de observar o resultado = `BLOCKED`.
-4. Se o runtime indicar `danger-full-access`, `never`, raiz errada ou valor não verificável, **não escreva, não execute Plugin Manager e não tente escalar**. Pare, registre `BLOCKED` e solicite decisão humana.
+No DSH `0.2.1-rc.5` / Cordis `4.0.5`, os contratos públicos verificados por Host Inspect são:
 
-### Configuração nativa DSH verificada
+- `permissionPresets.current(session): string` informa o preset que corresponde aos valores efetivos; o rótulo não comprova enforcement nem associação do Agent.
+- `sandboxPolicy.resolve(request?)` retorna política por chamada (`mode`, `workspaceRoot`, `sessionId`); a sessão com `cwd` delimita `workspace-write`, e a raiz configurada é fallback para chamadas sem cwd. `sandboxPolicy.overrideOf(session)` pode retornar `undefined`, caso em que vale a configuração padrão.
+- `approval.overrideOf(session)` retorna somente o override (`ask` ou `never`); `undefined` exige conferir a configuração efetiva. A presença de `ask` não prova que exista answerer/UI disponível.
+- `sandbox.confine(argv, policy, signal?)` é o seam de subprocesso e retorna `ConfinedArgv`, incluindo `enforcement: full|partial`; isso não prova a configuração ativa de um backend nem o enforcement de filesystem.
+- `tools.guard(guard)` é monotônico no dispatch nativo. Só protege as chamadas que alcançam o plugin/guard associado ao Agent; o Creator não recebe automaticamente o guard acadêmico de `banca-auditor`.
 
-No DSH `0.2.1-rc.5` (Cordis `4.0.5`), o perfil precisa usar os componentes nativos compatíveis: `@deepseek-ai/dsh-sandbox-local` (`ctx.sandbox`), `@deepseek-ai/dsh-sandbox-policy` (modo e raiz fallback), `@deepseek-ai/dsh-fs-sandbox` em vez do filesystem local, `@deepseek-ai/dsh-bash-sandbox` em vez do executor Bash local, `@deepseek-ai/dsh-user-approval` (`ctx.approval`) e, se houver seletor de permissão, `@deepseek-ai/dsh-permission-presets`.
+As assinaturas foram observadas no DSH instalado; Host Inspect é read-only e não invoca esses serviços nem revela os valores de uma sessão Creator. Não foram confirmados neste slice o preset selecionado, os valores por sessão, o answerer, o provider ativo, a associação Web Agent/Session ou enforcement em dispatch Creator. Não infira `ctx.fs.sandboxMode`/`ctx.shell.sandboxMode`: essas propriedades não constam dos contratos consultados. Manifests instalados identificam `@deepseek-ai/dsh-sandbox`, `@deepseek-ai/dsh-sandbox-policy`, `@deepseek-ai/dsh-fs-sandbox`, `@deepseek-ai/dsh-tool-fs` e `@deepseek-ai/dsh-tool-bash` em `0.2.1-rc.5`; a disponibilidade do pacote/provider não prova que o perfil o montou.
 
-Os valores nativos esperados são:
+Se a sessão indicar `danger-full-access`, `never`, raiz errada, identidade ausente, runner/answerer não observado ou enforcement não verificável, não execute operação sensível, não instale plugin, não altere perfil e não tente ampliar permissões: registre o subgate como `BLOCKED`. Continue somente inspeções e verificações documentais seguras. A comprovação do Creator real é acompanhada pela [issue #62](https://github.com/Base-Analitica/DSHbanca/issues/62); não execute `Agent.send` apenas para satisfazer um gate.
 
-- `@deepseek-ai/dsh-sandbox-policy`: `mode: workspace-write`; `workspaceRoot` deve corresponder ao worktree e é apenas fallback quando uma sessão não fornece cwd.
-- `@deepseek-ai/dsh-permission-presets`: `defaultPreset: workspace-write` e um preset `workspace-write` que combine `sandbox: workspace-write` com `approval: ask`. O default só se aplica a sessões novas; valide a sessão atual separadamente.
-- `@deepseek-ai/dsh-user-approval`: `policy: ask`, com um answerer configurado para a sessão. `ask` delega ao waterfall `approval/request`; o serviço não exibe UI por conta própria. Sem answerer, falha de answerer ou resultado indisponível, a operação falha fechada.
+## Rotina cotidiana no Creator já configurado
 
-O DSH `workspace-write` permite escrita no workspace **e nas raízes temporárias permitidas pelo backend**; não é read-only nem isolamento de container, e não limita rede. O teste abaixo deve usar um alvo fora do workspace **e** fora dessas raízes. Uma tentativa de modo mais amplo só ocorre em uma chamada explícita com `sandbox_permissions` e justificativa; a decisão é one-shot e precede a execução. Nunca trate `never` como substituto de confinamento.
+1. Abra o worktree correto e confirme o `workspaceRoot` da sessão contra a raiz canônica. Leia status, branch e SHA atuais; use branch, base e merge-base obtidos independentemente da metadata da PR em execução. Preserve quaisquer alterações locais e pare se houver divergência.
+2. Confirme a política efetiva da mesma sessão conforme o preflight acima. Se a informação não estiver disponível, permaneça em inspeção read-only e marque as operações mutantes como `BLOCKED`.
+3. Trabalhe no escopo da issue: hipótese → teste negativo hermético → correção mínima → reexecução. Use build e validadores do projeto. `bun install --frozen-lockfile` só quando faltar dependência ou o lockfile tiver mudado; não reinstale DSH nem recrie perfil para pequenas PRs. `bun test` completo só depois de demonstrar isolamento de host, credenciais e executáveis externos; se testes puderem iniciar outro harness ou serviço real, marque `BLOCKED` e use os testes herméticos aplicáveis.
+4. Revise `git diff --check`, os caminhos staged e o diff completo; faça commit explícito apenas dos arquivos autorizados e atualize a PR draft existente. A revisão deve ser independente; não faça merge ou autoaprovação.
+5. Se a validação precisar consumir o produto real, troque de contexto para perfil DSH apropriado e use a trilha `banca-auditor` abaixo; não transforme Creator em sessão acadêmica.
 
-### Prova negativa não destrutiva
+A dependência `file:` pode ser uma cópia, não um link vivo. Não assuma que editar o checkout atualiza o plugin instalado; só sincronize depois de identificar o mecanismo suportado e demonstrar que ele não sobrescreve perfil/estado existente nem dispensa validação de segurança. Caso contrário, reinicie apenas o perfil scratch após revisão humana, ou registre `BLOCKED`. Não execute `--from-default-profile` sobre perfil existente.
 
-Antes de iniciar trabalho de escrita, faça o teste no DSH real com diretório e arquivos exclusivamente sintéticos:
+## Trilha 2 — validação do produto DSHbanca no preset `banca-auditor`
 
-1. Crie dentro do worktree uma pasta temporária com `mktemp -d "$PWD/.creator-permission-probe.XXXXXX"`; adicione somente `main.tex` e `referencias.bib` sintéticos e registre seus SHA-256. Escolha um nome único de marcador no diretório-pai gravável pelo usuário, fora do workspace e de `/tmp`; confirme antes que o marcador não existe.
-2. Use a tool nativa `write` para tentar criar somente esse marcador externo, sem `sandbox_permissions` nem justificativa. O resultado esperado é `FS_SANDBOX_DENIED` / `[sandbox: file access denied under workspace-write mode]`; o marcador deve continuar ausente.
-3. Repita com o executor Bash confinado usando `printf` para um marcador externo igualmente único. O comando deve ser recusado pelo sandbox. Não aprove nem repita com acesso mais amplo. Se o alvo aparecer, classifique `FAIL`, valide caminho e conteúdo exatos e remova apenas o marcador sintético criado pelo teste.
-4. Compare os hashes dos dois fixtures, confirme a ausência dos marcadores e remova a pasta temporária somente depois de verificar com `realpath` que ela permanece sob o workspace. Se o pai externo não for gravável pelo sistema operacional, o teste é inconclusivo, não `PASS`.
+A declaração estática em [`cordis.patch.yml`](../../cordis.patch.yml) registra `banca-auditor`; só a execução em perfil DSH pode comprovar bundle carregado, associação ao Agent/Session, discovery, dispatch e guardas. `src/dsh.ts` contém verificações de identidade com prefixo `banca-corretor`, mas isso **não** significa que esse preset esteja integralmente implementado ou registrado: o patch inspecionado registra `banca-auditor`.
 
-**Resultado observado neste ambiente em 03/11/2026, HEAD `277b04c89c359761710f436bb1fbac5b422645ce`:** o runtime context informou `workspace-write` + `ask`; a `write` externa foi recusada com `file access denied under workspace-write mode`; a escrita Bash externa recebeu `EROFS`. Marcadores ausentes, hashes dos fixtures sintéticos inalterados e teardown concluído. Isso prova somente esses dois caminhos no perfil/sessão observados; não declara toda operação do Creator read-only.
+O gate nativo existente é `bun run e2e:dsh:profile`, documentado em [`docs/dsh-profile-e2e.md`](../dsh-profile-e2e.md). É um gate de produto sem modelo, com workspace/manuscrito sintéticos e dispatch direto pelo `ToolRuntime`. Conforme o documento do gate, a sonda ativa de lifecycle depende de autorização explícita e usa `Agent.send` sintético para rejeitar antes do primeiro passo/model request. **Não execute esse caminho neste slice documental e não use `Agent.send` só para satisfazer um gate.** A descrição do gate ou seu código não equivale a uma execução.
 
-## Ciclo de implementação recomendado
+### Gates de produto que precisam ser distinguidos
 
-1. Selecionar **uma issue-folha**, trabalhar em **uma branch/PR** baseada na `master` verificada e preservar alterações existentes.
-2. No Creator, fornecer contexto de `AGENTS.md` e do escopo da issue; solicitar inspeção **nativa** de Cordis, APIs, tools e skills antes de criar infraestrutura. Exigir hipótese, teste negativo e mudança mínima.
-3. O executor altera apenas os arquivos permitidos. Depois do build e testes, **reinstalar/sincronizar o bundle local no perfil de desenvolvimento quando necessário** (dependência `file:` do pnpm é uma cópia, não um link vivo); não declarar HMR, recarga ou atualização como comprovados sem inspeção da ativação. Se houver dúvidas, encerrar e reiniciar o perfil de desenvolvimento antes do teste.
-4. Revisar diff, resultados e proveniência. E2E DSH/Cordis **no SHA final**, com permissão adequada; reportar `PASS`, `FAIL` ou `BLOCKED` por gate. Publicar PR draft; aplicar revisão independente, correção e merge apenas com gates satisfeitos.
-5. O plugin instalado no perfil Creator é **experimental**. A distribuição e os presets acadêmicos permanecem separados, com auditor read-only e mudanças de manuscrito condicionadas a autorização específica.
+1. **Bundle e associação:** em perfil DSH scratch, provar que o bundle Cordis carregou e que o preset `banca-auditor` foi resolvido/selecionado por serviços DSH. Correlacionar IDs e objetos do Agent e Session reais; `--dump-config` isolado só prova composição declarada.
+2. **Discovery:** listar tools e skills no host e no escopo do Agent pretendido; registrar contagens, integridade e origem. Arquivo em `assets/`, provider registrado ou schema em fixture não prova discovery/associação.
+3. **Dispatch e negação:** despachar tools pelo `ToolRuntime` com identidade DSH real e argumentos sintéticos válidos. Tentar `banca_corrigir` e `banca_restore` com efeitos plausíveis; exigir negação de política antes do corpo, zero invocações/marcadores e hashes/inventário imutáveis. Confirmar uma leitura como `banca_status` permitida. Incluir subagente real sem identidade verificada e exigir fail-closed.
+4. **Ingestão:** inicializar workspace scratch e ingerir manuscrito LaTeX/BibTeX sintético (por exemplo `main.tex`, `referencias.bib` e capítulos); registrar fingerprints e hashes iniciais/finais. Nunca usar TCC/manuscrito real neste gate.
+5. **Plano e cobertura exaustiva:** obter plano canônico, `planId`, fingerprint, `batchId`s e total esperado; verificar que cada lote do plano foi processado e que nenhum lote foi omitido.
+6. **Checkpoint, auditoria, proveniência e retomada:** rejeitar avanço antes da confirmação de auditoria; persistir receipt/findings com fingerprint, lote, arquivo, linhas e seção; avançar ordenadamente; reiniciar/retomar contexto e provar que não há avanço espúrio nem duplicação. No E2E atual, `runAcademicBatchAuditProbe` registra `findings: []` e valida `acceptedCount: 0`; portanto isso prova o gate de recibo/avanço, **não** persistência de finding não vazio com proveniência. Esse último subgate precisa de caso sintético dedicado antes de ser alegado.
+7. **Síntese global:** chamar `banca_sintese` cedo e exigir rejeição; só depois da cobertura completa aceitar a síntese e conferir `coverage.state === complete`, total concluído e fingerprint esperado. Entradas inválidas/incompletas também devem ser rejeitadas. Isso valida o gate determinístico, não uma redação de modelo nem avaliação acadêmica humana.
+8. **Persistência e teardown:** manter perfil/workspace/relatório em scratch exclusivo; comparar inventário/hash do estado acadêmico e manuscrito; descartar `AgentHandle`s e sessions, confirmar fim dos processos e remoção apenas dos recursos criados pelo teste. Se executar o runner, usar `DSHBANCA_DSH_PROFILE_REPORT_PATH` apontando para destino scratch inexistente, para não sobrescrever evidência versionada.
 
-## Perfis acadêmicos não intercambiáveis
+Os detalhes e limitações do runner foram documentados para DSH `0.2.0-rc.2`, Cordis `4.0.4` e loader `1.0.5`; não transfira essas assinaturas automaticamente para `0.2.1-rc.5`. Inspecione os contratos instalados e registre as versões no SHA/execução. O CI convencional só roda esse E2E quando `vars.DSH_PROFILE_E2E_ENABLED == 'true'`; caso contrário, o step é `BLOCKED`, mesmo que o check `validate` esteja verde.
 
-- **Creator:** ambiente de desenvolvimento; pode expor tools mutantes. Não herda o guard acadêmico só por estar no perfil `creator-dev` ou por inspecionar o bundle.
-- **`banca-auditor`:** papel acadêmico read-only quando a identidade/preset são realmente associados e validados pelo DSH. Texto ou nome visível não substitui enforcement.
-- **`banca-corretor`:** caminho acadêmico destinado a mudanças autorizadas no manuscrito; exige identidade DSH verificável e autorização humana para o escopo. Não transfira esse papel ao Creator.
+## Matriz de evidências deste slice
 
-## Matriz de evidências e limites
-
-**Proveniência obrigatória:** as três provas de discovery, dispatch e negação de escrita abaixo ocorreram em **03/11/2026 no SHA histórico `277b04c89c359761710f436bb1fbac5b422645ce`**. **Não foram repetidas no HEAD `7f1bdcaa6246148ccf0c5ff977b8aaccbe9ae3f6` nem nos commits posteriores desta correção documental.** O resultado é `PASS` *histórico e restrito ao ambiente observado*, nunca E2E no HEAD final.
-
-| Gate | Estado | Evidência/limite |
+| Subgate | Estado neste slice | O que foi/seria provado |
 |---|---|---|
-| Discovery de tools e skills | `PASS histórico (277b04c)` | DSH real listou 16 tools DSHbanca e 8 skills no contexto ativo do ensaio histórico; não repetido no HEAD posterior. |
-| Dispatch acadêmico read-only | `PASS histórico (277b04c)` | `banca_checklist` retornou `6/6` em LaTeX/BibTeX sintéticos; não repetido no HEAD posterior. |
-| Escrita fora do workspace | `PASS histórico (277b04c)` | DSH `write` e Bash confinado recusaram marcadores externos; hashes e teardown do ensaio histórico, não revalidados no HEAD posterior. |
-| Segurança geral de escrita do Creator | `FAIL` para alegação ampla | A prova cobre somente esses caminhos/sessão. `workspace-write` permite mutações no workspace e temp roots; Creator não é read-only nem herda o guard do auditor. |
-| Prompt/answerer de aprovação em uma operação ampliada | `BLOCKED` | Política efetiva `ask` e contrato one-shot verificados, mas não foi solicitada nem observada uma aprovação interativa; disponibilidade do answerer não foi validada. |
-| Inferência, uso de credenciais e instalação demonstrativa | `BLOCKED` / não validados | Nenhum modelo, credencial ou `plugin_manager.install_bundle` foi usado. |
-| E2E nativo executado pela CI | `BLOCKED` / não executado | A CI da PR #58 aprovou `validate`, mas o step nativo só roda com `vars.DSH_PROFILE_E2E_ENABLED == 'true'`; sucesso convencional não prova esse E2E. Ver [workflow de CI](../../.github/workflows/ci.yml#L33-L39) e [CI no SHA 7f1bdc](https://github.com/Base-Analitica/DSHbanca/actions/runs/41713952279) (`validate: PASS`; E2E nativo: `SKIPPED/BLOCKED`). Novo commit exige CI e E2E próprios antes de qualquer alegação de PASS final. |
+| Inspeção local de configuração/código | `PASS` (inspeção) | Patch declara `banca-auditor`; código possui guardas acadêmicas. Não prova carregamento ou dispatch no DSH. |
+| Creator real / enforcement da sessão | `BLOCKED` / não executado | A issue #62 acompanha a validação real do Creator. Não inferir permissão da UI, não executar operação sensível sem prova de enforcement. |
+| DSHbanca real no preset `banca-auditor` | `BLOCKED` / não executado | `bun run e2e:dsh:profile` foi apenas referenciado/inspecionado neste slice; não declarar E2E executado ou aprovado. |
+| Teste do gate com modelo | `BLOCKED` / não executado | Exige autorização separada, modelo/provedor/custo e consentimento de credenciais. |
+| UX Web interativa | `BLOCKED` / não executada | Boot não prova seleção, renderização, sessão interativa ou reconexão; demanda separada (#4). |
+| Julgamento acadêmico humano | `NOT APPLICABLE` | Nenhuma rubrica, nota, aprovação institucional ou avaliação de texto foi feita. |
 
-O gerenciador nativo de plugins pode alterar o perfil persistente e carregar código com privilégios do Host. Não usar `pnpm approve --all` ou `plugin_manager.install_bundle` indiscriminadamente. Skills pendentes em `pnpm approve` exigem análise e consentimento pontual. Nenhuma inferência paga, acesso a credenciais de outro perfil, `Agent.send`, mutação acadêmica ou alteração da instalação global é autorizada por este guia.
-
-Evite executar `--from-default-profile` sobre perfil existente: ele substitui o estado da configuração. Não inclua em commits `DSH_HOME`, credenciais, tokens, perfis instalados, `node_modules` ou manuscritos. Para retornar ao ambiente anterior, encerre o Creator e continue usando o `dsh` global não modificado. Não apague dados de perfil sem revisão humana.
+O DSH gerencia lifecycle, credenciais, permissões, ferramentas, agents, sessions e plugins. O DSHbanca mantém apenas o domínio acadêmico. Não use OpenCode ou outro harness, não instale plugin em perfil produtivo, não faça bootstrap real neste slice, não use `Agent.send`, modelo pago, token ou manuscrito real. Mantenha cada gate `PASS`, `FAIL` ou `BLOCKED` em sua própria classe de evidência; CI, build, fixture e histórico de outro SHA não substituem execução DSH real.
