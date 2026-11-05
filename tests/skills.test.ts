@@ -17,6 +17,10 @@ const EXPECTED_SKILLS = [
   "banca-revisor"
 ];
 
+// Test H has two real synchronous subprocesses; bound them without widening the suite timeout.
+const H_SUBPROCESS_TIMEOUT_MS = 10_000;
+const H_TEST_TIMEOUT_MS = 25_000;
+
 describe("Skills Validation", () => {
   const canonicalSkillsDir = join(__dirname, "..", "skills");
   const versionedSkillsDir = join(__dirname, "..", "assets", "dsh", "skills");
@@ -652,8 +656,12 @@ describe("Skills Validation", () => {
     test("H. Empacotamento: pacote construído contém a fonte canônica e instalador resolve em dist", () => {
       const project = tempDir("case-h-pack-");
 
-      // Compilar dist
-      const buildRes = spawnSync("bun", ["run", "build"], { cwd: join(__dirname, ".."), encoding: "utf8" });
+      // Build and pack remain real; child limits prevent a stalled command from hanging the suite.
+      const buildRes = spawnSync("bun", ["run", "build"], {
+        cwd: join(__dirname, ".."),
+        encoding: "utf8",
+        timeout: H_SUBPROCESS_TIMEOUT_MS,
+      });
       expect(buildRes.status).toBe(0);
 
       // Verificar que dist/lib/install_assets.js existe
@@ -661,7 +669,11 @@ describe("Skills Validation", () => {
       expect(existsSync(distInstaller)).toBe(true);
 
       // Verificar arquivos incluídos no pacote via npm pack --dry-run --json
-      const packRes = spawnSync("npm", ["pack", "--dry-run", "--json"], { cwd: join(__dirname, ".."), encoding: "utf8" });
+      const packRes = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+        cwd: join(__dirname, ".."),
+        encoding: "utf8",
+        timeout: H_SUBPROCESS_TIMEOUT_MS,
+      });
       expect(packRes.status).toBe(0);
       const [packInfo] = JSON.parse(packRes.stdout);
       const packedPaths = new Set(packInfo.files.map((f: any) => f.path));
@@ -681,7 +693,7 @@ describe("Skills Validation", () => {
         const canonicalHash = new Bun.CryptoHasher("sha256").update(readFileSync(join(canonicalSkillsDir, skill, "SKILL.md"))).digest("hex");
         expect(installedHash).toBe(canonicalHash);
       }
-    });
+    }, { timeout: H_TEST_TIMEOUT_MS });
 
     test("I. Reversibilidade comprovada em fixture: estado anterior, instalação canônica e reversão verificada", () => {
       const project = tempDir("case-i-reversibility-");
