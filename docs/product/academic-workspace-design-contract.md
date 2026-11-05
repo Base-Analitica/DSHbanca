@@ -1,0 +1,63 @@
+# Contrato de produto — Estação Acadêmica Contextual do DSHbanca
+
+## Propósito, autoridade e limites
+
+Este documento versiona as decisões de produto da [issue #71](https://github.com/Base-Analitica/DSHbanca/issues/71) e da [triagem do mantenedor](https://github.com/Base-Analitica/DSHbanca/issues/71#issuecomment-6672153941). É a especificação de produto e referência de aceite para futuros slices da estação acadêmica; preserva a direção visual escolhida pelo mantenedor sob delegação humana.
+
+O contrato **não implementa nem autoriza a UI**, não comprova APIs Web do DSH e não aprova uso de manuscritos reais, modelos, notas institucionais, alteração de trust model, E2E ativo ou release. O DSH permanece o único harness e dono do shell, sessões, identidade, permissões e lifecycle. Esta especificação é normativa para o produto, mas não substitui `AGENTS.md` nem demonstra capacidade técnica existente.
+
+Dependências mantêm seus limites: a [issue #70](https://github.com/Base-Analitica/DSHbanca/issues/70) investiga contratos instalados de preset, slots/sidebar, lifecycle e isolamento; a [issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4) é responsável pelas perguntas, decisões humanas e aprovação nativas; a [issue #62](https://github.com/Base-Analitica/DSHbanca/issues/62) permanece independente e bloqueada até autorização específica para validar o Creator em scratch e seus limites de segurança. Esta entrega não desbloqueia, encerra ou absorve essas issues.
+
+## Estado de evidência: requisito não é implementação
+
+| Categoria | Estado neste contrato |
+|---|---|
+| **Requisito normativo de produto** | As nove decisões e os seis fluxos abaixo definem o comportamento esperado e os critérios para slices futuros. |
+| **Capacidade presente no código** | A base possui lógica acadêmica para ingestão/proveniência de manuscrito, cobertura e lotes, findings/fingerprints, ferramentas acadêmicas, snapshots, guardrails de correção e decisões não-mutantes. Isso não significa que exista uma estação Web ou que cada informação esteja projetada em uma UI. |
+| **Integração DSH efetivamente comprovada** | A documentação do perfil registra evidência de composição, ferramentas/skills e contratos nativos de perguntas/aprovação em E2E sem modelo no SHA específico `aa39d371962f8cb1349af19fbc6acba78f4f4a85`; veja [o relatório e seus limites](../dsh-profile-e2e.md). Essa evidência histórica não comprova UI Web, gating visual por preset, nem execução no HEAD desta PR. |
+| **Pesquisa técnica pendente** | A compatibilidade com a instalação DSH/Cordis/Web, a fonte confiável e reativa da identidade/preset ativo, extensões nativas disponíveis, lifecycle e isolamento/restauração continuam sob investigação na #70. Referências upstream, nomes de APIs e esta especificação não substituem essa prova. Se o contrato instalado não for verificável, o resultado é `BLOCKED`. |
+| **Funcionalidade futura não implementada** | A estação acadêmica contextual integrada ao shell nativo — leitor, navegação de findings, diff, estados de avaliação, gating visual e E2E Web — não está implementada nem validada por este documento. Deve ser planejada em slices separados após os gates técnicos e de decisão aplicáveis. |
+
+A inspeção de [`src/dsh.ts`](../../src/dsh.ts), [`src/index.ts`](../../src/index.ts) e [`cordis.patch.yml`](../../cordis.patch.yml) contextualiza o plugin acadêmico e o preset declarativo existentes; não comprova uma extensão da UI Web. Nenhuma API visual específica é presumida aqui.
+
+## Arquitetura de informação
+
+A organização prevista é contextual ao trabalho acadêmico, sem substituir o shell ou as capacidades nativas do DSH:
+
+1. **Início da avaliação** — estado real do projeto, fingerprint do manuscrito, mapa de cobertura por capítulo/lote, pendências e próximo passo útil. Sem nota prematura ou dashboard ornamental.
+2. **Manuscrito** — índice, capítulos, arquivos e navegação por localização; texto-fonte e proveniência. Preview compilada somente se um caminho nativo e seguro for comprovado. Destaques devem apontar para findings válidos; não reescrever conteúdo silenciosamente.
+3. **Achados** — lista pesquisável/filtrável por categoria, severidade, arquivo e estado; acesso contextual à evidência, justificativa, rubrica e proveniência. Diferenciar sinais determinísticos, heurísticos e dependentes de modelo.
+4. **Correções e diff** — original, proposta e resultado aplicado distinguíveis; changeset, linhas, snapshot quando aplicável, diff real, estado de autorização/aplicação e resultado de reauditoria. A proposta e o diff não mutam o manuscrito.
+5. **Avaliação e parecer** — cobertura, critérios/rubrica e versão, evidências, pendências e autoridade humana explícitas. `partial` ou `blocked` não gera nota nem parecer conclusivo.
+6. **Decisões** — integrar a interação nativa do DSH dentro do escopo da #4. Não criar serviço, formulário, autorização ou fluxo paralelo de perguntas/aprovação.
+
+## Decisões normativas de produto
+
+1. **Exclusividade de preset e fail-closed.** Toda UI acadêmica DSHbanca — incluindo conteúdo, navegação, ações e superfícies auxiliares — só pode aparecer e operar quando `banca-auditor` estiver efetivamente ativo e verificável na Session selecionada. `standard`, Creator Mode, outros presets, ausência de Session, identidade desconhecida ou conflitante significam **nenhum elemento acadêmico visível ou operável**. Texto selecionado/digitado, plugin instalado ou `session.header.agentPreset` histórico isolado não provam preset ativo. Outros presets futuros exigem decisão explícita; `banca-corretor` não é incluído automaticamente na allowlist.
+
+2. **Integração nativa, sem segundo harness.** Preservar o shell, chat, sessões e funcionamento nativo do DSH. Qualquer contribuição visual por slots, sidebar, projeções, resources ou outra extensão depende da comprovação dos contratos da versão instalada na #70. Documentação upstream é hipótese de pesquisa, não prova de API disponível. Não criar frontend/servidor isolado, fork do cliente Web, roteador de modelos, gerenciamento de sessão paralelo, permission engine ou substituto de serviço nativo.
+
+3. **Direção visual editorial e contida.** Adotar experiência *manuscript-first*: leitura do trabalho como superfície principal, findings e evidências em contexto, conversa nativa do DSH acessível e recolhível, e comparação lado a lado de diff real quando apropriada e houver espaço. Em viewport restrito, usar painéis ou tabs em vez de comprimir tudo. Respeitar temas, tokens, tipografia, componentes e convenções nativas do DSH. O acabamento inspirado na Apple é referência de refinamento, sem cópia literal, gradientes chamativos, ícones aleatórios, animações gratuitas, badges em massa, cartões vazios ou outros elementos artificiais.
+
+4. **Informação acadêmica útil e verdadeira.** Exibir, quando houver dados autoritativos, índice, capítulos, arquivos, localização, cobertura verdadeira, achados, justificativas, rubricas e suas versões, fingerprints, propostas de correção e reauditoria. Pendências e síntese dependem do estado real de cobertura. Não preencher lacunas com métricas decorativas, resultados simulados ou indicadores sem proveniência.
+
+5. **Sem notas fictícias ou juízo automatizado.** Não apresentar nota institucional, aprovação prevista ou score de IA como julgamento acadêmico. Escala numérica 0–10, pesos e semântica institucional dependem de decisão humana futura sobre rubrica, escala e limites. Enquanto isso, apresentar critérios/evidências ou `Não avaliado`. Cobertura `partial` ou `blocked` nunca sustenta nota, aprovação ou parecer conclusivo. Índices heurísticos devem ser identificados como sinais; detector de IA e similaridade não comprovam autoria.
+
+6. **Auditoria read-only; mutação exige autorização independente.** O auditor não modifica manuscritos. Escolher uma opção ou responder uma pergunta não aprova mutação. Propostas e diffs são somente leitura; qualquer correção requer changeset concreto e escopo explícito, diff examinável, autorização nativa do DSH (`ctx.approval`), perfil competente/verificado, snapshot real quando aplicável, aplicação autorizada, verificação e reauditoria. Recusa, cancelamento ou indisponibilidade não mutam. Rollback só pode ser anunciado quando a restauração efetiva estiver comprovada. `banca-auditor` não executa ações mutantes.
+
+7. **Proveniência e integridade acima da aparência.** Cada finding deve estar vinculado a categoria, evidência localizada, arquivo, linha, seção, justificativa, rubrica/versão aplicável, fingerprint do manuscrito, plano e lote; links precisam corresponder ao manuscrito e à versão corretos. Dados ausentes, órfãos ou stale devem ser apresentados honestamente. Não fabricar DOI, citação, fonte, trecho, evidência, resultado ou conclusão.
+
+8. **Privacidade, isolamento e lifecycle.** Impedir vazamento entre presets, Sessions, workspaces e identidades; tratar o texto do manuscrito como não confiável e respeitar direitos de acesso do host. Em troca de preset/Session, desmontagem, reload/reconexão, restauração, acesso não verificável ou disposal, ocultar/limpar também títulos, corpos, previews, miniaturas, tabs docked/floating, menus, atalhos, seleções, ações e callbacks. Se o host persistir/restaurar abas, o gate deve proteger o conteúdo e seus metadados além do registro/navegação; estado desconhecido nunca revela informação acadêmica.
+
+9. **Acessibilidade, desempenho e estados honestos.** Oferecer uso por teclado, foco e Escape previsíveis, rótulos para leitores de tela, contraste, zoom, temas dark/light nativos, reduced motion e layout responsivo. Manuscritos extensos não devem bloquear leitura nem conversa nativa. Estados de loading, empty, error, blocked e stale precisam refletir condições reais, sem simulação travestida de resultado.
+
+## Fluxos e estados obrigatórios para aceite futuro
+
+1. **Troca de preset e Sessions simultâneas:** abrir Session `banca-auditor` e mostrar a estação; alternar `banca-auditor → standard → Creator → banca-auditor`; manter o shell nativo e remover todo sinal/conteúdo acadêmico fora do preset elegível. Alternar para uma Session simultânea com outro preset não pode revelar dados da Session acadêmica; ao voltar, recuperar apenas estado seguro da Session correta.
+2. **Finding até evidência exata:** de um finding validado, navegar ao manuscrito, arquivo, posição, seção e versão/fingerprint correspondentes. Finding órfão ou stale deve ser identificado e não pode levar a uma passagem errada nem inventar texto/localização.
+3. **Proposta, diff e mutação:** examinar proposta e diff antes de qualquer ação. Recusa, cancelamento, indisponibilidade ou falha de autorização resultam em nenhuma mutação. Aprovação nativa do changeset concreto, no perfil competente, permite apenas a ação autorizada; verificar o resultado e reauditar antes de declarar resolvido.
+4. **Cobertura e fingerprint:** representar cobertura vazia/0%, parcial, bloqueada e completa com estados distintos e verdadeiros. Mudança de fingerprint invalida ou marca stale a análise pertinente. Nenhuma conclusão, nota ou parecer final antes da cobertura exigida estar comprovada.
+5. **Falhas, restauração e descarte:** validar reload/reconexão, Session removida ou outra Session em foco, erro de identidade/preset, acesso negado, tabs docked/floating restauradas e plugin disposed. Cada cenário deve falhar fechado e eliminar sinais, conteúdo, previews e callbacks acadêmicos que não pertençam a Session elegível.
+6. **Documentos extensos, viewports estreitos e acessibilidade:** leitura e navegação devem permanecer utilizáveis e responsivas em manuscritos grandes e telas estreitas, sem bloquear o host/chat; teclado, foco e leitores de tela devem permitir completar os fluxos sem depender exclusivamente de ponteiro ou cor.
+
+Esses são critérios de desenho e aceite para trabalho futuro, não resultados de teste nem alegações de que os fluxos já funcionam. A implementação futura precisa ser dividida em issues/slices próprios, revalidar APIs no DSH instalado, preservar a autoridade nativa do host e obter os E2E Web aplicáveis no SHA final. A documentação desta issue não satisfaz nem encerra esses gates.
