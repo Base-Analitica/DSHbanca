@@ -148,5 +148,6 @@ Issues #4 (decisões/perguntas/aprovação DSH nativas) e #62 (Creator scratch/i
 - `bash scripts/validate.sh` — **PASS**, exit code `0` (presença dos arquivos, JSON, frontmatter das skills e agentes).
 - `bash scripts/check-secrets.sh --ci` — **PASS**, exit code `0`. Esse script exclui `docs/` por projeto; portanto, o resultado não é apresentado como varredura do relatório. O conteúdo do relatório foi revisado sem encontrar credenciais ou dados privados.
 - `git diff --check` — **PASS**, exit code `0`, no diff staged final. Uma primeira checagem detectou três hard breaks Markdown com trailing spaces; eles foram removidos antes da verificação final.
-- `bun run typecheck`, `bun run build` e `bun test` — **NOT RUN**: o único artefato é Markdown; não são gates necessários para ele, e a suíte completa não foi executada nesta investigação.
-- E2E DSH/Web — **NOT RUN / OUT OF SCOPE**, conforme solicitado. Sem instalação, chamada de Agent/Tool, inferência, manuscrito real, compilação ou mudança de estado do Harness.
+- Verificador local de links Markdown e âncoras — **PASS**, exit code `0`.
+- Typecheck, build e `bun test` — **NOT RUN localmente**: a única alteração é Markdown. A CI comum do PR executa esses gates em runner limpo; seu status deve ser consultado no HEAD atual do PR e não constitui E2E DSH.
+- E2E DSH/Web — **NOT RUN / OUT OF SCOPE**, conforme solicitado. O gate E2E não foi iniciado localmente; qualquer execução/skip reportado pelo workflow deve ser distinguido da validação documental. Sem instalação de plugin/perfil, chamada de Agent/Tool, inferência, manuscrito real, compilação ou mudança de estado no Harness ativo.
