@@ -103,6 +103,14 @@ Para mudança funcional, reproduza primeiro o defeito ou crie teste de regressã
 
 Descubra comandos reais em `package.json`, CI, scripts e contrato da issue. Não suponha que um comando seja seguro pelo nome. O CI convencional pode compilar e testar lógica sem iniciar o DSH, não autenticar provedor e não provar integração nativa.
 
+### Testes herméticos DSH e prova nativa
+
+`bun test` é hermético por padrão: testes comuns verificam empacotamento, exports, schemas, ferramentas, skills e workspaces sintéticos sem procurar `dsh` no `PATH` nem importar o Host. A CI executa a mesma suíte comum e não equivale a uma execução do DSH real. `NATIVE_NONE` significa que a prova de Host não foi executada; nunca o promova a PASS de integração, discovery ou enforcement nativo.
+
+A prova nativa isolada de `ToolRuntime` só pode ser solicitada com ambas as precondições: `DSHBANCA_DSH_NATIVE_TEST_AUTHORIZED=yes` e `DSH_TEST_HOST_PACKAGE` definido explicitamente para o `package.json` de uma instalação DSH previamente inspecionada. Essa combinação exige autorização humana específica para aquela execução; a presença de DSH no `PATH`, uma variável isolada ou uma aprovação genérica de testes não autoriza carregá-lo. Opt-in parcial ou inválido permanece bloqueado (`NATIVE_BLOCKED`) e não executa/importa o Host.
+
+O teste comum e a CI não substituem o gate E2E separado `bun run e2e:dsh:profile`, que permanece condicionado aos seus próprios pré-requisitos e autorização explícita. Não execute esse gate como parte de uma validação hermética nem apresente fixtures ou `NATIVE_NONE` como prova DSH real.
+
 Na base consultada para issue #5, `package.json` e `.github/workflows/ci.yml` incluem `bun test`; o comando `e2e:opencode` foi removido do manifesto (issue #53), mas o repositório ainda conserva o runner histórico `scripts/e2e-opencode.ts` e seus testes. Inspecione `tests/e2e-opencode.test.ts`, o runner importado e o ambiente antes da suíte completa. Só execute `bun test` se estiver demonstrado que credenciais, configuração pessoal e executável externo não são alcançáveis. Prefira um ambiente temporário com HOME e PATH isolados e sem variáveis de credencial. Caso não seja possível comprovar esse isolamento, não rode a suíte inteira e registre `BLOCKED`, causa e testes seguros alternativos. Não afrouxe gates para forçar um resultado verde.
 
 A cada gate, registre comando exato e exit code. Use:
