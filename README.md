@@ -67,7 +67,7 @@ O gate E2E do perfil DSH real foi executado e aprovado (`PASS`, exit code 0) no 
 
 ### Pendente ou não comprovado
 
-- **Interface Web real e interativa do DSH** ([issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)): a renderização de componentes interativos e o fluxo de retomada em sessões persistidas ou reconectadas permanecem abertos (`agent:blocked` e `needs:e2e`).
+- **Interface Web real e interativa do DSH** ([issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)): a renderização de componentes interativos e o fluxo de retomada em sessões persistidas ou reconectadas permanecem abertos (`agent:blocked` e `needs:e2e`). A visão da futura estação acadêmica foi definida em [seu contrato de produto](docs/product/academic-workspace-design-contract.md), mas a UI ainda não está implementada; compatibilidade e isolamento visual no DSH instalado permanecem sob investigação na [issue #70](https://github.com/Base-Analitica/DSHbanca/issues/70).
 - **Execução com modelos de IA reais**: nenhuma inferência de LLM ou credencial de provedor foi utilizada. O comportamento qualitativo do modelo em cenários reais não é comprovado por testes herméticos ou E2E sem modelo.
 - **Avaliação acadêmica humana**: automações determinísticas, heurísticas de IA e similaridade fornecem sinais metodológicos, mas não constituem nota, aprovação, reprovação ou julgamento acadêmico institucional soberano.
 - **LaTeX/BibTeX real arbitrário**: validação com compilador `lualatex` em documentos externos complexos e arbitrários de terceiros não foi exaurida de ponta a ponta.

@@ -47,7 +47,7 @@ Legenda de status:
 - [/] E2E DSH real sem modelo executado e aprovado em SHAs autorizados (`cb066a1` da PR #1 e `aa39d37` da PR #49 com DSH `0.2.0-rc.2`, Cordis `4.0.4` e loader `1.0.5`); não constitui nova execução automática no commit de merge da master (`3c24a53`)
 - [ ] Execução contínua do gate E2E em CI provisionada com publicação automática de relatório sanitizado para o HEAD da master
 - [ ] E2E com modelo de IA (somente sob autorização humana específica, com modelo, custo e isolamento declarados)
-- [ ] Interface Web real e interativa do DSH comprovada de ponta a ponta (issue #4 permanece aberta com `agent:blocked` e `needs:e2e`)
+- [ ] Interface Web real e interativa do DSH comprovada de ponta a ponta (issue #4 permanece aberta com `agent:blocked` e `needs:e2e`; a visão de produto está definida em [seu contrato](docs/product/academic-workspace-design-contract.md), mas a UI não está implementada; a pesquisa técnica de APIs instaladas segue pendente na [issue #70](https://github.com/Base-Analitica/DSHbanca/issues/70))
 
 ## 4. Cobertura acadêmica exaustiva, checkpoints e retomada
 
