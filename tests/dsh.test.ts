@@ -1,38 +1,21 @@
 import { test, expect } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { existsSync, realpathSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { selectDshNativeTestGate } from "./dsh-native-test-gate"
 
-// Resolve a real DSH host installation so the native ToolRuntime proofs can
-// run. The env var remains the explicit override; otherwise a globally
-// installed `dsh` binary is used. Without a host the native section reports
-// NATIVE_NONE (skipped, never simulated).
-function resolveDshHostPackage(): string | undefined {
-  if (process.env.DSH_TEST_HOST_PACKAGE) return process.env.DSH_TEST_HOST_PACKAGE
-  const which = spawnSync("which", ["dsh"], { encoding: "utf8" })
-  if (which.status !== 0) return undefined
-  const bin = (which.stdout ?? "").trim().split("\n")[0]
-  if (!bin) return undefined
-  try {
-    const real = realpathSync(bin)
-    const pkg = join(dirname(real), "..", "package.json")
-    return existsSync(pkg) ? pkg : undefined
-  } catch {
-    return undefined
-  }
-}
-
-// Removing native registrations, losing nested schemas, or using the host cwd
-// instead of the agent session must break this packaged-entry regression.
-// The native section additionally proves, through the real ToolRuntime, that
-// the guard denies auditor mutations before any tool body runs, that a
-// verified corrector still works, that unverifiable delegation never grants
-// manuscript mutation, and that scope-registered guards are removed when the
-// Cordis scope is disposed.
-test("DSH bundle exposes all 16 tools, executes banca_context in the agent workspace, and the native ToolRuntime guard enforces read-only auditor policy", () => {
+// The default path exercises the packaged entry and synthetic workspace only.
+// The native section remains available for an explicitly authorized real-host
+// check; ToolRuntime imports are forbidden without the two-part opt-in gate.
+test("DSH bundle exposes 16 tools hermetically and gates native ToolRuntime proofs behind explicit authorization", () => {
   const build = spawnSync("bun", ["run", "build"], { encoding: "utf8" })
   expect(build.status, build.stderr).toBe(0)
-  const dshHost = resolveDshHostPackage()
+  const nativeGate = selectDshNativeTestGate(process.env)
+  const childEnv = { ...process.env }
+  delete childEnv.DSHBANCA_DSH_NATIVE_TEST_AUTHORIZED
+  delete childEnv.DSH_TEST_HOST_PACKAGE
+  if (nativeGate.mode === "authorized") {
+    childEnv.DSHBANCA_DSH_NATIVE_TEST_AUTHORIZED = "yes"
+    childEnv.DSH_TEST_HOST_PACKAGE = nativeGate.hostPackage
+  }
   const run = spawnSync("node", ["--input-type=module", "-e", `
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
@@ -41,10 +24,11 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { createRequire } from 'node:module';
 
+const nativeGate = ${JSON.stringify(nativeGate)};
 let hostCtx, runtime, hostRequire, hostVersion;
-if (process.env.DSH_TEST_HOST_PACKAGE) {
-  hostRequire = createRequire(process.env.DSH_TEST_HOST_PACKAGE);
-  hostVersion = JSON.parse(readFileSync(process.env.DSH_TEST_HOST_PACKAGE, 'utf8')).version;
+if (nativeGate.mode === 'authorized') {
+  hostRequire = createRequire(nativeGate.hostPackage);
+  hostVersion = JSON.parse(readFileSync(nativeGate.hostPackage, 'utf8')).version;
   const { Context } = await import(hostRequire.resolve('@deepseek-ai/cordis'));
   const { default: SystemPrompt } = await import(hostRequire.resolve('@deepseek-ai/dsh-system-prompt'));
   const { default: ToolRuntime } = await import(hostRequire.resolve('@deepseek-ai/dsh-tools'));
@@ -98,10 +82,17 @@ try {
   const controller = new AbortController(); controller.abort();
   await assert.rejects(() => context.execute({}, {...exec, signal:controller.signal}));
   console.log('PASS: 16 tools, schemas, skills, session cwd, execution, validation, cancellation');
-} finally { rmSync(root, { recursive: true, force: true }); }
+} finally {
+  rmSync(root, { recursive: true, force: true });
+  assert.equal(existsSync(root), false, 'synthetic workspace teardown must remove temporary files');
+}
 
-if (!runtime) {
-  console.log('NATIVE_NONE: no real DSH host package available; ToolRuntime guard proofs skipped');
+if (nativeGate.mode !== 'authorized') {
+  if (nativeGate.mode === 'blocked') {
+    console.log('NATIVE_BLOCKED: ' + nativeGate.reason + '; no native Host package imported');
+  } else {
+    console.log('NATIVE_NONE: native proof not requested; no Host package discovery or import performed');
+  }
 } else {
   const { createScope } = await import(hostRequire.resolve('@deepseek-ai/dsh-scope'));
   // Native registration through the real tools service. The guard registered
@@ -205,9 +196,17 @@ if (!runtime) {
 }
 `], {
     encoding: "utf8",
-    env: dshHost ? { ...process.env, DSH_TEST_HOST_PACKAGE: dshHost } : { ...process.env },
+    env: childEnv,
   })
   expect(run.status, run.stderr).toBe(0)
   expect(run.stdout).toContain("PASS: 16 tools")
-  expect(run.stdout).toMatch(/NATIVE_GUARD_PASS|NATIVE_NONE/)
+  if (nativeGate.mode === "authorized") {
+    expect(run.stdout).toContain("NATIVE_GUARD_PASS")
+    console.log("NATIVE_GUARD_PASS: explicitly authorized by both required inputs")
+  } else {
+    expect(run.stdout).not.toContain("NATIVE_GUARD_PASS")
+    const status = nativeGate.mode === "blocked" ? "NATIVE_BLOCKED" : "NATIVE_NONE"
+    expect(run.stdout).toContain(status)
+    console.log(status)
+  }
 }, 60_000)

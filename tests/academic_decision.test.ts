@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync, existsSync, realpathSync } from "node:fs"
-import { join, dirname } from "node:path"
-import { spawnSync } from "node:child_process"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { createRequire } from "node:module"
+import { selectDshNativeTestGate } from "./dsh-native-test-gate"
 import {
   formatAcademicDecisionQuestion,
   processAcademicDecisionAnswer,
@@ -719,28 +719,14 @@ describe("Academic Decision Cycle (DSHbanca issue #48)", () => {
     })
   })
 
-  function resolveDshHostPackage(): string | undefined {
-    if (process.env.DSH_TEST_HOST_PACKAGE) return process.env.DSH_TEST_HOST_PACKAGE
-    const which = spawnSync("which", ["dsh"], { encoding: "utf8" })
-    if (which.status !== 0) return undefined
-    const bin = (which.stdout ?? "").trim().split("\n")[0]
-    if (!bin) return undefined
-    try {
-      const real = realpathSync(bin)
-      const pkg = join(dirname(real), "..", "package.json")
-      return existsSync(pkg) ? pkg : undefined
-    } catch {
-      return undefined
-    }
-  }
-
   describe("Isolated tool contract: ask_user_question schema and answerer payload observation", () => {
     // Note: These tests verify the isolated contract and parameter schema of the installed
     // @deepseek-ai/dsh-tool-ask-user tool function within an isolated Context using synthetic
     // agent mocks. They do NOT prove end-to-end agent lifecycle execution (AgentRegistry,
     // Agent loop, SessionStore, etc.), which is validated separately via scripts/e2e-dsh-profile.ts
     // (reporting BLOCKED until authorized by maintainers).
-    const hostPackage = resolveDshHostPackage()
+    const nativeGate = selectDshNativeTestGate(process.env)
+    const hostPackage = nativeGate.mode === "authorized" ? nativeGate.hostPackage : undefined
     const hostTest = hostPackage ? test : test.skip
 
     hostTest("1. Agent path executes native ask_user_question with questions conforming to banca-grille", async () => {
