@@ -25,8 +25,10 @@ function isTokenContinuation(character: string | undefined): boolean {
 function hasLeftTokenBoundary(text: string, index: number): boolean {
   const before = codePointBefore(text, index)
   if (before === ".") {
-    // A dot attached to an identifier is not sentence punctuation.
-    return !isTokenContinuation(codePointBefore(text, index - before.length))
+    // A full dot run attached to an identifier is not punctuation.
+    let previousIndex = index - before.length
+    while (codePointBefore(text, previousIndex) === ".") previousIndex -= 1
+    return !isTokenContinuation(codePointBefore(text, previousIndex))
   }
   return !isTokenContinuation(before)
 }

@@ -22,6 +22,12 @@ describe("isSynthesisSectionIdCited", () => {
     expect(isSynthesisSectionIdCited("sec-1..2", "sec-1..2")).toBe(true)
   })
 
+  test("considers the full run of dots before an identifier", () => {
+    expect(isSynthesisSectionIdCited("prefix..sec-1", "sec-1")).toBe(false)
+    expect(isSynthesisSectionIdCited("prefix..sec-1", "prefix..sec-1")).toBe(true)
+    expect(isSynthesisSectionIdCited("...sec-1", "sec-1")).toBe(true)
+  })
+
   test("rejects prefix and suffix collisions for sec-1", () => {
     for (const text of [
       "sec-10",
