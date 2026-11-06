@@ -154,6 +154,43 @@ describe("findUnallowlistedSynthesisFindingIds", () => {
     ).toEqual([differentCompleteHash])
   })
 
+  test("preserves complete punctuated labels instead of accepting an allowed prefix", () => {
+    expect(
+      findUnallowlistedSynthesisFindingIds("findingId=fid-known.forged", ["fid-known"]),
+    ).toEqual(["fid-known.forged"])
+    expect(findUnallowlistedSynthesisFindingIds("findingId=fid.invented", [])).toEqual([
+      "fid.invented",
+    ])
+    expect(findUnallowlistedSynthesisFindingIds("findingId=fid.actual", ["fid.actual"])).toEqual(
+      [],
+    )
+  })
+
+  test("keeps a dotted suffix on a labeled SHA-256 candidate", () => {
+    const hash = "a".repeat(64)
+    expect(findUnallowlistedSynthesisFindingIds(`findingId=${hash}.forged`, [hash])).toEqual([
+      `${hash}.forged`,
+    ])
+  })
+
+  test("recognizes complete punctuated IDs inside backticks", () => {
+    expect(findUnallowlistedSynthesisFindingIds("`fid.invented`", [])).toEqual([
+      "fid.invented",
+    ])
+    expect(findUnallowlistedSynthesisFindingIds("`fid.actual`", ["fid.actual"])).toEqual([])
+  })
+
+  test("treats a final sentence period as punctuation, not part of an unquoted ID", () => {
+    expect(findUnallowlistedSynthesisFindingIds("findingId=fid.actual.", ["fid.actual"])).toEqual(
+      [],
+    )
+    expect(findUnallowlistedSynthesisFindingIds('findingId="fid.actual".', ["fid.actual"])).toEqual(
+      [],
+    )
+    const hash = "b".repeat(64)
+    expect(findUnallowlistedSynthesisFindingIds(`findingId=${hash}.`, [hash])).toEqual([])
+  })
+
   test("treats punctuation and whitespace as delimiters but not partial code tokens", () => {
     const text = `\n  findingId = fid-bad-008, and \`fid-bad-009\`!\t`
     expect(findUnallowlistedSynthesisFindingIds(text, [])).toEqual([

@@ -20,7 +20,7 @@ function isBacktickedIdToken(value: string): boolean {
 
   // Restrict inline-code matches to one identifier-like token. Explicit labels
   // are handled separately and may identify shorter values.
-  return value.length >= 6 && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value)
+  return value.length >= 6 && /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value)
 }
 
 function isIdentifierContinuation(character: string | undefined): boolean {
@@ -53,10 +53,18 @@ export function findUnallowlistedSynthesisFindingIds(
   const allowedIncidentalIds = createIdSet(nonFindingIds)
   const candidates: Array<{ id: string; index: number; explicitlyLabeled: boolean }> = []
 
-  const labeledValuePattern = /\bfindingId\s*[=:]\s*[`"']?([A-Za-z0-9][A-Za-z0-9_-]*)/gi
+  // A dot can be part of an ID. Keep it during extraction, then treat trailing
+  // unquoted periods as sentence punctuation; a closed quote preserves the exact
+  // quoted token, including a terminal period if one is intentional.
+  const labeledValuePattern = /\bfindingId\s*[=:]\s*([`"']?)([A-Za-z0-9_.-]+)\1?/gi
   for (const match of text.matchAll(labeledValuePattern)) {
-    const id = match[1]
-    if (id !== undefined) {
+    const quote = match[1]
+    const rawId = match[2]
+    if (rawId === undefined) continue
+
+    const hasClosingQuote = quote !== undefined && quote.length > 0 && match[0].endsWith(quote)
+    const id = hasClosingQuote ? rawId : rawId.replace(/\.+$/, "")
+    if (id.length > 0) {
       candidates.push({ id, index: match.index ?? 0, explicitlyLabeled: true })
     }
   }
