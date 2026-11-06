@@ -1,6 +1,6 @@
 # Roadmap
 
-Estado de referência: `origin/master` em `3c24a53` (merge da PR #49). Este documento registra prioridades do DSHbanca e **não** promete release, licença, publicação ou cutover — essas decisões competem ao mantenedor. Nenhum item é marcado como concluído por existir documentação, mock ou CI convencional.
+Estado de referência: `origin/master` em `fa2eb324275ecc6cc6e84ce0ee246ba994bb7b16` (merge da PR #73). Este documento registra prioridades do DSHbanca e **não** promete release, licença, publicação ou cutover — essas decisões competem ao mantenedor. Nenhum item é marcado como concluído por existir documentação, mock ou CI convencional.
 
 Legenda de status:
 
@@ -47,7 +47,10 @@ Legenda de status:
 - [/] E2E DSH real sem modelo executado e aprovado em SHAs autorizados (`cb066a1` da PR #1 e `aa39d37` da PR #49 com DSH `0.2.0-rc.2`, Cordis `4.0.4` e loader `1.0.5`); não constitui nova execução automática no commit de merge da master (`3c24a53`)
 - [ ] Execução contínua do gate E2E em CI provisionada com publicação automática de relatório sanitizado para o HEAD da master
 - [ ] E2E com modelo de IA (somente sob autorização humana específica, com modelo, custo e isolamento declarados)
-- [ ] Interface Web real e interativa do DSH comprovada de ponta a ponta (issue #4 permanece aberta com `agent:blocked` e `needs:e2e`; a visão de produto está definida em [seu contrato](docs/product/academic-workspace-design-contract.md), mas a UI não está implementada; a pesquisa técnica de APIs instaladas segue pendente na [issue #70](https://github.com/Base-Analitica/DSHbanca/issues/70))
+- Investigação documental da [#70](https://github.com/Base-Analitica/DSHbanca/issues/70) concluída pela [PR #73](https://github.com/Base-Analitica/DSHbanca/pull/73); o [relatório técnico](docs/audits/2026-11-05-dsh-preset-scoped-ui-feasibility.md) registra superfícies nativas compatíveis, mas classifica identidade live e isolamento integral como sem clearance. Isso não implementa nem valida a UI e não comprova E2E DSH/Web.
+- [ ] Identidade live autoritativa do preset por Session ([#74](https://github.com/Base-Analitica/DSHbanca/issues/74), `agent:blocked`, `needs:e2e`) — pré-requisito para #75.
+- [ ] Isolamento de abas e metadados restaurados ([#75](https://github.com/Base-Analitica/DSHbanca/issues/75), `agent:blocked`, `needs:e2e`) — depende da resolução de #74.
+- [ ] UI Web real e interativa e E2E DSH/Web no SHA final permanecem pendentes; nenhuma UI acadêmica foi implementada ou validada. Qualquer trabalho futuro depende da sequência #74 → #75 e dos gates/aprovações aplicáveis. A #4 (decisões/UX Web) e a #62 (Creator scratch/segurança) permanecem responsabilidades independentes.
 
 ## 4. Cobertura acadêmica exaustiva, checkpoints e retomada
 
