@@ -34,8 +34,11 @@ function hasLeftTokenBoundary(text: string, index: number): boolean {
 function hasRightTokenBoundary(text: string, index: number): boolean {
   const after = codePointAt(text, index)
   if (after === ".") {
-    // Keep dotted identifier suffixes (for example, sec-1.2) indivisible.
-    return !isTokenContinuation(codePointAt(text, index + after.length))
+    // A dot run followed by an identifier character belongs to the token; a
+    // terminal dot run remains punctuation.
+    let nextIndex = index + after.length
+    while (codePointAt(text, nextIndex) === ".") nextIndex += 1
+    return !isTokenContinuation(codePointAt(text, nextIndex))
   }
   return !isTokenContinuation(after)
 }

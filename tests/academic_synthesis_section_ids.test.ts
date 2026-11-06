@@ -16,6 +16,12 @@ describe("isSynthesisSectionIdCited", () => {
     expect(isSynthesisSectionIdCited("sectionId: sec-1.", "sec-1")).toBe(true)
   })
 
+  test("distinguishes a terminal period from a repeated-dot identifier", () => {
+    expect(isSynthesisSectionIdCited("sec-1.", "sec-1")).toBe(true)
+    expect(isSynthesisSectionIdCited("sec-1..2", "sec-1")).toBe(false)
+    expect(isSynthesisSectionIdCited("sec-1..2", "sec-1..2")).toBe(true)
+  })
+
   test("rejects prefix and suffix collisions for sec-1", () => {
     for (const text of [
       "sec-10",
