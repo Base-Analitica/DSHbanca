@@ -48,11 +48,30 @@ function hasRightTokenBoundary(text: string, index: number): boolean {
   return !isTokenContinuation(after)
 }
 
-function hasExactToken(text: string, findingId: string): boolean {
+/**
+ * Yields every occurrence of the expected ID that is a complete lexical token.
+ * The existing citation predicate and anchored-window search share this one
+ * boundary implementation so their SHA-256, literal-ID, and Unicode rules stay
+ * identical.
+ */
+export function* findSynthesisFindingIdOccurrences(
+  text: string,
+  findingId: string,
+): Generator<number, void, void> {
+  if (
+    typeof text !== "string" ||
+    typeof findingId !== "string" ||
+    findingId.length === 0 ||
+    findingId.trim().length === 0 ||
+    findingId !== findingId.trim()
+  ) {
+    return
+  }
+
   const hexOnly = /^[a-f0-9]+$/i.test(findingId)
   if (hexOnly && !isSha256Id(findingId)) {
     // Hex-only IDs are SHA-256 candidates, not non-hash IDs, unless exactly 64 chars.
-    return false
+    return
   }
 
   if (hexOnly) {
@@ -62,19 +81,25 @@ function hasExactToken(text: string, findingId: string): boolean {
       const index = match.index
       const end = index + findingId.length
       if (hasLeftTokenBoundary(text, index) && hasRightTokenBoundary(text, end)) {
-        return true
+        yield index
       }
     }
-    return false
+    return
   }
 
   let index = text.indexOf(findingId)
   while (index !== -1) {
     const end = index + findingId.length
     if (hasLeftTokenBoundary(text, index) && hasRightTokenBoundary(text, end)) {
-      return true
+      yield index
     }
     index = text.indexOf(findingId, index + 1)
+  }
+}
+
+function hasExactToken(text: string, findingId: string): boolean {
+  for (const _index of findSynthesisFindingIdOccurrences(text, findingId)) {
+    return true
   }
   return false
 }
