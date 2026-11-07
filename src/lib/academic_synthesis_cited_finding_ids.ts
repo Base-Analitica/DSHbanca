@@ -1,4 +1,7 @@
 const TOKEN_CONTINUATION = /[\p{L}\p{M}\p{N}\p{Pc}\p{Pd}/\\]/u
+const SECTION_TOKEN_CONTINUATION = /[\p{L}\p{M}\p{N}\p{Pc}\p{Pd}/]/u
+
+type TokenBoundaryKind = "findingId" | "filePath" | "sectionId"
 
 function isSha256Id(value: string): boolean {
   return /^[a-f0-9]{64}$/i.test(value)
@@ -22,30 +25,78 @@ function codePointAt(text: string, index: number): string | undefined {
   return codePoint === undefined ? undefined : String.fromCodePoint(codePoint)
 }
 
-function isTokenContinuation(character: string | undefined): boolean {
-  return character !== undefined && TOKEN_CONTINUATION.test(character)
+function isTokenContinuation(
+  character: string | undefined,
+  boundaryKind: TokenBoundaryKind,
+): boolean {
+  if (character === undefined) return false
+  return (boundaryKind === "sectionId"
+    ? SECTION_TOKEN_CONTINUATION
+    : TOKEN_CONTINUATION
+  ).test(character)
 }
 
-function hasLeftTokenBoundary(text: string, index: number): boolean {
+function hasLeftTokenBoundary(
+  text: string,
+  index: number,
+  boundaryKind: TokenBoundaryKind = "findingId",
+): boolean {
   const before = codePointBefore(text, index)
   if (before === ".") {
     // A complete dot run attached to an identifier is token content, not a boundary.
     let previousIndex = index - before.length
     while (codePointBefore(text, previousIndex) === ".") previousIndex -= 1
-    return !isTokenContinuation(codePointBefore(text, previousIndex))
+    return !isTokenContinuation(codePointBefore(text, previousIndex), boundaryKind)
   }
-  return !isTokenContinuation(before)
+  return !isTokenContinuation(before, boundaryKind)
 }
 
-function hasRightTokenBoundary(text: string, index: number): boolean {
+function hasRightTokenBoundary(
+  text: string,
+  index: number,
+  boundaryKind: TokenBoundaryKind = "findingId",
+): boolean {
   const after = codePointAt(text, index)
   if (after === ".") {
     // A dot run followed by an identifier extends the token; a terminal run is punctuation.
     let nextIndex = index + after.length
     while (codePointAt(text, nextIndex) === ".") nextIndex += 1
-    return !isTokenContinuation(codePointAt(text, nextIndex))
+    return !isTokenContinuation(codePointAt(text, nextIndex), boundaryKind)
   }
-  return !isTokenContinuation(after)
+  return !isTokenContinuation(after, boundaryKind)
+}
+
+/**
+ * Yields every complete, case-sensitive lexical occurrence of a file path or
+ * section ID using the same Unicode and dot-run boundary rules as its existing
+ * citation helper. Section IDs retain their narrower backslash boundary rule.
+ */
+export function* findSynthesisCitationTokenOccurrences(
+  text: string,
+  token: string,
+  boundaryKind: "filePath" | "sectionId",
+): Generator<number, void, void> {
+  if (
+    typeof text !== "string" ||
+    typeof token !== "string" ||
+    token.length === 0 ||
+    token.trim().length === 0 ||
+    (boundaryKind === "sectionId" && token !== token.trim())
+  ) {
+    return
+  }
+
+  let index = text.indexOf(token)
+  while (index !== -1) {
+    const end = index + token.length
+    if (
+      hasLeftTokenBoundary(text, index, boundaryKind) &&
+      hasRightTokenBoundary(text, end, boundaryKind)
+    ) {
+      yield index
+    }
+    index = text.indexOf(token, index + 1)
+  }
 }
 
 /**

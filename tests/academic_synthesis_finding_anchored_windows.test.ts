@@ -150,6 +150,89 @@ describe("hasSynthesisFindingCitationInAnchoredWindows", () => {
     expect(hasSynthesisFindingCitationInAnchoredWindows(text, expected)).toBe(false)
   })
 
+  test("rejects a section ID extended beyond the exclusive right edge", () => {
+    const afterId = `; arquivo ${expected.file}; linhas 42-48; seção `
+    const rightPadding = " ".repeat(300 - afterId.length - expected.sectionId.length)
+    const extendedSection =
+      `${expected.findingId}${afterId}${rightPadding}${expected.sectionId}a`
+
+    expect(extendedSection.length).toBe(expected.findingId.length + 301)
+    expect(hasSynthesisFindingCitationInAnchoredWindows(extendedSection, expected)).toBe(false)
+  })
+
+  test("rejects a file path whose prefix begins before the inclusive left edge", () => {
+    const anchor = 300
+    const windowStart = anchor - 220
+    const extendedPathPrefix = `${"x".repeat(windowStart - 4)}old-${expected.file}`
+    const beforeAnchor =
+      `${extendedPathPrefix}${" ".repeat(anchor - extendedPathPrefix.length)}`
+    const extendedFile =
+      `${beforeAnchor}${expected.findingId}; linhas 42-48; seção ${expected.sectionId}.`
+
+    expect(extendedFile.indexOf(expected.file)).toBe(windowStart)
+    expect(extendedFile.indexOf(expected.findingId)).toBe(anchor)
+    expect(hasSynthesisFindingCitationInAnchoredWindows(extendedFile, expected)).toBe(false)
+  })
+
+  test("rejects a line range extended beyond the exclusive right edge", () => {
+    const afterIdWithLinePrefix =
+      `; arquivo ${expected.file}; seção ${expected.sectionId}; linhas 42-`
+    const linePadding = " ".repeat(300 - afterIdWithLinePrefix.length - 2)
+    const extendedLineRange =
+      `${expected.findingId}${afterIdWithLinePrefix}${linePadding}48` + "0"
+
+    expect(extendedLineRange.length).toBe(expected.findingId.length + 301)
+    expect(hasSynthesisFindingCitationInAnchoredWindows(extendedLineRange, expected)).toBe(false)
+  })
+
+  test("preserves file-path and section-ID backslash boundaries", () => {
+    const pathContinuation =
+      `${citation(expected).replace(`${expected.file};`, `${expected.file}\\child;`)}`
+    expect(hasSynthesisFindingCitationInAnchoredWindows(pathContinuation, expected)).toBe(false)
+
+    const sectionBoundary = citation(expected).replace(
+      `${expected.sectionId}.`,
+      `${expected.sectionId}\\child.`,
+    )
+    expect(hasSynthesisFindingCitationInAnchoredWindows(sectionBoundary, expected)).toBe(true)
+  })
+
+  test("checks line-label context at the inclusive left edge", () => {
+    const anchor = 300
+    const windowStart = anchor - 220
+    const textWithPrefix = (leftFill: "x" | " "): string => {
+      const beforeAnchor =
+        `${leftFill.repeat(windowStart)}linhas 42-48; arquivo ${expected.file}; seção ${expected.sectionId}; `
+      return `${beforeAnchor}${" ".repeat(anchor - beforeAnchor.length)}${expected.findingId}`
+    }
+
+    const embeddedLine = textWithPrefix("x")
+    expect(embeddedLine.indexOf("linhas 42-48")).toBe(windowStart)
+    expect(embeddedLine.indexOf(expected.findingId)).toBe(anchor)
+    expect(hasSynthesisFindingCitationInAnchoredWindows(embeddedLine, expected)).toBe(false)
+
+    const boundaryLine = textWithPrefix(" ")
+    expect(hasSynthesisFindingCitationInAnchoredWindows(boundaryLine, expected)).toBe(true)
+  })
+
+  test("preserves exact single-line edges but rejects a clipped range continuation", () => {
+    const singleLineExpected = { ...expected, endLine: expected.startLine }
+    const beforeLine =
+      `; arquivo ${expected.file}; seção ${expected.sectionId}; linhas `
+    const linePadding = " ".repeat(300 - beforeLine.length - String(expected.startLine).length)
+    const windowEndText =
+      `${expected.findingId}${beforeLine}${linePadding}${expected.startLine}`
+    const end = expected.findingId.length + 300
+
+    expect(windowEndText.length).toBe(end)
+    expect(
+      hasSynthesisFindingCitationInAnchoredWindows(`${windowEndText};`, singleLineExpected),
+    ).toBe(true)
+    expect(
+      hasSynthesisFindingCitationInAnchoredWindows(`${windowEndText} - 48`, singleLineExpected),
+    ).toBe(false)
+  })
+
   test("handles IDs at text edges and repeated occurrences without merging windows", () => {
     const atStart = `${expected.findingId}; arquivo ${expected.file}; linhas 42-48; seção ${expected.sectionId}.`
     const atEnd = `arquivo ${expected.file}; linhas 42-48; seção ${expected.sectionId}; ID ${expected.findingId}`
