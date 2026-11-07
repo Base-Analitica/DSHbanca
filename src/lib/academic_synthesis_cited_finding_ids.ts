@@ -49,7 +49,13 @@ function hasRightTokenBoundary(text: string, index: number): boolean {
 }
 
 function hasExactToken(text: string, findingId: string): boolean {
-  if (isSha256Id(findingId)) {
+  const hexOnly = /^[a-f0-9]+$/i.test(findingId)
+  if (hexOnly && !isSha256Id(findingId)) {
+    // Hex-only IDs are SHA-256 candidates, not non-hash IDs, unless exactly 64 chars.
+    return false
+  }
+
+  if (hexOnly) {
     // findingId is restricted to hex here, so the case-insensitive pattern is literal.
     const candidates = new RegExp(findingId, "gi")
     for (const match of text.matchAll(candidates)) {

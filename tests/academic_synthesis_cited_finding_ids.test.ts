@@ -94,6 +94,16 @@ describe("isSynthesisFindingIdCited", () => {
     }
   })
 
+  test("rejects a 63-character hexadecimal expected ID", () => {
+    const truncated = "a".repeat(63)
+    expect(isSynthesisFindingIdCited(`findingId=${truncated}`, truncated)).toBe(false)
+  })
+
+  test("rejects a 65-character hexadecimal expected ID", () => {
+    const extended = "f".repeat(65)
+    expect(isSynthesisFindingIdCited(`findingId=${extended}`, extended)).toBe(false)
+  })
+
   test("requires the expected ID rather than any other allowed-looking ID", () => {
     expect(
       isSynthesisFindingIdCited("fid.allowed-2 and fid.allowed-3", "fid.allowed-1"),
