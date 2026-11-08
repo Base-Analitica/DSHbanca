@@ -10,6 +10,18 @@ Legenda de status:
 - `(PR #N)` pull request integrada na `master`;
 - `(issue #N)` issue relacionada ou dependência aberta.
 
+## Prioridades atuais — decisão de 07/11/2026
+
+Ordem de trabalho aprovada, sem promover status históricos nem substituir as decisões reservadas ao mantenedor:
+
+A. **DSH/Cordis nativos e E2E vertical observável** — primeiro provar o fluxo acadêmico real no DSH, começando pelo finding sintético não vazio da [issue #98](https://github.com/Base-Analitica/DSHbanca/issues/98). O preparo hermético não substitui o gate real: a execução ativa permanece `BLOCKED` até autorização humana específica, preflight do host instalado e scratch isolado.
+B. **Cobertura, retomada e correção autorizada** — evoluir o ciclo acadêmico completo depois de evidência vertical, respeitando identidade, autorização e reauditoria.
+C. **LaTeX, corpus e avaliação humana** — avançar formatos e corpus sintéticos/autorizados; juízo acadêmico continua humano e não é inferido por heurísticas.
+D. **Web após #74/#75** — qualquer UX Web depende da resolução dos pré-requisitos de identidade live e isolamento; não antecipar implementação.
+E. **Mais heurísticas lexicais somente com necessidade comprovada** — expansão congelada até existir impacto funcional demonstrado, corpus adequado e prioridade aprovada.
+
+A série #80–#97 fica registrada como baseline lexical hermético: testes determinísticos de padrões, sem prova de integração produtiva no DSH, eficácia semântica ou qualidade acadêmica. Ela não autoriza novos detectores automáticos nem altera os marcos históricos abaixo.
+
 ## Fundação do repositório (concluída)
 
 - [x] Estrutura inicial do repositório

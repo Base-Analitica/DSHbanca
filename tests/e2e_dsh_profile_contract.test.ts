@@ -713,22 +713,91 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
   })
 })
 
+const batchAuditPlanId = "1fc2cf44ea0ad923b401d36e35932491c8009807ff0207e05f1e7bd3d3929085"
+const batchAuditFingerprint = "a6260a0083fa91b7e41bdc14855f626f65df8d9c2b57e71e54f05eef51784338"
+const batchAuditIds = ["batch-01", "batch-02", "batch-03", "batch-04", "batch-05"]
+const completeFindingProjection = {
+  version: "analysis-finding-v1",
+  findingId: "f".repeat(64),
+  planId: batchAuditPlanId,
+  batchId: batchAuditIds[1],
+  manuscriptFingerprint: batchAuditFingerprint,
+  provenanceSha256: "a".repeat(64),
+  claimSha256: "b".repeat(64),
+  evidenceSha256: "c".repeat(64),
+}
 const completeBatchAuditEvidence = {
+  probeExecuted: true,
   totalBatches: 5,
   completedBatches: 5,
-  planId: "1fc2cf44ea0ad923b401d36e35932491c8009807ff0207e05f1e7bd3d3929085",
-  manuscriptFingerprint: "a6260a0083fa91b7e41bdc14855f626f65df8d9c2b57e71e54f05eef51784338",
+  planId: batchAuditPlanId,
+  manuscriptFingerprint: batchAuditFingerprint,
+  planBatchIds: [...batchAuditIds],
   unverifiedAdvancesBlocked: 5,
   prematureSynthesisBlocked: 5,
-  auditsCompletedWithZeroFindings: 5,
+  auditsCompletedWithZeroFindings: 4,
+  batchAudits: batchAuditIds.map((batchId, batchIndex) => ({
+    batchIndex,
+    batchId,
+    acceptedCount: batchIndex === 1 ? 1 : 0,
+    receiptFindingCount: batchIndex === 1 ? 1 : 0,
+    persistedFindingCount: batchIndex < 1 ? 0 : 1,
+    findingId: batchIndex === 1 ? completeFindingProjection.findingId : null,
+  })),
+  auditToolDispatchCount: 6,
   orderlyAdvances: 5,
   resumesWithoutSpuriousAdvance: 5,
+  invalidFinding: {
+    rejected: true,
+    errorCode: "invalid_lines",
+    statePreserved: true,
+    stateBeforeSha256: "d".repeat(64),
+    stateAfterSha256: "d".repeat(64),
+  },
+  auditorIdentity: {
+    createdVia: "ctx.agents.create",
+    agentId: "agent-e2e-auditor",
+    sessionId: "agent-e2e-auditor",
+    agentAndSessionIdMatch: true,
+    agentRegistryContainsAgent: true,
+    sessionStoreContainsSession: true,
+    effectivePreset: "banca-auditor",
+    toolRuntime: "ctx.tools.execute",
+    modelCalls: 0,
+  },
+  nonEmptyFinding: {
+    batchIndex: 1,
+    acceptedCount: 1,
+    receiptFindingCount: 1,
+    persistedFindingCount: 1,
+    synthesisFindingCount: 1,
+    deterministicFindingId: true,
+    expected: { ...completeFindingProjection },
+    receipt: { ...completeFindingProjection },
+    persisted: { ...completeFindingProjection },
+    synthesis: { ...completeFindingProjection },
+  },
+  synthesis: {
+    version: "global-analysis-synthesis-input-v1",
+    planId: batchAuditPlanId,
+    manuscriptFingerprint: batchAuditFingerprint,
+    coverage: {
+      state: "complete",
+      totalBatches: 5,
+      completedBatches: 5,
+      totalCharacters: 595,
+      completedCharacters: 595,
+      coveragePercent: 100,
+      orderedBatchIds: [...batchAuditIds],
+    },
+    findingsCount: 1,
+  },
   synthesisReleased: true,
   synthesisInputCoverageState: "complete",
   manuscriptPreserved: true,
 }
 
-describe("DSH batch audit evidence gate contract (#44)", () => {
+describe("DSH batch audit evidence gate contract (#44, #98)", () => {
   test("accepts complete positive batch audit evidence", () => {
     expect(validateBatchAuditEvidence(completeBatchAuditEvidence)).toEqual([])
     expect(classifyBatchAuditEvidenceStatus(completeBatchAuditEvidence)).toBe("PASS")
@@ -789,8 +858,8 @@ describe("DSH batch audit evidence gate contract (#44)", () => {
     ],
     [
       "audits completed with zero findings mismatch",
-      { ...completeBatchAuditEvidence, auditsCompletedWithZeroFindings: 4 },
-      "all batches must accept audit with zero findings",
+      { ...completeBatchAuditEvidence, auditsCompletedWithZeroFindings: 3 },
+      "exactly one batch must accept a non-empty finding; other batches must remain empty",
     ],
     [
       "orderly advances mismatch",
@@ -818,6 +887,143 @@ describe("DSH batch audit evidence gate contract (#44)", () => {
       "synthetic manuscript was modified by analysis tools",
     ],
   ])("rejects negative test case: %s", (_label, invalidEvidence, expectedError) => {
+    const errors = validateBatchAuditEvidence(invalidEvidence)
+    expect(errors).toContain(expectedError)
+    expect(classifyBatchAuditEvidenceStatus(invalidEvidence)).toBe("FAIL")
+  })
+
+  test.each([
+    ["probe was skipped", { ...completeBatchAuditEvidence, probeExecuted: false }, "batch audit probe must have executed"],
+    [
+      "Agent and Session identity is fabricated",
+      {
+        ...completeBatchAuditEvidence,
+        auditorIdentity: { ...completeBatchAuditEvidence.auditorIdentity, sessionId: "different-session" },
+      },
+      "auditor Agent/Session identity must be observed through DSH registries",
+    ],
+    [
+      "finding is absent from synthesis",
+      {
+        ...completeBatchAuditEvidence,
+        nonEmptyFinding: { ...completeBatchAuditEvidence.nonEmptyFinding, synthesisFindingCount: 0 },
+      },
+      "synthesis input must contain exactly one finding",
+    ],
+    [
+      "finding is duplicated in storage",
+      {
+        ...completeBatchAuditEvidence,
+        nonEmptyFinding: { ...completeBatchAuditEvidence.nonEmptyFinding, persistedFindingCount: 2 },
+      },
+      "persisted findings store must contain exactly one non-empty finding",
+    ],
+    [
+      "synthesis provenance diverged",
+      {
+        ...completeBatchAuditEvidence,
+        nonEmptyFinding: {
+          ...completeBatchAuditEvidence.nonEmptyFinding,
+          synthesis: { ...completeBatchAuditEvidence.nonEmptyFinding.synthesis, provenanceSha256: "e".repeat(64) },
+        },
+      },
+      "expected, receipt, stored, and synthesis finding identity/provenance must match",
+    ],
+    [
+      "synthesis batch order diverged",
+      {
+        ...completeBatchAuditEvidence,
+        synthesis: {
+          ...completeBatchAuditEvidence.synthesis,
+          coverage: { ...completeBatchAuditEvidence.synthesis.coverage, orderedBatchIds: [...batchAuditIds].reverse() },
+        },
+      },
+      "synthesis input must preserve the exact plan batch order",
+    ],
+    [
+      "invalid finding mutated state",
+      { ...completeBatchAuditEvidence, invalidFinding: { ...completeBatchAuditEvidence.invalidFinding, statePreserved: false } },
+      "invalid finding rejection must leave persisted state unchanged",
+    ],
+    [
+      "invalid finding state hashes diverged",
+      {
+        ...completeBatchAuditEvidence,
+        invalidFinding: { ...completeBatchAuditEvidence.invalidFinding, stateAfterSha256: "e".repeat(64) },
+      },
+      "invalid finding rejection must leave persisted state unchanged",
+    ],
+    [
+      "invalid finding was not rejected",
+      { ...completeBatchAuditEvidence, invalidFinding: { ...completeBatchAuditEvidence.invalidFinding, rejected: false } },
+      "invalid finding must be rejected before persistence",
+    ],
+    [
+      "finding ID was not verified as deterministic",
+      {
+        ...completeBatchAuditEvidence,
+        nonEmptyFinding: { ...completeBatchAuditEvidence.nonEmptyFinding, deterministicFindingId: false },
+      },
+      "findingId must match the deterministic identity calculated from the submitted finding",
+    ],
+    [
+      "every batch was reported as empty",
+      { ...completeBatchAuditEvidence, auditsCompletedWithZeroFindings: 5 },
+      "exactly one batch must accept a non-empty finding; other batches must remain empty",
+    ],
+    [
+      "batch receipt was repeated instead of covering the next plan batch",
+      {
+        ...completeBatchAuditEvidence,
+        batchAudits: completeBatchAuditEvidence.batchAudits.map((audit, index) => index === 2
+          ? { ...completeBatchAuditEvidence.batchAudits[1] }
+          : audit),
+      },
+      "batch audit receipts must cover every plan batch exactly once in plan order",
+    ],
+    [
+      "an empty batch claims another accepted finding",
+      {
+        ...completeBatchAuditEvidence,
+        batchAudits: completeBatchAuditEvidence.batchAudits.map((audit, index) => index === 0
+          ? { ...audit, acceptedCount: 1, receiptFindingCount: 1, findingId: "d".repeat(64) }
+          : audit),
+      },
+      "exactly one batch audit must accept the expected finding; other batches must remain empty",
+    ],
+    [
+      "batch audit finding ID diverged from the expected finding",
+      {
+        ...completeBatchAuditEvidence,
+        batchAudits: completeBatchAuditEvidence.batchAudits.map((audit, index) => index === 1
+          ? { ...audit, findingId: "d".repeat(64) }
+          : audit),
+      },
+      "exactly one batch audit must accept the expected finding; other batches must remain empty",
+    ],
+    [
+      "receipt finding identity diverged",
+      {
+        ...completeBatchAuditEvidence,
+        nonEmptyFinding: {
+          ...completeBatchAuditEvidence.nonEmptyFinding,
+          receipt: { ...completeBatchAuditEvidence.nonEmptyFinding.receipt, findingId: "d".repeat(64) },
+        },
+      },
+      "expected, receipt, stored, and synthesis finding identity/provenance must match",
+    ],
+    [
+      "synthesis coverage counters diverged",
+      {
+        ...completeBatchAuditEvidence,
+        synthesis: {
+          ...completeBatchAuditEvidence.synthesis,
+          coverage: { ...completeBatchAuditEvidence.synthesis.coverage, completedCharacters: 594 },
+        },
+      },
+      "synthesis coverage totals and counts must agree with the complete plan",
+    ],
+  ])("rejects vertical finding adulteration: %s", (_label, invalidEvidence, expectedError) => {
     const errors = validateBatchAuditEvidence(invalidEvidence)
     expect(errors).toContain(expectedError)
     expect(classifyBatchAuditEvidenceStatus(invalidEvidence)).toBe("FAIL")

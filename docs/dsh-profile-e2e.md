@@ -69,17 +69,24 @@ A aprovação em discovery não produz automaticamente `PASS` no carregamento. A
 
 A issue #44 exige que o avanço de checkpoints e a liberação da síntese estrutural dependam de evidência durável e coerente de auditoria acadêmica por lote. A sonda E2E acadêmica nativa formaliza esse fluxo diretamente no `ToolRuntime` do DSH (`ctx.tools.execute`), utilizando o `Agent` e a `Session` reais criados pelo host via `AgentRegistry`.
 
-O cenário cobre de forma reproduzível e hermética:
-1. **Planejamento de múltiplos lotes sintéticos**: o manuscrito sintético LaTeX (`main.tex` e 5 capítulos) é planejado com `maxCharactersPerBatch: 80`, gerando 5 lotes distintos com ordenação determinística.
+O cenário-base documentado na #44 e a extensão implementada na #98 verificam, quando o gate ativo recebe autorização específica:
+1. **Planejamento de múltiplos lotes sintéticos**: o manuscrito sintético LaTeX (`main.tex` e 5 capítulos) é planejado com `maxCharactersPerBatch: 120`, gerando 5 lotes distintos com ordenação determinística para o fixture atual.
 2. **Rejeição de avanço sem auditoria**: para cada lote, a tentativa de avançar via `banca_context(advance: true)` sem auditoria prévia é estritamente rejeitada com `missing_batch_audit`.
-3. **Auditoria explícita com zero findings**: execução de `banca_auditar` com `findings: []` para o lote corrente, persistindo confirmação durável e canônica.
-4. **Avanço ordenado após confirmação**: com a confirmação válida e persistida, o avanço via `banca_context(advance: true)` é aceito, incrementando `completedBatches` em ordem rigorosa.
-5. **Retomada idempotente sem avanço indevido**: consulta repetida a `banca_context` sem flag de avanço não altera o progresso registrado no checkpoint.
-6. **Bloqueio de síntese prematura**: chamadas a `banca_sintese` antes da conclusão de todos os lotes são bloqueadas com erro de cobertura incompleta (`synthesis input error`).
-7. **Liberação da entrada de síntese**: somente após todos os lotes serem auditados e confirmados (`state === "complete"`), `banca_sintese` emite a chave de síntese global (`global-analysis-synthesis-input-v1`) com metadados estruturados.
-8. **Preservação e teardown**: os arquivos sintéticos originais têm seus digests SHA-256 verificados antes e depois da sonda, e os handles dos agentes são descartados via `dispose()`.
+3. **Finding inválido rejeitado sem mutação**: uma submissão sintética com linha inválida (`startLine: 0`) deve retornar `invalid_lines`; o inventário persistente do workspace é comparado antes/depois e precisa permanecer idêntico.
+4. **Auditoria explícita por lote**: quatro lotes usam `findings: []`; exatamente um lote recebe um finding estrutural sintético não vazio, ancorado em arquivo/linha e título de seção contidos em chunk real do plano.
+5. **Avanço ordenado após confirmação**: cada lote avança exatamente uma vez após sua confirmação válida e persistida, em ordem rigorosa.
+6. **Retomada idempotente sem avanço indevido**: consulta repetida a `banca_context` sem flag de avanço não altera o progresso registrado no checkpoint.
+7. **Bloqueio de síntese prematura**: chamadas a `banca_sintese` antes da conclusão de todos os lotes são bloqueadas com erro de cobertura incompleta (`synthesis input error`).
+8. **Finding durável e recuperado uma vez**: o recibo, o arquivo `.banca/analysis/findings/<planId>.json` e a entrada `global-analysis-synthesis-input-v1` precisam preservar a mesma identidade/proveniência; a store e `findings` da síntese contêm exatamente um finding após cobertura completa e com ordem de lotes intacta.
+9. **Preservação e teardown**: os arquivos sintéticos originais têm seus digests SHA-256 verificados antes e depois da sonda, e os handles dos agentes são descartados via `dispose()`.
 
-O resultado é registrado em `stages.batchAuditEvidenceGate` com status (`PASS`, `FAIL`, `BLOCKED`), contagens detalhadas de operações executadas e auditoria sanitizada, sem chamada a modelos ou vazamento de caminhos. Assim como os demais estágios ativos, a sonda permanece `BLOCKED` por padrão antes do boot do perfil até autorização explícita (`DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes`).
+O resultado é registrado em `stages.batchAuditEvidenceGate` com status (`PASS`, `FAIL`, `BLOCKED`), resumo ordenado por lote (índice/ID, contagens, `findingId` quando aplicável), IDs e digests; `claim` e `evidence` são comparados sem emitir o conteúdo no relatório. A verificação de identidade exige o Agent/Session publicado pelo DSH, o preset `banca-auditor` e despacho por `ctx.tools.execute`; a sonda não faz chamada a modelo. Isso descreve o comportamento esperado quando autorizada, não uma nova observação no host: a execução permanece `BLOCKED` antes do boot até autorização humana específica para aquela execução, após preflight instalado e isolamento scratch. Não defina `DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes` por causa desta documentação ou da implementação.
+
+## Issue #98: finding sintético até a entrada de síntese
+
+A extensão vertical reutiliza o runner, perfil, workspace LaTeX/BibTeX sintético e fase `batchAuditEvidenceGate` existentes. O probe seleciona o lote/chunk pela metadata do plano corrente; usa a linha real `\section{...}` integralmente coberta pelo chunk como fonte do `sectionId` (o tipo `SourceSpan` expõe arquivo/linhas/texto, não um campo separado de seção). Categoria `structure`, severidade `low`, claim e evidência são valores sintéticos locais, sem DOI ou fonte externa, e não representam juízo acadêmico nem suporte semântico. O `findingId` é calculado pelo framing determinístico de `analysis-finding-v1`; recibo, store e síntese são comparados contra os mesmos valores antes de gerar somente projeções com IDs/digests.
+
+A validação unitária do contrato não comprova o DSH real. Sem autorização humana específica, este slice é apenas implementação e teste herméticos; E2E real no HEAD final permanece `BLOCKED`, o issue deve continuar aberto e não se deve solicitar merge. O gate ativo também exige DSH/Cordis/loader instalados verificados e workspace/perfil scratch isolados, e não usa modelo, credenciais ou manuscrito real.
 
 ## Issue #46: contratos nativos de perguntas estruturadas e aprovação independente
 
