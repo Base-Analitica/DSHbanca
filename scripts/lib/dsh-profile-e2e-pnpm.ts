@@ -11,7 +11,7 @@ import {
   statSync,
 } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
 export type PnpmCliKind = "native" | "javascript"
 
@@ -34,6 +34,93 @@ export interface PnpmFindOptions {
   corepackHome?: string
   cacheRoots?: string[]
   pathEnv?: string
+}
+
+const scratchPnpmPathKeys = [
+  "HOME",
+  "DSH_HOME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR",
+  "PNPM_HOME",
+  "npm_config_userconfig",
+  "npm_config_cache",
+  "COREPACK_HOME",
+] as const
+
+function isScratchPath(scratchRoot: string, candidate: string): boolean {
+  if (!isAbsolute(candidate)) return false
+  const relativePath = relative(scratchRoot, resolve(candidate))
+  return relativePath === "" || isStrictlyWithin(scratchRoot, candidate)
+}
+
+function isStrictlyWithin(root: string, candidate: string): boolean {
+  if (!isAbsolute(candidate)) return false
+  const relativePath = relative(root, resolve(candidate))
+  return relativePath !== "" &&
+    relativePath !== ".." &&
+    !relativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(relativePath)
+}
+
+/**
+ * Adds pnpm's workspace-root opt-in only to the offline DSH bundle-install child
+ * environment after proving all package-manager state and its wrapper are scratch-scoped.
+ */
+export function buildScratchPnpmBundleInstallEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  scratchRoot: string,
+  profileDir: string,
+  pnpmStoreDir: string,
+): NodeJS.ProcessEnv {
+  if (!isAbsolute(scratchRoot)) {
+    throw new Error("scratch bundle install requires an absolute isolated root")
+  }
+  const scratch = resolve(scratchRoot)
+  if (!isStrictlyWithin(scratch, pnpmStoreDir)) {
+    throw new Error("pnpm store must remain inside the isolated scratch root")
+  }
+  const dshHome = baseEnv.DSH_HOME
+  if (typeof dshHome !== "string" || !isScratchPath(scratch, dshHome)) {
+    throw new Error("native profile home must remain inside the isolated scratch root")
+  }
+  const profileParent = join(resolve(dshHome), "profiles")
+  if (!isStrictlyWithin(profileParent, profileDir) || !isScratchPath(scratch, profileDir)) {
+    throw new Error("native profile install target must remain inside the isolated scratch profile")
+  }
+  for (const key of scratchPnpmPathKeys) {
+    const value = baseEnv[key]
+    if (typeof value !== "string" || !isScratchPath(scratch, value)) {
+      throw new Error("scratch bundle install environment contains a path outside its isolated root")
+    }
+  }
+  const firstPathEntry = baseEnv.PATH?.split(delimiter)[0]
+  if (!firstPathEntry || resolve(firstPathEntry) !== join(scratch, "bin")) {
+    throw new Error("verified scratch pnpm wrapper must be first on the isolated PATH")
+  }
+  if (
+    baseEnv.npm_config_offline !== "true" ||
+    baseEnv.NPM_CONFIG_OFFLINE !== undefined ||
+    baseEnv.COREPACK_ENABLE_NETWORK !== "0" ||
+    baseEnv.COREPACK_ENABLE_DOWNLOAD_PROMPT !== "0"
+  ) {
+    throw new Error("scratch bundle install must remain offline with Corepack network access disabled")
+  }
+  if (
+    baseEnv.npm_config_ignore_workspace_root_check !== undefined ||
+    baseEnv.NPM_CONFIG_IGNORE_WORKSPACE_ROOT_CHECK !== undefined
+  ) {
+    throw new Error("workspace-root opt-in must not leak into the base scratch environment")
+  }
+  return {
+    ...baseEnv,
+    npm_config_ignore_workspace_root_check: "true",
+  }
 }
 
 export function shellQuote(value: string): string {

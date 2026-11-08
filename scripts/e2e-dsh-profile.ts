@@ -47,6 +47,7 @@ import {
   validateComposedProfilePlugins,
 } from "./lib/dsh-profile-e2e-contract.js"
 import {
+  buildScratchPnpmBundleInstallEnv,
   buildPnpmCommand,
   findPnpmCli,
   isOfflineMissingPnpmError,
@@ -3062,7 +3063,15 @@ async function main(): Promise<void> {
     return
   }
 
-  const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env, timeoutMs })
+  let bundleInstallEnv: NodeJS.ProcessEnv
+  try {
+    bundleInstallEnv = buildScratchPnpmBundleInstallEnv(env, scratch, profileDir, dirs.pnpmStore)
+  } catch {
+    report.stages.nativeBundleInstall = { status: "BLOCKED", exitCode: null, timedOut: false }
+    fail("DSH native bundle install environment did not satisfy scratch/offline isolation", "BLOCKED")
+    return
+  }
+  const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env: bundleInstallEnv, timeoutMs })
   report.stages.nativeBundleInstall = { exitCode: add.exitCode, timedOut: add.timedOut }
   if (add.exitCode !== 0 || add.timedOut) {
     const offlineMissing = isOfflineMissingPnpmError(`${add.stderr}\n${add.stdout}`)
