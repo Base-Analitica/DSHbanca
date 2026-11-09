@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { delimiter, join } from "node:path"
 import { spawnSync } from "node:child_process"
 import {
+  buildScratchPnpmBundleInstallEnv,
   buildPnpmCommand,
   findPnpmCli,
   isExecutableFile,
@@ -14,6 +15,102 @@ import {
   resolvePnpmCandidate,
   shellQuote,
 } from "../scripts/lib/dsh-profile-e2e-pnpm.js"
+
+function makeScratchBundleInstallBaseEnv(scratchRoot: string): NodeJS.ProcessEnv {
+  const home = join(scratchRoot, "home")
+  const temp = join(scratchRoot, "tmp")
+  return {
+    PATH: [join(scratchRoot, "bin"), join(scratchRoot, "system-bin")].join(delimiter),
+    HOME: home,
+    DSH_HOME: join(scratchRoot, "dsh-home"),
+    TMPDIR: temp,
+    TMP: temp,
+    TEMP: temp,
+    XDG_CONFIG_HOME: join(scratchRoot, "xdg", "config"),
+    XDG_CACHE_HOME: join(scratchRoot, "xdg", "cache"),
+    XDG_DATA_HOME: join(scratchRoot, "xdg", "data"),
+    XDG_STATE_HOME: join(scratchRoot, "xdg", "state"),
+    XDG_RUNTIME_DIR: join(scratchRoot, "xdg", "runtime"),
+    PNPM_HOME: join(scratchRoot, "pnpm-home"),
+    npm_config_userconfig: join(home, ".npmrc"),
+    npm_config_cache: join(scratchRoot, "npm-cache"),
+    npm_config_offline: "true",
+    COREPACK_HOME: join(scratchRoot, "corepack"),
+    COREPACK_ENABLE_NETWORK: "0",
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+    CI: "1",
+  }
+}
+
+describe("Issue #98 pnpm workspace-root install environment", () => {
+  test("passes the root-check override only to a cloned offline scratch subprocess env", () => {
+    const scratchRoot = join(tmpdir(), "dshbanca-scratch-profile")
+    const baseEnv = makeScratchBundleInstallBaseEnv(scratchRoot)
+    const baseEnvBefore = { ...baseEnv }
+    const hostValueBefore = process.env.npm_config_ignore_workspace_root_check
+    const profileDir = join(scratchRoot, "dsh-home", "profiles", "unique-profile")
+    const storeDir = join(scratchRoot, "pnpm-store")
+    const installEnv = buildScratchPnpmBundleInstallEnv(baseEnv, scratchRoot, profileDir, storeDir)
+
+    expect(installEnv).toEqual({ ...baseEnv, npm_config_ignore_workspace_root_check: "true" })
+    expect(baseEnv).toEqual(baseEnvBefore)
+    expect(process.env.npm_config_ignore_workspace_root_check).toBe(hostValueBefore)
+    expect(installEnv.npm_config_offline).toBe("true")
+    expect(installEnv.COREPACK_ENABLE_NETWORK).toBe("0")
+    expect(installEnv.PATH?.split(delimiter)[0]).toBe(join(scratchRoot, "bin"))
+
+    const child = spawnSync(
+      process.execPath,
+      ["-e", "process.stdout.write(JSON.stringify([process.env.npm_config_ignore_workspace_root_check, process.env.npm_config_offline, process.env.COREPACK_ENABLE_NETWORK]))"],
+      { encoding: "utf8", env: installEnv },
+    )
+    expect(child.status).toBe(0)
+    expect(JSON.parse(child.stdout)).toEqual(["true", "true", "0"])
+  })
+
+  test("rejects online, ambient, or non-scratch bundle install environments", () => {
+    const scratchRoot = join(tmpdir(), "dshbanca-scratch-profile")
+    const baseEnv = makeScratchBundleInstallBaseEnv(scratchRoot)
+    const profileDir = join(scratchRoot, "dsh-home", "profiles", "unique-profile")
+    const storeDir = join(scratchRoot, "pnpm-store")
+    const rejects = [
+      { ...baseEnv, npm_config_offline: "false" },
+      { ...baseEnv, COREPACK_ENABLE_NETWORK: "1" },
+      { ...baseEnv, HOME: tmpdir() },
+      { ...baseEnv, PATH: ["/usr/bin", join(scratchRoot, "bin")].join(delimiter) },
+      { ...baseEnv, npm_config_ignore_workspace_root_check: "true" },
+      { ...baseEnv, NPM_CONFIG_IGNORE_WORKSPACE_ROOT_CHECK: "true" },
+    ]
+    for (const unsafeEnv of rejects) {
+      expect(() => buildScratchPnpmBundleInstallEnv(unsafeEnv, scratchRoot, profileDir, storeDir)).toThrow()
+    }
+    expect(() => buildScratchPnpmBundleInstallEnv(baseEnv, scratchRoot, profileDir, tmpdir())).toThrow()
+    expect(() => buildScratchPnpmBundleInstallEnv(baseEnv, "relative-scratch-root", profileDir, storeDir)).toThrow()
+    expect(() => buildScratchPnpmBundleInstallEnv(baseEnv, scratchRoot, join(scratchRoot, "observer"), storeDir)).toThrow()
+  })
+
+  test("runner passes the scoped environment only to the native bundle add command", () => {
+    const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+    const baseEnvStart = runnerSource.indexOf("const env: NodeJS.ProcessEnv = {")
+    const baseEnvEnd = runnerSource.indexOf("\n  }\n  for (const value", baseEnvStart)
+    const envAssignment = "bundleInstallEnv = buildScratchPnpmBundleInstallEnv(env, scratch, profileDir, dirs.pnpmStore)"
+    const assignmentAt = runnerSource.indexOf(envAssignment)
+    const addAt = runnerSource.indexOf("const add = await runDsh(")
+    const stageAt = runnerSource.indexOf("report.stages.nativeBundleInstall", addAt)
+
+    expect(baseEnvStart).toBeGreaterThanOrEqual(0)
+    expect(baseEnvEnd).toBeGreaterThan(baseEnvStart)
+    expect(runnerSource.slice(baseEnvStart, baseEnvEnd)).not.toContain("ignore_workspace_root_check")
+    expect(assignmentAt).toBeGreaterThanOrEqual(0)
+    expect(addAt).toBeGreaterThan(assignmentAt)
+    expect(stageAt).toBeGreaterThan(addAt)
+    const addCall = runnerSource.slice(addAt, stageAt)
+    expect(addCall).toContain("env: bundleInstallEnv")
+    expect(addCall).toContain('"--offline"')
+    expect(addCall).toContain('"--store-dir", dirs.pnpmStore')
+    expect(runnerSource).not.toContain("env.npm_config_ignore_workspace_root_check =")
+  })
+})
 
 describe("DSH runner pnpm 12 native and JS CLI support (Issue #32)", () => {
   test("isNativeBinary identifies ELF header and rejects non-ELF text/scripts", () => {

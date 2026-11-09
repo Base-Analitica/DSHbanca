@@ -1,7 +1,6 @@
 import { spawn, spawnSync } from "node:child_process"
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -20,6 +19,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { parse as parseYaml } from "yaml"
 import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "./lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "./lib/dsh-profile-e2e-observer-control.js"
+import { copyRequiredAcademicDecisionModule } from "./lib/dsh-profile-observer-package.js"
 import {
   canonicalAuditorMarkdownSha256,
   expectedTools,
@@ -47,6 +47,7 @@ import {
   validateComposedProfilePlugins,
 } from "./lib/dsh-profile-e2e-contract.js"
 import {
+  buildScratchPnpmBundleInstallEnv,
   buildPnpmCommand,
   findPnpmCli,
   isOfflineMissingPnpmError,
@@ -428,10 +429,7 @@ function createObserverPackage(
     main: "./index.js",
     exports: "./index.js",
   }, null, 2) + "\n")
-  const academicDecisionDist = join(repositoryRoot, "dist", "lib", "academic_decision.js")
-  if (existsSync(academicDecisionDist)) {
-    copyFileSync(academicDecisionDist, join(observerRoot, "academic_decision.js"))
-  }
+  copyRequiredAcademicDecisionModule(repositoryRoot, observerRoot)
   const observerSource = `import { createHash } from "node:crypto";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -575,7 +573,8 @@ const parseContextMeta = async (contextOutput) => {
 export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   const configPath = join(workspace, ".banca", "project.json");
   const config = JSON.parse(await readFile(configPath, "utf8"));
-  const maxCharsPerBatch = 80;
+  // The 595-character synthetic fixture yields the five issue #98 batches at this budget.
+  const maxCharsPerBatch = 120;
   config.analysis = { coverageMode: "exhaustive", maxCharactersPerBatch: maxCharsPerBatch };
   await writeFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 
@@ -602,25 +601,166 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   }
   const expectedTotalBatches = Math.ceil(totalManuscriptChars / maxCharsPerBatch);
 
+  const effectivePreset = ctx.agentPresets?.composedPreset?.(agent?.ctx);
+  const agentId = typeof agent?.id === "string" ? agent.id : "";
+  const sessionId = typeof agent?.session?.id === "string" ? agent.session.id : "";
+  const auditorIdentity = {
+    createdVia: "ctx.agents.create",
+    agentId,
+    sessionId,
+    agentAndSessionIdMatch: agentId.length > 0 && agentId === sessionId,
+    agentRegistryContainsAgent: Boolean(agent && ctx.agents?.get(agentId) === agent),
+    sessionStoreContainsSession: Boolean(agent?.session && ctx.sessions?.get(agentId) === agent.session),
+    effectivePreset: effectivePreset ?? "",
+    toolRuntime: typeof ctx.tools?.execute === "function" ? "ctx.tools.execute" : "",
+  };
+  if (
+    auditorIdentity.createdVia !== "ctx.agents.create" ||
+    !auditorIdentity.agentAndSessionIdMatch ||
+    !auditorIdentity.agentRegistryContainsAgent ||
+    !auditorIdentity.sessionStoreContainsSession ||
+    auditorIdentity.effectivePreset !== "banca-auditor" ||
+    auditorIdentity.toolRuntime !== "ctx.tools.execute"
+  ) fail("academic probe: batch audit did not use the live DSH banca-auditor Agent/Session through ToolRuntime");
+
+  const modelEventsBefore = modelEventCount(agent.session);
   const initRes = await runTool(ctx, "dshbanca-e2e-academic-init", "banca_context", {}, agent);
-  if (initRes.result.isError) fail("academic probe: banca_context init failed: " + initRes.message);
+  if (initRes.result.isError) fail("academic probe: banca_context init failed");
   let currentMeta = await parseContextMeta(initRes.message);
   const planId = currentMeta.plan.planId;
   const manuscriptFingerprint = currentMeta.manuscript.fingerprint;
   const totalBatches = currentMeta.checkpoint.totalBatches;
+  const planTotalCharacters = currentMeta.plan.totalCharacters;
   if (totalBatches !== expectedTotalBatches) {
-    fail("academic probe: expected " + expectedTotalBatches + " batches for known chapters (" + totalManuscriptChars + " chars, budget " + maxCharsPerBatch + "), got " + totalBatches);
+    fail("academic probe: synthetic batch count did not match the known chapters fixture size");
   }
+  if (
+    currentMeta.plan.status !== "complete" ||
+    currentMeta.checkpoint.planId !== planId ||
+    currentMeta.checkpoint.totalBatches !== totalBatches ||
+    currentMeta.checkpoint.completedBatches !== 0 ||
+    typeof planId !== "string" || !/^[a-f0-9]{64}$/.test(planId) ||
+    typeof manuscriptFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(manuscriptFingerprint)
+  ) fail("academic probe: initial exhaustive plan identity or checkpoint was inconsistent");
+
+  const shaText = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+  const findingProjection = (finding) => ({
+    version: finding.version,
+    findingId: finding.findingId,
+    planId: finding.planId,
+    batchId: finding.batchId,
+    manuscriptFingerprint: finding.manuscriptFingerprint,
+    provenanceSha256: shaText(JSON.stringify([
+      finding.category,
+      finding.severity,
+      finding.file,
+      finding.startLine,
+      finding.endLine,
+      finding.sectionId,
+    ])),
+    claimSha256: shaText(finding.claim),
+    evidenceSha256: shaText(finding.evidence),
+  });
+  const deterministicFindingId = (finding) => {
+    const fields = [
+      "analysis-finding-v1",
+      finding.planId,
+      finding.manuscriptFingerprint,
+      finding.batchId,
+      finding.category,
+      finding.severity,
+      finding.claim,
+      finding.evidence,
+      finding.file,
+      String(finding.startLine),
+      String(finding.endLine),
+      finding.sectionId,
+    ];
+    const parts = [];
+    for (const field of fields) {
+      const bytes = Buffer.from(field, "utf8");
+      const header = Buffer.allocUnsafe(4);
+      header.writeUInt32BE(bytes.byteLength, 0);
+      parts.push(header, bytes);
+    }
+    return createHash("sha256").update(Buffer.concat(parts)).digest("hex");
+  };
+  const sameProjection = (left, right) =>
+    JSON.stringify(left) === JSON.stringify(right);
+  const sameFindingPayload = (actual, expected, expectedFindingId) =>
+    actual?.version === "analysis-finding-v1" &&
+    actual?.findingId === expectedFindingId &&
+    actual?.planId === planId &&
+    actual?.batchId === expected.batchId &&
+    actual?.manuscriptFingerprint === manuscriptFingerprint &&
+    actual?.category === expected.category &&
+    actual?.severity === expected.severity &&
+    actual?.claim === expected.claim &&
+    actual?.evidence === expected.evidence &&
+    actual?.file === expected.file &&
+    actual?.startLine === expected.startLine &&
+    actual?.endLine === expected.endLine &&
+    actual?.sectionId === expected.sectionId;
+  const parseAuditReceipt = (toolResult) => {
+    try {
+      return JSON.parse(toolResult.message);
+    } catch {
+      return null;
+    }
+  };
+  const findSectionSourceInBatch = async (meta) => {
+    const sectionPrefix = String.fromCharCode(92) + "section{";
+    for (const chunk of Array.isArray(meta?.chunks) ? meta.chunks : []) {
+      const file = chunk?.file;
+      if (
+        typeof file !== "string" || file.length === 0 || file.startsWith("/") ||
+        file.split("/").some((part) => part === ".." || part === "") ||
+        !Number.isInteger(chunk.startLine) || !Number.isInteger(chunk.endLine) ||
+        !Number.isInteger(chunk.startOffset) || !Number.isInteger(chunk.endOffset)
+      ) continue;
+      const source = await readFile(join(workspace, file), "utf8");
+      const lines = source.split(String.fromCharCode(10));
+      const firstLine = Math.max(1, chunk.startLine);
+      const lastLine = Math.min(lines.length, chunk.endLine);
+      for (let lineNumber = firstLine; lineNumber <= lastLine; lineNumber++) {
+        const line = lines[lineNumber - 1];
+        const trimmed = line.trim();
+        if (!trimmed.startsWith(sectionPrefix) || !trimmed.endsWith("}")) continue;
+        const sectionId = trimmed.slice(sectionPrefix.length, -1);
+        if (sectionId.length === 0 || sectionId.includes("{") || sectionId.includes("}")) continue;
+        const lineStartOffset = lines.slice(0, lineNumber - 1).reduce((sum, item) => sum + item.length + 1, 0);
+        const lineEndOffset = lineStartOffset + line.length;
+        if (chunk.startOffset > lineStartOffset || chunk.endOffset < lineEndOffset) continue;
+        return {
+          file,
+          startLine: lineNumber,
+          endLine: lineNumber,
+          sectionId,
+          sourceLine: trimmed,
+        };
+      }
+    }
+    return null;
+  };
 
   let unverifiedAdvancesBlocked = 0;
   let prematureSynthesisBlocked = 0;
   let auditsCompletedWithZeroFindings = 0;
+  let auditToolDispatchCount = 0;
+  const batchAuditReceiptEvidence = [];
   let orderlyAdvances = 0;
   let resumesWithoutSpuriousAdvance = 0;
+  let invalidFindingEvidence = null;
+  let nonEmptyFindingEvidence = null;
+  let syntheticFindingInput = null;
+  const planBatchIds = [];
 
   for (let bIndex = 0; bIndex < totalBatches; bIndex++) {
     const batchId = currentMeta.batch.batchId;
-    if (!batchId) fail("academic probe: missing batchId for batch " + bIndex);
+    if (!batchId || currentMeta.batch.index !== bIndex || currentMeta.batch.totalBatches !== totalBatches) {
+      fail("academic probe: live plan did not provide the expected next batch identity");
+    }
+    planBatchIds.push(batchId);
 
     const rejAdvance = await runTool(
       ctx,
@@ -630,7 +770,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       agent,
     );
     if (!rejAdvance.message.includes("missing_batch_audit")) {
-      fail("academic probe: advance without audit was not rejected with missing_batch_audit; got: " + rejAdvance.message);
+      fail("academic probe: advance without audit was not rejected with missing_batch_audit");
     }
     unverifiedAdvancesBlocked++;
 
@@ -642,25 +782,161 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       agent,
     );
     if (!rejSynth.message.includes("synthesis input error")) {
-      fail("academic probe: premature synthesis was not rejected with synthesis input error; got: " + rejSynth.message);
+      fail("academic probe: premature synthesis was not rejected");
     }
     prematureSynthesisBlocked++;
 
-    const auditRes = await runTool(
-      ctx,
-      "dshbanca-e2e-audit-" + bIndex,
-      "banca_auditar",
-      {
+    const sectionSource = nonEmptyFindingEvidence ? null : await findSectionSourceInBatch(currentMeta);
+    if (sectionSource) {
+      const findingInput = {
+        category: "structure",
+        severity: "low",
+        claim: "The synthetic LaTeX span contains an explicit section heading.",
+        evidence: sectionSource.file + ":" + sectionSource.startLine + "-" + sectionSource.endLine + ": " + sectionSource.sourceLine,
+        file: sectionSource.file,
+        startLine: sectionSource.startLine,
+        endLine: sectionSource.endLine,
+        sectionId: sectionSource.sectionId,
         manuscriptFingerprint,
         batchId,
-        findings: [],
-      },
-      agent,
-    );
-    if (auditRes.result.isError || !auditRes.message.includes('\\"acceptedCount\\":0')) {
-      fail("academic probe: banca_auditar failed for batch " + bIndex + ": " + auditRes.message);
+      };
+      const invalidBefore = await inventory(workspace);
+      const invalidCall = await runTool(
+        ctx,
+        "dshbanca-e2e-invalid-finding-" + bIndex,
+        "banca_auditar",
+        {
+          manuscriptFingerprint,
+          batchId,
+          findings: [{ ...findingInput, startLine: 0, endLine: 0 }],
+        },
+        agent,
+      );
+      auditToolDispatchCount++;
+      const invalidCode = invalidCall.message.split(String.fromCharCode(10)).find((line) => line.startsWith("code="))?.slice(5) ?? "";
+      const invalidAfter = await inventory(workspace);
+      const stateBeforeSha256 = shaText(JSON.stringify(invalidBefore));
+      const stateAfterSha256 = shaText(JSON.stringify(invalidAfter));
+      const statePreserved =
+        JSON.stringify(invalidBefore) === JSON.stringify(invalidAfter) &&
+        stateBeforeSha256 === stateAfterSha256;
+      invalidFindingEvidence = {
+        rejected: invalidCode === "invalid_lines",
+        errorCode: invalidCode,
+        statePreserved,
+        stateBeforeSha256,
+        stateAfterSha256,
+      };
+      if (!invalidFindingEvidence.rejected || !statePreserved) {
+        fail("academic probe: invalid finding was not rejected atomically before persistence");
+      }
+
+      const expectedFindingId = deterministicFindingId({ ...findingInput, planId });
+      const expectedProjection = {
+        version: "analysis-finding-v1",
+        findingId: expectedFindingId,
+        planId,
+        batchId,
+        manuscriptFingerprint,
+        provenanceSha256: shaText(JSON.stringify([
+          findingInput.category,
+          findingInput.severity,
+          findingInput.file,
+          findingInput.startLine,
+          findingInput.endLine,
+          findingInput.sectionId,
+        ])),
+        claimSha256: shaText(findingInput.claim),
+        evidenceSha256: shaText(findingInput.evidence),
+      };
+      const auditRes = await runTool(
+        ctx,
+        "dshbanca-e2e-audit-nonempty-" + bIndex,
+        "banca_auditar",
+        { manuscriptFingerprint, batchId, findings: [findingInput] },
+        agent,
+      );
+      auditToolDispatchCount++;
+      const receipt = parseAuditReceipt(auditRes);
+      if (
+        auditRes.result.isError || !receipt ||
+        receipt.kind !== "openbanca-audit-receipt-v2" ||
+        receipt.planId !== planId ||
+        receipt.manuscriptFingerprint !== manuscriptFingerprint ||
+        receipt.batchId !== batchId || receipt.batchIndex !== bIndex ||
+        receipt.acceptedCount !== 1 || !Array.isArray(receipt.findings) || receipt.findings.length !== 1 ||
+        !sameFindingPayload(receipt.findings[0], findingInput, expectedFindingId) ||
+        !sameProjection(findingProjection(receipt.findings[0]), expectedProjection) ||
+        receipt.persistence?.version !== "analysis-findings-store-v1" ||
+        receipt.persistence?.path !== ".banca/analysis/findings/" + planId + ".json" ||
+        receipt.persistence?.previousCount !== 0 || receipt.persistence?.addedCount !== 1 ||
+        receipt.persistence?.duplicateCount !== 0 || receipt.persistence?.totalCount !== 1
+      ) fail("academic probe: non-empty banca_auditar receipt did not preserve the expected deterministic finding identity");
+
+      const storePath = join(workspace, ".banca", "analysis", "findings", planId + ".json");
+      const store = JSON.parse(await readFile(storePath, "utf8"));
+      if (
+        store.version !== "analysis-findings-store-v1" ||
+        store.planId !== planId || store.manuscriptFingerprint !== manuscriptFingerprint ||
+        !Array.isArray(store.findings) || store.findings.length !== 1 ||
+        !sameFindingPayload(store.findings[0], findingInput, expectedFindingId) ||
+        !sameProjection(findingProjection(store.findings[0]), expectedProjection)
+      ) fail("academic probe: persisted findings store did not contain exactly the expected finding");
+
+      batchAuditReceiptEvidence.push({
+        batchIndex: bIndex,
+        batchId,
+        acceptedCount: receipt.acceptedCount,
+        receiptFindingCount: receipt.findings.length,
+        persistedFindingCount: store.findings.length,
+        findingId: receipt.findings[0].findingId,
+      });
+      syntheticFindingInput = findingInput;
+      nonEmptyFindingEvidence = {
+        batchIndex: bIndex,
+        acceptedCount: receipt.acceptedCount,
+        receiptFindingCount: receipt.findings.length,
+        persistedFindingCount: store.findings.length,
+        synthesisFindingCount: 0,
+        deterministicFindingId: receipt.findings[0].findingId === expectedFindingId,
+        expected: expectedProjection,
+        receipt: findingProjection(receipt.findings[0]),
+        persisted: findingProjection(store.findings[0]),
+        synthesis: null,
+      };
+    } else {
+      const auditRes = await runTool(
+        ctx,
+        "dshbanca-e2e-audit-empty-" + bIndex,
+        "banca_auditar",
+        { manuscriptFingerprint, batchId, findings: [] },
+        agent,
+      );
+      auditToolDispatchCount++;
+      const receipt = parseAuditReceipt(auditRes);
+      const expectedStoredCount = nonEmptyFindingEvidence ? 1 : 0;
+      if (
+        auditRes.result.isError || !receipt ||
+        receipt.kind !== "openbanca-audit-receipt-v2" ||
+        receipt.planId !== planId || receipt.manuscriptFingerprint !== manuscriptFingerprint ||
+        receipt.batchId !== batchId || receipt.batchIndex !== bIndex ||
+        receipt.acceptedCount !== 0 || !Array.isArray(receipt.findings) || receipt.findings.length !== 0 ||
+        receipt.persistence?.version !== "analysis-findings-store-v1" ||
+        receipt.persistence?.path !== ".banca/analysis/findings/" + planId + ".json" ||
+        receipt.persistence?.previousCount !== expectedStoredCount ||
+        receipt.persistence?.addedCount !== 0 || receipt.persistence?.duplicateCount !== 0 ||
+        receipt.persistence?.totalCount !== expectedStoredCount
+      ) fail("academic probe: empty batch audit did not preserve the findings-store count");
+      batchAuditReceiptEvidence.push({
+        batchIndex: bIndex,
+        batchId,
+        acceptedCount: receipt.acceptedCount,
+        receiptFindingCount: receipt.findings.length,
+        persistedFindingCount: receipt.persistence.totalCount,
+        findingId: null,
+      });
+      auditsCompletedWithZeroFindings++;
     }
-    auditsCompletedWithZeroFindings++;
 
     const advRes = await runTool(
       ctx,
@@ -670,12 +946,12 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       agent,
     );
     if (advRes.result.isError || advRes.message.includes("context checkpoint error")) {
-      fail("academic probe: banca_context advance failed for batch " + bIndex + ": " + advRes.message);
+      fail("academic probe: banca_context advance failed after validated audit");
     }
     orderlyAdvances++;
     const advMeta = await parseContextMeta(advRes.message);
     if (advMeta.checkpoint.completedBatches !== bIndex + 1) {
-      fail("academic probe: advance completedBatches mismatch; expected " + (bIndex + 1) + " got " + advMeta.checkpoint.completedBatches);
+      fail("academic probe: advance completedBatches did not increase exactly once");
     }
 
     const resRes = await runTool(
@@ -686,15 +962,25 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       agent,
     );
     if (resRes.result.isError || resRes.message.includes("context checkpoint error")) {
-      fail("academic probe: resume failed for batch " + bIndex + ": " + resRes.message);
+      fail("academic probe: resume failed after the single ordered advance");
     }
     const resMeta = await parseContextMeta(resRes.message);
     if (resMeta.checkpoint.completedBatches !== bIndex + 1) {
-      fail("academic probe: resume spurious advance; expected " + (bIndex + 1) + " got " + resMeta.checkpoint.completedBatches);
+      fail("academic probe: resume spuriously advanced completedBatches");
     }
     resumesWithoutSpuriousAdvance++;
 
     currentMeta = advMeta;
+  }
+
+  if (!nonEmptyFindingEvidence || !syntheticFindingInput || !invalidFindingEvidence) {
+    fail("academic probe: no plan-backed non-empty finding or invalid-finding negative evidence was observed");
+  }
+  if (planBatchIds.length !== totalBatches || new Set(planBatchIds).size !== totalBatches) {
+    fail("academic probe: plan batch order was incomplete or duplicated");
+  }
+  if (batchAuditReceiptEvidence.length !== totalBatches) {
+    fail("academic probe: audit receipts did not cover each plan batch exactly once");
   }
 
   const finalSynth = await runTool(
@@ -705,34 +991,94 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     agent,
   );
   if (finalSynth.result.isError || finalSynth.message.includes("synthesis input error")) {
-    fail("academic probe: final synthesis release failed: " + finalSynth.message);
+    fail("academic probe: final synthesis input was not released after complete coverage");
   }
-  const synthPayload = JSON.parse(finalSynth.message);
-  if (synthPayload.coverage?.state !== "complete" || synthPayload.coverage?.completedBatches !== totalBatches) {
-    fail("academic probe: synthesis coverage state not complete; got: " + JSON.stringify(synthPayload.coverage));
+  let synthPayload;
+  try {
+    synthPayload = JSON.parse(finalSynth.message);
+  } catch {
+    fail("academic probe: banca_sintese did not return versioned JSON input");
   }
+  const synthCoverage = synthPayload.coverage;
+  if (
+    synthPayload.version !== "global-analysis-synthesis-input-v1" ||
+    synthPayload.planId !== planId ||
+    synthPayload.manuscriptFingerprint !== manuscriptFingerprint ||
+    synthCoverage?.state !== "complete" ||
+    synthCoverage?.totalBatches !== totalBatches ||
+    synthCoverage?.completedBatches !== totalBatches ||
+    synthCoverage?.totalCharacters !== planTotalCharacters ||
+    synthCoverage?.completedCharacters !== planTotalCharacters ||
+    synthCoverage?.coveragePercent !== 100 ||
+    JSON.stringify(synthCoverage?.orderedBatchIds) !== JSON.stringify(planBatchIds) ||
+    !Array.isArray(synthPayload.findings) || synthPayload.findings.length !== 1 ||
+    !sameFindingPayload(synthPayload.findings[0], syntheticFindingInput, nonEmptyFindingEvidence.expected.findingId)
+  ) fail("academic probe: final synthesis did not return complete coverage and the single plan-backed finding");
+
+  const finalStore = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "findings", planId + ".json"), "utf8"));
+  if (
+    finalStore.version !== "analysis-findings-store-v1" ||
+    finalStore.planId !== planId || finalStore.manuscriptFingerprint !== manuscriptFingerprint ||
+    !Array.isArray(finalStore.findings) || finalStore.findings.length !== 1 ||
+    !sameFindingPayload(finalStore.findings[0], syntheticFindingInput, nonEmptyFindingEvidence.expected.findingId)
+  ) fail("academic probe: durable findings store was absent, duplicated, or diverged after all batches");
+  const synthesizedProjection = findingProjection(synthPayload.findings[0]);
+  const finalStoredProjection = findingProjection(finalStore.findings[0]);
+  if (
+    !sameProjection(synthesizedProjection, nonEmptyFindingEvidence.expected) ||
+    !sameProjection(finalStoredProjection, nonEmptyFindingEvidence.expected)
+  ) fail("academic probe: persisted and synthesized finding identity/provenance diverged");
+  nonEmptyFindingEvidence.persisted = finalStoredProjection;
+  nonEmptyFindingEvidence.synthesis = synthesizedProjection;
+  nonEmptyFindingEvidence.persistedFindingCount = finalStore.findings.length;
+  nonEmptyFindingEvidence.synthesisFindingCount = synthPayload.findings.length;
 
   let manuscriptPreserved = true;
   for (const rel of manuscriptFiles) {
     const postHash = await sha(join(workspace, rel));
     if (postHash !== initialManuscriptHashes[rel]) {
       manuscriptPreserved = false;
-      fail("academic probe: synthetic manuscript file " + rel + " was mutated by analysis tools");
+      fail("academic probe: synthetic manuscript was mutated by analysis tools");
     }
   }
+  const modelCalls = modelEventCount(agent.session) - modelEventsBefore;
+  if (modelCalls !== 0) fail("academic probe: a model-facing request occurred during the academic batch audit probe");
+  auditorIdentity.modelCalls = modelCalls;
 
   return {
+    probeExecuted: true,
     totalBatches,
     completedBatches: totalBatches,
     planId,
     manuscriptFingerprint,
+    planBatchIds,
+    batchAudits: batchAuditReceiptEvidence,
     unverifiedAdvancesBlocked,
     prematureSynthesisBlocked,
     auditsCompletedWithZeroFindings,
+    auditToolDispatchCount,
     orderlyAdvances,
     resumesWithoutSpuriousAdvance,
+    invalidFinding: invalidFindingEvidence,
+    auditorIdentity,
+    nonEmptyFinding: nonEmptyFindingEvidence,
+    synthesis: {
+      version: synthPayload.version,
+      planId: synthPayload.planId,
+      manuscriptFingerprint: synthPayload.manuscriptFingerprint,
+      coverage: {
+        state: synthCoverage.state,
+        totalBatches: synthCoverage.totalBatches,
+        completedBatches: synthCoverage.completedBatches,
+        totalCharacters: synthCoverage.totalCharacters,
+        completedCharacters: synthCoverage.completedCharacters,
+        coveragePercent: synthCoverage.coveragePercent,
+        orderedBatchIds: synthCoverage.orderedBatchIds,
+      },
+      findingsCount: synthPayload.findings.length,
+    },
     synthesisReleased: true,
-    synthesisInputCoverageState: synthPayload.coverage.state,
+    synthesisInputCoverageState: synthCoverage.state,
     manuscriptPreserved,
   };
 }
@@ -2671,6 +3017,13 @@ async function main(): Promise<void> {
   const bundlesBefore = beforeManifest.dsh?.profile?.bundles ?? []
   report.stages.bundlesBeforeInstall = bundlesBefore
 
+  const build = await run(bunExecutable, ["run", "build"], { cwd: repositoryRoot, env, timeoutMs })
+  report.stages.build = { exitCode: build.exitCode, timedOut: build.timedOut }
+  if (build.exitCode !== 0 || build.timedOut) {
+    fail(`Repository build required for the exported DSH entrypoint failed: ${safeOutput(build)}`)
+    return
+  }
+
   const observerRoot = join(scratch, "observer")
   const workspace = join(scratch, "synthetic-project")
   const observerResult = join(scratch, "observer-result.json")
@@ -2707,14 +3060,15 @@ async function main(): Promise<void> {
   writeFileSync(pnpmWrapper, renderPnpmWrapper(pnpmResolution, nodeExecutable), { mode: 0o700 })
   chmodSync(pnpmWrapper, 0o700)
 
-  const build = await run(bunExecutable, ["run", "build"], { cwd: repositoryRoot, env, timeoutMs })
-  report.stages.build = { exitCode: build.exitCode, timedOut: build.timedOut }
-  if (build.exitCode !== 0 || build.timedOut) {
-    fail(`Repository build required for the exported DSH entrypoint failed: ${safeOutput(build)}`)
+  let bundleInstallEnv: NodeJS.ProcessEnv
+  try {
+    bundleInstallEnv = buildScratchPnpmBundleInstallEnv(env, scratch, profileDir, dirs.pnpmStore)
+  } catch {
+    report.stages.nativeBundleInstall = { status: "BLOCKED", exitCode: null, timedOut: false }
+    fail("DSH native bundle install environment did not satisfy scratch/offline isolation", "BLOCKED")
     return
   }
-
-  const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env, timeoutMs })
+  const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env: bundleInstallEnv, timeoutMs })
   report.stages.nativeBundleInstall = { exitCode: add.exitCode, timedOut: add.timedOut }
   if (add.exitCode !== 0 || add.timedOut) {
     const offlineMissing = isOfflineMissingPnpmError(`${add.stderr}\n${add.stdout}`)
@@ -2856,7 +3210,7 @@ async function main(): Promise<void> {
           bancaAuditar: "banca_auditar",
           bancaSintese: "banca_sintese",
         },
-        evidenceGate: "Issue #44 durable batch audit confirmation gate",
+        evidenceGate: "Issue #44/#98 durable batch audit confirmation and exactly-once synthesis finding gate",
       },
       blocker: "Academic batch audit evidence probe is pending the separately authorized one-shot no-model execution.",
     }
@@ -2978,7 +3332,7 @@ async function main(): Promise<void> {
         bancaAuditar: "banca_auditar",
         bancaSintese: "banca_sintese",
       },
-      evidenceGate: "Issue #44 durable batch audit confirmation gate",
+      evidenceGate: "Issue #44/#98 durable batch audit confirmation and exactly-once synthesis finding gate",
     },
     blocker: batchAuditStatus === "BLOCKED"
       ? "Academic batch audit evidence probe is pending the separately authorized one-shot no-model probe."

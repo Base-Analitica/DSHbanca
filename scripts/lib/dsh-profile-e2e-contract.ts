@@ -776,56 +776,332 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
   return errors
 }
 
+export interface BatchAuditFindingProjectionEvidence {
+  version: string
+  findingId: string
+  planId: string
+  batchId: string
+  manuscriptFingerprint: string
+  provenanceSha256: string
+  claimSha256: string
+  evidenceSha256: string
+}
+
 export interface BatchAuditEvidenceGateEvidence {
+  probeExecuted: boolean
   totalBatches: number
   completedBatches: number
   planId: string
   manuscriptFingerprint: string
+  planBatchIds: string[]
+  batchAudits: Array<{
+    batchIndex: number
+    batchId: string
+    acceptedCount: number
+    receiptFindingCount: number
+    persistedFindingCount: number
+    findingId: string | null
+  }>
   unverifiedAdvancesBlocked: number
   prematureSynthesisBlocked: number
   auditsCompletedWithZeroFindings: number
+  auditToolDispatchCount: number
   orderlyAdvances: number
   resumesWithoutSpuriousAdvance: number
+  invalidFinding: {
+    rejected: boolean
+    errorCode: string
+    statePreserved: boolean
+    stateBeforeSha256: string
+    stateAfterSha256: string
+  }
+  auditorIdentity: {
+    createdVia: string
+    agentId: string
+    sessionId: string
+    agentAndSessionIdMatch: boolean
+    agentRegistryContainsAgent: boolean
+    sessionStoreContainsSession: boolean
+    effectivePreset: string
+    toolRuntime: string
+    modelCalls: number
+  }
+  nonEmptyFinding: {
+    batchIndex: number
+    acceptedCount: number
+    receiptFindingCount: number
+    persistedFindingCount: number
+    synthesisFindingCount: number
+    deterministicFindingId: boolean
+    expected: BatchAuditFindingProjectionEvidence
+    receipt: BatchAuditFindingProjectionEvidence
+    persisted: BatchAuditFindingProjectionEvidence
+    synthesis: BatchAuditFindingProjectionEvidence
+  }
+  synthesis: {
+    version: string
+    planId: string
+    manuscriptFingerprint: string
+    coverage: {
+      state: string
+      totalBatches: number
+      completedBatches: number
+      totalCharacters: number
+      completedCharacters: number
+      coveragePercent: number
+      orderedBatchIds: string[]
+    }
+    findingsCount: number
+  }
   synthesisReleased: boolean
   synthesisInputCoverageState: string
   manuscriptPreserved: boolean
 }
 
+const batchAuditFindingProjectionKeys = [
+  "version",
+  "findingId",
+  "planId",
+  "batchId",
+  "manuscriptFingerprint",
+  "provenanceSha256",
+  "claimSha256",
+  "evidenceSha256",
+] as const
+
+function isSha256Digest(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
+}
+
+function isBatchAuditFindingProjection(value: unknown): value is BatchAuditFindingProjectionEvidence {
+  return isRecord(value) &&
+    value.version === "analysis-finding-v1" &&
+    isSha256Digest(value.findingId) &&
+    isSha256Digest(value.planId) &&
+    typeof value.batchId === "string" && value.batchId.length > 0 &&
+    isSha256Digest(value.manuscriptFingerprint) &&
+    isSha256Digest(value.provenanceSha256) &&
+    isSha256Digest(value.claimSha256) &&
+    isSha256Digest(value.evidenceSha256)
+}
+
+function batchAuditFindingProjectionsEqual(
+  left: BatchAuditFindingProjectionEvidence,
+  right: BatchAuditFindingProjectionEvidence,
+): boolean {
+  return batchAuditFindingProjectionKeys.every((key) => left[key] === right[key])
+}
+
 /**
- * Validate proof that all batches required durable audit confirmation before advancing
- * and releasing synthesis input, with zero-findings support and synthetic manuscript preservation.
+ * Validate proof that the native ToolRuntime accepted one non-empty finding,
+ * persisted it once, and returned the same identity/provenance in completed synthesis input.
  */
 export function validateBatchAuditEvidence(value: unknown): string[] {
   const errors: string[] = []
   if (!isRecord(value)) {
     return ["batch audit evidence gate lacks required host verification"]
   }
-  if (typeof value.totalBatches !== "number" || value.totalBatches < 2) {
+  if (value.probeExecuted !== true) {
+    errors.push("batch audit probe must have executed")
+  }
+  const totalBatches = Number.isInteger(value.totalBatches) ? value.totalBatches as number : 0
+  if (totalBatches < 2) {
     errors.push("totalBatches must be at least 2")
   }
-  if (value.completedBatches !== value.totalBatches) {
+  if (value.completedBatches !== totalBatches) {
     errors.push("completedBatches must equal totalBatches")
   }
-  if (typeof value.planId !== "string" || value.planId.length === 0) {
-    errors.push("planId must be a non-empty string")
+  if (!isSha256Digest(value.planId)) {
+    errors.push("planId must be a SHA-256 identity")
   }
-  if (typeof value.manuscriptFingerprint !== "string" || value.manuscriptFingerprint.length === 0) {
-    errors.push("manuscriptFingerprint must be a non-empty string")
+  if (!isSha256Digest(value.manuscriptFingerprint)) {
+    errors.push("manuscriptFingerprint must be a SHA-256 digest")
   }
-  if (typeof value.unverifiedAdvancesBlocked !== "number" || value.unverifiedAdvancesBlocked < (value.totalBatches ?? 2)) {
+  const planBatchIds = Array.isArray(value.planBatchIds) ? value.planBatchIds : []
+  if (
+    planBatchIds.length !== totalBatches ||
+    planBatchIds.some((batchId) => typeof batchId !== "string" || batchId.length === 0) ||
+    new Set(planBatchIds).size !== planBatchIds.length
+  ) {
+    errors.push("plan batch IDs must be complete, non-empty, and unique")
+  }
+  if (value.unverifiedAdvancesBlocked !== totalBatches) {
     errors.push("all batches must reject advance without audit")
   }
-  if (typeof value.prematureSynthesisBlocked !== "number" || value.prematureSynthesisBlocked < (value.totalBatches ?? 2)) {
+  if (value.prematureSynthesisBlocked !== totalBatches) {
     errors.push("all incomplete batches must block synthesis")
   }
-  if (typeof value.auditsCompletedWithZeroFindings !== "number" || value.auditsCompletedWithZeroFindings !== value.totalBatches) {
-    errors.push("all batches must accept audit with zero findings")
+  if (value.auditsCompletedWithZeroFindings !== totalBatches - 1) {
+    errors.push("exactly one batch must accept a non-empty finding; other batches must remain empty")
   }
-  if (typeof value.orderlyAdvances !== "number" || value.orderlyAdvances !== value.totalBatches) {
+  if (value.auditToolDispatchCount !== totalBatches + 1) {
+    errors.push("ToolRuntime audit dispatch count must include one invalid probe and one audit per batch")
+  }
+  if (value.orderlyAdvances !== totalBatches) {
     errors.push("all batches must advance in order")
   }
-  if (typeof value.resumesWithoutSpuriousAdvance !== "number" || value.resumesWithoutSpuriousAdvance !== value.totalBatches) {
+  if (value.resumesWithoutSpuriousAdvance !== totalBatches) {
     errors.push("resume must not spuriously advance completedBatches")
+  }
+
+  const invalidFinding = isRecord(value.invalidFinding) ? value.invalidFinding : undefined
+  if (invalidFinding?.rejected !== true || invalidFinding.errorCode !== "invalid_lines") {
+    errors.push("invalid finding must be rejected before persistence")
+  }
+  if (
+    invalidFinding?.statePreserved !== true ||
+    !isSha256Digest(invalidFinding.stateBeforeSha256) ||
+    !isSha256Digest(invalidFinding.stateAfterSha256) ||
+    invalidFinding.stateBeforeSha256 !== invalidFinding.stateAfterSha256
+  ) {
+    errors.push("invalid finding rejection must leave persisted state unchanged")
+  }
+
+  const identity = isRecord(value.auditorIdentity) ? value.auditorIdentity : undefined
+  if (
+    identity?.createdVia !== "ctx.agents.create" ||
+    typeof identity.agentId !== "string" || identity.agentId.length === 0 ||
+    typeof identity.sessionId !== "string" || identity.sessionId.length === 0 ||
+    identity.agentId !== identity.sessionId ||
+    identity.agentAndSessionIdMatch !== true ||
+    identity.agentRegistryContainsAgent !== true ||
+    identity.sessionStoreContainsSession !== true ||
+    identity.effectivePreset !== "banca-auditor" ||
+    identity.toolRuntime !== "ctx.tools.execute" ||
+    identity.modelCalls !== 0
+  ) {
+    errors.push("auditor Agent/Session identity must be observed through DSH registries")
+  }
+
+  const finding = isRecord(value.nonEmptyFinding) ? value.nonEmptyFinding : undefined
+  if (
+    !finding ||
+    !Number.isInteger(finding.batchIndex) || finding.batchIndex < 0 || finding.batchIndex >= totalBatches ||
+    finding.acceptedCount !== 1 || finding.receiptFindingCount !== 1
+  ) {
+    errors.push("non-empty finding must be accepted exactly once")
+  }
+  if (finding?.persistedFindingCount !== 1) {
+    errors.push("persisted findings store must contain exactly one non-empty finding")
+  }
+  if (finding?.synthesisFindingCount !== 1) {
+    errors.push("synthesis input must contain exactly one finding")
+  }
+  if (finding?.deterministicFindingId !== true) {
+    errors.push("findingId must match the deterministic identity calculated from the submitted finding")
+  }
+
+  const batchAudits = Array.isArray(value.batchAudits) ? value.batchAudits : []
+  if (batchAudits.length !== totalBatches) {
+    errors.push("batch audit receipts must cover every plan batch exactly once in plan order")
+  } else {
+    const findingBatchIndex = Number.isInteger(finding?.batchIndex) ? finding.batchIndex : -1
+    const expectedFindingId = isRecord(finding?.expected) ? finding.expected.findingId : undefined
+    let batchesInPlanOrder = true
+    let oneExpectedFindingOnly = findingBatchIndex >= 0 && findingBatchIndex < totalBatches
+    let persistedCountsInOrder = true
+    for (let index = 0; index < totalBatches; index++) {
+      const audit = batchAudits[index]
+      if (!isRecord(audit)) {
+        batchesInPlanOrder = false
+        oneExpectedFindingOnly = false
+        persistedCountsInOrder = false
+        continue
+      }
+      if (audit.batchIndex !== index || audit.batchId !== planBatchIds[index]) {
+        batchesInPlanOrder = false
+      }
+      const isFindingBatch = index === findingBatchIndex
+      if (isFindingBatch) {
+        if (
+          audit.acceptedCount !== 1 ||
+          audit.receiptFindingCount !== 1 ||
+          audit.findingId !== expectedFindingId
+        ) oneExpectedFindingOnly = false
+      } else if (
+        audit.acceptedCount !== 0 ||
+        audit.receiptFindingCount !== 0 ||
+        audit.findingId !== null
+      ) {
+        oneExpectedFindingOnly = false
+      }
+      const expectedPersistedCount = findingBatchIndex >= 0 && index >= findingBatchIndex ? 1 : 0
+      if (audit.persistedFindingCount !== expectedPersistedCount) {
+        persistedCountsInOrder = false
+      }
+    }
+    if (!batchesInPlanOrder) {
+      errors.push("batch audit receipts must cover every plan batch exactly once in plan order")
+    }
+    if (!oneExpectedFindingOnly) {
+      errors.push("exactly one batch audit must accept the expected finding; other batches must remain empty")
+    }
+    if (!persistedCountsInOrder) {
+      errors.push("per-batch persisted finding counts must reflect the single ordered durable store")
+    }
+  }
+
+  if (
+    finding &&
+    isSha256Digest(value.planId) &&
+    isSha256Digest(value.manuscriptFingerprint) &&
+    Array.isArray(planBatchIds) &&
+    Number.isInteger(finding.batchIndex) &&
+    finding.batchIndex >= 0 &&
+    finding.batchIndex < planBatchIds.length
+  ) {
+    const expected = finding.expected
+    const receipt = finding.receipt
+    const persisted = finding.persisted
+    const synthesized = finding.synthesis
+    const projections = [expected, receipt, persisted, synthesized]
+    const validProjections = projections.every(isBatchAuditFindingProjection)
+    if (!validProjections) {
+      errors.push("expected, receipt, stored, and synthesis finding identity/provenance must be valid")
+    } else {
+      const typedExpected = expected as BatchAuditFindingProjectionEvidence
+      if (
+        typedExpected.planId !== value.planId ||
+        typedExpected.manuscriptFingerprint !== value.manuscriptFingerprint ||
+        typedExpected.batchId !== planBatchIds[finding.batchIndex] ||
+        !projections.slice(1).every((projection) =>
+          batchAuditFindingProjectionsEqual(typedExpected, projection as BatchAuditFindingProjectionEvidence),
+        )
+      ) {
+        errors.push("expected, receipt, stored, and synthesis finding identity/provenance must match")
+      }
+    }
+  }
+
+  const synthesis = isRecord(value.synthesis) ? value.synthesis : undefined
+  const coverage = isRecord(synthesis?.coverage) ? synthesis.coverage : undefined
+  if (synthesis?.version !== "global-analysis-synthesis-input-v1") {
+    errors.push("synthesis must return global-analysis-synthesis-input-v1")
+  }
+  if (
+    synthesis?.planId !== value.planId ||
+    synthesis?.manuscriptFingerprint !== value.manuscriptFingerprint ||
+    synthesis?.findingsCount !== 1
+  ) {
+    errors.push("synthesis input identity and finding count must match the completed plan")
+  }
+  if (
+    coverage?.state !== "complete" ||
+    coverage.totalBatches !== totalBatches ||
+    coverage.completedBatches !== totalBatches ||
+    !Number.isInteger(coverage.totalCharacters) ||
+    coverage.totalCharacters <= 0 ||
+    coverage.completedCharacters !== coverage.totalCharacters ||
+    coverage.coveragePercent !== 100
+  ) {
+    errors.push("synthesis coverage totals and counts must agree with the complete plan")
+  }
+  if (
+    !Array.isArray(coverage?.orderedBatchIds) ||
+    coverage.orderedBatchIds.length !== totalBatches ||
+    JSON.stringify(coverage.orderedBatchIds) !== JSON.stringify(planBatchIds)
+  ) {
+    errors.push("synthesis input must preserve the exact plan batch order")
   }
   if (value.synthesisReleased !== true) {
     errors.push("synthesis must be released upon full coverage")
