@@ -430,7 +430,7 @@ function createObserverPackage(
     exports: "./index.js",
   }, null, 2) + "\n")
   copyRequiredAcademicDecisionModule(repositoryRoot, observerRoot)
-  const observerSource = `import { createHash } from "node:crypto";
+  const observerSource = `import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -600,14 +600,17 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     totalManuscriptChars += (await readFile(join(workspace, rel), "utf8")).length;
   }
   const expectedTotalBatches = Math.ceil(totalManuscriptChars / maxCharsPerBatch);
+  const shaText = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+  const identityHashKey = randomBytes(32);
+  const identityDigest = (value) => createHmac("sha256", identityHashKey).update(value, "utf8").digest("hex");
 
   const effectivePreset = ctx.agentPresets?.composedPreset?.(agent?.ctx);
   const agentId = typeof agent?.id === "string" ? agent.id : "";
   const sessionId = typeof agent?.session?.id === "string" ? agent.session.id : "";
   const auditorIdentity = {
     createdVia: "ctx.agents.create",
-    agentId,
-    sessionId,
+    agentId: agentId.length > 0 ? identityDigest(agentId) : "",
+    sessionId: sessionId.length > 0 ? identityDigest(sessionId) : "",
     agentAndSessionIdMatch: agentId.length > 0 && agentId === sessionId,
     agentRegistryContainsAgent: Boolean(agent && ctx.agents?.get(agentId) === agent),
     sessionStoreContainsSession: Boolean(agent?.session && ctx.sessions?.get(agentId) === agent.session),
@@ -631,8 +634,13 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   const manuscriptFingerprint = currentMeta.manuscript.fingerprint;
   const totalBatches = currentMeta.checkpoint.totalBatches;
   const planTotalCharacters = currentMeta.plan.totalCharacters;
-  if (totalBatches !== expectedTotalBatches) {
-    fail("academic probe: synthetic batch count did not match the known chapters fixture size");
+  if (
+    totalBatches !== expectedTotalBatches ||
+    totalBatches !== 5 ||
+    totalManuscriptChars !== 595 ||
+    planTotalCharacters !== 595
+  ) {
+    fail("academic probe: synthetic manuscript must retain the canonical five batches and 595 characters");
   }
   if (
     currentMeta.plan.status !== "complete" ||
@@ -643,7 +651,6 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     typeof manuscriptFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(manuscriptFingerprint)
   ) fail("academic probe: initial exhaustive plan identity or checkpoint was inconsistent");
 
-  const shaText = (text) => createHash("sha256").update(text, "utf8").digest("hex");
   const findingProjection = (finding) => ({
     version: finding.version,
     findingId: finding.findingId,
@@ -708,6 +715,32 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       return null;
     }
   };
+  const captureAnalysisStoreHashes = async () => {
+    const workspaceInventory = await inventory(workspace);
+    const analysisFiles = Object.fromEntries(
+      Object.entries(workspaceInventory).filter(([path]) => path.startsWith(".banca/analysis/")),
+    );
+    const hashAt = (path) => analysisFiles[path] ?? null;
+    const checkpointSha256 = hashAt(".banca/analysis/checkpoints/" + planId + ".json");
+    const auditConfirmationsSha256 = hashAt(".banca/analysis/audit-confirmations/" + planId + ".json");
+    const findingsSha256 = hashAt(".banca/analysis/findings/" + planId + ".json");
+    const inventorySha256 = shaText(JSON.stringify(analysisFiles));
+    if (![checkpointSha256, auditConfirmationsSha256, findingsSha256].every((value) =>
+      typeof value === "string" && /^[0-9a-f]{64}$/.test(value)
+    )) fail("academic probe: checkpoint, audit confirmations, or findings store was absent before resume-only context query");
+    return { inventorySha256, checkpointSha256, auditConfirmationsSha256, findingsSha256 };
+  };
+  const checkpointEvidence = (meta) => ({
+    planId: meta?.checkpoint?.planId,
+    manuscriptFingerprint: meta?.manuscript?.fingerprint,
+    totalBatches: meta?.checkpoint?.totalBatches,
+    completedBatches: meta?.checkpoint?.completedBatches,
+    completedCharacters: meta?.checkpoint?.completedCharacters,
+    totalCharacters: meta?.checkpoint?.totalCharacters,
+    coveragePercent: meta?.checkpoint?.coveragePercent,
+    nextBatchId: meta?.batch?.batchId,
+    nextBatchIndex: meta?.batch?.index,
+  });
   const findSectionSourceInBatch = async (meta) => {
     const sectionPrefix = String.fromCharCode(92) + "section{";
     for (const chunk of Array.isArray(meta?.chunks) ? meta.chunks : []) {
@@ -754,32 +787,52 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   let nonEmptyFindingEvidence = null;
   let syntheticFindingInput = null;
   const planBatchIds = [];
+  const observerProcessId = process.pid;
+  let resumedAgentHandle = null;
+  let resumedAgent = null;
+  let resumedToolDispatchCount = 0;
+  let agentSessionResumeEvidence = null;
+  let batchAuditResult = null;
+  const runBatchTool = async (context, callId, name, args, toolAgent) => {
+    if (resumedAgent && toolAgent === resumedAgent) {
+      if (
+        ctx.agents?.get(toolAgent.id) !== toolAgent ||
+        ctx.sessions?.get(toolAgent.id) !== toolAgent.session ||
+        ctx.agentPresets?.composedPreset?.(toolAgent.ctx) !== "banca-auditor" ||
+        typeof ctx.tools?.execute !== "function"
+      ) fail("academic probe: resumed Agent/Session identity, auditor preset, or ToolRuntime became stale");
+      resumedToolDispatchCount++;
+    }
+    return runTool(context, callId, name, args, toolAgent);
+  };
 
+  try {
   for (let bIndex = 0; bIndex < totalBatches; bIndex++) {
+    const batchAgent = resumedAgent && bIndex >= 2 ? resumedAgent : agent;
     const batchId = currentMeta.batch.batchId;
     if (!batchId || currentMeta.batch.index !== bIndex || currentMeta.batch.totalBatches !== totalBatches) {
       fail("academic probe: live plan did not provide the expected next batch identity");
     }
     planBatchIds.push(batchId);
 
-    const rejAdvance = await runTool(
+    const rejAdvance = await runBatchTool(
       ctx,
       "dshbanca-e2e-advance-unverified-" + bIndex,
       "banca_context",
       { completedBatchId: batchId },
-      agent,
+      batchAgent,
     );
     if (!rejAdvance.message.includes("missing_batch_audit")) {
       fail("academic probe: advance without audit was not rejected with missing_batch_audit");
     }
     unverifiedAdvancesBlocked++;
 
-    const rejSynth = await runTool(
+    const rejSynth = await runBatchTool(
       ctx,
       "dshbanca-e2e-premature-synth-" + bIndex,
       "banca_sintese",
       {},
-      agent,
+      batchAgent,
     );
     if (!rejSynth.message.includes("synthesis input error")) {
       fail("academic probe: premature synthesis was not rejected");
@@ -801,7 +854,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
         batchId,
       };
       const invalidBefore = await inventory(workspace);
-      const invalidCall = await runTool(
+      const invalidCall = await runBatchTool(
         ctx,
         "dshbanca-e2e-invalid-finding-" + bIndex,
         "banca_auditar",
@@ -810,7 +863,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
           batchId,
           findings: [{ ...findingInput, startLine: 0, endLine: 0 }],
         },
-        agent,
+        batchAgent,
       );
       auditToolDispatchCount++;
       const invalidCode = invalidCall.message.split(String.fromCharCode(10)).find((line) => line.startsWith("code="))?.slice(5) ?? "";
@@ -849,12 +902,12 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
         claimSha256: shaText(findingInput.claim),
         evidenceSha256: shaText(findingInput.evidence),
       };
-      const auditRes = await runTool(
+      const auditRes = await runBatchTool(
         ctx,
         "dshbanca-e2e-audit-nonempty-" + bIndex,
         "banca_auditar",
         { manuscriptFingerprint, batchId, findings: [findingInput] },
-        agent,
+        batchAgent,
       );
       auditToolDispatchCount++;
       const receipt = parseAuditReceipt(auditRes);
@@ -886,6 +939,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       batchAuditReceiptEvidence.push({
         batchIndex: bIndex,
         batchId,
+        agentId: identityDigest(batchAgent.id),
         acceptedCount: receipt.acceptedCount,
         receiptFindingCount: receipt.findings.length,
         persistedFindingCount: store.findings.length,
@@ -905,12 +959,12 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
         synthesis: null,
       };
     } else {
-      const auditRes = await runTool(
+      const auditRes = await runBatchTool(
         ctx,
         "dshbanca-e2e-audit-empty-" + bIndex,
         "banca_auditar",
         { manuscriptFingerprint, batchId, findings: [] },
-        agent,
+        batchAgent,
       );
       auditToolDispatchCount++;
       const receipt = parseAuditReceipt(auditRes);
@@ -930,6 +984,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       batchAuditReceiptEvidence.push({
         batchIndex: bIndex,
         batchId,
+        agentId: identityDigest(batchAgent.id),
         acceptedCount: receipt.acceptedCount,
         receiptFindingCount: receipt.findings.length,
         persistedFindingCount: receipt.persistence.totalCount,
@@ -938,12 +993,12 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       auditsCompletedWithZeroFindings++;
     }
 
-    const advRes = await runTool(
+    const advRes = await runBatchTool(
       ctx,
       "dshbanca-e2e-advance-" + bIndex,
       "banca_context",
       { completedBatchId: batchId },
-      agent,
+      batchAgent,
     );
     if (advRes.result.isError || advRes.message.includes("context checkpoint error")) {
       fail("academic probe: banca_context advance failed after validated audit");
@@ -954,21 +1009,185 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       fail("academic probe: advance completedBatches did not increase exactly once");
     }
 
-    const resRes = await runTool(
-      ctx,
-      "dshbanca-e2e-resume-" + bIndex,
-      "banca_context",
-      {},
-      agent,
-    );
-    if (resRes.result.isError || resRes.message.includes("context checkpoint error")) {
-      fail("academic probe: resume failed after the single ordered advance");
+    let resMeta;
+    if (bIndex === 1) {
+      if (
+        advMeta.checkpoint.planId !== planId ||
+        advMeta.manuscript.fingerprint !== manuscriptFingerprint ||
+        advMeta.checkpoint.totalBatches !== 5 ||
+        advMeta.checkpoint.completedBatches !== 2 ||
+        advMeta.batch.index !== 2
+      ) {
+        fail("academic probe: original Agent did not advance the canonical checkpoint to 2/5 before handoff");
+      }
+      if (!nonEmptyFindingEvidence || nonEmptyFindingEvidence.batchIndex !== 1 || nonEmptyFindingEvidence.persistedFindingCount !== 1) {
+        fail("academic probe: the single expected finding was not persisted before Agent/Session handoff");
+      }
+
+      resumedAgentHandle = await ctx.agents.create({
+        sessionId: "session-dshbanca-e2e-resume-" + process.pid + "-" + Date.now(),
+        meta: { cwd: workspace },
+      });
+      resumedAgent = resumedAgentHandle.agent;
+      const resumedSession = resumedAgent.session;
+      const presetSelectionResult = await ctx.agentPresets.select(resumedAgent, "banca-auditor");
+      const effectivePreset = ctx.agentPresets.composedPreset(resumedAgent.ctx);
+      const sessionPresetProjection = ctx.sessionProjections.stateOf(resumedSession, "agentPreset");
+      const distinctIdentity =
+        resumedAgent !== agent && resumedSession !== agent.session &&
+        resumedAgent.id !== agent.id && resumedSession.id !== agent.session.id;
+      const workspaceMatches =
+        resumedSession.header.cwd === workspace &&
+        agent.session.header.cwd === workspace;
+      if (
+        !distinctIdentity ||
+        resumedAgent.id !== resumedSession.id ||
+        ctx.agents.get(resumedAgent.id) !== resumedAgent ||
+        ctx.sessions.get(resumedAgent.id) !== resumedSession ||
+        !workspaceMatches ||
+        resumedAgent.status !== "idle" ||
+        presetSelectionResult !== "banca-auditor" ||
+        effectivePreset !== "banca-auditor" ||
+        sessionPresetProjection !== "banca-auditor" ||
+        typeof ctx.tools?.execute !== "function" ||
+        process.pid !== observerProcessId ||
+        modelEventCount(resumedSession) !== 0
+      ) fail("academic probe: native same-process Agent/Session handoff did not publish a distinct live banca-auditor identity");
+
+      const checkpointBeforeQuery = checkpointEvidence(advMeta);
+      const analysisBefore = await captureAnalysisStoreHashes();
+      const findingStoreBefore = JSON.parse(await readFile(
+        join(workspace, ".banca", "analysis", "findings", planId + ".json"),
+        "utf8",
+      ));
+      const findingBeforeResume = {
+        count: Array.isArray(findingStoreBefore.findings) ? findingStoreBefore.findings.length : 0,
+        projection: Array.isArray(findingStoreBefore.findings) && findingStoreBefore.findings.length === 1
+          ? findingProjection(findingStoreBefore.findings[0])
+          : null,
+      };
+      if (
+        findingStoreBefore.version !== "analysis-findings-store-v1" ||
+        findingStoreBefore.planId !== planId ||
+        findingStoreBefore.manuscriptFingerprint !== manuscriptFingerprint ||
+        findingBeforeResume.count !== 1 ||
+        !sameProjection(findingBeforeResume.projection, nonEmptyFindingEvidence.expected)
+      ) fail("academic probe: persisted finding did not match the one accepted audit before resume");
+
+      const resumeArgs = {};
+      const queryCompletedBatchIdProvided = Object.hasOwn(resumeArgs, "completedBatchId");
+      const resRes = await runBatchTool(
+        ctx,
+        "dshbanca-e2e-resume-agent-session",
+        "banca_context",
+        resumeArgs,
+        resumedAgent,
+      );
+      if (resRes.result.isError || resRes.message.includes("context checkpoint error")) {
+        fail("academic probe: native resumed Agent could not read the persisted academic checkpoint");
+      }
+      resMeta = await parseContextMeta(resRes.message);
+      const checkpointAfterQuery = checkpointEvidence(resMeta);
+      const analysisAfter = await captureAnalysisStoreHashes();
+      const receiptLedgerBeforeSha256 = analysisBefore.auditConfirmationsSha256;
+      const receiptLedgerAfterSha256 = analysisAfter.auditConfirmationsSha256;
+      const checkpointWasPreserved =
+        checkpointBeforeQuery.planId === checkpointAfterQuery.planId &&
+        checkpointBeforeQuery.manuscriptFingerprint === checkpointAfterQuery.manuscriptFingerprint &&
+        checkpointBeforeQuery.totalBatches === checkpointAfterQuery.totalBatches &&
+        checkpointBeforeQuery.completedBatches === checkpointAfterQuery.completedBatches &&
+        checkpointBeforeQuery.completedCharacters === checkpointAfterQuery.completedCharacters &&
+        checkpointBeforeQuery.totalCharacters === checkpointAfterQuery.totalCharacters &&
+        checkpointBeforeQuery.coveragePercent === checkpointAfterQuery.coveragePercent &&
+        checkpointBeforeQuery.nextBatchId === checkpointAfterQuery.nextBatchId &&
+        checkpointBeforeQuery.nextBatchIndex === checkpointAfterQuery.nextBatchIndex;
+      const analysisStoresUnchanged =
+        analysisBefore.inventorySha256 === analysisAfter.inventorySha256 &&
+        analysisBefore.checkpointSha256 === analysisAfter.checkpointSha256 &&
+        analysisBefore.auditConfirmationsSha256 === analysisAfter.auditConfirmationsSha256 &&
+        analysisBefore.findingsSha256 === analysisAfter.findingsSha256;
+      if (
+        queryCompletedBatchIdProvided ||
+        !checkpointWasPreserved ||
+        !analysisStoresUnchanged ||
+        resMeta.checkpoint.planId !== planId ||
+        resMeta.manuscript.fingerprint !== manuscriptFingerprint ||
+        resMeta.checkpoint.totalBatches !== 5 ||
+        resMeta.checkpoint.completedBatches !== 2 ||
+        resMeta.batch.index !== 2 ||
+        resMeta.batch.batchId !== advMeta.batch.batchId ||
+        receiptLedgerBeforeSha256 !== receiptLedgerAfterSha256
+      ) fail("academic probe: resume-only banca_context changed or diverged from persisted checkpoint, finding, or audit evidence");
+
+      agentSessionResumeEvidence = {
+        probeExecuted: true,
+        executionMode: "same-process-native-dsh",
+        syntheticAgentFixture: false,
+        sameProcess: process.pid === observerProcessId,
+        originalAgentId: auditorIdentity.agentId,
+        originalSessionId: auditorIdentity.sessionId,
+        agentId: identityDigest(resumedAgent.id),
+        sessionId: identityDigest(resumedSession.id),
+        createdVia: "ctx.agents.create",
+        identityDistinctFromOriginal: distinctIdentity,
+        agentAndSessionIdMatch: resumedAgent.id === resumedSession.id,
+        agentRegistryContainsAgent: ctx.agents.get(resumedAgent.id) === resumedAgent,
+        sessionStoreContainsSession: ctx.sessions.get(resumedAgent.id) === resumedSession,
+        workspaceMatches,
+        presetSelectionResult,
+        effectivePreset,
+        sessionPresetProjection,
+        toolRuntime: typeof ctx.tools?.execute === "function" ? "ctx.tools.execute" : "unavailable",
+        switchAfterCompletedBatches: advMeta.checkpoint.completedBatches,
+        queryCompletedBatchIdProvided,
+        checkpointBeforeQuery,
+        checkpointAfterQuery,
+        analysisStores: {
+          inventoryBeforeSha256: analysisBefore.inventorySha256,
+          inventoryAfterSha256: analysisAfter.inventorySha256,
+          checkpointBeforeSha256: analysisBefore.checkpointSha256,
+          checkpointAfterSha256: analysisAfter.checkpointSha256,
+          auditConfirmationsBeforeSha256: analysisBefore.auditConfirmationsSha256,
+          auditConfirmationsAfterSha256: analysisAfter.auditConfirmationsSha256,
+          findingsBeforeSha256: analysisBefore.findingsSha256,
+          findingsAfterSha256: analysisAfter.findingsSha256,
+        },
+        receiptLedgerBeforeSha256,
+        receiptLedgerAfterSha256,
+        receiptLedgerUnchanged: receiptLedgerBeforeSha256 === receiptLedgerAfterSha256,
+        findingBeforeResume,
+        completedBatchIds: [],
+        completedBatchCount: 0,
+        toolDispatchCount: 0,
+        synthesisAgentId: "",
+        modelCalls: modelEventCount(resumedSession),
+        teardown: {
+          disposeCalled: false,
+          agentUnregistered: false,
+          sessionUnregistered: false,
+        },
+      };
+    } else {
+      const resRes = await runBatchTool(
+        ctx,
+        "dshbanca-e2e-resume-" + bIndex,
+        "banca_context",
+        {},
+        batchAgent,
+      );
+      if (resRes.result.isError || resRes.message.includes("context checkpoint error")) {
+        fail("academic probe: resume failed after the single ordered advance");
+      }
+      resMeta = await parseContextMeta(resRes.message);
     }
-    const resMeta = await parseContextMeta(resRes.message);
     if (resMeta.checkpoint.completedBatches !== bIndex + 1) {
       fail("academic probe: resume spuriously advanced completedBatches");
     }
     resumesWithoutSpuriousAdvance++;
+    if (resumedAgent && batchAgent === resumedAgent) {
+      agentSessionResumeEvidence.completedBatchIds.push(batchId);
+      agentSessionResumeEvidence.completedBatchCount = agentSessionResumeEvidence.completedBatchIds.length;
+    }
 
     currentMeta = advMeta;
   }
@@ -983,12 +1202,18 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     fail("academic probe: audit receipts did not cover each plan batch exactly once");
   }
 
-  const finalSynth = await runTool(
+  if (
+    !resumedAgent || !agentSessionResumeEvidence ||
+    agentSessionResumeEvidence.completedBatchCount !== 3 ||
+    JSON.stringify(agentSessionResumeEvidence.completedBatchIds) !== JSON.stringify(planBatchIds.slice(2))
+  ) fail("academic probe: the distinct resumed Agent did not complete all three remaining plan batches");
+
+  const finalSynth = await runBatchTool(
     ctx,
     "dshbanca-e2e-final-synthesis",
     "banca_sintese",
     {},
-    agent,
+    resumedAgent,
   );
   if (finalSynth.result.isError || finalSynth.message.includes("synthesis input error")) {
     fail("academic probe: final synthesis input was not released after complete coverage");
@@ -1032,6 +1257,16 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   nonEmptyFindingEvidence.synthesis = synthesizedProjection;
   nonEmptyFindingEvidence.persistedFindingCount = finalStore.findings.length;
   nonEmptyFindingEvidence.synthesisFindingCount = synthPayload.findings.length;
+  agentSessionResumeEvidence.synthesisAgentId = identityDigest(resumedAgent.id);
+  agentSessionResumeEvidence.toolDispatchCount = resumedToolDispatchCount;
+  agentSessionResumeEvidence.modelCalls = modelEventCount(resumedAgent.session);
+  if (
+    agentSessionResumeEvidence.synthesisAgentId !== agentSessionResumeEvidence.agentId ||
+    agentSessionResumeEvidence.toolDispatchCount !== 17 ||
+    agentSessionResumeEvidence.modelCalls !== 0 ||
+    ctx.agentPresets.composedPreset(resumedAgent.ctx) !== "banca-auditor" ||
+    ctx.sessionProjections.stateOf(resumedAgent.session, "agentPreset") !== "banca-auditor"
+  ) fail("academic probe: resumed Agent did not own all remaining ToolRuntime dispatches and final synthesis without model calls");
 
   let manuscriptPreserved = true;
   for (const rel of manuscriptFiles) {
@@ -1045,7 +1280,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   if (modelCalls !== 0) fail("academic probe: a model-facing request occurred during the academic batch audit probe");
   auditorIdentity.modelCalls = modelCalls;
 
-  return {
+  batchAuditResult = {
     probeExecuted: true,
     totalBatches,
     completedBatches: totalBatches,
@@ -1061,6 +1296,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     resumesWithoutSpuriousAdvance,
     invalidFinding: invalidFindingEvidence,
     auditorIdentity,
+    agentSessionResume: agentSessionResumeEvidence,
     nonEmptyFinding: nonEmptyFindingEvidence,
     synthesis: {
       version: synthPayload.version,
@@ -1081,6 +1317,22 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     synthesisInputCoverageState: synthCoverage.state,
     manuscriptPreserved,
   };
+  } finally {
+    if (resumedAgentHandle) {
+      await resumedAgentHandle.dispose();
+      const agentUnregistered = ctx.agents.get(resumedAgent.id) === undefined;
+      const sessionUnregistered = ctx.sessions.get(resumedAgent.id) === undefined;
+      if (agentSessionResumeEvidence) {
+        agentSessionResumeEvidence.teardown.disposeCalled = true;
+        agentSessionResumeEvidence.teardown.agentUnregistered = agentUnregistered;
+        agentSessionResumeEvidence.teardown.sessionUnregistered = sessionUnregistered;
+      }
+      if (!agentUnregistered || !sessionUnregistered) {
+        fail("academic probe: disposed resumed Agent or Session remained registered in DSH");
+      }
+    }
+  }
+  return batchAuditResult;
 }
 
 export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions = []) {
@@ -3210,7 +3462,7 @@ async function main(): Promise<void> {
           bancaAuditar: "banca_auditar",
           bancaSintese: "banca_sintese",
         },
-        evidenceGate: "Issue #44/#98 durable batch audit confirmation and exactly-once synthesis finding gate",
+        evidenceGate: "Issue #44/#98/#100 durable batch audit confirmation, native Agent/Session handoff, and exactly-once synthesis finding gate",
       },
       blocker: "Academic batch audit evidence probe is pending the separately authorized one-shot no-model execution.",
     }
@@ -3332,7 +3584,7 @@ async function main(): Promise<void> {
         bancaAuditar: "banca_auditar",
         bancaSintese: "banca_sintese",
       },
-      evidenceGate: "Issue #44/#98 durable batch audit confirmation and exactly-once synthesis finding gate",
+      evidenceGate: "Issue #44/#98/#100 durable batch audit confirmation, native Agent/Session handoff, and exactly-once synthesis finding gate",
     },
     blocker: batchAuditStatus === "BLOCKED"
       ? "Academic batch audit evidence probe is pending the separately authorized one-shot no-model probe."

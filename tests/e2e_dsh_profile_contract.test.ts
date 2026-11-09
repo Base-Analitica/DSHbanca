@@ -716,6 +716,8 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
 const batchAuditPlanId = "1fc2cf44ea0ad923b401d36e35932491c8009807ff0207e05f1e7bd3d3929085"
 const batchAuditFingerprint = "a6260a0083fa91b7e41bdc14855f626f65df8d9c2b57e71e54f05eef51784338"
 const batchAuditIds = ["batch-01", "batch-02", "batch-03", "batch-04", "batch-05"]
+const batchAuditOriginalAgentId = "a".repeat(64)
+const batchAuditResumedAgentId = "b".repeat(64)
 const completeFindingProjection = {
   version: "analysis-finding-v1",
   findingId: "f".repeat(64),
@@ -725,6 +727,77 @@ const completeFindingProjection = {
   provenanceSha256: "a".repeat(64),
   claimSha256: "b".repeat(64),
   evidenceSha256: "c".repeat(64),
+}
+const completeAgentSessionResumeEvidence = {
+  probeExecuted: true,
+  executionMode: "same-process-native-dsh",
+  syntheticAgentFixture: false,
+  sameProcess: true,
+  originalAgentId: batchAuditOriginalAgentId,
+  originalSessionId: batchAuditOriginalAgentId,
+  agentId: batchAuditResumedAgentId,
+  sessionId: batchAuditResumedAgentId,
+  createdVia: "ctx.agents.create",
+  identityDistinctFromOriginal: true,
+  agentAndSessionIdMatch: true,
+  agentRegistryContainsAgent: true,
+  sessionStoreContainsSession: true,
+  workspaceMatches: true,
+  presetSelectionResult: "banca-auditor",
+  effectivePreset: "banca-auditor",
+  sessionPresetProjection: "banca-auditor",
+  toolRuntime: "ctx.tools.execute",
+  switchAfterCompletedBatches: 2,
+  queryCompletedBatchIdProvided: false,
+  checkpointBeforeQuery: {
+    planId: batchAuditPlanId,
+    manuscriptFingerprint: batchAuditFingerprint,
+    totalBatches: 5,
+    completedBatches: 2,
+    completedCharacters: 240,
+    totalCharacters: 595,
+    coveragePercent: 40.34,
+    nextBatchId: batchAuditIds[2],
+    nextBatchIndex: 2,
+  },
+  checkpointAfterQuery: {
+    planId: batchAuditPlanId,
+    manuscriptFingerprint: batchAuditFingerprint,
+    totalBatches: 5,
+    completedBatches: 2,
+    completedCharacters: 240,
+    totalCharacters: 595,
+    coveragePercent: 40.34,
+    nextBatchId: batchAuditIds[2],
+    nextBatchIndex: 2,
+  },
+  analysisStores: {
+    inventoryBeforeSha256: "1".repeat(64),
+    inventoryAfterSha256: "1".repeat(64),
+    checkpointBeforeSha256: "2".repeat(64),
+    checkpointAfterSha256: "2".repeat(64),
+    auditConfirmationsBeforeSha256: "3".repeat(64),
+    auditConfirmationsAfterSha256: "3".repeat(64),
+    findingsBeforeSha256: "4".repeat(64),
+    findingsAfterSha256: "4".repeat(64),
+  },
+  receiptLedgerBeforeSha256: "3".repeat(64),
+  receiptLedgerAfterSha256: "3".repeat(64),
+  receiptLedgerUnchanged: true,
+  findingBeforeResume: {
+    count: 1,
+    projection: { ...completeFindingProjection },
+  },
+  completedBatchIds: batchAuditIds.slice(2),
+  completedBatchCount: 3,
+  toolDispatchCount: 17,
+  synthesisAgentId: batchAuditResumedAgentId,
+  modelCalls: 0,
+  teardown: {
+    disposeCalled: true,
+    agentUnregistered: true,
+    sessionUnregistered: true,
+  },
 }
 const completeBatchAuditEvidence = {
   probeExecuted: true,
@@ -739,6 +812,7 @@ const completeBatchAuditEvidence = {
   batchAudits: batchAuditIds.map((batchId, batchIndex) => ({
     batchIndex,
     batchId,
+    agentId: batchIndex < 2 ? batchAuditOriginalAgentId : batchAuditResumedAgentId,
     acceptedCount: batchIndex === 1 ? 1 : 0,
     receiptFindingCount: batchIndex === 1 ? 1 : 0,
     persistedFindingCount: batchIndex < 1 ? 0 : 1,
@@ -756,8 +830,8 @@ const completeBatchAuditEvidence = {
   },
   auditorIdentity: {
     createdVia: "ctx.agents.create",
-    agentId: "agent-e2e-auditor",
-    sessionId: "agent-e2e-auditor",
+    agentId: batchAuditOriginalAgentId,
+    sessionId: batchAuditOriginalAgentId,
     agentAndSessionIdMatch: true,
     agentRegistryContainsAgent: true,
     sessionStoreContainsSession: true,
@@ -765,6 +839,7 @@ const completeBatchAuditEvidence = {
     toolRuntime: "ctx.tools.execute",
     modelCalls: 0,
   },
+  agentSessionResume: { ...completeAgentSessionResumeEvidence },
   nonEmptyFinding: {
     batchIndex: 1,
     acceptedCount: 1,
@@ -797,10 +872,228 @@ const completeBatchAuditEvidence = {
   manuscriptPreserved: true,
 }
 
-describe("DSH batch audit evidence gate contract (#44, #98)", () => {
-  test("accepts complete positive batch audit evidence", () => {
+describe("DSH batch audit evidence gate contract (#44, #98, #100)", () => {
+  test("accepts complete positive batch audit evidence with native Agent/Session handoff", () => {
     expect(validateBatchAuditEvidence(completeBatchAuditEvidence)).toEqual([])
     expect(classifyBatchAuditEvidenceStatus(completeBatchAuditEvidence)).toBe("PASS")
+  })
+
+  test.each([
+    ["new Agent reused original Agent/Session identity", {
+      ...completeAgentSessionResumeEvidence,
+      agentId: batchAuditOriginalAgentId,
+      sessionId: batchAuditOriginalAgentId,
+    }],
+    ["native Agent/Session ID is not pseudonymized", {
+      ...completeAgentSessionResumeEvidence,
+      agentId: "agent-e2e-resume",
+      sessionId: "agent-e2e-resume",
+    }],
+    ["native lifecycle is replaced by a fixture", {
+      ...completeAgentSessionResumeEvidence,
+      executionMode: "fixture",
+      syntheticAgentFixture: true,
+    }],
+    ["native Agent/Session is not in the same process", {
+      ...completeAgentSessionResumeEvidence,
+      sameProcess: false,
+    }],
+    ["new Agent lacks verified auditor preset", {
+      ...completeAgentSessionResumeEvidence,
+      effectivePreset: "",
+      sessionPresetProjection: "",
+    }],
+    ["checkpoint restarted from zero", {
+      ...completeAgentSessionResumeEvidence,
+      checkpointAfterQuery: {
+        ...completeAgentSessionResumeEvidence.checkpointAfterQuery,
+        completedBatches: 0,
+        completedCharacters: 0,
+        coveragePercent: 0,
+        nextBatchId: batchAuditIds[0],
+        nextBatchIndex: 0,
+      },
+    }],
+    ["resume-only context spuriously advanced checkpoint", {
+      ...completeAgentSessionResumeEvidence,
+      checkpointAfterQuery: {
+        ...completeAgentSessionResumeEvidence.checkpointAfterQuery,
+        completedBatches: 3,
+        completedCharacters: 360,
+        coveragePercent: 60.5,
+        nextBatchId: batchAuditIds[3],
+        nextBatchIndex: 3,
+      },
+    }],
+    ["plan identity diverged at resume", {
+      ...completeAgentSessionResumeEvidence,
+      checkpointAfterQuery: {
+        ...completeAgentSessionResumeEvidence.checkpointAfterQuery,
+        planId: "e".repeat(64),
+      },
+    }],
+    ["manuscript fingerprint diverged at resume", {
+      ...completeAgentSessionResumeEvidence,
+      checkpointAfterQuery: {
+        ...completeAgentSessionResumeEvidence.checkpointAfterQuery,
+        manuscriptFingerprint: "e".repeat(64),
+      },
+    }],
+    ["resume selected wrong next batch", {
+      ...completeAgentSessionResumeEvidence,
+      checkpointAfterQuery: {
+        ...completeAgentSessionResumeEvidence.checkpointAfterQuery,
+        nextBatchId: batchAuditIds[3],
+        nextBatchIndex: 3,
+      },
+    }],
+    ["resume query claimed a completedBatchId", {
+      ...completeAgentSessionResumeEvidence,
+      queryCompletedBatchIdProvided: true,
+    }],
+    ["persisted checkpoint changed during read", {
+      ...completeAgentSessionResumeEvidence,
+      analysisStores: {
+        ...completeAgentSessionResumeEvidence.analysisStores,
+        checkpointAfterSha256: "e".repeat(64),
+      },
+    }],
+    ["persisted audit confirmations changed during read", {
+      ...completeAgentSessionResumeEvidence,
+      analysisStores: {
+        ...completeAgentSessionResumeEvidence.analysisStores,
+        auditConfirmationsAfterSha256: "e".repeat(64),
+      },
+    }],
+    ["persisted finding store changed during read", {
+      ...completeAgentSessionResumeEvidence,
+      analysisStores: {
+        ...completeAgentSessionResumeEvidence.analysisStores,
+        findingsAfterSha256: "e".repeat(64),
+      },
+    }],
+    ["analysis store inventory changed during read", {
+      ...completeAgentSessionResumeEvidence,
+      analysisStores: {
+        ...completeAgentSessionResumeEvidence.analysisStores,
+        inventoryAfterSha256: "e".repeat(64),
+      },
+    }],
+    ["in-memory audit receipt ledger changed during read", {
+      ...completeAgentSessionResumeEvidence,
+      receiptLedgerAfterSha256: "e".repeat(64),
+    }],
+    ["receipt ledger digest is not bound to persisted audit confirmations", {
+      ...completeAgentSessionResumeEvidence,
+      receiptLedgerBeforeSha256: "5".repeat(64),
+      receiptLedgerAfterSha256: "5".repeat(64),
+    }],
+    ["preset selection did not commit the auditor role", {
+      ...completeAgentSessionResumeEvidence,
+      presetSelectionResult: "",
+    }],
+    ["persisted finding is absent before resume", {
+      ...completeAgentSessionResumeEvidence,
+      findingBeforeResume: {
+        ...completeAgentSessionResumeEvidence.findingBeforeResume,
+        count: 0,
+      },
+    }],
+    ["persisted finding is duplicated before resume", {
+      ...completeAgentSessionResumeEvidence,
+      findingBeforeResume: {
+        ...completeAgentSessionResumeEvidence.findingBeforeResume,
+        count: 2,
+      },
+    }],
+    ["persisted finding fingerprint diverged before resume", {
+      ...completeAgentSessionResumeEvidence,
+      findingBeforeResume: {
+        ...completeAgentSessionResumeEvidence.findingBeforeResume,
+        projection: {
+          ...completeFindingProjection,
+          manuscriptFingerprint: "e".repeat(64),
+        },
+      },
+    }],
+    ["remaining batch was not audited by the new Agent", {
+      ...completeAgentSessionResumeEvidence,
+      completedBatchIds: [batchAuditIds[2], batchAuditIds[3]],
+      completedBatchCount: 2,
+    }],
+    ["final synthesis was not produced by the new Agent", {
+      ...completeAgentSessionResumeEvidence,
+      synthesisAgentId: batchAuditOriginalAgentId,
+    }],
+    ["resumed Agent entered a model-facing turn", {
+      ...completeAgentSessionResumeEvidence,
+      modelCalls: 1,
+    }],
+    ["new Agent was not disposed", {
+      ...completeAgentSessionResumeEvidence,
+      teardown: { ...completeAgentSessionResumeEvidence.teardown, disposeCalled: false },
+    }],
+    ["new Agent remained registered after disposal", {
+      ...completeAgentSessionResumeEvidence,
+      teardown: { ...completeAgentSessionResumeEvidence.teardown, agentUnregistered: false },
+    }],
+    ["new Session remained registered after disposal", {
+      ...completeAgentSessionResumeEvidence,
+      teardown: { ...completeAgentSessionResumeEvidence.teardown, sessionUnregistered: false },
+    }],
+  ])("rejects Agent/Session resume regression: %s", (_label, invalidResume) => {
+    const evidence = {
+      ...completeBatchAuditEvidence,
+      agentSessionResume: invalidResume,
+    }
+    expect(validateBatchAuditEvidence(evidence).length).toBeGreaterThan(0)
+    expect(classifyBatchAuditEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("fails closed when a full batch report omits native resume evidence", () => {
+    const { agentSessionResume: _resume, ...evidence } = completeBatchAuditEvidence
+    expect(validateBatchAuditEvidence(evidence)).not.toEqual([])
+    expect(classifyBatchAuditEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("rejects unredacted native Agent/Session identifiers in the batch report", () => {
+    const evidence = {
+      ...completeBatchAuditEvidence,
+      auditorIdentity: {
+        ...completeBatchAuditEvidence.auditorIdentity,
+        agentId: "agent-e2e-auditor",
+        sessionId: "agent-e2e-auditor",
+      },
+    }
+    expect(validateBatchAuditEvidence(evidence)).toContain(
+      "auditor Agent/Session identity must be observed through DSH registries",
+    )
+    expect(classifyBatchAuditEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test.each([
+    ["original Agent does not own the first two audits", 0, batchAuditResumedAgentId],
+    ["resumed Agent does not own the final three audits", 2, batchAuditOriginalAgentId],
+  ])("rejects handoff audit ownership regression: %s", (_label, batchIndex, agentId) => {
+    const evidence = {
+      ...completeBatchAuditEvidence,
+      batchAudits: completeBatchAuditEvidence.batchAudits.map((audit, index) =>
+        index === batchIndex ? { ...audit, agentId } : audit
+      ),
+    }
+    expect(validateBatchAuditEvidence(evidence)).toContain(
+      "the original Agent must audit batches 1-2 and the distinct resumed Agent batches 3-5",
+    )
+    expect(classifyBatchAuditEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("rejects a finding not accepted in batch two before the Agent/Session handoff", () => {
+    const evidence = {
+      ...completeBatchAuditEvidence,
+      nonEmptyFinding: { ...completeBatchAuditEvidence.nonEmptyFinding, batchIndex: 0 },
+    }
+    expect(validateBatchAuditEvidence(evidence).length).toBeGreaterThan(0)
+    expect(classifyBatchAuditEvidenceStatus(evidence)).toBe("FAIL")
   })
 
   test("reports BLOCKED when evidence is missing or totalBatches undefined", () => {

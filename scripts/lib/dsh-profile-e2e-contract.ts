@@ -797,6 +797,7 @@ export interface BatchAuditEvidenceGateEvidence {
   batchAudits: Array<{
     batchIndex: number
     batchId: string
+    agentId: string
     acceptedCount: number
     receiptFindingCount: number
     persistedFindingCount: number
@@ -825,6 +826,77 @@ export interface BatchAuditEvidenceGateEvidence {
     effectivePreset: string
     toolRuntime: string
     modelCalls: number
+  }
+  agentSessionResume: {
+    probeExecuted: boolean
+    executionMode: string
+    syntheticAgentFixture: boolean
+    sameProcess: boolean
+    originalAgentId: string
+    originalSessionId: string
+    agentId: string
+    sessionId: string
+    createdVia: string
+    identityDistinctFromOriginal: boolean
+    agentAndSessionIdMatch: boolean
+    agentRegistryContainsAgent: boolean
+    sessionStoreContainsSession: boolean
+    workspaceMatches: boolean
+    presetSelectionResult: string
+    effectivePreset: string
+    sessionPresetProjection: string
+    toolRuntime: string
+    switchAfterCompletedBatches: number
+    queryCompletedBatchIdProvided: boolean
+    checkpointBeforeQuery: {
+      planId: string
+      manuscriptFingerprint: string
+      totalBatches: number
+      completedBatches: number
+      completedCharacters: number
+      totalCharacters: number
+      coveragePercent: number
+      nextBatchId: string
+      nextBatchIndex: number
+    }
+    checkpointAfterQuery: {
+      planId: string
+      manuscriptFingerprint: string
+      totalBatches: number
+      completedBatches: number
+      completedCharacters: number
+      totalCharacters: number
+      coveragePercent: number
+      nextBatchId: string
+      nextBatchIndex: number
+    }
+    analysisStores: {
+      inventoryBeforeSha256: string
+      inventoryAfterSha256: string
+      checkpointBeforeSha256: string
+      checkpointAfterSha256: string
+      auditConfirmationsBeforeSha256: string
+      auditConfirmationsAfterSha256: string
+      findingsBeforeSha256: string
+      findingsAfterSha256: string
+    }
+    receiptLedgerBeforeSha256: string
+    receiptLedgerAfterSha256: string
+    receiptLedgerUnchanged: boolean
+    findingBeforeResume: {
+      count: number
+      projection: BatchAuditFindingProjectionEvidence
+    }
+    completedBatchIds: string[]
+    completedBatchCount: number
+    toolDispatchCount: number
+    synthesisAgentId: string
+    modelCalls: number
+    teardown: {
+      disposeCalled: boolean
+      agentUnregistered: boolean
+      sessionUnregistered: boolean
+    }
   }
   nonEmptyFinding: {
     batchIndex: number
@@ -960,8 +1032,8 @@ export function validateBatchAuditEvidence(value: unknown): string[] {
   const identity = isRecord(value.auditorIdentity) ? value.auditorIdentity : undefined
   if (
     identity?.createdVia !== "ctx.agents.create" ||
-    typeof identity.agentId !== "string" || identity.agentId.length === 0 ||
-    typeof identity.sessionId !== "string" || identity.sessionId.length === 0 ||
+    !isSha256Digest(identity.agentId) ||
+    !isSha256Digest(identity.sessionId) ||
     identity.agentId !== identity.sessionId ||
     identity.agentAndSessionIdMatch !== true ||
     identity.agentRegistryContainsAgent !== true ||
@@ -971,6 +1043,140 @@ export function validateBatchAuditEvidence(value: unknown): string[] {
     identity.modelCalls !== 0
   ) {
     errors.push("auditor Agent/Session identity must be observed through DSH registries")
+  }
+
+  if (totalBatches !== 5) {
+    errors.push("issue #98/#100 vertical probe must retain exactly five canonical batches")
+  }
+
+  const resume = isRecord(value.agentSessionResume) ? value.agentSessionResume : undefined
+  const originalAgentId = identity?.agentId
+  const originalSessionId = identity?.sessionId
+  if (
+    resume?.probeExecuted !== true ||
+    resume.executionMode !== "same-process-native-dsh" ||
+    resume.syntheticAgentFixture !== false ||
+    resume.sameProcess !== true ||
+    resume.createdVia !== "ctx.agents.create" ||
+    !isSha256Digest(resume.agentId) ||
+    !isSha256Digest(resume.sessionId) ||
+    resume.agentId !== resume.sessionId ||
+    resume.agentAndSessionIdMatch !== true ||
+    resume.originalAgentId !== originalAgentId ||
+    resume.originalSessionId !== originalSessionId ||
+    resume.agentId === originalAgentId ||
+    resume.sessionId === originalSessionId ||
+    resume.identityDistinctFromOriginal !== true ||
+    resume.agentRegistryContainsAgent !== true ||
+    resume.sessionStoreContainsSession !== true ||
+    resume.workspaceMatches !== true ||
+    resume.presetSelectionResult !== "banca-auditor" ||
+    resume.effectivePreset !== "banca-auditor" ||
+    resume.sessionPresetProjection !== "banca-auditor" ||
+    resume.toolRuntime !== "ctx.tools.execute" ||
+    resume.modelCalls !== 0
+  ) {
+    errors.push("native Agent/Session handoff must use a distinct live banca-auditor identity in the same DSH process")
+  }
+
+  const checkpointBeforeQuery = isRecord(resume?.checkpointBeforeQuery)
+    ? resume.checkpointBeforeQuery
+    : undefined
+  const checkpointAfterQuery = isRecord(resume?.checkpointAfterQuery)
+    ? resume.checkpointAfterQuery
+    : undefined
+  const expectedResumeBatchId = Array.isArray(planBatchIds) ? planBatchIds[2] : undefined
+  const checkpointSnapshotsMatch = [checkpointBeforeQuery, checkpointAfterQuery].every((snapshot) => {
+    if (!snapshot) return false
+    const totalCharacters = Number.isInteger(snapshot.totalCharacters) ? snapshot.totalCharacters as number : 0
+    const completedCharacters = Number.isInteger(snapshot.completedCharacters) ? snapshot.completedCharacters as number : -1
+    const expectedCoverage = totalCharacters > 0
+      ? Math.round((completedCharacters / totalCharacters) * 10000) / 100
+      : -1
+    return snapshot.planId === value.planId &&
+      snapshot.manuscriptFingerprint === value.manuscriptFingerprint &&
+      snapshot.totalBatches === 5 &&
+      snapshot.completedBatches === 2 &&
+      completedCharacters >= 0 && completedCharacters <= totalCharacters &&
+      totalCharacters === 595 &&
+      snapshot.coveragePercent === expectedCoverage &&
+      snapshot.nextBatchId === expectedResumeBatchId &&
+      snapshot.nextBatchIndex === 2
+  })
+  if (
+    resume?.switchAfterCompletedBatches !== 2 ||
+    resume.queryCompletedBatchIdProvided !== false ||
+    !checkpointBeforeQuery || !checkpointAfterQuery ||
+    checkpointBeforeQuery.completedCharacters !== checkpointAfterQuery.completedCharacters ||
+    checkpointBeforeQuery.coveragePercent !== checkpointAfterQuery.coveragePercent ||
+    checkpointBeforeQuery.nextBatchId !== checkpointAfterQuery.nextBatchId ||
+    checkpointBeforeQuery.nextBatchIndex !== checkpointAfterQuery.nextBatchIndex ||
+    !checkpointSnapshotsMatch
+  ) {
+    errors.push("new Agent must recover the same plan and fingerprint at 2/5 without advancing or restarting the checkpoint")
+  }
+
+  const analysisStores = isRecord(resume?.analysisStores) ? resume.analysisStores : undefined
+  const analysisDigestPairs = [
+    [analysisStores?.inventoryBeforeSha256, analysisStores?.inventoryAfterSha256],
+    [analysisStores?.checkpointBeforeSha256, analysisStores?.checkpointAfterSha256],
+    [analysisStores?.auditConfirmationsBeforeSha256, analysisStores?.auditConfirmationsAfterSha256],
+    [analysisStores?.findingsBeforeSha256, analysisStores?.findingsAfterSha256],
+  ]
+  if (!analysisDigestPairs.every(([before, after]) =>
+    isSha256Digest(before) && isSha256Digest(after) && before === after
+  )) {
+    errors.push("resume-only context query must not mutate checkpoint, audit-confirmation, or findings state")
+  }
+  if (
+    resume?.receiptLedgerUnchanged !== true ||
+    !isSha256Digest(resume.receiptLedgerBeforeSha256) ||
+    !isSha256Digest(resume.receiptLedgerAfterSha256) ||
+    resume.receiptLedgerBeforeSha256 !== resume.receiptLedgerAfterSha256 ||
+    resume.receiptLedgerBeforeSha256 !== analysisStores?.auditConfirmationsBeforeSha256 ||
+    resume.receiptLedgerAfterSha256 !== analysisStores?.auditConfirmationsAfterSha256
+  ) {
+    errors.push("resume-only context query must preserve the validated audit receipt ledger")
+  }
+
+  const nonEmptyFinding = isRecord(value.nonEmptyFinding) ? value.nonEmptyFinding : undefined
+  const recoveredFinding = isRecord(resume?.findingBeforeResume) ? resume.findingBeforeResume : undefined
+  const recoveredProjection = recoveredFinding?.projection
+  const expectedProjection = nonEmptyFinding?.expected
+  if (
+    recoveredFinding?.count !== 1 ||
+    !isBatchAuditFindingProjection(recoveredProjection) ||
+    !isBatchAuditFindingProjection(expectedProjection) ||
+    !batchAuditFindingProjectionsEqual(
+      recoveredProjection as BatchAuditFindingProjectionEvidence,
+      expectedProjection as BatchAuditFindingProjectionEvidence,
+    ) ||
+    recoveredProjection.planId !== value.planId ||
+    recoveredProjection.manuscriptFingerprint !== value.manuscriptFingerprint ||
+    nonEmptyFinding?.batchIndex !== 1
+  ) {
+    errors.push("the original single persisted finding must remain present and unchanged across the Agent/Session handoff")
+  }
+
+  const resumedBatchIds = Array.isArray(resume?.completedBatchIds) ? resume.completedBatchIds : []
+  const expectedResumedBatchIds = Array.isArray(planBatchIds) ? planBatchIds.slice(2) : []
+  const expectedResumeDispatchCount = 1 + Math.max(totalBatches - 2, 0) * 5 + 1
+  const resumeTeardown = isRecord(resume?.teardown) ? resume.teardown : undefined
+  if (
+    resume?.completedBatchCount !== totalBatches - 2 ||
+    JSON.stringify(resumedBatchIds) !== JSON.stringify(expectedResumedBatchIds) ||
+    !isSha256Digest(resume.synthesisAgentId) ||
+    resume.toolDispatchCount !== expectedResumeDispatchCount ||
+    resume.synthesisAgentId !== resume.agentId
+  ) {
+    errors.push("remaining batches and final synthesis must run through the new Agent/Session")
+  }
+  if (
+    resumeTeardown?.disposeCalled !== true ||
+    resumeTeardown.agentUnregistered !== true ||
+    resumeTeardown.sessionUnregistered !== true
+  ) {
+    errors.push("resumed Agent and Session must be disposed and absent from native registries")
   }
 
   const finding = isRecord(value.nonEmptyFinding) ? value.nonEmptyFinding : undefined
@@ -1000,6 +1206,7 @@ export function validateBatchAuditEvidence(value: unknown): string[] {
     let batchesInPlanOrder = true
     let oneExpectedFindingOnly = findingBatchIndex >= 0 && findingBatchIndex < totalBatches
     let persistedCountsInOrder = true
+    let batchAgentOwnershipInOrder = true
     for (let index = 0; index < totalBatches; index++) {
       const audit = batchAudits[index]
       if (!isRecord(audit)) {
@@ -1010,6 +1217,10 @@ export function validateBatchAuditEvidence(value: unknown): string[] {
       }
       if (audit.batchIndex !== index || audit.batchId !== planBatchIds[index]) {
         batchesInPlanOrder = false
+      }
+      const expectedBatchAgentId = index < 2 ? originalAgentId : resume?.agentId
+      if (!isSha256Digest(audit.agentId) || typeof expectedBatchAgentId !== "string" || audit.agentId !== expectedBatchAgentId) {
+        batchAgentOwnershipInOrder = false
       }
       const isFindingBatch = index === findingBatchIndex
       if (isFindingBatch) {
@@ -1038,6 +1249,9 @@ export function validateBatchAuditEvidence(value: unknown): string[] {
     }
     if (!persistedCountsInOrder) {
       errors.push("per-batch persisted finding counts must reflect the single ordered durable store")
+    }
+    if (!batchAgentOwnershipInOrder) {
+      errors.push("the original Agent must audit batches 1-2 and the distinct resumed Agent batches 3-5")
     }
   }
 
@@ -1090,7 +1304,7 @@ export function validateBatchAuditEvidence(value: unknown): string[] {
     coverage.totalBatches !== totalBatches ||
     coverage.completedBatches !== totalBatches ||
     !Number.isInteger(coverage.totalCharacters) ||
-    coverage.totalCharacters <= 0 ||
+    coverage.totalCharacters !== 595 ||
     coverage.completedCharacters !== coverage.totalCharacters ||
     coverage.coveragePercent !== 100
   ) {
