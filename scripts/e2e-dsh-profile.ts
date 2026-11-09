@@ -1,7 +1,6 @@
 import { spawn, spawnSync } from "node:child_process"
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -20,6 +19,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { parse as parseYaml } from "yaml"
 import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "./lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "./lib/dsh-profile-e2e-observer-control.js"
+import { copyRequiredAcademicDecisionModule } from "./lib/dsh-profile-observer-package.js"
 import {
   canonicalAuditorMarkdownSha256,
   expectedTools,
@@ -429,10 +429,7 @@ function createObserverPackage(
     main: "./index.js",
     exports: "./index.js",
   }, null, 2) + "\n")
-  const academicDecisionDist = join(repositoryRoot, "dist", "lib", "academic_decision.js")
-  if (existsSync(academicDecisionDist)) {
-    copyFileSync(academicDecisionDist, join(observerRoot, "academic_decision.js"))
-  }
+  copyRequiredAcademicDecisionModule(repositoryRoot, observerRoot)
   const observerSource = `import { createHash } from "node:crypto";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -3020,6 +3017,13 @@ async function main(): Promise<void> {
   const bundlesBefore = beforeManifest.dsh?.profile?.bundles ?? []
   report.stages.bundlesBeforeInstall = bundlesBefore
 
+  const build = await run(bunExecutable, ["run", "build"], { cwd: repositoryRoot, env, timeoutMs })
+  report.stages.build = { exitCode: build.exitCode, timedOut: build.timedOut }
+  if (build.exitCode !== 0 || build.timedOut) {
+    fail(`Repository build required for the exported DSH entrypoint failed: ${safeOutput(build)}`)
+    return
+  }
+
   const observerRoot = join(scratch, "observer")
   const workspace = join(scratch, "synthetic-project")
   const observerResult = join(scratch, "observer-result.json")
@@ -3055,13 +3059,6 @@ async function main(): Promise<void> {
   }
   writeFileSync(pnpmWrapper, renderPnpmWrapper(pnpmResolution, nodeExecutable), { mode: 0o700 })
   chmodSync(pnpmWrapper, 0o700)
-
-  const build = await run(bunExecutable, ["run", "build"], { cwd: repositoryRoot, env, timeoutMs })
-  report.stages.build = { exitCode: build.exitCode, timedOut: build.timedOut }
-  if (build.exitCode !== 0 || build.timedOut) {
-    fail(`Repository build required for the exported DSH entrypoint failed: ${safeOutput(build)}`)
-    return
-  }
 
   let bundleInstallEnv: NodeJS.ProcessEnv
   try {
