@@ -1425,6 +1425,7 @@ export interface CrossProcessBatchAuditEvidence {
       persistedBatchIds: string[]
     }
     workspaceInventoryBeforeResumeSha256: string
+    workspaceInventoryAfterResumeQuerySha256: string
     agentIdentity: Record<string, unknown>
     completedBatchIds: string[]
     batchAudits: Array<Record<string, unknown>>
@@ -1432,6 +1433,8 @@ export interface CrossProcessBatchAuditEvidence {
     unverifiedAdvanceProbes: Array<{
       batchIndex: number
       batchId: string
+      toolRuntimeIsError: boolean | null
+      toolResultValue: string | null
       errorCode: string | null
       rejectionObserved: boolean
       checkpointBefore: Record<string, unknown>
@@ -1817,6 +1820,9 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
   ) {
     errors.push("second-process workspace inventory must match the parent-observed restart boundary")
   }
+  if (!isSha256Digest(phaseTwo?.workspaceInventoryAfterResumeQuerySha256)) {
+    errors.push("second-process post-query workspace inventory must be captured before unaudited-advance probes")
+  }
   if (!restartCheckpointMatches(resumeQuery?.checkpointBefore, {
     completedBatches: 2,
     completedCharacters: Number.isInteger(firstCompletedCharacters) ? firstCompletedCharacters as number : -1,
@@ -1857,13 +1863,20 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
       errors.push(`second process must record a missing_batch_audit rejection before auditing batch ${batchIndex + 1}`)
       continue
     }
+    const expectedRejectionValue = [
+      "context checkpoint error",
+      "code=missing_batch_audit",
+      `message=cannot advance checkpoint: audit confirmation missing for batch ${expectedBatchId}`,
+    ].join("\n")
     if (
       probe.batchIndex !== batchIndex ||
       probe.batchId !== expectedBatchId ||
+      probe.toolRuntimeIsError !== false ||
+      probe.toolResultValue !== expectedRejectionValue ||
       probe.errorCode !== "missing_batch_audit" ||
       probe.rejectionObserved !== true
     ) {
-      errors.push(`second process must observe missing_batch_audit for unaudited batch ${batchIndex + 1}`)
+      errors.push(`second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch ${batchIndex + 1}`)
     }
 
     const checkpointBefore = isRecord(probe.checkpointBefore) ? probe.checkpointBefore : undefined
@@ -1895,6 +1908,9 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
     }
     if (Number.isInteger(completedCharacters)) previousUnverifiedCheckpointCharacters = completedCharacters as number
 
+    if (probeIndex === 0 && probe.workspaceInventoryBeforeSha256 !== phaseTwo?.workspaceInventoryAfterResumeQuerySha256) {
+      errors.push("first unaudited-advance probe must start from the captured post-resume workspace inventory")
+    }
     const expectedPriorBatchIds = planBatchIds.slice(0, batchIndex)
     if (
       !restartPersistenceMatches(probe.persistenceBefore, probe.persistenceAfter) ||

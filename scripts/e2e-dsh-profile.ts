@@ -1753,6 +1753,8 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
     const storesAfterQuery = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
     const recoveredFindingAfterQuery = storesAfterQuery.findings.length === 1 ? crossProcessFindingProjection(storesAfterQuery.findings[0]) : null;
     if (JSON.stringify(checkpointBeforeQuery) !== JSON.stringify(checkpointAfterQuery) || !crossProcessSameProjection(persistenceBefore, persistenceAfterQuery) || storesAfterQuery.receipts.length !== 2 || storesAfterQuery.findings.length !== 1 || !recoveredFindingAfterQuery || !crossProcessSameProjection(recoveredFindingAfterQuery, expectation.finding)) fail("resume-only banca_context query changed persistent progress or the first-process finding");
+    // banca_context writes its context pack, so the first denial baseline must be captured after this resume-only query.
+    const workspaceInventoryAfterResumeQuerySha256 = crossProcessShaText(JSON.stringify(await inventory(workspace)));
     const batchAudits = [];
     const completedBatchIds = [];
     const unverifiedAdvanceProbes = [];
@@ -1765,6 +1767,7 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
 
       const persistenceBeforeAttempt = await crossProcessAnalysisHashes(workspace, expectation.planId);
       const workspaceInventoryBeforeAttempt = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+      if (index === 2 && workspaceInventoryBeforeAttempt !== workspaceInventoryAfterResumeQuerySha256) fail("first unaudited-advance probe workspace inventory drifted after the resume-only query");
       const storesBeforeAttempt = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
       const checkpointBefore = crossProcessStoredCheckpointEvidence(storesBeforeAttempt.checkpoint, meta?.batch);
       const persistedBatchIdsBefore = storesBeforeAttempt.receipts.map((receipt) => receipt.batchId);
@@ -1783,9 +1786,17 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
       ) fail("second DSH process pre-attempt checkpoint, confirmations, or finding did not match the current unaudited batch");
 
       const unverifiedAdvance = await runTool(ctx, "dshbanca-e2e-process-b-unverified-advance-" + index, "banca_context", { completedBatchId: batchId }, agent);
-      const rejectionCode = crossProcessToolErrorCode(unverifiedAdvance.message);
-      const rejectionObserved = rejectionCode === "missing_batch_audit";
-      if (!rejectionObserved) fail("second DSH process did not reject an unaudited advance with missing_batch_audit");
+      // DSH ToolRuntime treats a returned string as a success value; banca_context encodes its domain refusal in that exact value.
+      const toolRuntimeIsError = unverifiedAdvance.result?.isError === true ? true : unverifiedAdvance.result?.isError === false ? false : null;
+      const toolResultValue = toolRuntimeIsError === false && typeof unverifiedAdvance.result?.value === "string" ? unverifiedAdvance.result.value : null;
+      const expectedRejectionValue = [
+        "context checkpoint error",
+        "code=missing_batch_audit",
+        "message=cannot advance checkpoint: audit confirmation missing for batch " + batchId,
+      ].join(String.fromCharCode(10));
+      const rejectionCode = typeof toolResultValue === "string" ? crossProcessToolErrorCode(toolResultValue) : null;
+      const rejectionObserved = toolRuntimeIsError === false && toolResultValue === expectedRejectionValue && unverifiedAdvance.message === toolResultValue && rejectionCode === "missing_batch_audit";
+      if (!rejectionObserved) fail("second DSH process did not return the exact missing_batch_audit domain refusal for an unaudited advance");
 
       const storesAfterAttempt = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
       const persistenceAfterAttempt = await crossProcessAnalysisHashes(workspace, expectation.planId);
@@ -1806,6 +1817,8 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
       unverifiedAdvanceProbes.push({
         batchIndex: index,
         batchId,
+        toolRuntimeIsError,
+        toolResultValue,
         errorCode: rejectionCode,
         rejectionObserved,
         checkpointBefore,
@@ -1865,6 +1878,7 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
         persistedBatchIds: storesAfterQuery.receipts.map((receipt) => receipt.batchId),
       },
       workspaceInventoryBeforeResumeSha256: inventoryBefore,
+      workspaceInventoryAfterResumeQuerySha256,
       agentIdentity: identity,
       completedBatchIds,
       batchAudits,

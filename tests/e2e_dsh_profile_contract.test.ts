@@ -908,10 +908,16 @@ const crossProcessCheckpointAt = (batchIndex: number) => {
 const completeCrossProcessUnauditedAdvanceProbes = [2, 3, 4].map((batchIndex, probeIndex) => {
   const checkpoint = crossProcessCheckpointAt(batchIndex)
   const priorBatchIds = batchAuditIds.slice(0, batchIndex)
-  const inventoryDigest = ["8", "9", "0"][probeIndex].repeat(64)
+  const inventoryDigest = ["7", "9", "0"][probeIndex].repeat(64)
   return {
     batchIndex,
     batchId: batchAuditIds[batchIndex],
+    toolRuntimeIsError: false,
+    toolResultValue: [
+      "context checkpoint error",
+      "code=missing_batch_audit",
+      `message=cannot advance checkpoint: audit confirmation missing for batch ${batchAuditIds[batchIndex]}`,
+    ].join("\n"),
     errorCode: "missing_batch_audit",
     rejectionObserved: true,
     checkpointBefore: { ...checkpoint },
@@ -1058,6 +1064,7 @@ const completeCrossProcessBatchAuditEvidence = {
       persistedBatchIds: batchAuditIds.slice(0, 2),
     },
     workspaceInventoryBeforeResumeSha256: "a".repeat(64),
+    workspaceInventoryAfterResumeQuerySha256: "7".repeat(64),
     agentIdentity: crossProcessAuditorIdentity("9".repeat(64)),
     completedBatchIds: batchAuditIds.slice(2),
     batchAudits: batchAuditIds.slice(2).map((batchId, index) => ({
@@ -1151,11 +1158,34 @@ describe("DSH process-restart recovery contract (#103)", () => {
     ["missing probe list", { unverifiedAdvanceProbes: undefined }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
     ["unconfirmed rejection", {
       unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, rejectionObserved: false } : probe),
-    }, "second process must observe missing_batch_audit for unaudited batch 3"],
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
     ["incomplete probe list", { unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.slice(0, 2) }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
     ["wrong rejection code", {
       unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, errorCode: "unexpected" } : probe),
-    }, "second process must observe missing_batch_audit for unaudited batch 3"],
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["native ToolRuntime error is confused with the returned domain refusal", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, toolRuntimeIsError: true } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["successful output only contains a confusable code line", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        toolResultValue: ["successful context", "code=missing_batch_audit", "more context"].join(String.fromCharCode(10)),
+      } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["domain error names a different batch", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        toolResultValue: completeCrossProcessUnauditedAdvanceProbes[1].toolResultValue,
+      } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["missing post-query workspace baseline", { workspaceInventoryAfterResumeQuerySha256: undefined }, "second-process post-query workspace inventory must be captured before unaudited-advance probes"],
+    ["changed first-probe workspace baseline", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        workspaceInventoryBeforeSha256: "8".repeat(64),
+        workspaceInventoryAfterSha256: "8".repeat(64),
+      } : probe),
+    }, "first unaudited-advance probe must start from the captured post-resume workspace inventory"],
     ["changed checkpoint", {
       unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, checkpointAfter: { ...probe.checkpointAfter, completedBatches: 3 } } : probe),
     }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
@@ -1181,7 +1211,7 @@ describe("DSH process-restart recovery contract (#103)", () => {
     ["changed workspace inventory", {
       unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
         ...probe,
-        workspaceInventoryAfterSha256: "7".repeat(64),
+        workspaceInventoryAfterSha256: "5".repeat(64),
       } : probe),
     }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
   ])("rejects post-restart denial evidence mutation: %s", (_label, phaseTwoPatch, expectedError) => {
