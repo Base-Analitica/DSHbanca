@@ -16,8 +16,8 @@ import {
   writeFileSync,
 } from "node:fs"
 import { createHash, createHmac, randomBytes } from "node:crypto"
-import { homedir, tmpdir } from "node:os"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { tmpdir } from "node:os"
+import { dirname, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { parse as parseYaml } from "yaml"
 import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "./lib/dsh-profile-e2e-presets.js"
@@ -26,6 +26,12 @@ import { copyRequiredAcademicDecisionModule } from "./lib/dsh-profile-observer-p
 import {
   canonicalAuditorMarkdownSha256,
   expectedTools,
+  formatCommandFailure,
+  declaredPackageVersionMatches,
+  resolveSelectedDshPackage,
+  resolveSelectedDshPackageRoot,
+  safeRuntimeVersion,
+  sanitizeReport,
   expectedNativeSkills,
   expectedNativeSkillProvider,
   canonicalNativeSkills,
@@ -66,12 +72,9 @@ const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH?.trim(
 const reportPath = configuredReportPath
   ? resolve(repositoryRoot, configuredReportPath)
   : resolve(repositoryRoot, "docs/evidence/dsh-profile-e2e.latest.json")
-const reportPathLabel = (() => {
-  const repositoryRelative = relative(repositoryRoot, reportPath)
-  return repositoryRelative === ".." || repositoryRelative.startsWith(`..${sep}`) || isAbsolute(repositoryRelative)
-    ? "<external report path>"
-    : repositoryRelative
-})()
+const reportPathLabel = configuredReportPath
+  ? "<configured report path>"
+  : "docs/evidence/dsh-profile-e2e.latest.json"
 const timeoutMs = 120_000
 const bootTimeoutMs = 30_000
 const maxOutputBytes = 8_000_000
@@ -167,36 +170,40 @@ function delimiter(): string {
   return process.platform === "win32" ? ";" : ":"
 }
 
-function findPackageJson(root: string, packageName: string): string | undefined {
-  const packagePath = join(root, "node_modules", ...packageName.split("/"), "package.json")
-  return existsSync(packagePath) ? packagePath : undefined
+function findDshPackageRoot(executable: string): string | undefined {
+  return resolveSelectedDshPackageRoot(executable) ?? undefined
 }
 
-function findDshPackageRoot(executable: string): string | undefined {
-  let current = dirname(realpathSync(executable))
-  for (;;) {
-    const manifest = join(current, "package.json")
-    if (existsSync(manifest)) {
-      try {
-        const parsed = JSON.parse(readFileSync(manifest, "utf8"))
-        if (parsed.name === "@deepseek-ai/dsh") return current
-      } catch {
-        // Continue to the executable's parent package.
-      }
-    }
-    const parent = dirname(current)
-    if (parent === current) return undefined
-    current = parent
+function assertDeclaredDependency(ownerManifest: Record<string, any>, packageName: string, actualVersion: string): void {
+  const dependencySets = [ownerManifest.dependencies, ownerManifest.peerDependencies, ownerManifest.optionalDependencies]
+  const declaredRanges = dependencySets
+    .filter((set) => set && typeof set[packageName] === "string")
+    .map((set) => set[packageName] as string)
+  if (declaredRanges.length === 0 || declaredRanges.some((range) => !declaredPackageVersionMatches(actualVersion, range))) {
+    throw new Error("selected DSH dependency does not satisfy its declared version")
   }
 }
 
-async function validateNativePresetConfig(dshExecutable: string) {
+async function validateNativePresetConfig(dshExecutable: string, nodeVersion: string) {
   const dshRoot = findDshPackageRoot(dshExecutable)
   if (!dshRoot) throw new Error("installed DSH package root is unavailable")
-  const packageRoot = join(dshRoot, "node_modules", "@deepseek-ai")
-  const registryModule = await import(pathToFileURL(join(packageRoot, "dsh-agent-preset-registry", "lib", "index.js")).href)
-  const presetModule = await import(pathToFileURL(join(packageRoot, "dsh-agent-preset", "lib", "index.js")).href)
-  const instructionModule = await import(pathToFileURL(join(packageRoot, "dsh-agent-instructions", "lib", "index.js")).href)
+  const dshManifest = JSON.parse(readFileSync(join(dshRoot, "package.json"), "utf8")) as Record<string, any>
+  const registryPackage = resolveSelectedDshPackage(dshRoot, "@deepseek-ai/dsh-agent-preset-registry", nodeVersion)
+  const presetPackage = resolveSelectedDshPackage(dshRoot, "@deepseek-ai/dsh-agent-preset", nodeVersion)
+  const instructionPackage = resolveSelectedDshPackage(dshRoot, "@deepseek-ai/dsh-agent-instructions", nodeVersion)
+  const webAppPackage = resolveSelectedDshPackage(dshRoot, "@deepseek-ai/dsh-web-app", nodeVersion)
+  const basePackage = resolveSelectedDshPackage(dshRoot, "@deepseek-ai/dsh-base", nodeVersion)
+  for (const packageName of [
+    "@deepseek-ai/dsh-agent-preset",
+    "@deepseek-ai/dsh-agent-instructions",
+    "@deepseek-ai/dsh-web-app",
+    "@deepseek-ai/dsh-base",
+  ]) assertDeclaredDependency(dshManifest, packageName, dshManifest.version)
+  assertDeclaredDependency(webAppPackage.manifest, "@deepseek-ai/dsh-agent-preset-registry", registryPackage.manifest.version as string)
+  assertDeclaredDependency(presetPackage.manifest, "@deepseek-ai/dsh-agent-preset-registry", registryPackage.manifest.version as string)
+  const registryModule = await import(pathToFileURL(registryPackage.entryPath).href)
+  const presetModule = await import(pathToFileURL(presetPackage.entryPath).href)
+  const instructionModule = await import(pathToFileURL(instructionPackage.entryPath).href)
   const patchRows = (parseYaml(readFileSync(join(repositoryRoot, "cordis.patch.yml"), "utf8")) as any[])
     .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
   const overlayRows = (parseYaml(buildSdkPresetOverlayPatch(observerName)) as any[])
@@ -229,7 +236,7 @@ async function validateNativePresetConfig(dshExecutable: string) {
   const childProblem = auditorRow ? registryModule.entryListProblem(auditorRow.config.plugins) : "banca-auditor preset row missing"
   const rejectedMissingDefault = Array.isArray(missingDefaultResult.issues) &&
     missingDefaultResult.issues.some((issue) => issue.path?.[0] === "default")
-  const webAppRoot = join(packageRoot, "dsh-web-app")
+  const webAppRoot = webAppPackage.packageRoot
   const webHostRows = (parseYaml(readFileSync(join(webAppRoot, "cordis.patch.yml"), "utf8")) as any[])
     .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
   const webHostRegistry = webHostRows.find((row) => row?.name === "@deepseek-ai/dsh-agent-preset-registry")
@@ -238,7 +245,7 @@ async function validateNativePresetConfig(dshExecutable: string) {
   const webStandardPreset = webStandardRows.find((row) => row?.name === "@deepseek-ai/dsh-agent-preset" && row?.config?.id === "standard")
   const hostStandardPreserved = webHostRegistry?.config?.default === "standard" && Boolean(webStandardPreset) && bundleRegistryAbsent && bundleStandardAbsent
   const registryInjectionRequired = Array.isArray(presetModule.default.inject) && presetModule.default.inject.includes("agentPresets")
-  const basePatchPath = join(packageRoot, "dsh-base", "cordis.patch.yml")
+  const basePatchPath = join(basePackage.packageRoot, "cordis.patch.yml")
   const baseRows = existsSync(basePatchPath)
     ? (parseYaml(readFileSync(basePatchPath, "utf8")) as any[])
         .flatMap((operation) => Array.isArray(operation?.insert) ? operation.insert : [])
@@ -252,6 +259,14 @@ async function validateNativePresetConfig(dshExecutable: string) {
     noDuplicates
   return {
     accepted,
+    dshVersion: dshManifest.version,
+    resolvedPackageLayouts: {
+      registry: registryPackage.layout,
+      preset: presetPackage.layout,
+      instructions: instructionPackage.layout,
+      webApp: webAppPackage.layout,
+      base: basePackage.layout,
+    },
     bundleRegistryAbsent,
     bundleStandardAbsent,
     scratchRegistryAccepted: !registryResult.issues,
@@ -404,16 +419,6 @@ function terminateProcessTree(child: ReturnType<typeof spawn>): void {
   forceTimer.unref()
 }
 
-function safeOutput(result: CommandResult): string {
-  return `${result.stderr}\n${result.stdout}`
-    .replaceAll(scratchRoot ?? "\0", "<sandbox>")
-    .replaceAll(repositoryRoot, "<checkout>")
-    .replaceAll(homedir(), "<home>")
-    .replace(/(?:sk|api|key|token)[-_]?[A-Za-z0-9]{12,}/gi, "<redacted>")
-    .slice(0, 1200)
-    .trim()
-}
-
 function hashFile(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex")
 }
@@ -472,11 +477,13 @@ function writeReport(): void {
   report.finishedAt = new Date().toISOString()
   report.status = finalStatus
   mkdirSync(dirname(reportPath), { recursive: true })
-  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 })
+  const safeReport = sanitizeReport(report) as GateReport
+  writeFileSync(reportPath, `${JSON.stringify(safeReport, null, 2)}\n`, { mode: 0o600 })
 }
 
 function fail(message: string, status: "FAIL" | "BLOCKED" = "FAIL"): void {
-  report.failures.push(message)
+  const safeFailure = sanitizeReport({ message }) as { message: string }
+  report.failures.push(safeFailure.message)
   finalStatus = status
 }
 
@@ -613,6 +620,17 @@ export const crossProcessToolErrorCode = (message) => {
   if (lines.length !== 3 || lines[0] !== "context checkpoint error" || !lines[1].startsWith("code=") || !lines[2].startsWith("message=")) return null;
   const code = lines[1].slice("code=".length);
   return /^[a-z][a-z0-9_]*$/.test(code) ? code : null;
+};
+export const crossProcessSynthesisRefusal = (outcome, checkpoint) => {
+  if (outcome?.result?.isError !== false || typeof outcome.result.value !== "string" || typeof outcome.message !== "string") return null;
+  if (checkpoint?.state !== "running" || !Number.isInteger(checkpoint.completedBatches) ||
+      !Number.isInteger(checkpoint.totalBatches) || checkpoint.completedBatches < 0 ||
+      checkpoint.totalBatches <= checkpoint.completedBatches) return null;
+  const expectedMessage = 'global synthesis requires checkpoint.state === "complete"; received "running"';
+  const lines = outcome.result.value.split(String.fromCharCode(10));
+  if (lines.length !== 3 || lines[0] !== "synthesis input error" || lines[1] !== "code=incomplete_coverage" ||
+      lines[2] !== "message=" + expectedMessage || outcome.message !== outcome.result.value) return null;
+  return { errorCode: "incomplete_coverage", errorMessage: expectedMessage };
 };
 const runTool = async (context, callId, name, args, agent) => {
   const controller = new AbortController();
@@ -869,6 +887,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
 
   let unverifiedAdvancesBlocked = 0;
   let prematureSynthesisBlocked = 0;
+  const prematureSynthesisProbes = [];
   let auditsCompletedWithZeroFindings = 0;
   let auditToolDispatchCount = 0;
   const batchAuditReceiptEvidence = [];
@@ -917,18 +936,6 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       fail("academic probe: advance without audit was not rejected with missing_batch_audit");
     }
     unverifiedAdvancesBlocked++;
-
-    const rejSynth = await runBatchTool(
-      ctx,
-      "dshbanca-e2e-premature-synth-" + bIndex,
-      "banca_sintese",
-      {},
-      batchAgent,
-    );
-    if (!rejSynth.message.includes("synthesis input error")) {
-      fail("academic probe: premature synthesis was not rejected");
-    }
-    prematureSynthesisBlocked++;
 
     const sectionSource = nonEmptyFindingEvidence ? null : await findSectionSourceInBatch(currentMeta);
     if (sectionSource) {
@@ -1083,6 +1090,12 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
       });
       auditsCompletedWithZeroFindings++;
     }
+
+    prematureSynthesisProbes.push(await runCrossProcessSynthesisProbe(
+      ctx, workspace, planId, manuscriptFingerprint, currentMeta, batchAgent,
+      "dshbanca-e2e-premature-synth-" + bIndex, runBatchTool,
+    ));
+    prematureSynthesisBlocked++;
 
     const advRes = await runBatchTool(
       ctx,
@@ -1381,6 +1394,7 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     batchAudits: batchAuditReceiptEvidence,
     unverifiedAdvancesBlocked,
     prematureSynthesisBlocked,
+    prematureSynthesisProbes,
     auditsCompletedWithZeroFindings,
     auditToolDispatchCount,
     orderlyAdvances,
@@ -1498,6 +1512,67 @@ const crossProcessReadStores = async (workspace, planId, fingerprint) => {
   ) fail("cross-process durable stores do not match the live exhaustive plan identity");
   return { checkpoint, receipts: receipts.confirmations, findings: findings.findings };
 };
+const runCrossProcessSynthesisProbe = async (ctx, workspace, planId, fingerprint, meta, agent, callId, toolRunner = runTool) => {
+  const contextCheckpoint = crossProcessCheckpointEvidence(meta);
+  const storesBefore = await crossProcessReadStores(workspace, planId, fingerprint);
+  const checkpointBefore = crossProcessStoredCheckpointEvidence(storesBefore.checkpoint, meta?.batch);
+  if (contextCheckpoint.state !== "running" || contextCheckpoint.planId !== planId ||
+      contextCheckpoint.manuscriptFingerprint !== fingerprint ||
+      contextCheckpoint.completedBatches !== checkpointBefore.completedBatches ||
+      contextCheckpoint.nextBatchIndex !== checkpointBefore.nextBatchIndex ||
+      contextCheckpoint.nextBatchId !== checkpointBefore.nextBatchId) {
+    fail("cross-process synthesis probe checkpoint did not match the persisted incomplete plan");
+  }
+  const persistenceBefore = await crossProcessAnalysisHashes(workspace, planId);
+  const workspaceInventoryBeforeSha256 = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+  const persistedBatchIdsBefore = storesBefore.receipts.map((receipt) => receipt.batchId);
+  const findingsBefore = storesBefore.findings.map(crossProcessFindingProjection);
+
+  const result = await toolRunner(ctx, callId, "banca_sintese", {}, agent);
+  const refusal = crossProcessSynthesisRefusal(result, checkpointBefore);
+
+  const storesAfter = await crossProcessReadStores(workspace, planId, fingerprint);
+  const checkpointAfter = crossProcessStoredCheckpointEvidence(storesAfter.checkpoint, meta?.batch);
+  const persistenceAfter = await crossProcessAnalysisHashes(workspace, planId);
+  const workspaceInventoryAfterSha256 = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+  const persistedBatchIdsAfter = storesAfter.receipts.map((receipt) => receipt.batchId);
+  const findingsAfter = storesAfter.findings.map(crossProcessFindingProjection);
+  const persistentStateUnchanged =
+    JSON.stringify(storesBefore.checkpoint) === JSON.stringify(storesAfter.checkpoint) &&
+    JSON.stringify(storesBefore.receipts) === JSON.stringify(storesAfter.receipts) &&
+    JSON.stringify(storesBefore.findings) === JSON.stringify(storesAfter.findings) &&
+    JSON.stringify(checkpointBefore) === JSON.stringify(checkpointAfter) &&
+    JSON.stringify(persistenceBefore) === JSON.stringify(persistenceAfter) &&
+    workspaceInventoryBeforeSha256 === workspaceInventoryAfterSha256;
+  if (!persistentStateUnchanged) fail("cross-process incomplete-synthesis refusal mutated checkpoint, receipts, findings, or workspace inventory");
+  if (!refusal) fail("cross-process synthesis did not return the exact successful ToolRuntime incomplete_coverage domain refusal");
+
+  return {
+    batchIndex: checkpointBefore.completedBatches,
+    batchId: checkpointBefore.nextBatchId,
+    toolRuntimeIsError: result.result?.isError === true ? true : result.result?.isError === false ? false : null,
+    toolResultValue: typeof result.result?.value === "string" ? result.result.value : null,
+    toolMessage: typeof result.message === "string" ? result.message : null,
+    errorCode: refusal?.errorCode ?? null,
+    errorMessage: refusal?.errorMessage ?? null,
+    rejectionObserved: true,
+    checkpointBefore,
+    checkpointAfter,
+    persistenceBefore,
+    persistenceAfter,
+    workspaceInventoryBeforeSha256,
+    workspaceInventoryAfterSha256,
+    persistedReceiptCountBefore: storesBefore.receipts.length,
+    persistedReceiptCountAfter: storesAfter.receipts.length,
+    persistedBatchIdsBefore,
+    persistedBatchIdsAfter,
+    findingCountBefore: findingsBefore.length,
+    findingCountAfter: findingsAfter.length,
+    findingsBefore,
+    findingsAfter,
+    persistentStateUnchanged,
+  };
+};
 const crossProcessAgentIdentity = (ctx, agent) => {
   const session = agent?.session;
   const effectivePreset = ctx.agentPresets?.composedPreset?.(agent?.ctx) ?? "";
@@ -1594,6 +1669,7 @@ export async function runCrossProcessInitialProbe(ctx, workspace) {
     let findingProjection = null;
     let unverifiedAdvancesBlocked = 0;
     let prematureSynthesisBlocked = 0;
+    const prematureSynthesisProbes = [];
     for (let index = 0; index < 2; index++) {
       const batchId = meta?.batch?.batchId;
       if (meta?.batch?.index !== index || meta?.checkpoint?.completedBatches !== index || typeof batchId !== "string") fail("first DSH process observed a skipped or unexpected batch before audit");
@@ -1605,9 +1681,6 @@ export async function runCrossProcessInitialProbe(ctx, workspace) {
       const afterAttempt = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "checkpoints", planId + ".json"), "utf8"));
       if (!unverified.message.includes("missing_batch_audit") || JSON.stringify(beforeAttempt) !== JSON.stringify(afterAttempt)) fail("first DSH process did not fail closed on an unaudited progress attempt");
       unverifiedAdvancesBlocked++;
-      const premature = await runTool(ctx, "dshbanca-e2e-process-a-premature-synthesis-" + index, "banca_sintese", {}, agent);
-      if (!premature.result.isError || !premature.message.includes("synthesis input error")) fail("first DSH process released synthesis before complete coverage");
-      prematureSynthesisBlocked++;
       const findings = [];
       if (index === 1) {
         const section = await crossProcessSectionSource(workspace, meta);
@@ -1638,14 +1711,21 @@ export async function runCrossProcessInitialProbe(ctx, workspace) {
         findingProjection = crossProcessFindingProjection(stores.findings[0]);
       }
       batchAudits.push({ batchIndex: index, batchId, acceptedCount, persistedFindingCount: stores.findings.length, findingId: acceptedCount === 1 ? receipt.findings[0].findingId : null });
+      prematureSynthesisProbes.push(await runCrossProcessSynthesisProbe(
+        ctx, workspace, planId, fingerprint, meta, agent,
+        "dshbanca-e2e-process-a-premature-synthesis-" + index,
+      ));
+      prematureSynthesisBlocked++;
       const advanced = await runTool(ctx, "dshbanca-e2e-process-a-advance-" + index, "banca_context", { completedBatchId: batchId }, agent);
       if (advanced.result.isError) fail("first DSH process failed to advance an audited canonical batch");
       meta = await parseContextMeta(advanced.message);
       if (meta?.checkpoint?.completedBatches !== index + 1 || meta?.checkpoint?.planId !== planId || meta?.manuscript?.fingerprint !== fingerprint || (index === 0 && meta?.batch?.index !== 1) || (index === 1 && meta?.batch?.index !== 2)) fail("first DSH process progress was not exactly one batch per accepted audit");
       if (index === 0) checkpointAfterFirstBatch = crossProcessCheckpointEvidence(meta);
     }
-    const incompleteSynthesis = await runTool(ctx, "dshbanca-e2e-process-a-stop-at-two", "banca_sintese", {}, agent);
-    if (!incompleteSynthesis.result.isError || !incompleteSynthesis.message.includes("synthesis input error")) fail("first DSH process did not stop at 2/5 before synthesis");
+    prematureSynthesisProbes.push(await runCrossProcessSynthesisProbe(
+      ctx, workspace, planId, fingerprint, meta, agent,
+      "dshbanca-e2e-process-a-stop-at-two",
+    ));
     prematureSynthesisBlocked++;
     const finalStores = await crossProcessReadStores(workspace, planId, fingerprint);
     const persistedIds = finalStores.receipts.map((receipt) => receipt.batchId);
@@ -1687,6 +1767,7 @@ export async function runCrossProcessInitialProbe(ctx, workspace) {
       findingCount: finalStores.findings.length,
       finding: findingProjection,
       prematureSynthesisBlocked: prematureSynthesisBlocked === 3,
+      prematureSynthesisProbes,
       synthesisReleased: false,
       unverifiedAdvancesBlocked,
       agentIdentity: identity,
@@ -1758,7 +1839,9 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
     const batchAudits = [];
     const completedBatchIds = [];
     const unverifiedAdvanceProbes = [];
+    const prematureSynthesisProbes = [];
     let unverifiedAdvancesBlocked = 0;
+    let prematureSynthesisBlocked = 0;
     const allPlanBatchIds = [...expectation.completedBatchIds];
     for (let index = 2; index < 5; index++) {
       const batchId = meta?.batch?.batchId;
@@ -1839,8 +1922,11 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
       });
       unverifiedAdvancesBlocked++;
 
-      const premature = await runTool(ctx, "dshbanca-e2e-process-b-premature-synthesis-" + index, "banca_sintese", {}, agent);
-      if (!premature.result.isError || !premature.message.includes("synthesis input error")) fail("second DSH process released synthesis before all five batches");
+      prematureSynthesisProbes.push(await runCrossProcessSynthesisProbe(
+        ctx, workspace, expectation.planId, expectation.manuscriptFingerprint, meta, agent,
+        "dshbanca-e2e-process-b-premature-synthesis-" + index,
+      ));
+      prematureSynthesisBlocked++;
       const audit = await runTool(ctx, "dshbanca-e2e-process-b-audit-" + index, "banca_auditar", { manuscriptFingerprint: expectation.manuscriptFingerprint, batchId, findings: [] }, agent);
       if (audit.result.isError) fail("second DSH process could not submit a zero-finding audit receipt");
       const receipt = crossProcessReceipt(audit);
@@ -1884,6 +1970,8 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
       batchAudits,
       unverifiedAdvancesBlocked,
       unverifiedAdvanceProbes,
+      prematureSynthesisBlocked: prematureSynthesisBlocked === 3,
+      prematureSynthesisProbes,
       persistedReceiptCount: finalStores.receipts.length,
       persistedBatchIds: finalStores.receipts.map((receipt) => receipt.batchId),
       finalCheckpoint,
@@ -3741,8 +3829,21 @@ async function main(): Promise<void> {
     fail("Node or Bun executable is unavailable", "BLOCKED")
     return
   }
+  const versionEnv: NodeJS.ProcessEnv = {
+    PATH: [dirname(nodeExecutable), dirname(bunExecutable), "/usr/local/bin", "/usr/bin", "/bin"].join(delimiter()),
+    LANG: "C.UTF-8",
+    NO_COLOR: "1",
+  }
+  const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable, ["--version"], versionEnv))
+  const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable, ["--version"], versionEnv))
+  report.versions.node = nodeVersion
+  report.versions.bun = bunVersion
+  if (!nodeVersion || !bunVersion) {
+    fail("Node or Bun version could not be verified", "BLOCKED")
+    return
+  }
   try {
-    const nativePresetSchema = await validateNativePresetConfig(dshExecutable)
+    const nativePresetSchema = await validateNativePresetConfig(dshExecutable, nodeVersion)
     report.stages.nativePresetSchema = nativePresetSchema
     if (!nativePresetSchema.accepted) {
       fail("installed DSH native preset schemas rejected the bundled auditor composition", "FAIL")
@@ -3811,14 +3912,19 @@ async function main(): Promise<void> {
   const dshManifest = JSON.parse(readFileSync(join(dshRoot, "package.json"), "utf8"))
   report.versions.dsh = dshManifest.version
   report.stages.dshVersionSource = "package manifest adjacent to the resolved DSH CLI entrypoint; interactive preflight separately runs dsh --version"
-  const cordisManifestPath = findPackageJson(dshRoot, "@deepseek-ai/cordis")
-  const loaderManifestPath = findPackageJson(dshRoot, "@deepseek-ai/cordis-plugin-loader")
-  if (!cordisManifestPath || !loaderManifestPath) {
-    fail("DSH installation is missing Cordis or cordis-plugin-loader package metadata", "BLOCKED")
+  let cordisPackage: ReturnType<typeof resolveSelectedDshPackage>
+  let loaderPackage: ReturnType<typeof resolveSelectedDshPackage>
+  try {
+    cordisPackage = resolveSelectedDshPackage(dshRoot, "@deepseek-ai/cordis", nodeVersion)
+    loaderPackage = resolveSelectedDshPackage(dshRoot, "@deepseek-ai/cordis-plugin-loader", nodeVersion)
+    assertDeclaredDependency(dshManifest, "@deepseek-ai/cordis", cordisPackage.manifest.version as string)
+    assertDeclaredDependency(dshManifest, "@deepseek-ai/cordis-plugin-loader", loaderPackage.manifest.version as string)
+  } catch {
+    fail("selected DSH installation is missing or incompatible with Cordis or cordis-plugin-loader metadata", "BLOCKED")
     return
   }
-  report.versions.cordis = JSON.parse(readFileSync(cordisManifestPath, "utf8")).version
-  report.versions.cordisPluginLoader = JSON.parse(readFileSync(loaderManifestPath, "utf8")).version
+  report.versions.cordis = cordisPackage.manifest.version
+  report.versions.cordisPluginLoader = loaderPackage.manifest.version
 
   const hostPackageVersions = [
     ["dshSkill", "@deepseek-ai/dsh-skill"],
@@ -3834,27 +3940,15 @@ async function main(): Promise<void> {
     ["dshToolAskUser", "@deepseek-ai/dsh-tool-ask-user"],
   ] as const
   for (const [key, packageName] of hostPackageVersions) {
-    const packageManifest = findPackageJson(dshRoot, packageName)
-    if (!packageManifest) {
-      fail(`DSH installation is missing required host API package ${packageName}`, "BLOCKED")
+    try {
+      const hostPackage = resolveSelectedDshPackage(dshRoot, packageName, nodeVersion)
+      report.versions[key] = hostPackage.manifest.version as string
+    } catch {
+      fail(`selected DSH installation is missing or incompatible with required host API package ${packageName}`, "BLOCKED")
       return
     }
-    report.versions[key] = JSON.parse(readFileSync(packageManifest, "utf8")).version
   }
 
-  const nodeVersion = nodeExecutable ? commandVersion(nodeExecutable, ["--version"], env) : null
-  const bunVersion = bunExecutable ? commandVersion(bunExecutable, ["--version"], env) : null
-  report.versions.node = nodeVersion
-  report.versions.bun = bunVersion
-  if (!nodeVersion || !bunVersion) {
-    fail("Node or Bun version could not be verified", "BLOCKED")
-    return
-  }
-
-  if (!nodeExecutable || !bunExecutable) {
-    fail("Node or Bun executable is missing from PATH", "BLOCKED")
-    return
-  }
   const pnpmResolution = findPnpmCli()
   if (!pnpmResolution) {
     fail("No cached pnpm CLI is available for offline execution; provision pnpm (native binary or JS CLI) in Corepack cache or set PNPM_BIN to a valid pnpm executable", "BLOCKED")
@@ -3864,12 +3958,12 @@ async function main(): Promise<void> {
   const pnpmCheck = await run(pnpmCmd.command, pnpmCmd.args, { cwd: repositoryRoot, env, timeoutMs: 10_000 })
   report.stages.pnpmVersionExitCode = pnpmCheck.exitCode
   if (pnpmCheck.exitCode !== 0) {
-    fail(`Cached pnpm cannot execute offline: ${safeOutput(pnpmCheck)}`, "BLOCKED")
+    fail(formatCommandFailure("offline pnpm preflight", "cached pnpm could not execute offline", pnpmCheck), "BLOCKED")
     return
   }
-  const reportedVersion = pnpmCheck.stdout.trim().split(/\r?\n/)[0] ?? null
+  const reportedVersion = safeRuntimeVersion(pnpmCheck.stdout.trim().split(/\r?\n/)[0] ?? null)
   if (!reportedVersion || reportedVersion !== pnpmResolution.declaredVersion) {
-    fail(`pnpm --version execution reported "${reportedVersion}", which does not match verified manifest version "${pnpmResolution.declaredVersion}"`, "BLOCKED")
+    fail("pnpm --version did not match the verified cached CLI manifest version", "BLOCKED")
     return
   }
   report.versions.pnpm = reportedVersion
@@ -3892,7 +3986,7 @@ async function main(): Promise<void> {
   const setup = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--from-default-profile", "sdk", "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
   report.stages.profileInitialization = { exitCode: setup.exitCode, timedOut: setup.timedOut }
   if (setup.exitCode !== 0 || setup.timedOut) {
-    fail(`DSH could not create the isolated SDK profile: ${safeOutput(setup)}`)
+    fail(formatCommandFailure("isolated SDK profile setup", "the real DSH profile could not be created", setup))
     return
   }
   const profileDir = join(dirs.dshHome, "profiles", profileName)
@@ -3908,7 +4002,7 @@ async function main(): Promise<void> {
   const build = await run(bunExecutable, ["run", "build"], { cwd: repositoryRoot, env, timeoutMs })
   report.stages.build = { exitCode: build.exitCode, timedOut: build.timedOut }
   if (build.exitCode !== 0 || build.timedOut) {
-    fail(`Repository build required for the exported DSH entrypoint failed: ${safeOutput(build)}`)
+    fail(formatCommandFailure("repository bundle build", "the exported DSH entrypoint build failed", build))
     return
   }
 
@@ -3982,7 +4076,11 @@ async function main(): Promise<void> {
   report.stages.nativeBundleInstall = { exitCode: add.exitCode, timedOut: add.timedOut }
   if (add.exitCode !== 0 || add.timedOut) {
     const offlineMissing = isOfflineMissingPnpmError(`${add.stderr}\n${add.stdout}`)
-    fail(`DSH native offline bundle installation ${offlineMissing ? "is BLOCKED by a missing offline dependency" : "failed"}: ${safeOutput(add)}`, offlineMissing ? "BLOCKED" : "FAIL")
+    fail(formatCommandFailure(
+      "native offline bundle installation",
+      offlineMissing ? "blocked because a cached dependency is missing" : "the package-manager install failed",
+      add,
+    ), offlineMissing ? "BLOCKED" : "FAIL")
     return
   }
 
@@ -4184,11 +4282,11 @@ async function main(): Promise<void> {
     stdin: "EOF triggers native SDK stdin-lifetime shutdown; no request or model call is sent",
   }
   if (boot.exitCode !== 0 || boot.timedOut || boot.signal !== null || !boot.spawnObserved || !boot.exitObserved || !boot.closeObserved || !boot.hostProcessIdentitySha256) {
-    fail(`Real DSH SDK profile boot failed, timed out, or exited unexpectedly before evidence: ${safeOutput(boot)}`)
+    fail(formatCommandFailure("native DSH profile boot", "the profile failed, timed out, or exited before observer evidence", boot))
     return
   }
   if (!existsSync(observerResult)) {
-    fail(`The real profile exited without the Cordis observer evidence file; plugin lifecycle/discovery was not observed. Sanitized boot output: ${safeOutput(boot)}`)
+    fail(formatCommandFailure("native Cordis observer", "the profile exited without lifecycle/discovery evidence", boot))
     return
   }
   const observed = JSON.parse(readFileSync(observerResult, "utf8"))
@@ -4285,7 +4383,7 @@ async function main(): Promise<void> {
         closeObserved: secondBoot.closeObserved === true,
       },
     }
-    fail(`Issue #103 second native DSH process failed, was forced to stop, or omitted recovery evidence: ${safeOutput(secondBoot)}`)
+    fail(formatCommandFailure("cross-process recovery phase two", "the second native DSH process failed or omitted recovery evidence", secondBoot))
     return
   }
   const phaseTwoSidecar = JSON.parse(readFileSync(restartObserverResultTwo, "utf8"))
@@ -4579,15 +4677,15 @@ async function main(): Promise<void> {
 
 try {
   await main()
-} catch (error) {
-  fail(`Unhandled gate error: ${error instanceof Error ? error.message.replaceAll(scratchRoot ?? "\0", "<sandbox>").replaceAll(repositoryRoot, "<checkout>") : "unknown error"}`)
+} catch {
+  fail("Runner orchestration: unexpected exception; details withheld")
 } finally {
   if (restartWorkspaceDirectoryFd !== undefined) {
     try {
       closeSync(restartWorkspaceDirectoryFd)
       restartWorkspaceDirectoryFd = undefined
-    } catch (error) {
-      fail(`Synthetic workspace identity handle teardown failed: ${error instanceof Error ? error.message : "unknown error"}`)
+    } catch {
+      fail("Synthetic workspace identity handle teardown failed; details withheld")
     }
   }
   if (scratchRoot && existsSync(scratchRoot)) {
@@ -4600,9 +4698,9 @@ try {
       rmSync(resolvedScratch, { recursive: true, force: false })
       report.sandbox.removed = !existsSync(resolvedScratch)
       if (!report.sandbox.removed) fail("Scratch cleanup did not remove the test-owned sandbox")
-    } catch (error) {
+    } catch {
       report.sandbox.removed = false
-      fail(`Scratch cleanup failed: ${error instanceof Error ? error.message : "unknown cleanup error"}`)
+      fail("Scratch cleanup failed; details withheld")
     }
   } else if (scratchRoot) {
     report.sandbox.removed = true
@@ -4612,10 +4710,10 @@ try {
   }
   try {
     writeReport()
-  } catch (error) {
+  } catch {
     finalStatus = "FAIL"
     report.status = finalStatus
-    report.failures.push(`Could not preserve sanitized report at ${reportPathLabel}: ${error instanceof Error ? error.message : "unknown error"}`)
+    report.failures.push("Report persistence failed; details withheld")
     process.stderr.write(`FAIL: report persistence failed (${reportPathLabel})\n`)
   }
 }
@@ -4640,6 +4738,7 @@ const crossProcessBatchAuditStatus = typeof report.stages.crossProcessBatchAudit
   : "NOT_EVALUATED"
 process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}; sequential process-restart recovery (#103): ${crossProcessBatchAuditStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
-if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Skill ${report.versions.dshSkill ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
+const safeVersions = sanitizeReport(report.versions) as GateReport["versions"]
+if (safeVersions.dsh) process.stdout.write(`DSH ${safeVersions.dsh}; Cordis ${safeVersions.cordis ?? "unknown"}; loader ${safeVersions.cordisPluginLoader ?? "unknown"}; Skill ${safeVersions.dshSkill ?? "unknown"}; Agent ${safeVersions.dshAgent ?? "unknown"}; AgentLoop ${safeVersions.dshAgentLoop ?? "unknown"}; Tools ${safeVersions.dshTools ?? "unknown"}; AgentPreset ${safeVersions.dshAgentPreset ?? "unknown"}; PresetRegistry ${safeVersions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${safeVersions.dshApiSessionController ?? "unknown"}; Bun ${safeVersions.bun ?? "unknown"}; Node ${safeVersions.node ?? "unknown"}; pnpm ${safeVersions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)
 process.exitCode = finalStatus === "PASS" ? passExitCode() : finalStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode()

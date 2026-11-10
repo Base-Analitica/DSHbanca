@@ -803,6 +803,61 @@ const completeAgentSessionResumeEvidence = {
     sessionUnregistered: true,
   },
 }
+const incompleteCoverageMessage = 'global synthesis requires checkpoint.state === "complete"; received "running"'
+const incompleteCoverageValue = [
+  "synthesis input error",
+  "code=incomplete_coverage",
+  `message=${incompleteCoverageMessage}`,
+].join("\n")
+const completeBatchAuditSynthesisProbes = batchAuditIds.map((batchId, batchIndex) => {
+  const completedCharacters = batchIndex * 120
+  const checkpoint = {
+    planId: batchAuditPlanId,
+    manuscriptFingerprint: batchAuditFingerprint,
+    totalBatches: 5,
+    completedBatches: batchIndex,
+    completedCharacters,
+    totalCharacters: 595,
+    coveragePercent: Math.round((completedCharacters / 595) * 10_000) / 100,
+    state: "running",
+    nextBatchIndex: batchIndex,
+    nextBatchId: batchId,
+  }
+  const findings = batchIndex === 0 ? [] : [{ ...completeFindingProjection }]
+  const persistedBatchIds = batchAuditIds.slice(0, batchIndex + 1)
+  const persistence = {
+    analysisInventorySha256: "a".repeat(64),
+    checkpointSha256: "b".repeat(64),
+    auditConfirmationsSha256: "c".repeat(64),
+    findingsSha256: "d".repeat(64),
+  }
+  const workspaceInventory = ["4", "5", "6", "7", "8"][batchIndex]!.repeat(64)
+  return {
+    batchIndex,
+    batchId,
+    toolRuntimeIsError: false,
+    toolResultValue: incompleteCoverageValue,
+    toolMessage: incompleteCoverageValue,
+    errorCode: "incomplete_coverage",
+    errorMessage: incompleteCoverageMessage,
+    rejectionObserved: true,
+    checkpointBefore: { ...checkpoint },
+    checkpointAfter: { ...checkpoint },
+    persistenceBefore: { ...persistence },
+    persistenceAfter: { ...persistence },
+    workspaceInventoryBeforeSha256: workspaceInventory,
+    workspaceInventoryAfterSha256: workspaceInventory,
+    persistedReceiptCountBefore: batchIndex + 1,
+    persistedReceiptCountAfter: batchIndex + 1,
+    persistedBatchIdsBefore: [...persistedBatchIds],
+    persistedBatchIdsAfter: [...persistedBatchIds],
+    findingCountBefore: findings.length,
+    findingCountAfter: findings.length,
+    findingsBefore: findings.map((finding) => ({ ...finding })),
+    findingsAfter: findings.map((finding) => ({ ...finding })),
+    persistentStateUnchanged: true,
+  }
+})
 const completeBatchAuditEvidence = {
   probeExecuted: true,
   totalBatches: 5,
@@ -812,6 +867,7 @@ const completeBatchAuditEvidence = {
   planBatchIds: [...batchAuditIds],
   unverifiedAdvancesBlocked: 5,
   prematureSynthesisBlocked: 5,
+  prematureSynthesisProbes: completeBatchAuditSynthesisProbes,
   auditsCompletedWithZeroFindings: 4,
   batchAudits: batchAuditIds.map((batchId, batchIndex) => ({
     batchIndex,
@@ -937,6 +993,66 @@ const completeCrossProcessUnauditedAdvanceProbes = [2, 3, 4].map((batchIndex, pr
     persistentStateUnchanged: true,
   }
 })
+const completePhaseOneSynthesisProbes = [0, 1, 2].map((batchIndex) => {
+  const receiptCount = Math.min(batchIndex + 1, 2)
+  const findings = batchIndex === 0 ? [] : [{ ...completeFindingProjection }]
+  const persistence = { ...crossProcessPersistenceHashes }
+  const inventoryDigest = ["4", "5", "6"][batchIndex]!.repeat(64)
+  const checkpoint = crossProcessCheckpointAt(batchIndex)
+  return {
+    batchIndex,
+    batchId: batchAuditIds[batchIndex],
+    toolRuntimeIsError: false,
+    toolResultValue: incompleteCoverageValue,
+    toolMessage: incompleteCoverageValue,
+    errorCode: "incomplete_coverage",
+    errorMessage: incompleteCoverageMessage,
+    rejectionObserved: true,
+    checkpointBefore: { ...checkpoint },
+    checkpointAfter: { ...checkpoint },
+    persistenceBefore: { ...persistence },
+    persistenceAfter: { ...persistence },
+    workspaceInventoryBeforeSha256: inventoryDigest,
+    workspaceInventoryAfterSha256: inventoryDigest,
+    persistedReceiptCountBefore: receiptCount,
+    persistedReceiptCountAfter: receiptCount,
+    persistedBatchIdsBefore: batchAuditIds.slice(0, receiptCount),
+    persistedBatchIdsAfter: batchAuditIds.slice(0, receiptCount),
+    findingCountBefore: findings.length,
+    findingCountAfter: findings.length,
+    findingsBefore: findings.map((finding) => ({ ...finding })),
+    findingsAfter: findings.map((finding) => ({ ...finding })),
+    persistentStateUnchanged: true,
+  }
+})
+const completePhaseTwoSynthesisProbes = [2, 3, 4].map((batchIndex, probeIndex) => {
+  const priorAdvanceProbe = completeCrossProcessUnauditedAdvanceProbes[probeIndex]!
+  return {
+    batchIndex,
+    batchId: batchAuditIds[batchIndex],
+    toolRuntimeIsError: false,
+    toolResultValue: incompleteCoverageValue,
+    toolMessage: incompleteCoverageValue,
+    errorCode: "incomplete_coverage",
+    errorMessage: incompleteCoverageMessage,
+    rejectionObserved: true,
+    checkpointBefore: { ...priorAdvanceProbe.checkpointAfter },
+    checkpointAfter: { ...priorAdvanceProbe.checkpointAfter },
+    persistenceBefore: { ...priorAdvanceProbe.persistenceAfter },
+    persistenceAfter: { ...priorAdvanceProbe.persistenceAfter },
+    workspaceInventoryBeforeSha256: priorAdvanceProbe.workspaceInventoryAfterSha256,
+    workspaceInventoryAfterSha256: priorAdvanceProbe.workspaceInventoryAfterSha256,
+    persistedReceiptCountBefore: priorAdvanceProbe.persistedReceiptCountAfter,
+    persistedReceiptCountAfter: priorAdvanceProbe.persistedReceiptCountAfter,
+    persistedBatchIdsBefore: [...priorAdvanceProbe.persistedBatchIdsAfter],
+    persistedBatchIdsAfter: [...priorAdvanceProbe.persistedBatchIdsAfter],
+    findingCountBefore: priorAdvanceProbe.findingCountAfter,
+    findingCountAfter: priorAdvanceProbe.findingCountAfter,
+    findingsBefore: priorAdvanceProbe.findingsAfter.map((finding) => ({ ...finding })),
+    findingsAfter: priorAdvanceProbe.findingsAfter.map((finding) => ({ ...finding })),
+    persistentStateUnchanged: true,
+  }
+})
 const crossProcessAuditorIdentity = (agentId: string) => ({
   createdVia: "ctx.agents.create",
   agentId,
@@ -1046,6 +1162,7 @@ const completeCrossProcessBatchAuditEvidence = {
     findingCount: 1,
     finding: { ...completeFindingProjection },
     prematureSynthesisBlocked: true,
+    prematureSynthesisProbes: completePhaseOneSynthesisProbes,
     synthesisReleased: false,
     agentIdentity: crossProcessAuditorIdentity("8".repeat(64)),
     teardown: { ...crossProcessTeardown },
@@ -1075,6 +1192,8 @@ const completeCrossProcessBatchAuditEvidence = {
     })),
     unverifiedAdvancesBlocked: 3,
     unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes,
+    prematureSynthesisBlocked: true,
+    prematureSynthesisProbes: completePhaseTwoSynthesisProbes,
     persistedReceiptCount: 5,
     persistedBatchIds: [...batchAuditIds],
     finalCheckpoint: {
@@ -1124,6 +1243,50 @@ describe("DSH process-restart recovery contract (#103)", () => {
         "phase one must leave canonical 1/5 and 2/5 checkpoints matching observed batch characters, coverage, and next plan IDs",
       )
     }
+  })
+
+  test.each([
+    ["ToolRuntime dispatch error", { toolRuntimeIsError: true }],
+    ["successful JSON synthesis", { toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), errorCode: null }],
+    ["wrong domain code", { toolResultValue: incompleteCoverageValue.replace("incomplete_coverage", "missing_findings"), errorCode: "missing_findings" }],
+    ["wrong checkpoint message", { toolResultValue: incompleteCoverageValue.replace('received "running"', 'received "complete"'), errorMessage: 'global synthesis requires checkpoint.state === "complete"; received "complete"' }],
+    ["checkpoint changed during refusal", { checkpointAfter: { ...crossProcessCheckpointAt(0), completedBatches: 1 } }],
+    ["persisted store changed during refusal", { persistenceAfter: { ...crossProcessPersistenceHashes, findingsSha256: "0".repeat(64) } }],
+    ["workspace changed during refusal", { workspaceInventoryAfterSha256: "0".repeat(64) }],
+  ])("phase-one premature synthesis rejects %s", (_label, probePatch) => {
+    const phaseOne = {
+      ...completeCrossProcessBatchAuditEvidence.phaseOne,
+      prematureSynthesisProbes: completePhaseOneSynthesisProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        ...probePatch,
+        rejectionObserved: false,
+      } : probe),
+    }
+    expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(phaseOne)).toContain(
+      "phase one must observe exact incomplete_coverage domain refusals without persistent-state mutation",
+    )
+  })
+
+  test.each([
+    ["ToolRuntime error is not a domain refusal", { toolRuntimeIsError: true }],
+    ["successful output releases synthesis", { toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), errorCode: null }],
+    ["persisted checkpoint mutates", { checkpointAfter: { ...crossProcessCheckpointAt(2), completedBatches: 3 } }],
+    ["receipts mutate", { persistedBatchIdsAfter: [batchAuditIds[0]] }],
+    ["findings mutate", { findingsAfter: [] }],
+    ["workspace mutates", { workspaceInventoryAfterSha256: "0".repeat(64) }],
+  ])("phase-two premature synthesis rejects %s", (_label, probePatch) => {
+    const phaseTwo = {
+      ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+      prematureSynthesisProbes: completePhaseTwoSynthesisProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        ...probePatch,
+        rejectionObserved: false,
+      } : probe),
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence({
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo,
+    })).toContain("second process must observe exact incomplete_coverage domain refusals without persistent-state mutation")
   })
 
   test("cross-process BLOCKED status participates in the overall gate", () => {
@@ -1713,6 +1876,41 @@ describe("DSH batch audit evidence gate contract (#44, #98, #100)", () => {
 
   test.each([
     ["probe was skipped", { ...completeBatchAuditEvidence, probeExecuted: false }, "batch audit probe must have executed"],
+    [
+      "exact synthesis probes are missing",
+      { ...completeBatchAuditEvidence, prematureSynthesisProbes: [] },
+      "each incomplete batch must record an exact synthesis refusal",
+    ],
+    [
+      "synthesis dispatch error is mistaken for domain refusal",
+      {
+        ...completeBatchAuditEvidence,
+        prematureSynthesisProbes: completeBatchAuditSynthesisProbes.map((probe, index) => index === 0
+          ? { ...probe, toolRuntimeIsError: true }
+          : probe),
+      },
+      "incomplete batch 0 must return the exact incomplete_coverage ToolRuntime value without mutation",
+    ],
+    [
+      "synthesis returns successful output instead of refusal",
+      {
+        ...completeBatchAuditEvidence,
+        prematureSynthesisProbes: completeBatchAuditSynthesisProbes.map((probe, index) => index === 0
+          ? { ...probe, toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), toolMessage: JSON.stringify({ coverage: { state: "complete" } }) }
+          : probe),
+      },
+      "incomplete batch 0 must return the exact incomplete_coverage ToolRuntime value without mutation",
+    ],
+    [
+      "synthesis refusal mutates durable state",
+      {
+        ...completeBatchAuditEvidence,
+        prematureSynthesisProbes: completeBatchAuditSynthesisProbes.map((probe, index) => index === 0
+          ? { ...probe, persistenceAfter: { ...probe.persistenceAfter, findingsSha256: "e".repeat(64) }, persistentStateUnchanged: false }
+          : probe),
+      },
+      "incomplete batch 0 must return the exact incomplete_coverage ToolRuntime value without mutation",
+    ],
     [
       "Agent and Session identity is fabricated",
       {
@@ -3167,5 +3365,131 @@ describe("DSH Cordis composed profile plugin deduplication contract (#48 P1)", (
       userApprovalUnique: true,
       askUserToolPresent: true,
     })).toEqual([])
+  })
+})
+
+describe("DSH E2E diagnostic redaction", () => {
+  test("runtime version outputs are allowlisted before report or terminal use", () => {
+    const safeRuntimeVersion = Reflect.get(profileEvidenceContract, "safeRuntimeVersion") as (value: unknown) => string | null
+    expect(safeRuntimeVersion("v26.7.0")).toBe("v26.7.0")
+    expect(safeRuntimeVersion("1.4.2")).toBe("1.4.2")
+    expect(safeRuntimeVersion("9.15.9")).toBe("9.15.9")
+    expect(safeRuntimeVersion("/private-root/token=arbitrary-output")).toBeNull()
+    expect(safeRuntimeVersion("v26.7.0 arbitrary output")).toBeNull()
+    expect(safeRuntimeVersion("api-secret-123456789012")).toBeNull()
+  })
+
+  test("command failures and nested reports retain status metadata without local paths, URIs, or native IDs", () => {
+    const safeOutput = Reflect.get(profileEvidenceContract, "safeOutput") as (result: Record<string, unknown>) => string
+    const formatCommandFailure = Reflect.get(profileEvidenceContract, "formatCommandFailure") as (
+      stage: string,
+      nature: string,
+      result: Record<string, unknown>,
+    ) => string
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    expect(typeof safeOutput).toBe("function")
+    expect(typeof formatCommandFailure).toBe("function")
+    expect(typeof sanitizeReport).toBe("function")
+
+    const command = {
+      exitCode: 2,
+      signal: null,
+      timedOut: false,
+      spawnObserved: true,
+      exitObserved: true,
+      closeObserved: true,
+      stdout: "/private-root/checkouts/dshbanca file:///private-root/scratch/observer native-agent-secret-123",
+      stderr: 'sessionId=native-session-secret-456 local://workspace/private agentId=native-agent-secret-123',
+    }
+    const diagnostic = formatCommandFailure("phase-two synthesis", "incomplete coverage refusal failed", command)
+    expect(diagnostic).toContain("phase-two synthesis")
+    expect(diagnostic).toContain("incomplete coverage refusal failed")
+    expect(diagnostic).toContain("exitCode=2")
+    expect(diagnostic).not.toContain("private-root")
+    expect(diagnostic).not.toContain("file://")
+    expect(diagnostic).not.toContain("local://")
+    expect(diagnostic).not.toContain("native-agent-secret")
+    expect(diagnostic).not.toContain("native-session-secret")
+    expect(safeOutput(command)).toBe(diagnostic.slice(diagnostic.indexOf("exitCode=")))
+    const longDiagnostic = formatCommandFailure("report persistence", "observer output was withheld", {
+      ...command,
+      stdout: `${"x".repeat(20_000)} /private-root/trailing-native-session-secret-456`,
+    })
+    expect(longDiagnostic.length).toBeLessThan(500)
+    expect(longDiagnostic).not.toContain("private-root")
+    expect(longDiagnostic).not.toContain("native-session-secret")
+
+    const hostileReport = {
+      status: "BLOCKED",
+      failures: [diagnostic],
+      stages: {
+        boot: { status: "FAIL", exitCode: 2, failureKind: "native_profile_boot_failed", diagnostic: "/private-root/checkouts/dshbanca/file:///private-root/logs/boot.log" },
+        academicDecision: { evidence: { agentIdentity: { agentId: "native-agent-secret-123", sessionId: "native-session-secret-456" } } },
+        nativeQuestions: { request: { requestId: "native-request-secret-789" }, event: { id: "550e8400-e29b-41d4-a716-446655440000" } },
+        alternateIdentityKeys: {
+          "session-id": "hyphen-session-secret-123",
+          agent_id: "underscore-agent-secret-456",
+          processId: "process-secret-789",
+          process: { ids: ["opaque-process-array-secret"] },
+          pid: "pid-secret-abc",
+        },
+        serializedIdentity: '{"session_id":"serialized-session-secret-234","pid":"serialized-pid-secret-def"}',
+        platform: {
+          windowsPath: "C:\\Users\\fake\\repo",
+          uncPath: "\\\\fakehost\\share\\repo",
+          uri: "file:///private-root/a%20b",
+          localUris: ["file:/private-root/x", "file://localhost/C:/Users/fake/x", "local://workspace/path", "local:/workspace/path"],
+          uriWithSpaces: "opening file:///private root/sensitive-uri-path; retry",
+          pathWithSpaces: "/private root/checkouts/unique-X",
+        },
+      },
+    }
+    const sanitized = JSON.stringify(sanitizeReport(hostileReport))
+    for (const secret of [
+      "/private-root",
+      "/private root",
+      "unique-X",
+      "sensitive-uri-path",
+      "C:\\Users\\fake\\repo",
+      "fakehost\\share",
+      "file:",
+      "local://",
+      "native-agent-secret",
+      "native-session-secret",
+      "native-request-secret",
+      "hyphen-session-secret",
+      "underscore-agent-secret",
+      "process-secret",
+      "opaque-process-array-secret",
+      "pid-secret",
+      "serialized-session-secret",
+      "serialized-pid-secret",
+      "550e8400-e29b-41d4-a716-446655440000",
+    ]) expect(sanitized).not.toContain(secret)
+    expect(sanitized).toContain('"status":"BLOCKED"')
+    expect(sanitized).toContain('"failureKind":"native_profile_boot_failed"')
+    expect(sanitized).toContain('"exitCode":2')
+    expect(sanitized).toContain("phase-two synthesis")
+    expect(sanitized).toContain("incomplete coverage refusal failed")
+  })
+
+  test("runner sanitizes the complete report and withholds raw exception and child output", () => {
+    const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+    const writeReportStart = runnerSource.indexOf("function writeReport(): void")
+    const failFunctionStart = runnerSource.indexOf("function fail(message:", writeReportStart)
+    const writeReportSource = runnerSource.slice(writeReportStart, failFunctionStart)
+    expect(writeReportSource).toContain("sanitizeReport(report)")
+    expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable")
+    expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable")
+    expect(runnerSource).toContain("const reportedVersion = safeRuntimeVersion(pnpmCheck.stdout")
+    expect(runnerSource).toContain("const safeVersions = sanitizeReport(report.versions)")
+    expect(runnerSource).not.toContain("Node ${report.versions.node")
+    expect(runnerSource).not.toContain('execution reported "${reportedVersion}"')
+    expect(runnerSource).toContain('fail("Runner orchestration: unexpected exception; details withheld")')
+    expect(runnerSource).toContain('report.failures.push("Report persistence failed; details withheld")')
+    expect(runnerSource).toContain('formatCommandFailure("native DSH profile boot"')
+    expect(runnerSource).toContain('const reportPathLabel = configuredReportPath')
+    expect(runnerSource).not.toContain("error.message.replaceAll(scratchRoot")
+    expect(runnerSource).not.toContain("Could not preserve sanitized report at ${reportPathLabel}: ${error.message")
   })
 })

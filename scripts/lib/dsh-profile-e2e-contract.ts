@@ -1,4 +1,349 @@
 import { createHash } from "node:crypto"
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+
+export interface SelectedDshPackage {
+  layout: "nested" | "sibling"
+  packageRoot: string
+  manifestPath: string
+  entryPath: string
+  dshVersion: string
+  manifest: Record<string, unknown>
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function isInsidePath(root: string, target: string): boolean {
+  const relativePath = relative(root, target)
+  return relativePath === "" || (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+}
+
+function readPackageManifest(path: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
+    if (isRecord(parsed)) return parsed
+  } catch {
+    // Report a stable, path-free contract error below.
+  }
+  throw new Error("selected DSH package metadata is invalid")
+}
+
+function validReleaseVersion(value: unknown): value is string {
+  return typeof value === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value)
+}
+
+export function safeRuntimeVersion(value: unknown): string | null {
+  return typeof value === "string" && /^v?\d+\.\d+\.\d+$/.test(value) ? value : null
+}
+
+export function declaredPackageVersionMatches(actualVersion: string, declaredRange: unknown): boolean {
+  if (typeof declaredRange !== "string" || !validReleaseVersion(actualVersion)) return false
+  if (declaredRange === actualVersion) return true
+  const range = declaredRange.match(/^~(\d+)\.(\d+)\.(\d+)$/)
+  const actual = actualVersion.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/)
+  return Boolean(range && actual && !actual[4] && Number(actual[1]) === Number(range[1]) &&
+    Number(actual[2]) === Number(range[2]) && Number(actual[3]) >= Number(range[3]))
+}
+
+/** Verify that the executable is exactly the bin declared by its nearest DSH package. */
+export function resolveSelectedDshPackageRoot(executable: string): string | null {
+  let realExecutable: string
+  try {
+    realExecutable = realpathSync(executable)
+  } catch {
+    return null
+  }
+  let current = dirname(realExecutable)
+  while (true) {
+    const manifestPath = join(current, "package.json")
+    if (existsSync(manifestPath)) {
+      let manifest: Record<string, unknown> | undefined
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(manifestPath, "utf8"))
+        if (isRecord(parsed)) manifest = parsed
+      } catch {
+        manifest = undefined
+      }
+      if (manifest?.name === "@deepseek-ai/dsh") {
+        const declaredBin = typeof manifest.bin === "string"
+          ? manifest.bin
+          : isRecord(manifest.bin) && typeof manifest.bin.dsh === "string"
+            ? manifest.bin.dsh
+            : undefined
+        if (!validReleaseVersion(manifest.version) || !declaredBin || isAbsolute(declaredBin)) return null
+        const binPath = resolve(current, declaredBin)
+        if (!isInsidePath(current, binPath)) return null
+        try {
+          if (!statSync(binPath).isFile() || realpathSync(binPath) !== realExecutable) return null
+          return current
+        } catch {
+          return null
+        }
+      }
+    }
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
+function selectedDshInstallRoot(dshRoot: string): string {
+  let current = dirname(dshRoot)
+  let nearestNodeModules: string | undefined
+  let pnpmRoot: string | undefined
+  while (current !== dirname(current)) {
+    if (basename(current) === "node_modules") {
+      nearestNodeModules ??= current
+      if (isDirectory(join(current, ".pnpm"))) {
+        pnpmRoot = current
+        break
+      }
+    }
+    current = dirname(current)
+  }
+  const root = pnpmRoot ?? nearestNodeModules
+  if (!root) throw new Error("selected DSH package installation root is unavailable")
+  try {
+    return realpathSync(root)
+  } catch {
+    throw new Error("selected DSH package installation root is unavailable")
+  }
+}
+
+function nodeImportExportConditions(nodeVersion: string): Set<string> {
+  const version = nodeVersion.match(/^v?(\d+)\.(\d+)\.(\d+)$/)
+  if (!version) throw new Error("selected DSH Node version is invalid")
+  const major = Number(version[1])
+  const minor = Number(version[2])
+  const patch = Number(version[3])
+  if (![major, minor, patch].every(Number.isSafeInteger)) throw new Error("selected DSH Node version is invalid")
+  const supportsModuleSync = major >= 24 || (major === 23 && minor >= 4) ||
+    (major === 22 && minor >= 10) || (major === 20 && minor >= 19)
+  return new Set([
+    "node-addons",
+    "node",
+    "import",
+    ...(supportsModuleSync ? ["module-sync"] : []),
+    "default",
+  ])
+}
+
+function selectImportExportTarget(value: unknown, conditions: Set<string>): string | undefined {
+  if (typeof value === "string") return value
+  if (Array.isArray(value)) throw new Error("selected DSH package export map shape is unsupported")
+  if (!isRecord(value)) return undefined
+  for (const [condition, target] of Object.entries(value)) {
+    if (!conditions.has(condition)) continue
+    const selected = selectImportExportTarget(target, conditions)
+    if (selected !== undefined) return selected
+    if (!isRecord(target)) throw new Error("selected DSH package import condition is invalid")
+  }
+  return undefined
+}
+
+function validPackageExportTarget(target: string): boolean {
+  if (!target.startsWith("./") || /[%\\?#*]/.test(target)) return false
+  const segments = target.slice(2).split("/")
+  return segments.length > 0 && segments.every((segment) =>
+    segment.length > 0 && segment !== "." && segment !== ".." && segment.toLowerCase() !== "node_modules",
+  )
+}
+
+function validPackageSubpathKey(key: string): boolean {
+  if (key === ".") return true
+  if (!key.startsWith("./") || key.length <= 2 || /[%\\?#]/.test(key)) return false
+  const segments = key.slice(2).split("/")
+  const wildcardCount = key.split("*").length - 1
+  return wildcardCount <= 1 && segments.every((segment) =>
+    segment.length > 0 && segment !== "." && segment !== ".." && segment.toLowerCase() !== "node_modules",
+  )
+}
+
+function publicPackageEntry(manifest: Record<string, unknown>, packageRoot: string, nodeVersion: string): string {
+  const exports = manifest.exports
+  const hasExportsMap = exports !== undefined
+  const exportKeys = isRecord(exports) ? Object.keys(exports) : []
+  const exportsHaveSubpaths = exportKeys.some((key) => key.startsWith("."))
+  const exportsHaveConditions = exportKeys.some((key) => !key.startsWith("."))
+  if (exportsHaveSubpaths && exportsHaveConditions) {
+    throw new Error("selected DSH package exports cannot mix subpath and condition keys")
+  }
+  if (exportsHaveSubpaths && exportKeys.some((key) => !validPackageSubpathKey(key))) {
+    throw new Error("selected DSH package subpath export key is invalid")
+  }
+  const rootExport = exportsHaveSubpaths ? (exports as Record<string, unknown>)["."] : exports
+  const target = hasExportsMap
+    ? selectImportExportTarget(rootExport, nodeImportExportConditions(nodeVersion))
+    : typeof manifest.main === "string" ? manifest.main : undefined
+  if (!target || isAbsolute(target) || (hasExportsMap && !validPackageExportTarget(target))) {
+    throw new Error("selected DSH package public entrypoint is unavailable")
+  }
+  const entry = join(packageRoot, target)
+  try {
+    const realEntry = realpathSync(entry)
+    if (!isInsidePath(packageRoot, realEntry) || !statSync(realEntry).isFile()) {
+      throw new Error("selected DSH package public entrypoint is invalid")
+    }
+    return realEntry
+  } catch {
+    throw new Error("selected DSH package public entrypoint is unavailable")
+  }
+}
+
+/**
+ * Resolve only the selected DSH package's local or sibling dependency layout.
+ * This deliberately avoids Node's parent/global module search so a missing
+ * package cannot silently come from the checkout or another DSH installation.
+ */
+export function resolveSelectedDshPackage(dshRoot: string, packageName: string, nodeVersion: string): SelectedDshPackage {
+  if (!/^@deepseek-ai\/[a-z0-9][a-z0-9-]*$/.test(packageName)) {
+    throw new Error("selected DSH dependency name is invalid")
+  }
+  let realDshRoot: string
+  try {
+    realDshRoot = realpathSync(dshRoot)
+  } catch {
+    throw new Error("selected DSH package root is unavailable")
+  }
+  const dshManifest = readPackageManifest(join(realDshRoot, "package.json"))
+  if (dshManifest.name !== "@deepseek-ai/dsh" || !validReleaseVersion(dshManifest.version)) {
+    throw new Error("selected DSH package identity or version is invalid")
+  }
+
+  const nestedScope = join(realDshRoot, "node_modules", "@deepseek-ai")
+  const siblingScope = dirname(realDshRoot)
+  const siblingLayoutAvailable = basename(siblingScope) === "@deepseek-ai" &&
+    basename(dirname(siblingScope)) === "node_modules" && isDirectory(siblingScope)
+  const installRoot = selectedDshInstallRoot(realDshRoot)
+  const roots: Array<{ layout: SelectedDshPackage["layout"]; scope: string }> = []
+  if (isDirectory(nestedScope)) roots.push({ layout: "nested", scope: nestedScope })
+  if (siblingLayoutAvailable) roots.push({ layout: "sibling", scope: siblingScope })
+
+  const shortName = packageName.slice("@deepseek-ai/".length)
+  let selected: { layout: SelectedDshPackage["layout"]; manifestPath: string } | undefined
+  for (const candidate of roots) {
+    const packageDirectory = join(candidate.scope, shortName)
+    if (!existsSync(packageDirectory)) continue
+    const manifestPath = join(packageDirectory, "package.json")
+    if (!existsSync(manifestPath)) throw new Error("selected DSH dependency metadata is unavailable")
+    selected = { layout: candidate.layout, manifestPath }
+    break
+  }
+  if (!selected) throw new Error("selected DSH dependency is unavailable")
+
+  let realManifestPath: string
+  try {
+    realManifestPath = realpathSync(selected.manifestPath)
+  } catch {
+    throw new Error("selected DSH dependency metadata is unavailable")
+  }
+  const packageRoot = dirname(realManifestPath)
+  if (!isInsidePath(installRoot, packageRoot) && !isInsidePath(realDshRoot, packageRoot)) {
+    throw new Error("selected DSH dependency resolves outside its installation")
+  }
+  const manifest = readPackageManifest(realManifestPath)
+  if (manifest.name !== packageName || !validReleaseVersion(manifest.version)) {
+    throw new Error("selected DSH dependency identity or version is invalid")
+  }
+  if (packageName.startsWith("@deepseek-ai/dsh-") && manifest.version !== dshManifest.version) {
+    throw new Error("selected DSH dependency version does not match the selected DSH release")
+  }
+  const entryPath = publicPackageEntry(manifest, packageRoot, nodeVersion)
+  return {
+    layout: selected.layout,
+    packageRoot,
+    manifestPath: realManifestPath,
+    entryPath,
+    dshVersion: dshManifest.version,
+    manifest,
+  }
+}
+
+export interface SafeCommandResult {
+  exitCode: number | null
+  signal: string | null
+  timedOut: boolean
+  stdout: string
+  stderr: string
+  spawnObserved?: boolean
+  exitObserved?: boolean
+  closeObserved?: boolean
+}
+
+function boolLabel(value: unknown): string {
+  return value === true ? "true" : value === false ? "false" : "unknown"
+}
+
+/** Keep useful process status while omitting all untrusted stdout/stderr. */
+export function safeOutput(result: SafeCommandResult): string {
+  const exitCode = Number.isInteger(result.exitCode) ? String(result.exitCode) : "unavailable"
+  const signal = typeof result.signal === "string" && /^SIG[A-Z0-9]+$/.test(result.signal)
+    ? result.signal
+    : result.signal === null ? "none" : "other"
+  const stdoutChars = typeof result.stdout === "string" ? result.stdout.length : 0
+  const stderrChars = typeof result.stderr === "string" ? result.stderr.length : 0
+  return `exitCode=${exitCode}, signal=${signal}, timedOut=${boolLabel(result.timedOut)}, spawnObserved=${boolLabel(result.spawnObserved)}, exitObserved=${boolLabel(result.exitObserved)}, closeObserved=${boolLabel(result.closeObserved)}, stdoutChars=${stdoutChars}, stderrChars=${stderrChars}`
+}
+
+function sanitizeDiagnosticText(value: string): string {
+  let safe = value
+    .replace(/(?:file|local|vscode-local|vscode-remote):(?:\/\/)?[^"'<>;,\r\n)\]}]+/gi, "<local-uri>")
+    .replace(/(["'`])\/(?:[^\r\n]*?)\1/g, "<absolute-path>")
+    .replace(/(^|[\s"'`=([{])\/(?:[^\r\n,;)}\]]+)/g, "$1<absolute-path>")
+    .replace(/(^|[\s"'`=([{])[A-Za-z]:[\\/](?:[^\r\n,;)}\]]+)/g, "$1<absolute-path>")
+    .replace(/(^|[\s"'`=([{])\\\\[^\r\n,;)}\]]+/g, "$1<absolute-path>")
+    .replace(/(["']?(?:agent|session|request|event|call|process)[_-]?ids?["']?\s*[:=]\s*["']?)[^\s,"'{}\]]+["']?/gi, "$1<redacted-native-id>")
+    .replace(/(["'`]?pid["']?\s*[:=]\s*["']?)[^\s,"'{}\]]+["']?/gi, "$1<redacted-native-id>")
+    .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, "<redacted-native-id>")
+    .replace(/\b[0-9A-HJKMNP-TV-Z]{26}\b/g, "<redacted-native-id>")
+    .replace(/\b(?:agent|session|sess|request|req|event|evt|call|tool)[_-][A-Za-z0-9][A-Za-z0-9._-]{5,}\b/gi, "<redacted-native-id>")
+    .replace(/(?:sk|api|key|token)[-_]?[A-Za-z0-9]{12,}/gi, "<redacted>")
+  return safe.replace(/[\r\n\t]+/g, " ").trim()
+}
+
+function looksLikeLocalPathOrUri(value: string): boolean {
+  const trimmed = value.trim()
+  return /^(?:file|local|vscode-local|vscode-remote):/i.test(trimmed) ||
+    trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("\\\\")
+}
+
+const privateIdentityKey = /^(?:(?:agent|session|request|event|call|process)[_-]?ids?|pid)$/i
+const pathValueKey = /(?:path|file|directory|dirname|cwd|root)$/i
+
+/** Redact all report strings at the persistence boundary, not only failures[]. */
+export function sanitizeReport(value: unknown): unknown {
+  const visit = (current: unknown, key = "", parentKey = ""): unknown => {
+    if (typeof current === "string") {
+      if (privateIdentityKey.test(key) || key.toLowerCase() === "id" ||
+          (key === "ids" && /(?:agent|session|request|event|call|process)/i.test(parentKey))) {
+        return "<redacted-native-id>"
+      }
+      if (pathValueKey.test(key) && looksLikeLocalPathOrUri(current)) return "<redacted-local-path>"
+      return sanitizeDiagnosticText(current)
+    }
+    if (Array.isArray(current)) return current.map((entry) => visit(entry, key, parentKey))
+    if (isRecord(current)) {
+      const safeEntries = Object.entries(current).map(([childKey, child]) => [
+        sanitizeDiagnosticText(childKey),
+        visit(child, childKey, key),
+      ])
+      return Object.fromEntries(safeEntries)
+    }
+    return current
+  }
+  return visit(value)
+}
+
+/** A bounded failure diagnostic with an explicit stage, nature, and exit code. */
+export function formatCommandFailure(stage: string, nature: string, result: SafeCommandResult): string {
+  return `${sanitizeDiagnosticText(stage)}: ${sanitizeDiagnosticText(nature)}; ${safeOutput(result)}`
+}
 
 export const expectedTools = [
   "banca_init",
@@ -809,6 +1154,7 @@ export interface BatchAuditEvidenceGateEvidence {
   }>
   unverifiedAdvancesBlocked: number
   prematureSynthesisBlocked: number
+  prematureSynthesisProbes: CrossProcessSynthesisProbeEvidence[]
   auditsCompletedWithZeroFindings: number
   auditToolDispatchCount: number
   orderlyAdvances: number
@@ -1006,6 +1352,34 @@ export function validateBatchAuditEvidence(value: unknown): string[] {
   }
   if (value.prematureSynthesisBlocked !== totalBatches) {
     errors.push("all incomplete batches must block synthesis")
+  }
+  const synthesisProbes = Array.isArray(value.prematureSynthesisProbes) ? value.prematureSynthesisProbes : []
+  if (synthesisProbes.length !== totalBatches) {
+    errors.push("each incomplete batch must record an exact synthesis refusal")
+  }
+  const expectedFinding = isRecord(value.nonEmptyFinding) && isBatchAuditFindingProjection(value.nonEmptyFinding.expected)
+    ? [value.nonEmptyFinding.expected]
+    : []
+  for (let index = 0; index < totalBatches; index++) {
+    const probe = synthesisProbes[index]
+    const checkpoint = isRecord(probe) && isRecord(probe.checkpointBefore) ? probe.checkpointBefore : {}
+    const completedCharacters = checkpoint.completedCharacters
+    const checkpointCoverageMatches = Number.isInteger(completedCharacters) && completedCharacters >= 0 && completedCharacters <= 595 &&
+      checkpoint.coveragePercent === Math.round((completedCharacters / 595) * 10_000) / 100
+    const expectedProbeFindings = index === 0 ? [] : expectedFinding
+    if (!checkpointCoverageMatches || !restartSynthesisProbeMatches(
+      probe,
+      {
+        batchIndex: index,
+        batchId: typeof planBatchIds[index] === "string" ? planBatchIds[index] : "",
+        checkpoint,
+        persistedReceiptCount: index + 1,
+        persistedBatchIds: planBatchIds.slice(0, index + 1),
+        findings: expectedProbeFindings,
+      },
+      value.planId,
+      value.manuscriptFingerprint,
+    )) errors.push(`incomplete batch ${index} must return the exact incomplete_coverage ToolRuntime value without mutation`)
   }
   if (value.auditsCompletedWithZeroFindings !== totalBatches - 1) {
     errors.push("exactly one batch must accept a non-empty finding; other batches must remain empty")
@@ -1339,6 +1713,32 @@ export function classifyBatchAuditEvidenceStatus(value: unknown): ProfileGateSta
   return validateBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
+export interface CrossProcessSynthesisProbeEvidence {
+  batchIndex: number
+  batchId: string
+  toolRuntimeIsError: boolean | null
+  toolResultValue: string | null
+  toolMessage: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  rejectionObserved: boolean
+  checkpointBefore: Record<string, unknown>
+  checkpointAfter: Record<string, unknown>
+  persistenceBefore: Record<string, unknown>
+  persistenceAfter: Record<string, unknown>
+  workspaceInventoryBeforeSha256: string
+  workspaceInventoryAfterSha256: string
+  persistedReceiptCountBefore: number
+  persistedReceiptCountAfter: number
+  persistedBatchIdsBefore: string[]
+  persistedBatchIdsAfter: string[]
+  findingCountBefore: number
+  findingCountAfter: number
+  findingsBefore: BatchAuditFindingProjectionEvidence[]
+  findingsAfter: BatchAuditFindingProjectionEvidence[]
+  persistentStateUnchanged: boolean
+}
+
 export interface CrossProcessBatchAuditEvidence {
   probeExecuted: boolean
   executionMode: string
@@ -1408,6 +1808,7 @@ export interface CrossProcessBatchAuditEvidence {
     findingCount: number
     finding: BatchAuditFindingProjectionEvidence
     prematureSynthesisBlocked: boolean
+    prematureSynthesisProbes: CrossProcessSynthesisProbeEvidence[]
     synthesisReleased: boolean
     agentIdentity: Record<string, unknown>
     teardown: Record<string, unknown>
@@ -1453,6 +1854,8 @@ export interface CrossProcessBatchAuditEvidence {
       findingsAfter: BatchAuditFindingProjectionEvidence[]
       persistentStateUnchanged: boolean
     }>
+    prematureSynthesisBlocked: boolean
+    prematureSynthesisProbes: CrossProcessSynthesisProbeEvidence[]
     persistedReceiptCount: number
     persistedBatchIds: string[]
     finalCheckpoint: Record<string, unknown>
@@ -1483,6 +1886,74 @@ function restartPersistenceMatches(left: unknown, right: unknown): boolean {
   return isRecord(left) && isRecord(right) && restartPersistenceKeys.every((key) =>
     isSha256Digest(left[key]) && left[key] === right[key],
   )
+}
+
+const incompleteCoverageMessage = 'global synthesis requires checkpoint.state === "complete"; received "running"'
+const incompleteCoverageValue = [
+  "synthesis input error",
+  "code=incomplete_coverage",
+  `message=${incompleteCoverageMessage}`,
+].join("\n")
+
+function restartSynthesisProbeMatches(
+  value: unknown,
+  expected: {
+    batchIndex: number
+    batchId: string
+    checkpoint: Record<string, unknown>
+    persistedReceiptCount: number
+    persistedBatchIds: string[]
+    findings: BatchAuditFindingProjectionEvidence[]
+  },
+  planId: string,
+  fingerprint: string,
+): boolean {
+  if (!isRecord(value)) return false
+  const completedCharacters = expected.checkpoint.completedCharacters
+  const expectedCheckpoint = {
+    completedBatches: expected.batchIndex,
+    completedCharacters: Number.isInteger(completedCharacters) ? completedCharacters as number : -1,
+    state: "running",
+    nextBatchIndex: expected.batchIndex,
+    nextBatchId: expected.batchId,
+  }
+  const beforeCheckpoint = value.checkpointBefore
+  const afterCheckpoint = value.checkpointAfter
+  const checkpointCoverage = Number.isInteger(completedCharacters)
+    ? Math.round((completedCharacters as number / 595) * 10_000) / 100
+    : -1
+  return value.batchIndex === expected.batchIndex &&
+    value.batchId === expected.batchId &&
+    value.toolRuntimeIsError === false &&
+    value.toolResultValue === incompleteCoverageValue &&
+    value.toolMessage === incompleteCoverageValue &&
+    value.errorCode === "incomplete_coverage" &&
+    value.errorMessage === incompleteCoverageMessage &&
+    value.rejectionObserved === true &&
+    restartCheckpointMatches(beforeCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
+    restartCheckpointMatches(afterCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
+    isRecord(beforeCheckpoint) && isRecord(afterCheckpoint) &&
+    beforeCheckpoint.coveragePercent === checkpointCoverage &&
+    afterCheckpoint.coveragePercent === checkpointCoverage &&
+    JSON.stringify(beforeCheckpoint) === JSON.stringify(afterCheckpoint) &&
+    restartPersistenceMatches(value.persistenceBefore, value.persistenceAfter) &&
+    isSha256Digest(value.workspaceInventoryBeforeSha256) &&
+    value.workspaceInventoryBeforeSha256 === value.workspaceInventoryAfterSha256 &&
+    value.persistedReceiptCountBefore === expected.persistedReceiptCount &&
+    value.persistedReceiptCountAfter === expected.persistedReceiptCount &&
+    Array.isArray(value.persistedBatchIdsBefore) &&
+    JSON.stringify(value.persistedBatchIdsBefore) === JSON.stringify(expected.persistedBatchIds) &&
+    Array.isArray(value.persistedBatchIdsAfter) &&
+    JSON.stringify(value.persistedBatchIdsAfter) === JSON.stringify(expected.persistedBatchIds) &&
+    value.findingCountBefore === expected.findings.length &&
+    value.findingCountAfter === expected.findings.length &&
+    Array.isArray(value.findingsBefore) &&
+    value.findingsBefore.every(isBatchAuditFindingProjection) &&
+    JSON.stringify(value.findingsBefore) === JSON.stringify(expected.findings) &&
+    Array.isArray(value.findingsAfter) &&
+    value.findingsAfter.every(isBatchAuditFindingProjection) &&
+    JSON.stringify(value.findingsAfter) === JSON.stringify(expected.findings) &&
+    value.persistentStateUnchanged === true
 }
 
 function restartCheckpointMatches(
@@ -1603,6 +2074,44 @@ export function validateCrossProcessPhaseOneEvidence(value: unknown): string[] {
   }
   if (value.unverifiedAdvancesBlocked !== 2 || value.prematureSynthesisBlocked !== true || value.synthesisReleased !== false) {
     errors.push("phase one must fail closed on unaudited progress and incomplete synthesis")
+  }
+  const synthesisProbes = Array.isArray(value.prematureSynthesisProbes) ? value.prematureSynthesisProbes : []
+  const synthesisFinding = value.finding
+  const synthesisProbesMatch = synthesisProbes.length === 3 && [0, 1, 2].every((batchIndex) => {
+    const batchId = planBatchIdsPrefix[batchIndex]
+    const completedCharactersAtProbe = batchIndex === 0
+      ? 0
+      : validBatchCharacters
+        ? completedBatchCharacters.slice(0, batchIndex).reduce((sum: number, characters) => sum + (characters as number), 0)
+        : -1
+    if (typeof batchId !== "string" || completedCharactersAtProbe < 0) return false
+    const expectedCheckpoint = {
+      planId: value.planId,
+      manuscriptFingerprint: value.manuscriptFingerprint,
+      totalBatches: 5,
+      completedBatches: batchIndex,
+      completedCharacters: completedCharactersAtProbe,
+      totalCharacters: 595,
+      coveragePercent: Math.round((completedCharactersAtProbe / 595) * 10_000) / 100,
+      state: "running",
+      nextBatchIndex: batchIndex,
+      nextBatchId: batchId,
+    }
+    const receiptCount = Math.min(batchIndex + 1, 2)
+    const expectedFindings = batchIndex === 0 || !isBatchAuditFindingProjection(synthesisFinding)
+      ? []
+      : [synthesisFinding]
+    return restartSynthesisProbeMatches(synthesisProbes[batchIndex], {
+      batchIndex,
+      batchId,
+      checkpoint: expectedCheckpoint,
+      persistedReceiptCount: receiptCount,
+      persistedBatchIds: completedBatchIds.slice(0, receiptCount),
+      findings: expectedFindings,
+    }, value.planId as string, value.manuscriptFingerprint as string)
+  })
+  if (!synthesisProbesMatch) {
+    errors.push("phase one must observe exact incomplete_coverage domain refusals without persistent-state mutation")
   }
   const persistence = value.persistence
   if (!isRecord(persistence) || restartPersistenceKeys.some((key) => !isSha256Digest(persistence[key]))) {
@@ -1938,6 +2447,40 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
     ) {
       errors.push(`second process must prove batch ${batchIndex + 1} rejection left checkpoint, confirmations, findings, and inventory unchanged`)
     }
+  }
+
+  const synthesisProbes = Array.isArray(phaseTwo?.prematureSynthesisProbes) ? phaseTwo.prematureSynthesisProbes : []
+  if (phaseTwo?.prematureSynthesisBlocked !== true || synthesisProbes.length !== 3) {
+    errors.push("second process must reject incomplete synthesis for all three remaining batches")
+  }
+  let synthesisProbesMatch = synthesisProbes.length === 3
+  for (let probeIndex = 0; probeIndex < 3; probeIndex++) {
+    const batchIndex = probeIndex + 2
+    const expectedBatchId = planBatchIds[batchIndex]
+    const synthesisProbe = synthesisProbes[probeIndex]
+    const advanceProbe = unverifiedAdvanceProbes[probeIndex]
+    const expectedCheckpoint = isRecord(advanceProbe) && isRecord(advanceProbe.checkpointAfter)
+      ? advanceProbe.checkpointAfter
+      : {}
+    const expectedFindings = isBatchAuditFindingProjection(phaseOne?.finding) ? [phaseOne.finding] : []
+    const matches = typeof expectedBatchId === "string" && isRecord(advanceProbe) &&
+      restartSynthesisProbeMatches(synthesisProbe, {
+        batchIndex,
+        batchId: expectedBatchId,
+        checkpoint: expectedCheckpoint,
+        persistedReceiptCount: batchIndex,
+        persistedBatchIds: planBatchIds.slice(0, batchIndex),
+        findings: expectedFindings,
+      }, expectedPlanId as string, expectedFingerprint as string) &&
+      restartPersistenceMatches(advanceProbe.persistenceAfter, (synthesisProbe as Record<string, unknown> | undefined)?.persistenceBefore) &&
+      advanceProbe.workspaceInventoryAfterSha256 === (synthesisProbe as Record<string, unknown> | undefined)?.workspaceInventoryBeforeSha256 &&
+      JSON.stringify(advanceProbe.checkpointAfter) === JSON.stringify((synthesisProbe as Record<string, unknown> | undefined)?.checkpointBefore) &&
+      JSON.stringify(advanceProbe.persistedBatchIdsAfter) === JSON.stringify((synthesisProbe as Record<string, unknown> | undefined)?.persistedBatchIdsBefore) &&
+      JSON.stringify(advanceProbe.findingsAfter) === JSON.stringify((synthesisProbe as Record<string, unknown> | undefined)?.findingsBefore)
+    if (!matches) synthesisProbesMatch = false
+  }
+  if (!synthesisProbesMatch) {
+    errors.push("second process must observe exact incomplete_coverage domain refusals without persistent-state mutation")
   }
 
   if (!restartAgentIdentityIsVerified(phaseTwo?.agentIdentity)) {
