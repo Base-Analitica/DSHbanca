@@ -623,10 +623,11 @@ export const crossProcessToolErrorCode = (message) => {
 };
 export const crossProcessSynthesisRefusal = (outcome, checkpoint) => {
   if (outcome?.result?.isError !== false || typeof outcome.result.value !== "string" || typeof outcome.message !== "string") return null;
-  if (checkpoint?.state !== "running" || !Number.isInteger(checkpoint.completedBatches) ||
-      !Number.isInteger(checkpoint.totalBatches) || checkpoint.completedBatches < 0 ||
-      checkpoint.totalBatches <= checkpoint.completedBatches) return null;
-  const expectedMessage = 'global synthesis requires checkpoint.state === "complete"; received "running"';
+  if (checkpoint?.totalBatches !== 5 || !Number.isInteger(checkpoint.completedBatches) ||
+      checkpoint.completedBatches < 0 || checkpoint.completedBatches >= checkpoint.totalBatches) return null;
+  const expectedState = checkpoint.completedBatches === 0 ? "pending" : "running";
+  if (checkpoint.state !== expectedState) return null;
+  const expectedMessage = 'global synthesis requires checkpoint.state === "complete"; received "' + expectedState + '"';
   const lines = outcome.result.value.split(String.fromCharCode(10));
   if (lines.length !== 3 || lines[0] !== "synthesis input error" || lines[1] !== "code=incomplete_coverage" ||
       lines[2] !== "message=" + expectedMessage || outcome.message !== outcome.result.value) return null;
@@ -1516,9 +1517,14 @@ const runCrossProcessSynthesisProbe = async (ctx, workspace, planId, fingerprint
   const contextCheckpoint = crossProcessCheckpointEvidence(meta);
   const storesBefore = await crossProcessReadStores(workspace, planId, fingerprint);
   const checkpointBefore = crossProcessStoredCheckpointEvidence(storesBefore.checkpoint, meta?.batch);
-  if (contextCheckpoint.state !== "running" || contextCheckpoint.planId !== planId ||
+  const expectedCheckpointState = contextCheckpoint.completedBatches === 0 ? "pending" : "running";
+  if (contextCheckpoint.totalBatches !== 5 || !Number.isInteger(contextCheckpoint.completedBatches) ||
+      contextCheckpoint.completedBatches < 0 || contextCheckpoint.completedBatches >= contextCheckpoint.totalBatches ||
+      contextCheckpoint.state !== expectedCheckpointState || contextCheckpoint.planId !== planId ||
       contextCheckpoint.manuscriptFingerprint !== fingerprint ||
+      contextCheckpoint.totalBatches !== checkpointBefore.totalBatches ||
       contextCheckpoint.completedBatches !== checkpointBefore.completedBatches ||
+      contextCheckpoint.state !== checkpointBefore.state ||
       contextCheckpoint.nextBatchIndex !== checkpointBefore.nextBatchIndex ||
       contextCheckpoint.nextBatchId !== checkpointBefore.nextBatchId) {
     fail("cross-process synthesis probe checkpoint did not match the persisted incomplete plan");

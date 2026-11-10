@@ -803,14 +803,16 @@ const completeAgentSessionResumeEvidence = {
     sessionUnregistered: true,
   },
 }
-const incompleteCoverageMessage = 'global synthesis requires checkpoint.state === "complete"; received "running"'
-const incompleteCoverageValue = [
+const incompleteCoverageMessage = (state: "pending" | "running") =>
+  `global synthesis requires checkpoint.state === "complete"; received "${state}"`
+const incompleteCoverageValue = (state: "pending" | "running") => [
   "synthesis input error",
   "code=incomplete_coverage",
-  `message=${incompleteCoverageMessage}`,
+  `message=${incompleteCoverageMessage(state)}`,
 ].join("\n")
 const completeBatchAuditSynthesisProbes = batchAuditIds.map((batchId, batchIndex) => {
   const completedCharacters = batchIndex * 120
+  const state = batchIndex === 0 ? "pending" : "running"
   const checkpoint = {
     planId: batchAuditPlanId,
     manuscriptFingerprint: batchAuditFingerprint,
@@ -819,7 +821,7 @@ const completeBatchAuditSynthesisProbes = batchAuditIds.map((batchId, batchIndex
     completedCharacters,
     totalCharacters: 595,
     coveragePercent: Math.round((completedCharacters / 595) * 10_000) / 100,
-    state: "running",
+    state,
     nextBatchIndex: batchIndex,
     nextBatchId: batchId,
   }
@@ -836,10 +838,10 @@ const completeBatchAuditSynthesisProbes = batchAuditIds.map((batchId, batchIndex
     batchIndex,
     batchId,
     toolRuntimeIsError: false,
-    toolResultValue: incompleteCoverageValue,
-    toolMessage: incompleteCoverageValue,
+    toolResultValue: incompleteCoverageValue(state),
+    toolMessage: incompleteCoverageValue(state),
     errorCode: "incomplete_coverage",
-    errorMessage: incompleteCoverageMessage,
+    errorMessage: incompleteCoverageMessage(state),
     rejectionObserved: true,
     checkpointBefore: { ...checkpoint },
     checkpointAfter: { ...checkpoint },
@@ -952,11 +954,13 @@ const crossProcessCheckpointAtTwo = {
 }
 const crossProcessCheckpointAt = (batchIndex: number) => {
   const completedCharacters = batchIndex * 120
+  const state = batchIndex === 0 ? "pending" : "running"
   return {
     ...crossProcessCheckpointAtTwo,
     completedBatches: batchIndex,
     completedCharacters,
     coveragePercent: Math.round((completedCharacters / 595) * 10000) / 100,
+    state,
     nextBatchIndex: batchIndex,
     nextBatchId: batchAuditIds[batchIndex],
   }
@@ -999,14 +1003,15 @@ const completePhaseOneSynthesisProbes = [0, 1, 2].map((batchIndex) => {
   const persistence = { ...crossProcessPersistenceHashes }
   const inventoryDigest = ["4", "5", "6"][batchIndex]!.repeat(64)
   const checkpoint = crossProcessCheckpointAt(batchIndex)
+  const state = batchIndex === 0 ? "pending" : "running"
   return {
     batchIndex,
     batchId: batchAuditIds[batchIndex],
     toolRuntimeIsError: false,
-    toolResultValue: incompleteCoverageValue,
-    toolMessage: incompleteCoverageValue,
+    toolResultValue: incompleteCoverageValue(state),
+    toolMessage: incompleteCoverageValue(state),
     errorCode: "incomplete_coverage",
-    errorMessage: incompleteCoverageMessage,
+    errorMessage: incompleteCoverageMessage(state),
     rejectionObserved: true,
     checkpointBefore: { ...checkpoint },
     checkpointAfter: { ...checkpoint },
@@ -1031,10 +1036,10 @@ const completePhaseTwoSynthesisProbes = [2, 3, 4].map((batchIndex, probeIndex) =
     batchIndex,
     batchId: batchAuditIds[batchIndex],
     toolRuntimeIsError: false,
-    toolResultValue: incompleteCoverageValue,
-    toolMessage: incompleteCoverageValue,
+    toolResultValue: incompleteCoverageValue("running"),
+    toolMessage: incompleteCoverageValue("running"),
     errorCode: "incomplete_coverage",
-    errorMessage: incompleteCoverageMessage,
+    errorMessage: incompleteCoverageMessage("running"),
     rejectionObserved: true,
     checkpointBefore: { ...priorAdvanceProbe.checkpointAfter },
     checkpointAfter: { ...priorAdvanceProbe.checkpointAfter },
@@ -1248,8 +1253,8 @@ describe("DSH process-restart recovery contract (#103)", () => {
   test.each([
     ["ToolRuntime dispatch error", { toolRuntimeIsError: true }],
     ["successful JSON synthesis", { toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), errorCode: null }],
-    ["wrong domain code", { toolResultValue: incompleteCoverageValue.replace("incomplete_coverage", "missing_findings"), errorCode: "missing_findings" }],
-    ["wrong checkpoint message", { toolResultValue: incompleteCoverageValue.replace('received "running"', 'received "complete"'), errorMessage: 'global synthesis requires checkpoint.state === "complete"; received "complete"' }],
+    ["wrong domain code", { toolResultValue: incompleteCoverageValue("pending").replace("incomplete_coverage", "missing_findings"), errorCode: "missing_findings" }],
+    ["wrong checkpoint message", { toolResultValue: incompleteCoverageValue("pending").replace('received "pending"', 'received "running"'), errorMessage: incompleteCoverageMessage("running") }],
     ["checkpoint changed during refusal", { checkpointAfter: { ...crossProcessCheckpointAt(0), completedBatches: 1 } }],
     ["persisted store changed during refusal", { persistenceAfter: { ...crossProcessPersistenceHashes, findingsSha256: "0".repeat(64) } }],
     ["workspace changed during refusal", { workspaceInventoryAfterSha256: "0".repeat(64) }],
@@ -1260,6 +1265,26 @@ describe("DSH process-restart recovery contract (#103)", () => {
         ...probe,
         ...probePatch,
         rejectionObserved: false,
+      } : probe),
+    }
+    expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(phaseOne)).toContain(
+      "phase one must observe exact incomplete_coverage domain refusals without persistent-state mutation",
+    )
+  })
+
+  test.each([
+    ["running at 0/5", 0, "running"],
+    ["pending after 0/5", 1, "pending"],
+  ])("phase one rejects %s despite a matching refusal message", (_label, probeIndex, wrongState) => {
+    const phaseOne = {
+      ...completeCrossProcessBatchAuditEvidence.phaseOne,
+      prematureSynthesisProbes: completePhaseOneSynthesisProbes.map((probe, index) => index === probeIndex ? {
+        ...probe,
+        toolResultValue: incompleteCoverageValue(wrongState),
+        toolMessage: incompleteCoverageValue(wrongState),
+        errorMessage: incompleteCoverageMessage(wrongState),
+        checkpointBefore: { ...probe.checkpointBefore, state: wrongState },
+        checkpointAfter: { ...probe.checkpointAfter, state: wrongState },
       } : probe),
     }
     expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(phaseOne)).toContain(
@@ -1552,6 +1577,28 @@ describe("DSH process-restart recovery contract (#103)", () => {
       phaseTwo: {
         ...completeCrossProcessBatchAuditEvidence.phaseTwo,
         finalCheckpoint: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.finalCheckpoint, planId: "b".repeat(64) },
+      },
+    }, "second process must finish the same plan at exactly 5/5 complete coverage"],
+    ["checkpoint claims complete before 5/5", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        finalCheckpoint: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.finalCheckpoint,
+          completedBatches: 4,
+          completedCharacters: 480,
+          coveragePercent: 80.67,
+          state: "complete",
+          nextBatchIndex: 4,
+          nextBatchId: batchAuditIds[4],
+        },
+      },
+    }, "second process must finish the same plan at exactly 5/5 complete coverage"],
+    ["checkpoint is not complete at 5/5", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        finalCheckpoint: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.finalCheckpoint, state: "running" },
       },
     }, "second process must finish the same plan at exactly 5/5 complete coverage"],
   ])("rejects integrity failure: %s", (_label, evidence, expectedError) => {
@@ -3376,7 +3423,53 @@ describe("DSH E2E diagnostic redaction", () => {
     expect(safeRuntimeVersion("9.15.9")).toBe("9.15.9")
     expect(safeRuntimeVersion("/private-root/token=arbitrary-output")).toBeNull()
     expect(safeRuntimeVersion("v26.7.0 arbitrary output")).toBeNull()
-    expect(safeRuntimeVersion("api-secret-123456789012")).toBeNull()
+    expect(safeRuntimeVersion("api-secret123456789012")).toBeNull()
+  })
+
+  test.each([["PASS"], ["FAIL"], ["BLOCKED"]])("preserves canonical report keys in %s reports", (status) => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const report = {
+      schemaVersion: 1,
+      status,
+      versions: { dshApiSessionController: "/private-root/1.0.6" },
+      stages: {
+        composedProfile: { containsAskUserToolEntry: true, askUserToolPresent: true },
+        diagnostics: { apiResponse: "api-secret123456789012" },
+      },
+      failures: status === "FAIL" ? ["/private-root/failure.log"] : [],
+    }
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport(report)))
+    expect(sanitized.status).toBe(status)
+    expect(Object.keys(sanitized.versions)).toEqual(["dshApiSessionController"])
+    expect(sanitized.versions.dshApiSessionController).toBe("<absolute-path>")
+    expect(sanitized.stages.composedProfile.containsAskUserToolEntry).toBe(true)
+    expect(sanitized.stages.composedProfile.askUserToolPresent).toBe(true)
+    expect(sanitized.stages.diagnostics.apiResponse).toBe("<redacted>")
+    expect(sanitized.schemaVersion).toBe(1)
+  })
+
+  test("sanitizes dynamic untrusted report keys without collisions or data loss", () => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const dynamicMap = Object.fromEntries([
+      ["/private-root/first", "first"],
+      ["/private-root/second", "second"],
+      ["api-secret123456789012", "third"],
+      ["<redacted>", "fourth"],
+      ["file:///private-root/uri", "fifth"],
+      ["session-abcdef123456", "sixth"],
+      ["<redacted-native-id>", "seventh"],
+      ["__proto__", "eighth"],
+    ])
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport({ status: "BLOCKED", stages: { dynamicMap } })))
+    const entries = Object.entries(sanitized.stages.dynamicMap)
+    expect(entries).toHaveLength(8)
+    expect(new Set(entries.map(([key]) => key)).size).toBe(8)
+    expect(entries.map(([, value]) => value)).toEqual(["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"])
+    const dynamicJson = JSON.stringify(sanitized.stages.dynamicMap)
+    expect(dynamicJson).not.toContain("private-root")
+    expect(dynamicJson).not.toContain("api-secret")
+    expect(dynamicJson).not.toContain("file:///")
+    expect(dynamicJson).not.toContain("session-abcdef123456")
   })
 
   test("command failures and nested reports retain status metadata without local paths, URIs, or native IDs", () => {

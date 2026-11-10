@@ -315,6 +315,11 @@ function looksLikeLocalPathOrUri(value: string): boolean {
 
 const privateIdentityKey = /^(?:(?:agent|session|request|event|call|process)[_-]?ids?|pid)$/i
 const pathValueKey = /(?:path|file|directory|dirname|cwd|root)$/i
+const canonicalSensitiveReportKeys = new Set([
+  "dshApiSessionController",
+  "containsAskUserToolEntry",
+  "askUserToolPresent",
+])
 
 /** Redact all report strings at the persistence boundary, not only failures[]. */
 export function sanitizeReport(value: unknown): unknown {
@@ -329,11 +334,31 @@ export function sanitizeReport(value: unknown): unknown {
     }
     if (Array.isArray(current)) return current.map((entry) => visit(entry, key, parentKey))
     if (isRecord(current)) {
-      const safeEntries = Object.entries(current).map(([childKey, child]) => [
-        sanitizeDiagnosticText(childKey),
-        visit(child, childKey, key),
-      ])
-      return Object.fromEntries(safeEntries)
+      const entries = Object.entries(current)
+      const reservedCanonicalKeys = new Set(entries
+        .map(([childKey]) => childKey)
+        .filter((childKey) => canonicalSensitiveReportKeys.has(childKey)))
+      const usedKeys = new Set(reservedCanonicalKeys)
+      const safeEntries = Object.create(null) as Record<string, unknown>
+      for (const [childKey, child] of entries) {
+        const canonical = canonicalSensitiveReportKeys.has(childKey)
+        const baseKey = canonical ? childKey : sanitizeDiagnosticText(childKey) || "<redacted-key>"
+        let safeKey = baseKey
+        if (!canonical) {
+          let suffix = 1
+          while (usedKeys.has(safeKey) || canonicalSensitiveReportKeys.has(safeKey)) {
+            safeKey = `${baseKey}#${suffix++}`
+          }
+          usedKeys.add(safeKey)
+        }
+        Object.defineProperty(safeEntries, safeKey, {
+          value: visit(child, childKey, key),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        })
+      }
+      return safeEntries
     }
     return current
   }
@@ -1888,12 +1913,27 @@ function restartPersistenceMatches(left: unknown, right: unknown): boolean {
   )
 }
 
-const incompleteCoverageMessage = 'global synthesis requires checkpoint.state === "complete"; received "running"'
-const incompleteCoverageValue = [
-  "synthesis input error",
-  "code=incomplete_coverage",
-  `message=${incompleteCoverageMessage}`,
-].join("\n")
+type RestartCheckpointState = "pending" | "running" | "complete"
+
+function restartExpectedCheckpointState(completedBatches: number, totalBatches: number): RestartCheckpointState | null {
+  if (!Number.isInteger(completedBatches) || !Number.isInteger(totalBatches) ||
+      totalBatches < 0 || completedBatches < 0 || completedBatches > totalBatches) return null
+  if (totalBatches === 0 || completedBatches === totalBatches) return "complete"
+  if (completedBatches === 0) return "pending"
+  return "running"
+}
+
+function incompleteCoverageMessage(state: "pending" | "running"): string {
+  return `global synthesis requires checkpoint.state === "complete"; received "${state}"`
+}
+
+function incompleteCoverageValue(state: "pending" | "running"): string {
+  return [
+    "synthesis input error",
+    "code=incomplete_coverage",
+    `message=${incompleteCoverageMessage(state)}`,
+  ].join("\n")
+}
 
 function restartSynthesisProbeMatches(
   value: unknown,
@@ -1909,11 +1949,17 @@ function restartSynthesisProbeMatches(
   fingerprint: string,
 ): boolean {
   if (!isRecord(value)) return false
+  const checkpointState = restartExpectedCheckpointState(expected.batchIndex, 5)
+  if (checkpointState === null || checkpointState === "complete" ||
+      expected.checkpoint.completedBatches !== expected.batchIndex ||
+      expected.checkpoint.totalBatches !== 5 || expected.checkpoint.state !== checkpointState) return false
+  const expectedRefusalValue = incompleteCoverageValue(checkpointState)
+  const expectedErrorMessage = incompleteCoverageMessage(checkpointState)
   const completedCharacters = expected.checkpoint.completedCharacters
   const expectedCheckpoint = {
     completedBatches: expected.batchIndex,
     completedCharacters: Number.isInteger(completedCharacters) ? completedCharacters as number : -1,
-    state: "running",
+    state: checkpointState,
     nextBatchIndex: expected.batchIndex,
     nextBatchId: expected.batchId,
   }
@@ -1925,10 +1971,10 @@ function restartSynthesisProbeMatches(
   return value.batchIndex === expected.batchIndex &&
     value.batchId === expected.batchId &&
     value.toolRuntimeIsError === false &&
-    value.toolResultValue === incompleteCoverageValue &&
-    value.toolMessage === incompleteCoverageValue &&
+    value.toolResultValue === expectedRefusalValue &&
+    value.toolMessage === expectedRefusalValue &&
     value.errorCode === "incomplete_coverage" &&
-    value.errorMessage === incompleteCoverageMessage &&
+    value.errorMessage === expectedErrorMessage &&
     value.rejectionObserved === true &&
     restartCheckpointMatches(beforeCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
     restartCheckpointMatches(afterCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
@@ -1964,14 +2010,16 @@ function restartCheckpointMatches(
   totalBatches: number,
   totalCharacters: number,
 ): boolean {
-  return isRecord(value) &&
+  const expectedState = restartExpectedCheckpointState(expected.completedBatches, totalBatches)
+  return expectedState !== null && expected.state === expectedState &&
+    isRecord(value) &&
     value.planId === planId &&
     value.manuscriptFingerprint === fingerprint &&
     value.totalBatches === totalBatches &&
     value.completedBatches === expected.completedBatches &&
     value.completedCharacters === expected.completedCharacters &&
     value.totalCharacters === totalCharacters &&
-    value.state === expected.state &&
+    value.state === expectedState &&
     value.nextBatchIndex === expected.nextBatchIndex &&
     value.nextBatchId === expected.nextBatchId
 }
@@ -2093,7 +2141,7 @@ export function validateCrossProcessPhaseOneEvidence(value: unknown): string[] {
       completedCharacters: completedCharactersAtProbe,
       totalCharacters: 595,
       coveragePercent: Math.round((completedCharactersAtProbe / 595) * 10_000) / 100,
-      state: "running",
+      state: batchIndex === 0 ? "pending" : "running",
       nextBatchIndex: batchIndex,
       nextBatchId: batchId,
     }

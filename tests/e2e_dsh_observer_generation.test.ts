@@ -163,6 +163,10 @@ test("actual generated observer module binds the control preset ID without runne
       errorCode: "incomplete_coverage",
       errorMessage: incompleteMessage,
     })
+    expect(generatedModule.crossProcessSynthesisRefusal(successfulDomainRefusal, { ...incompleteCheckpoint, completedBatches: 1 })).toEqual({
+      errorCode: "incomplete_coverage",
+      errorMessage: incompleteMessage,
+    })
     expect(generatedModule.crossProcessSynthesisRefusal({ result: { isError: true, value: incompleteValue }, message: incompleteValue }, incompleteCheckpoint)).toBeNull()
     expect(generatedModule.crossProcessSynthesisRefusal({ result: { isError: false, value: JSON.stringify({ coverage: { state: "complete" } }) }, message: JSON.stringify({ coverage: { state: "complete" } }) }, incompleteCheckpoint)).toBeNull()
     expect(generatedModule.crossProcessSynthesisRefusal({ result: { isError: false, value: incompleteValue.replace("code=incomplete_coverage", "code=missing_findings") }, message: incompleteValue.replace("code=incomplete_coverage", "code=missing_findings") }, incompleteCheckpoint)).toBeNull()
@@ -170,9 +174,23 @@ test("actual generated observer module binds the control preset ID without runne
     expect(generatedModule.crossProcessSynthesisRefusal({ result: { isError: false, value: wrongStateMessage }, message: wrongStateMessage }, incompleteCheckpoint)).toBeNull()
     expect(generatedModule.crossProcessSynthesisRefusal({ result: { isError: false, value: incompleteValue }, message: "conflicting tool message" }, incompleteCheckpoint)).toBeNull()
     expect(generatedModule.crossProcessSynthesisRefusal(successfulDomainRefusal, { ...incompleteCheckpoint, state: "complete" })).toBeNull()
+    const pendingMessage = 'global synthesis requires checkpoint.state === "complete"; received "pending"'
+    const pendingValue = `synthesis input error${newline}code=incomplete_coverage${newline}message=${pendingMessage}`
+    const pendingCheckpoint = { state: "pending", completedBatches: 0, totalBatches: 5 }
+    const pendingDomainRefusal = { result: { isError: false, value: pendingValue }, message: pendingValue }
+    expect(generatedModule.crossProcessSynthesisRefusal(pendingDomainRefusal, pendingCheckpoint)).toEqual({
+      errorCode: "incomplete_coverage",
+      errorMessage: pendingMessage,
+    })
+    expect(generatedModule.crossProcessSynthesisRefusal(successfulDomainRefusal, { ...incompleteCheckpoint, completedBatches: 0 })).toBeNull()
+    expect(generatedModule.crossProcessSynthesisRefusal(pendingDomainRefusal, { ...pendingCheckpoint, completedBatches: 1 })).toBeNull()
+    expect(generatedModule.crossProcessSynthesisRefusal(pendingDomainRefusal, { ...pendingCheckpoint, state: "running" })).toBeNull()
+    expect(generatedModule.crossProcessSynthesisRefusal(successfulDomainRefusal, { ...incompleteCheckpoint, completedBatches: 5, state: "complete" })).toBeNull()
     expect(typeof generatedModule.crossProcessProcessIdentitySha256).toBe("function")
     expect(typeof generatedModule.runAcademicNativeQuestionsProbe).toBe("function")
     expect(runnerSource).toContain('child.once("spawn"')
+    expect(runnerSource).toContain('const expectedCheckpointState = contextCheckpoint.completedBatches === 0 ? "pending" : "running";')
+    expect(runnerSource).toContain("contextCheckpoint.state !== checkpointBefore.state")
     expect(generatedModuleSource).toContain("/proc/sys/kernel/random/boot_id")
     expect(generatedModuleSource).toContain('readFile("/proc/" + process.pid + "/stat"')
     expect(generatedModuleSource).toContain("analysis-audit-confirmations-store-v1")
