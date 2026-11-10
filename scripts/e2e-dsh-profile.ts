@@ -1544,11 +1544,11 @@ const runCrossProcessSynthesisProbe = async (ctx, workspace, planId, fingerprint
   const persistedBatchIdsAfter = storesAfter.receipts.map((receipt) => receipt.batchId);
   const findingsAfter = storesAfter.findings.map(crossProcessFindingProjection);
   const persistentStateUnchanged =
-    JSON.stringify(storesBefore.checkpoint) === JSON.stringify(storesAfter.checkpoint) &&
-    JSON.stringify(storesBefore.receipts) === JSON.stringify(storesAfter.receipts) &&
-    JSON.stringify(storesBefore.findings) === JSON.stringify(storesAfter.findings) &&
-    JSON.stringify(checkpointBefore) === JSON.stringify(checkpointAfter) &&
-    JSON.stringify(persistenceBefore) === JSON.stringify(persistenceAfter) &&
+    crossProcessSameProjection(storesBefore.checkpoint, storesAfter.checkpoint) &&
+    crossProcessSameProjection(storesBefore.receipts, storesAfter.receipts) &&
+    crossProcessSameProjection(storesBefore.findings, storesAfter.findings) &&
+    crossProcessSameProjection(checkpointBefore, checkpointAfter) &&
+    crossProcessSameProjection(persistenceBefore, persistenceAfter) &&
     workspaceInventoryBeforeSha256 === workspaceInventoryAfterSha256;
   if (!persistentStateUnchanged) fail("cross-process incomplete-synthesis refusal mutated checkpoint, receipts, findings, or workspace inventory");
   if (!refusal) fail("cross-process synthesis did not return the exact successful ToolRuntime incomplete_coverage domain refusal");
@@ -1636,7 +1636,37 @@ const crossProcessExpectedFinding = (findingInput, planId, fingerprint) => {
   }
   return createHash("sha256").update(Buffer.concat(parts)).digest("hex");
 };
-const crossProcessSameProjection = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+const crossProcessCheckpointProjectionFields = [
+  "planId",
+  "manuscriptFingerprint",
+  "totalBatches",
+  "completedBatches",
+  "completedCharacters",
+  "totalCharacters",
+  "coveragePercent",
+  "state",
+  "nextBatchIndex",
+  "nextBatchId",
+];
+export const crossProcessCheckpointProjectionMatches = (left, right) => {
+  const hasExactFields = (value) => value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).length === crossProcessCheckpointProjectionFields.length &&
+    crossProcessCheckpointProjectionFields.every((field) => Object.prototype.hasOwnProperty.call(value, field));
+  return hasExactFields(left) && hasExactFields(right) &&
+    crossProcessCheckpointProjectionFields.every((field) => left[field] === right[field]);
+};
+export const crossProcessSameProjection = (left, right) => {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+      left.every((entry, index) => crossProcessSameProjection(entry, right[index]));
+  }
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) =>
+    Object.prototype.hasOwnProperty.call(right, key) && crossProcessSameProjection(left[key], right[key]));
+};
 
 export async function runCrossProcessInitialProbe(ctx, workspace) {
   let handle;
@@ -1685,7 +1715,7 @@ export async function runCrossProcessInitialProbe(ctx, workspace) {
       const beforeAttempt = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "checkpoints", planId + ".json"), "utf8"));
       const unverified = await runTool(ctx, "dshbanca-e2e-process-a-unverified-" + index, "banca_context", { completedBatchId: batchId }, agent);
       const afterAttempt = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "checkpoints", planId + ".json"), "utf8"));
-      if (!unverified.message.includes("missing_batch_audit") || JSON.stringify(beforeAttempt) !== JSON.stringify(afterAttempt)) fail("first DSH process did not fail closed on an unaudited progress attempt");
+      if (!unverified.message.includes("missing_batch_audit") || !crossProcessSameProjection(beforeAttempt, afterAttempt)) fail("first DSH process did not fail closed on an unaudited progress attempt");
       unverifiedAdvancesBlocked++;
       const findings = [];
       if (index === 1) {
@@ -1839,7 +1869,7 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
     const persistenceAfterQuery = await crossProcessAnalysisHashes(workspace, expectation.planId);
     const storesAfterQuery = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
     const recoveredFindingAfterQuery = storesAfterQuery.findings.length === 1 ? crossProcessFindingProjection(storesAfterQuery.findings[0]) : null;
-    if (JSON.stringify(checkpointBeforeQuery) !== JSON.stringify(checkpointAfterQuery) || !crossProcessSameProjection(persistenceBefore, persistenceAfterQuery) || storesAfterQuery.receipts.length !== 2 || storesAfterQuery.findings.length !== 1 || !recoveredFindingAfterQuery || !crossProcessSameProjection(recoveredFindingAfterQuery, expectation.finding)) fail("resume-only banca_context query changed persistent progress or the first-process finding");
+    if (!crossProcessCheckpointProjectionMatches(checkpointBeforeQuery, checkpointAfterQuery) || !crossProcessSameProjection(persistenceBefore, persistenceAfterQuery) || storesAfterQuery.receipts.length !== 2 || storesAfterQuery.findings.length !== 1 || !recoveredFindingAfterQuery || !crossProcessSameProjection(recoveredFindingAfterQuery, expectation.finding)) fail("resume-only banca_context query changed persistent progress or the first-process finding");
     // banca_context writes its context pack, so the first denial baseline must be captured after this resume-only query.
     const workspaceInventoryAfterResumeQuerySha256 = crossProcessShaText(JSON.stringify(await inventory(workspace)));
     const batchAudits = [];
@@ -4744,7 +4774,7 @@ const crossProcessBatchAuditStatus = typeof report.stages.crossProcessBatchAudit
   : "NOT_EVALUATED"
 process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}; sequential process-restart recovery (#103): ${crossProcessBatchAuditStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
-const safeVersions = sanitizeReport(report.versions) as GateReport["versions"]
+const safeVersions = (sanitizeReport({ versions: report.versions }) as { versions: GateReport["versions"] }).versions
 if (safeVersions.dsh) process.stdout.write(`DSH ${safeVersions.dsh}; Cordis ${safeVersions.cordis ?? "unknown"}; loader ${safeVersions.cordisPluginLoader ?? "unknown"}; Skill ${safeVersions.dshSkill ?? "unknown"}; Agent ${safeVersions.dshAgent ?? "unknown"}; AgentLoop ${safeVersions.dshAgentLoop ?? "unknown"}; Tools ${safeVersions.dshTools ?? "unknown"}; AgentPreset ${safeVersions.dshAgentPreset ?? "unknown"}; PresetRegistry ${safeVersions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${safeVersions.dshApiSessionController ?? "unknown"}; Bun ${safeVersions.bun ?? "unknown"}; Node ${safeVersions.node ?? "unknown"}; pnpm ${safeVersions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)
 process.exitCode = finalStatus === "PASS" ? passExitCode() : finalStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode()

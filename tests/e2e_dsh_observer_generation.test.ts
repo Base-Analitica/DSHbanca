@@ -148,6 +148,80 @@ test("actual generated observer module binds the control preset ID without runne
     expect(typeof generatedModule.runCrossProcessResumeProbe).toBe("function")
     expect(typeof generatedModule.crossProcessToolErrorCode).toBe("function")
     expect(typeof generatedModule.crossProcessSynthesisRefusal).toBe("function")
+    expect(typeof generatedModule.crossProcessCheckpointProjectionMatches).toBe("function")
+    const checkpointBeforeQuery = {
+      planId: "plan-id",
+      manuscriptFingerprint: "manuscript-fingerprint",
+      totalBatches: 5,
+      completedBatches: 2,
+      completedCharacters: 240,
+      totalCharacters: 595,
+      coveragePercent: 40.34,
+      state: "running",
+      nextBatchIndex: 2,
+      nextBatchId: "batch-2",
+    }
+    const checkpointAfterQuery = {
+      planId: "plan-id",
+      manuscriptFingerprint: "manuscript-fingerprint",
+      totalBatches: 5,
+      completedBatches: 2,
+      completedCharacters: 240,
+      totalCharacters: 595,
+      coveragePercent: 40.34,
+      state: "running",
+      nextBatchId: "batch-2",
+      nextBatchIndex: 2,
+    }
+    expect(JSON.stringify(checkpointBeforeQuery)).not.toBe(JSON.stringify(checkpointAfterQuery))
+    expect(generatedModuleSource).toContain("crossProcessCheckpointProjectionMatches(checkpointBeforeQuery, checkpointAfterQuery)")
+    expect(generatedModuleSource).not.toContain("JSON.stringify(checkpointBeforeQuery) !== JSON.stringify(checkpointAfterQuery)")
+    expect(generatedModule.crossProcessCheckpointProjectionMatches(checkpointBeforeQuery, checkpointAfterQuery)).toBe(true)
+    for (const [field, original] of Object.entries(checkpointBeforeQuery)) {
+      const changed = typeof original === "number" ? original + 1 : `${original}-changed`
+      expect(generatedModule.crossProcessCheckpointProjectionMatches(checkpointBeforeQuery, {
+        ...checkpointBeforeQuery,
+        [field]: changed,
+      })).toBe(false)
+    }
+    const missingCheckpointField = Object.fromEntries(Object.entries(checkpointBeforeQuery).filter(([field]) => field !== "nextBatchId"))
+    expect(generatedModule.crossProcessCheckpointProjectionMatches(checkpointBeforeQuery, missingCheckpointField)).toBe(false)
+    expect(generatedModule.crossProcessCheckpointProjectionMatches(checkpointBeforeQuery, {
+      ...checkpointBeforeQuery,
+      unexpectedField: true,
+    })).toBe(false)
+    expect(typeof generatedModule.crossProcessSameProjection).toBe("function")
+    const persistedCheckpointBefore = {
+      planId: "plan-id",
+      fingerprint: "manuscript-fingerprint",
+      state: "running",
+      batchIds: ["batch-1", "batch-2"],
+      metadata: { createdAt: "2026-11-10T00:00:00.000Z", evidence: { first: 1, second: 2 } },
+    }
+    const persistedCheckpointAfter = {
+      metadata: { evidence: { second: 2, first: 1 }, createdAt: "2026-11-10T00:00:00.000Z" },
+      batchIds: ["batch-1", "batch-2"],
+      state: "running",
+      fingerprint: "manuscript-fingerprint",
+      planId: "plan-id",
+    }
+    expect(JSON.stringify(persistedCheckpointBefore)).not.toBe(JSON.stringify(persistedCheckpointAfter))
+    expect(generatedModule.crossProcessSameProjection(persistedCheckpointBefore, persistedCheckpointAfter)).toBe(true)
+    expect(generatedModule.crossProcessSameProjection(persistedCheckpointBefore, {
+      ...persistedCheckpointAfter,
+      state: "complete",
+    })).toBe(false)
+    expect(generatedModule.crossProcessSameProjection(persistedCheckpointBefore, {
+      ...persistedCheckpointAfter,
+      unexpectedField: true,
+    })).toBe(false)
+    expect(generatedModule.crossProcessSameProjection(["batch-1", "batch-2"], ["batch-2", "batch-1"])).toBe(false)
+    expect(generatedModuleSource).toContain("crossProcessSameProjection(storesBefore.checkpoint, storesAfter.checkpoint)")
+    expect(generatedModuleSource).toContain("crossProcessSameProjection(checkpointBefore, checkpointAfter)")
+    expect(generatedModuleSource).toContain("crossProcessSameProjection(beforeAttempt, afterAttempt)")
+    expect(generatedModuleSource).not.toContain("JSON.stringify(storesBefore.checkpoint) === JSON.stringify(storesAfter.checkpoint)")
+    expect(generatedModuleSource).not.toContain("JSON.stringify(checkpointBefore) === JSON.stringify(checkpointAfter)")
+    expect(generatedModuleSource).not.toContain("JSON.stringify(beforeAttempt) !== JSON.stringify(afterAttempt)")
     const newline = String.fromCharCode(10)
     expect(generatedModule.crossProcessToolErrorCode(`context checkpoint error${newline}code=missing_batch_audit${newline}message=missing confirmation`)).toBe("missing_batch_audit")
     expect(generatedModule.crossProcessToolErrorCode(`context checkpoint error${newline}code=missing_batch_audit_extra${newline}message=wrong code`)).toBe("missing_batch_audit_extra")

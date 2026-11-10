@@ -1296,6 +1296,7 @@ describe("DSH process-restart recovery contract (#103)", () => {
     ["ToolRuntime error is not a domain refusal", { toolRuntimeIsError: true }],
     ["successful output releases synthesis", { toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), errorCode: null }],
     ["persisted checkpoint mutates", { checkpointAfter: { ...crossProcessCheckpointAt(2), completedBatches: 3 } }],
+    ["persisted checkpoint metadata mutates", { checkpointAfter: { ...crossProcessCheckpointAt(2), fingerprint: "wrong-fingerprint" } }],
     ["receipts mutate", { persistedBatchIdsAfter: [batchAuditIds[0]] }],
     ["findings mutate", { findingsAfter: [] }],
     ["workspace mutates", { workspaceInventoryAfterSha256: "0".repeat(64) }],
@@ -1325,6 +1326,56 @@ describe("DSH process-restart recovery contract (#103)", () => {
   test("accepts independently observed sequential DSH process recovery", () => {
     expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(completeCrossProcessBatchAuditEvidence)).toEqual([])
     expect(profileEvidenceContract.classifyCrossProcessBatchAuditEvidenceStatus(completeCrossProcessBatchAuditEvidence)).toBe("PASS")
+  })
+
+  test("resume checkpoint snapshots compare structurally despite different property insertion order", () => {
+    const checkpoint = crossProcessCheckpointAtTwo
+    const checkpointBefore = Object.fromEntries(Object.entries(checkpoint).reverse())
+    const checkpointAfterEntries = Object.entries(checkpoint).filter(([key]) => key !== "nextBatchIndex" && key !== "nextBatchId")
+    const checkpointAfter = Object.fromEntries([
+      ...checkpointAfterEntries,
+      ["nextBatchId", checkpoint.nextBatchId],
+      ["nextBatchIndex", checkpoint.nextBatchIndex],
+    ])
+    expect(JSON.stringify(checkpointBefore)).not.toBe(JSON.stringify(checkpointAfter))
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence({
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointBefore,
+          checkpointAfter,
+        },
+      },
+    })).toEqual([])
+  })
+
+  test("refusal checkpoint projections remain equivalent across reordered fields", () => {
+    const phaseTwo = completeCrossProcessBatchAuditEvidence.phaseTwo
+    const reorder = (checkpoint: Record<string, unknown>, reverse: boolean) => {
+      if (reverse) return Object.fromEntries(Object.entries(checkpoint).reverse())
+      const otherEntries = Object.entries(checkpoint).filter(([key]) => key !== "nextBatchIndex" && key !== "nextBatchId")
+      return Object.fromEntries([
+        ...otherEntries,
+        ["nextBatchId", checkpoint.nextBatchId],
+        ["nextBatchIndex", checkpoint.nextBatchIndex],
+      ])
+    }
+    const unverifiedAdvanceProbes = phaseTwo.unverifiedAdvanceProbes.map((probe, index) => index === 0
+      ? { ...probe, checkpointBefore: reorder(probe.checkpointBefore, true), checkpointAfter: reorder(probe.checkpointAfter, false) }
+      : probe)
+    const prematureSynthesisProbes = phaseTwo.prematureSynthesisProbes.map((probe, index) => index === 0
+      ? {
+        ...probe,
+        checkpointBefore: reorder({ ...probe.checkpointBefore, fingerprint: batchAuditFingerprint }, true),
+        checkpointAfter: reorder({ ...probe.checkpointAfter, fingerprint: batchAuditFingerprint }, false),
+      }
+      : probe)
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence({
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: { ...phaseTwo, unverifiedAdvanceProbes, prematureSynthesisProbes },
+    })).toEqual([])
   })
 
   test("requires the resumed DSH process to reject unaudited advances before each remaining batch", () => {
@@ -1510,6 +1561,46 @@ describe("DSH process-restart recovery contract (#103)", () => {
         },
       },
     }, "second process must query banca_context without completedBatchId"],
+    ["resume query changed checkpoint state", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, state: "pending" },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
+    ["resume query changed checkpoint coverage", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, completedCharacters: 241, coveragePercent: 40.5 },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
+    ["resume query changed only checkpoint coverage", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, coveragePercent: 40.35 },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
+    ["resume query added an unknown checkpoint field", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, unrecognizedField: true },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
     ["resume query changed durable hashes", {
       ...completeCrossProcessBatchAuditEvidence,
       phaseTwo: {
@@ -1520,6 +1611,26 @@ describe("DSH process-restart recovery contract (#103)", () => {
         },
       },
     }, "cross-process persistent hashes must match and remain unchanged across resume-only context query"],
+    ["resume query recovered incompatible receipt IDs", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          persistedBatchIds: [batchAuditIds[0], "wrong-receipt-id"],
+        },
+      },
+    }, "second process must recover the first two persisted audit receipts before advancing"],
+    ["resume query recovered an incompatible finding", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          recoveredFinding: { ...completeFindingProjection, findingId: "b".repeat(64) },
+        },
+      },
+    }, "first-process finding identity and provenance must be unchanged after restart and in synthesis"],
     ["second phase Agent/Session was not host verified", {
       ...completeCrossProcessBatchAuditEvidence,
       phaseTwo: {
@@ -3426,26 +3537,109 @@ describe("DSH E2E diagnostic redaction", () => {
     expect(safeRuntimeVersion("api-secret123456789012")).toBeNull()
   })
 
-  test.each([["PASS"], ["FAIL"], ["BLOCKED"]])("preserves canonical report keys in %s reports", (status) => {
+  test.each([["PASS"], ["FAIL"], ["BLOCKED"]])("preserves the complete canonical report shape in %s reports", (status) => {
     const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const composedProfile = {
+      exitCode: status === "PASS" ? 0 : status === "FAIL" ? 1 : null,
+      stdoutBytes: 512,
+      stderrBytes: status === "FAIL" ? 24 : 0,
+      outputTruncated: false,
+      containsDshbancaEntry: true,
+      containsObserverEntry: true,
+      containsPresetRegistryEntry: true,
+      containsAuditorPresetEntry: true,
+      containsControlPresetEntry: true,
+      containsUserQuestionsEntry: true,
+      containsUserApprovalEntry: true,
+      containsAskUserToolEntry: true,
+      userQuestionsCount: 1,
+      userApprovalCount: 1,
+      askUserToolCount: 1,
+      userQuestionsUnique: true,
+      userApprovalUnique: true,
+      askUserToolPresent: true,
+      askUserToolUnique: true,
+      pluginInstancesUnique: true,
+    }
+    const versions = {
+      dsh: "0.2.1-rc.5",
+      cordis: "4.0.5",
+      cordisPluginLoader: "1.0.6",
+      dshSkill: "0.2.1-rc.5",
+      dshAgent: "0.2.1-rc.5",
+      dshAgentLoop: "0.2.1-rc.5",
+      dshTools: "0.2.1-rc.5",
+      dshAgentPreset: "0.2.1-rc.5",
+      dshAgentPresetRegistry: "0.2.1-rc.5",
+      dshAgentInstructions: "0.2.1-rc.5",
+      dshApiSessionController: "0.2.1-rc.5",
+      dshUserQuestions: "0.2.1-rc.5",
+      dshUserApproval: "0.2.1-rc.5",
+      dshToolAskUser: "0.2.1-rc.5",
+      node: "v22.23.2",
+      bun: "1.4.2",
+      pnpm: "9.15.9",
+    }
     const report = {
       schemaVersion: 1,
       status,
-      versions: { dshApiSessionController: "/private-root/1.0.6" },
-      stages: {
-        composedProfile: { containsAskUserToolEntry: true, askUserToolPresent: true },
-        diagnostics: { apiResponse: "api-secret123456789012" },
-      },
+      startedAt: "2026-11-10T00:00:00.000Z",
+      finishedAt: "2026-11-10T00:00:01.000Z",
+      repository: { revision: "a".repeat(40), dirty: false },
+      versions,
+      sandbox: { isolated: true, removed: true },
+      stages: { composedProfile },
       failures: status === "FAIL" ? ["/private-root/failure.log"] : [],
+      limitations: ["synthetic evidence fixture; host E2E not run"],
     }
     const sanitized = JSON.parse(JSON.stringify(sanitizeReport(report)))
+    expect(Object.keys(sanitized)).toEqual(Object.keys(report))
+    expect(Object.keys(sanitized.repository)).toEqual(Object.keys(report.repository))
+    expect(Object.keys(sanitized.versions)).toEqual(Object.keys(versions))
+    expect(sanitized.versions).toEqual(versions)
+    const safeVersions = (sanitizeReport({ versions }) as { versions: typeof versions }).versions
+    expect(safeVersions).toEqual(versions)
+    expect(Object.keys(sanitized.sandbox)).toEqual(Object.keys(report.sandbox))
+    expect(Object.keys(sanitized.stages.composedProfile)).toEqual(Object.keys(composedProfile))
+    expect(sanitized.stages.composedProfile).toEqual(composedProfile)
+    expect(sanitized.failures).toEqual(status === "FAIL" ? ["<absolute-path>"] : [])
     expect(sanitized.status).toBe(status)
-    expect(Object.keys(sanitized.versions)).toEqual(["dshApiSessionController"])
-    expect(sanitized.versions.dshApiSessionController).toBe("<absolute-path>")
-    expect(sanitized.stages.composedProfile.containsAskUserToolEntry).toBe(true)
-    expect(sanitized.stages.composedProfile.askUserToolPresent).toBe(true)
-    expect(sanitized.stages.diagnostics.apiResponse).toBe("<redacted>")
     expect(sanitized.schemaVersion).toBe(1)
+  })
+
+  test("canonical key exemptions still redact their untrusted values", () => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const report = {
+      versions: { dshApiSessionController: "api-secret123456789012" },
+      stages: {
+        composedProfile: {
+          containsAskUserToolEntry: "session-abcdef123456",
+          askUserToolCount: 1,
+          askUserToolUnique: true,
+          askUserToolPresent: true,
+        },
+      },
+    }
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport(report)))
+    expect(Object.keys(sanitized.versions)).toEqual(["dshApiSessionController"])
+    expect(sanitized.versions.dshApiSessionController).toBe("<redacted>")
+    expect(Object.keys(sanitized.stages.composedProfile)).toEqual(Object.keys(report.stages.composedProfile))
+    expect(sanitized.stages.composedProfile.containsAskUserToolEntry).toBe("<redacted-native-id>")
+  })
+
+  test("canonical key exemptions do not leak into array-contained dynamic maps", () => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const report = {
+      versions: [{ dshApiSessionController: "api-secret123456789012" }],
+      stages: {
+        composedProfile: [{ askUserToolCount: 1, askUserToolUnique: true }],
+      },
+    }
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport(report)))
+    expect(Object.keys(sanitized.versions[0])).toEqual(["dsh<redacted>"])
+    expect(sanitized.versions[0]["dsh<redacted>"]).toBe("<redacted>")
+    expect(Object.keys(sanitized.stages.composedProfile[0])).toEqual(["a<redacted>", "a<redacted>#1"])
+    expect(Object.values(sanitized.stages.composedProfile[0])).toEqual([1, true])
   })
 
   test("sanitizes dynamic untrusted report keys without collisions or data loss", () => {
@@ -3458,18 +3652,22 @@ describe("DSH E2E diagnostic redaction", () => {
       ["file:///private-root/uri", "fifth"],
       ["session-abcdef123456", "sixth"],
       ["<redacted-native-id>", "seventh"],
-      ["__proto__", "eighth"],
+      ["askUserToolCount", "eighth"],
+      ["askUserToolUnique", "ninth"],
+      ["__proto__", "tenth"],
     ])
     const sanitized = JSON.parse(JSON.stringify(sanitizeReport({ status: "BLOCKED", stages: { dynamicMap } })))
     const entries = Object.entries(sanitized.stages.dynamicMap)
-    expect(entries).toHaveLength(8)
-    expect(new Set(entries.map(([key]) => key)).size).toBe(8)
-    expect(entries.map(([, value]) => value)).toEqual(["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"])
+    expect(entries).toHaveLength(10)
+    expect(new Set(entries.map(([key]) => key)).size).toBe(10)
+    expect(entries.map(([, value]) => value)).toEqual(["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"])
     const dynamicJson = JSON.stringify(sanitized.stages.dynamicMap)
     expect(dynamicJson).not.toContain("private-root")
     expect(dynamicJson).not.toContain("api-secret")
     expect(dynamicJson).not.toContain("file:///")
     expect(dynamicJson).not.toContain("session-abcdef123456")
+    expect(dynamicJson).not.toContain("askUserToolCount")
+    expect(dynamicJson).not.toContain("askUserToolUnique")
   })
 
   test("command failures and nested reports retain status metadata without local paths, URIs, or native IDs", () => {
@@ -3575,7 +3773,8 @@ describe("DSH E2E diagnostic redaction", () => {
     expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable")
     expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable")
     expect(runnerSource).toContain("const reportedVersion = safeRuntimeVersion(pnpmCheck.stdout")
-    expect(runnerSource).toContain("const safeVersions = sanitizeReport(report.versions)")
+    expect(runnerSource).toContain("const safeVersions = (sanitizeReport({ versions: report.versions }) as { versions: GateReport[\"versions\"] }).versions")
+    expect(runnerSource).not.toContain("sanitizeReport(report.versions)")
     expect(runnerSource).not.toContain("Node ${report.versions.node")
     expect(runnerSource).not.toContain('execution reported "${reportedVersion}"')
     expect(runnerSource).toContain('fail("Runner orchestration: unexpected exception; details withheld")')

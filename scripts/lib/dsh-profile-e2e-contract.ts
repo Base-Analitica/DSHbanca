@@ -315,15 +315,25 @@ function looksLikeLocalPathOrUri(value: string): boolean {
 
 const privateIdentityKey = /^(?:(?:agent|session|request|event|call|process)[_-]?ids?|pid)$/i
 const pathValueKey = /(?:path|file|directory|dirname|cwd|root)$/i
-const canonicalSensitiveReportKeys = new Set([
-  "dshApiSessionController",
-  "containsAskUserToolEntry",
-  "askUserToolPresent",
+// Preserve schema fields whose names overlap the free-text secret detector, only at their canonical paths.
+// Values under these fields still pass through the ordinary recursive redaction rules.
+const canonicalReportKeyPaths = new Set([
+  JSON.stringify(["versions", "dshApiSessionController"]),
+  JSON.stringify(["stages", "composedProfile", "containsAskUserToolEntry"]),
+  JSON.stringify(["stages", "composedProfile", "askUserToolCount"]),
+  JSON.stringify(["stages", "composedProfile", "askUserToolUnique"]),
+  JSON.stringify(["stages", "composedProfile", "askUserToolPresent"]),
 ])
 
 /** Redact all report strings at the persistence boundary, not only failures[]. */
 export function sanitizeReport(value: unknown): unknown {
-  const visit = (current: unknown, key = "", parentKey = ""): unknown => {
+  const visit = (
+    current: unknown,
+    key = "",
+    parentKey = "",
+    path: readonly string[] = [],
+    canonicalPathAllowed = true,
+  ): unknown => {
     if (typeof current === "string") {
       if (privateIdentityKey.test(key) || key.toLowerCase() === "id" ||
           (key === "ids" && /(?:agent|session|request|event|call|process)/i.test(parentKey))) {
@@ -332,27 +342,29 @@ export function sanitizeReport(value: unknown): unknown {
       if (pathValueKey.test(key) && looksLikeLocalPathOrUri(current)) return "<redacted-local-path>"
       return sanitizeDiagnosticText(current)
     }
-    if (Array.isArray(current)) return current.map((entry) => visit(entry, key, parentKey))
+    if (Array.isArray(current)) return current.map((entry) => visit(entry, key, parentKey, path, false))
     if (isRecord(current)) {
       const entries = Object.entries(current)
+      const canonicalAtPath = (childKey: string) => canonicalPathAllowed &&
+        canonicalReportKeyPaths.has(JSON.stringify([...path, childKey]))
       const reservedCanonicalKeys = new Set(entries
         .map(([childKey]) => childKey)
-        .filter((childKey) => canonicalSensitiveReportKeys.has(childKey)))
+        .filter(canonicalAtPath))
       const usedKeys = new Set(reservedCanonicalKeys)
       const safeEntries = Object.create(null) as Record<string, unknown>
       for (const [childKey, child] of entries) {
-        const canonical = canonicalSensitiveReportKeys.has(childKey)
+        const canonical = canonicalAtPath(childKey)
         const baseKey = canonical ? childKey : sanitizeDiagnosticText(childKey) || "<redacted-key>"
         let safeKey = baseKey
         if (!canonical) {
           let suffix = 1
-          while (usedKeys.has(safeKey) || canonicalSensitiveReportKeys.has(safeKey)) {
+          while (usedKeys.has(safeKey) || canonicalAtPath(safeKey)) {
             safeKey = `${baseKey}#${suffix++}`
           }
           usedKeys.add(safeKey)
         }
         Object.defineProperty(safeEntries, safeKey, {
-          value: visit(child, childKey, key),
+          value: visit(child, childKey, key, [...path, childKey], canonicalPathAllowed),
           enumerable: true,
           configurable: true,
           writable: true,
@@ -1913,6 +1925,20 @@ function restartPersistenceMatches(left: unknown, right: unknown): boolean {
   )
 }
 
+function restartCheckpointEvidenceEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+      left.every((entry, index) => restartCheckpointEvidenceEqual(entry, right[index]))
+  }
+  if (!isRecord(left) || !isRecord(right)) return false
+  const leftKeys = Object.keys(left)
+  const rightKeys = Object.keys(right)
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) =>
+    Object.prototype.hasOwnProperty.call(right, key) && restartCheckpointEvidenceEqual(left[key], right[key]),
+  )
+}
+
 type RestartCheckpointState = "pending" | "running" | "complete"
 
 function restartExpectedCheckpointState(completedBatches: number, totalBatches: number): RestartCheckpointState | null {
@@ -1981,7 +2007,7 @@ function restartSynthesisProbeMatches(
     isRecord(beforeCheckpoint) && isRecord(afterCheckpoint) &&
     beforeCheckpoint.coveragePercent === checkpointCoverage &&
     afterCheckpoint.coveragePercent === checkpointCoverage &&
-    JSON.stringify(beforeCheckpoint) === JSON.stringify(afterCheckpoint) &&
+    restartCheckpointEvidenceEqual(beforeCheckpoint, afterCheckpoint) &&
     restartPersistenceMatches(value.persistenceBefore, value.persistenceAfter) &&
     isSha256Digest(value.workspaceInventoryBeforeSha256) &&
     value.workspaceInventoryBeforeSha256 === value.workspaceInventoryAfterSha256 &&
@@ -2002,6 +2028,35 @@ function restartSynthesisProbeMatches(
     value.persistentStateUnchanged === true
 }
 
+// Exact shape of crossProcessCheckpointEvidence projections; property insertion order is irrelevant.
+const restartCheckpointProjectionFields = [
+  "planId",
+  "manuscriptFingerprint",
+  "totalBatches",
+  "completedBatches",
+  "completedCharacters",
+  "totalCharacters",
+  "coveragePercent",
+  "state",
+  "nextBatchIndex",
+  "nextBatchId",
+] as const
+
+function restartCheckpointProjectionMatches(
+  value: unknown,
+  expected: { completedBatches: number; completedCharacters: number; state: string; nextBatchIndex: number | null; nextBatchId: string | null },
+  planId: string,
+  fingerprint: string,
+  totalBatches: number,
+  totalCharacters: number,
+): boolean {
+  return isRecord(value) &&
+    Object.keys(value).length === restartCheckpointProjectionFields.length &&
+    restartCheckpointProjectionFields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) &&
+    restartCheckpointMatches(value, expected, planId, fingerprint, totalBatches, totalCharacters)
+}
+
+// Validate canonical checkpoint values in persisted-store snapshots, which may also carry store metadata.
 function restartCheckpointMatches(
   value: unknown,
   expected: { completedBatches: number; completedCharacters: number; state: string; nextBatchIndex: number | null; nextBatchId: string | null },
@@ -2011,6 +2066,10 @@ function restartCheckpointMatches(
   totalCharacters: number,
 ): boolean {
   const expectedState = restartExpectedCheckpointState(expected.completedBatches, totalBatches)
+  const expectedCoveragePercent = Number.isInteger(expected.completedCharacters) &&
+      expected.completedCharacters >= 0 && expected.completedCharacters <= totalCharacters && totalCharacters > 0
+    ? Math.round((expected.completedCharacters / totalCharacters) * 10_000) / 100
+    : -1
   return expectedState !== null && expected.state === expectedState &&
     isRecord(value) &&
     value.planId === planId &&
@@ -2019,6 +2078,7 @@ function restartCheckpointMatches(
     value.completedBatches === expected.completedBatches &&
     value.completedCharacters === expected.completedCharacters &&
     value.totalCharacters === totalCharacters &&
+    value.coveragePercent === expectedCoveragePercent &&
     value.state === expectedState &&
     value.nextBatchIndex === expected.nextBatchIndex &&
     value.nextBatchId === expected.nextBatchId
@@ -2092,7 +2152,7 @@ export function validateCrossProcessPhaseOneEvidence(value: unknown): string[] {
   const checkpointAfterFirstBatch = isRecord(value.checkpointAfterFirstBatch) ? value.checkpointAfterFirstBatch : undefined
   const checkpoint = isRecord(value.checkpoint) ? value.checkpoint : undefined
   if (
-    !restartCheckpointMatches(checkpointAfterFirstBatch, {
+    !restartCheckpointProjectionMatches(checkpointAfterFirstBatch, {
       completedBatches: 1,
       completedCharacters: validBatchCharacters ? completedBatchCharacters[0] as number : -1,
       state: "running",
@@ -2100,7 +2160,7 @@ export function validateCrossProcessPhaseOneEvidence(value: unknown): string[] {
       nextBatchId: typeof planBatchIdsPrefix[1] === "string" ? planBatchIdsPrefix[1] : null,
     }, value.planId as string, value.manuscriptFingerprint as string, 5, 595) ||
     checkpointAfterFirstBatch?.coveragePercent !== expectedFirstCoveragePercent ||
-    !restartCheckpointMatches(checkpoint, {
+    !restartCheckpointProjectionMatches(checkpoint, {
       completedBatches: 2,
       completedCharacters: expectedCompletedCharacters,
       state: "running",
@@ -2288,7 +2348,7 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
     firstCompletedCharacters <= 0 ||
     firstCompletedCharacters >= totalCharacters ||
     phaseOneCheckpoint?.coveragePercent !== firstCoveragePercent ||
-    !restartCheckpointMatches(phaseOneCheckpoint, {
+    !restartCheckpointProjectionMatches(phaseOneCheckpoint, {
       completedBatches: 2,
       completedCharacters: Number.isInteger(firstCompletedCharacters) ? firstCompletedCharacters as number : -1,
       state: "running",
@@ -2380,7 +2440,7 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
   if (!isSha256Digest(phaseTwo?.workspaceInventoryAfterResumeQuerySha256)) {
     errors.push("second-process post-query workspace inventory must be captured before unaudited-advance probes")
   }
-  if (!restartCheckpointMatches(resumeQuery?.checkpointBefore, {
+  if (!restartCheckpointProjectionMatches(resumeQuery?.checkpointBefore, {
     completedBatches: 2,
     completedCharacters: Number.isInteger(firstCompletedCharacters) ? firstCompletedCharacters as number : -1,
     state: "running",
@@ -2389,7 +2449,7 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
   }, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters)) {
     errors.push("second process must recover the exact 2/5 checkpoint and identical plan/fingerprint")
   }
-  if (!restartCheckpointMatches(resumeQuery?.checkpointAfter, {
+  if (!restartCheckpointProjectionMatches(resumeQuery?.checkpointAfter, {
     completedBatches: 2,
     completedCharacters: Number.isInteger(firstCompletedCharacters) ? firstCompletedCharacters as number : -1,
     state: "running",
@@ -2450,11 +2510,11 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
       nextBatchId: expectedBatchId,
     }
     if (
-      !restartCheckpointMatches(checkpointBefore, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
+      !restartCheckpointProjectionMatches(checkpointBefore, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
       checkpointBefore?.coveragePercent !== checkpointCoverage ||
-      !restartCheckpointMatches(checkpointAfter, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
+      !restartCheckpointProjectionMatches(checkpointAfter, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
       checkpointAfter?.coveragePercent !== checkpointCoverage ||
-      JSON.stringify(checkpointBefore) !== JSON.stringify(checkpointAfter) ||
+      !restartCheckpointEvidenceEqual(checkpointBefore, checkpointAfter) ||
       !Number.isInteger(completedCharacters) ||
       (completedCharacters as number) < 0 ||
       (completedCharacters as number) >= totalCharacters ||
@@ -2511,6 +2571,7 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
       ? advanceProbe.checkpointAfter
       : {}
     const expectedFindings = isBatchAuditFindingProjection(phaseOne?.finding) ? [phaseOne.finding] : []
+    // The synthesis probe validates canonical checkpoint fields and coverage against this advance projection.
     const matches = typeof expectedBatchId === "string" && isRecord(advanceProbe) &&
       restartSynthesisProbeMatches(synthesisProbe, {
         batchIndex,
@@ -2522,7 +2583,6 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
       }, expectedPlanId as string, expectedFingerprint as string) &&
       restartPersistenceMatches(advanceProbe.persistenceAfter, (synthesisProbe as Record<string, unknown> | undefined)?.persistenceBefore) &&
       advanceProbe.workspaceInventoryAfterSha256 === (synthesisProbe as Record<string, unknown> | undefined)?.workspaceInventoryBeforeSha256 &&
-      JSON.stringify(advanceProbe.checkpointAfter) === JSON.stringify((synthesisProbe as Record<string, unknown> | undefined)?.checkpointBefore) &&
       JSON.stringify(advanceProbe.persistedBatchIdsAfter) === JSON.stringify((synthesisProbe as Record<string, unknown> | undefined)?.persistedBatchIdsBefore) &&
       JSON.stringify(advanceProbe.findingsAfter) === JSON.stringify((synthesisProbe as Record<string, unknown> | undefined)?.findingsBefore)
     if (!matches) synthesisProbesMatch = false
@@ -2564,7 +2624,7 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
   ) {
     errors.push("final durable audit store must contain exactly one ordered receipt per canonical batch")
   }
-  if (!restartCheckpointMatches(phaseTwo?.finalCheckpoint, {
+  if (!restartCheckpointProjectionMatches(phaseTwo?.finalCheckpoint, {
     completedBatches: 5,
     completedCharacters: totalCharacters,
     state: "complete",
