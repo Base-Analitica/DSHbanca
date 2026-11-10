@@ -810,10 +810,36 @@ const incompleteCoverageValue = (state: "pending" | "running") => [
   "code=incomplete_coverage",
   `message=${incompleteCoverageMessage(state)}`,
 ].join("\n")
+const storedCheckpointEvidence = (checkpoint: {
+  planId: string
+  manuscriptFingerprint: string
+  totalBatches: number
+  completedBatches: number
+  completedCharacters: number
+  totalCharacters: number
+  coveragePercent: number
+  state: string
+  nextBatchIndex: number | null
+  nextBatchId: string | null
+}) => ({
+  version: "analysis-checkpoint-v2",
+  planId: checkpoint.planId,
+  fingerprint: checkpoint.manuscriptFingerprint,
+  strategy: "ordered-source-spans-exhaustive-v1",
+  totalBatches: checkpoint.totalBatches,
+  completedBatches: checkpoint.completedBatches,
+  totalCharacters: checkpoint.totalCharacters,
+  completedCharacters: checkpoint.completedCharacters,
+  coveragePercent: checkpoint.coveragePercent,
+  state: checkpoint.state,
+  manuscriptFingerprint: checkpoint.manuscriptFingerprint,
+  nextBatchId: checkpoint.nextBatchId,
+  nextBatchIndex: checkpoint.nextBatchIndex,
+})
 const completeBatchAuditSynthesisProbes = batchAuditIds.map((batchId, batchIndex) => {
   const completedCharacters = batchIndex * 120
   const state = batchIndex === 0 ? "pending" : "running"
-  const checkpoint = {
+  const checkpoint = storedCheckpointEvidence({
     planId: batchAuditPlanId,
     manuscriptFingerprint: batchAuditFingerprint,
     totalBatches: 5,
@@ -824,7 +850,7 @@ const completeBatchAuditSynthesisProbes = batchAuditIds.map((batchId, batchIndex
     state,
     nextBatchIndex: batchIndex,
     nextBatchId: batchId,
-  }
+  })
   const findings = batchIndex === 0 ? [] : [{ ...completeFindingProjection }]
   const persistedBatchIds = batchAuditIds.slice(0, batchIndex + 1)
   const persistence = {
@@ -965,8 +991,10 @@ const crossProcessCheckpointAt = (batchIndex: number) => {
     nextBatchId: batchAuditIds[batchIndex],
   }
 }
+const crossProcessStoredCheckpointAt = (batchIndex: number) =>
+  storedCheckpointEvidence(crossProcessCheckpointAt(batchIndex))
 const completeCrossProcessUnauditedAdvanceProbes = [2, 3, 4].map((batchIndex, probeIndex) => {
-  const checkpoint = crossProcessCheckpointAt(batchIndex)
+  const checkpoint = crossProcessStoredCheckpointAt(batchIndex)
   const priorBatchIds = batchAuditIds.slice(0, batchIndex)
   const inventoryDigest = ["7", "9", "0"][probeIndex].repeat(64)
   return {
@@ -1002,7 +1030,7 @@ const completePhaseOneSynthesisProbes = [0, 1, 2].map((batchIndex) => {
   const findings = batchIndex === 0 ? [] : [{ ...completeFindingProjection }]
   const persistence = { ...crossProcessPersistenceHashes }
   const inventoryDigest = ["4", "5", "6"][batchIndex]!.repeat(64)
-  const checkpoint = crossProcessCheckpointAt(batchIndex)
+  const checkpoint = crossProcessStoredCheckpointAt(batchIndex)
   const state = batchIndex === 0 ? "pending" : "running"
   return {
     batchIndex,
@@ -1328,6 +1356,27 @@ describe("DSH process-restart recovery contract (#103)", () => {
     expect(profileEvidenceContract.classifyCrossProcessBatchAuditEvidenceStatus(completeCrossProcessBatchAuditEvidence)).toBe("PASS")
   })
 
+  test("accepts the observer's full persisted checkpoint snapshots for resumed batches 3-5", () => {
+    for (const probe of completeCrossProcessBatchAuditEvidence.phaseTwo.unverifiedAdvanceProbes) {
+      expect(Object.keys(probe.checkpointBefore)).toEqual([
+        "version",
+        "planId",
+        "fingerprint",
+        "strategy",
+        "totalBatches",
+        "completedBatches",
+        "totalCharacters",
+        "completedCharacters",
+        "coveragePercent",
+        "state",
+        "manuscriptFingerprint",
+        "nextBatchId",
+        "nextBatchIndex",
+      ])
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(completeCrossProcessBatchAuditEvidence)).toEqual([])
+  })
+
   test("resume checkpoint snapshots compare structurally despite different property insertion order", () => {
     const checkpoint = crossProcessCheckpointAtTwo
     const checkpointBefore = Object.fromEntries(Object.entries(checkpoint).reverse())
@@ -1427,6 +1476,27 @@ describe("DSH process-restart recovery contract (#103)", () => {
     }, "first unaudited-advance probe must start from the captured post-resume workspace inventory"],
     ["changed checkpoint", {
       unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, checkpointAfter: { ...probe.checkpointAfter, completedBatches: 3 } } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed persisted checkpoint version", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        checkpointBefore: { ...probe.checkpointBefore, version: "analysis-checkpoint-v1" },
+        checkpointAfter: { ...probe.checkpointAfter, version: "analysis-checkpoint-v1" },
+      } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed persisted checkpoint fingerprint", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        checkpointBefore: { ...probe.checkpointBefore, fingerprint: "wrong-fingerprint" },
+        checkpointAfter: { ...probe.checkpointAfter, fingerprint: "wrong-fingerprint" },
+      } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed persisted checkpoint strategy", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        checkpointBefore: { ...probe.checkpointBefore, strategy: "unexpected-strategy" },
+        checkpointAfter: { ...probe.checkpointAfter, strategy: "unexpected-strategy" },
+      } : probe),
     }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
     ["changed first-probe baseline hashes", {
       unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {

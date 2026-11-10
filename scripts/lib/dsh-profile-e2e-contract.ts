@@ -2002,8 +2002,8 @@ function restartSynthesisProbeMatches(
     value.errorCode === "incomplete_coverage" &&
     value.errorMessage === expectedErrorMessage &&
     value.rejectionObserved === true &&
-    restartCheckpointMatches(beforeCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
-    restartCheckpointMatches(afterCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
+    restartStoredCheckpointMatches(beforeCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
+    restartStoredCheckpointMatches(afterCheckpoint, expectedCheckpoint, planId, fingerprint, 5, 595) &&
     isRecord(beforeCheckpoint) && isRecord(afterCheckpoint) &&
     beforeCheckpoint.coveragePercent === checkpointCoverage &&
     afterCheckpoint.coveragePercent === checkpointCoverage &&
@@ -2042,6 +2042,22 @@ const restartCheckpointProjectionFields = [
   "nextBatchId",
 ] as const
 
+const restartStoredCheckpointEvidenceFields = [
+  "version",
+  "planId",
+  "fingerprint",
+  "strategy",
+  "totalBatches",
+  "completedBatches",
+  "totalCharacters",
+  "completedCharacters",
+  "coveragePercent",
+  "state",
+  "manuscriptFingerprint",
+  "nextBatchId",
+  "nextBatchIndex",
+] as const
+
 function restartCheckpointProjectionMatches(
   value: unknown,
   expected: { completedBatches: number; completedCharacters: number; state: string; nextBatchIndex: number | null; nextBatchId: string | null },
@@ -2056,7 +2072,24 @@ function restartCheckpointProjectionMatches(
     restartCheckpointMatches(value, expected, planId, fingerprint, totalBatches, totalCharacters)
 }
 
-// Validate canonical checkpoint values in persisted-store snapshots, which may also carry store metadata.
+function restartStoredCheckpointMatches(
+  value: unknown,
+  expected: { completedBatches: number; completedCharacters: number; state: string; nextBatchIndex: number | null; nextBatchId: string | null },
+  planId: string,
+  fingerprint: string,
+  totalBatches: number,
+  totalCharacters: number,
+): boolean {
+  return isRecord(value) &&
+    Object.keys(value).length === restartStoredCheckpointEvidenceFields.length &&
+    restartStoredCheckpointEvidenceFields.every((field) => Object.prototype.hasOwnProperty.call(value, field)) &&
+    value.version === "analysis-checkpoint-v2" &&
+    value.fingerprint === fingerprint &&
+    value.strategy === "ordered-source-spans-exhaustive-v1" &&
+    restartCheckpointMatches(value, expected, planId, fingerprint, totalBatches, totalCharacters)
+}
+
+// Validate canonical progress values shared by context projections and persisted checkpoint evidence.
 function restartCheckpointMatches(
   value: unknown,
   expected: { completedBatches: number; completedCharacters: number; state: string; nextBatchIndex: number | null; nextBatchId: string | null },
@@ -2510,9 +2543,9 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
       nextBatchId: expectedBatchId,
     }
     if (
-      !restartCheckpointProjectionMatches(checkpointBefore, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
+      !restartStoredCheckpointMatches(checkpointBefore, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
       checkpointBefore?.coveragePercent !== checkpointCoverage ||
-      !restartCheckpointProjectionMatches(checkpointAfter, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
+      !restartStoredCheckpointMatches(checkpointAfter, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
       checkpointAfter?.coveragePercent !== checkpointCoverage ||
       !restartCheckpointEvidenceEqual(checkpointBefore, checkpointAfter) ||
       !Number.isInteger(completedCharacters) ||
@@ -2571,7 +2604,7 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
       ? advanceProbe.checkpointAfter
       : {}
     const expectedFindings = isBatchAuditFindingProjection(phaseOne?.finding) ? [phaseOne.finding] : []
-    // The synthesis probe validates canonical checkpoint fields and coverage against this advance projection.
+    // The synthesis probe validates the complete persisted checkpoint evidence against this advance snapshot.
     const matches = typeof expectedBatchId === "string" && isRecord(advanceProbe) &&
       restartSynthesisProbeMatches(synthesisProbe, {
         batchIndex,

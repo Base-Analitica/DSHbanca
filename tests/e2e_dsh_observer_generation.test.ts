@@ -111,6 +111,11 @@ test("both process phases verify successful incomplete-coverage refusal and pers
   expect(probeHelper).toContain("crossProcessAnalysisHashes")
   expect(probeHelper).toContain("workspaceInventoryBeforeSha256 === workspaceInventoryAfterSha256")
   expect(probeHelper).toContain("persistentStateUnchanged")
+  expect(runnerSource).toContain("const crossProcessStoredCheckpointEvidence = (checkpoint, nextBatch) => ({")
+  expect(runnerSource).toContain("...checkpoint,")
+  expect(runnerSource).toContain("manuscriptFingerprint: checkpoint?.fingerprint")
+  expect(secondPhase).toContain("const checkpointBefore = crossProcessStoredCheckpointEvidence(storesBeforeAttempt.checkpoint, meta?.batch)")
+  expect(secondPhase).toContain("const checkpointAfter = crossProcessStoredCheckpointEvidence(storesAfterAttempt.checkpoint, meta?.batch)")
 })
 
 test("actual generated observer module binds the control preset ID without runner scope", async () => {
