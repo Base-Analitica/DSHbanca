@@ -1428,6 +1428,28 @@ export interface CrossProcessBatchAuditEvidence {
     agentIdentity: Record<string, unknown>
     completedBatchIds: string[]
     batchAudits: Array<Record<string, unknown>>
+    unverifiedAdvancesBlocked: number
+    unverifiedAdvanceProbes: Array<{
+      batchIndex: number
+      batchId: string
+      errorCode: string | null
+      rejectionObserved: boolean
+      checkpointBefore: Record<string, unknown>
+      checkpointAfter: Record<string, unknown>
+      persistenceBefore: Record<string, unknown>
+      persistenceAfter: Record<string, unknown>
+      workspaceInventoryBeforeSha256: string
+      workspaceInventoryAfterSha256: string
+      persistedReceiptCountBefore: number
+      persistedReceiptCountAfter: number
+      persistedBatchIdsBefore: string[]
+      persistedBatchIdsAfter: string[]
+      findingCountBefore: number
+      findingCountAfter: number
+      findingsBefore: BatchAuditFindingProjectionEvidence[]
+      findingsAfter: BatchAuditFindingProjectionEvidence[]
+      persistentStateUnchanged: boolean
+    }>
     persistedReceiptCount: number
     persistedBatchIds: string[]
     finalCheckpoint: Record<string, unknown>
@@ -1818,6 +1840,88 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
     !restartPersistenceMatches(resumeQuery?.persistenceBefore, resumeQuery?.persistenceAfter)
   ) {
     errors.push("cross-process persistent hashes must match and remain unchanged across resume-only context query")
+  }
+
+  const unverifiedAdvanceProbes = Array.isArray(phaseTwo?.unverifiedAdvanceProbes)
+    ? phaseTwo.unverifiedAdvanceProbes
+    : []
+  if (phaseTwo?.unverifiedAdvancesBlocked !== 3 || unverifiedAdvanceProbes.length !== 3) {
+    errors.push("second process must reject unaudited advancement for all three remaining batches before auditing")
+  }
+  let previousUnverifiedCheckpointCharacters = firstCompletedCharacters
+  for (let probeIndex = 0; probeIndex < 3; probeIndex++) {
+    const batchIndex = probeIndex + 2
+    const expectedBatchId = planBatchIds[batchIndex]
+    const probe = unverifiedAdvanceProbes[probeIndex]
+    if (!isRecord(probe)) {
+      errors.push(`second process must record a missing_batch_audit rejection before auditing batch ${batchIndex + 1}`)
+      continue
+    }
+    if (
+      probe.batchIndex !== batchIndex ||
+      probe.batchId !== expectedBatchId ||
+      probe.errorCode !== "missing_batch_audit" ||
+      probe.rejectionObserved !== true
+    ) {
+      errors.push(`second process must observe missing_batch_audit for unaudited batch ${batchIndex + 1}`)
+    }
+
+    const checkpointBefore = isRecord(probe.checkpointBefore) ? probe.checkpointBefore : undefined
+    const checkpointAfter = isRecord(probe.checkpointAfter) ? probe.checkpointAfter : undefined
+    const completedCharacters = checkpointBefore?.completedCharacters
+    const checkpointCoverage = Number.isInteger(completedCharacters)
+      ? Math.round((completedCharacters as number / totalCharacters) * 10000) / 100
+      : -1
+    const checkpointExpected = {
+      completedBatches: batchIndex,
+      completedCharacters: Number.isInteger(completedCharacters) ? completedCharacters as number : -1,
+      state: "running",
+      nextBatchIndex: batchIndex,
+      nextBatchId: expectedBatchId,
+    }
+    if (
+      !restartCheckpointMatches(checkpointBefore, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
+      checkpointBefore?.coveragePercent !== checkpointCoverage ||
+      !restartCheckpointMatches(checkpointAfter, checkpointExpected, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters) ||
+      checkpointAfter?.coveragePercent !== checkpointCoverage ||
+      JSON.stringify(checkpointBefore) !== JSON.stringify(checkpointAfter) ||
+      !Number.isInteger(completedCharacters) ||
+      (completedCharacters as number) < 0 ||
+      (completedCharacters as number) >= totalCharacters ||
+      (probeIndex === 0 && completedCharacters !== firstCompletedCharacters) ||
+      (probeIndex > 0 && (completedCharacters as number) <= previousUnverifiedCheckpointCharacters)
+    ) {
+      errors.push(`unaudited advance probe for batch ${batchIndex + 1} must preserve the current ordered checkpoint`)
+    }
+    if (Number.isInteger(completedCharacters)) previousUnverifiedCheckpointCharacters = completedCharacters as number
+
+    const expectedPriorBatchIds = planBatchIds.slice(0, batchIndex)
+    if (
+      !restartPersistenceMatches(probe.persistenceBefore, probe.persistenceAfter) ||
+      (probeIndex === 0 && (
+        !restartPersistenceMatches(phaseOnePersistence, probe.persistenceBefore) ||
+        !restartPersistenceMatches(resumeQuery?.persistenceAfter, probe.persistenceBefore)
+      )) ||
+      !isSha256Digest(probe.workspaceInventoryBeforeSha256) ||
+      probe.workspaceInventoryBeforeSha256 !== probe.workspaceInventoryAfterSha256 ||
+      probe.persistedReceiptCountBefore !== batchIndex ||
+      probe.persistedReceiptCountAfter !== batchIndex ||
+      !Array.isArray(probe.persistedBatchIdsBefore) ||
+      JSON.stringify(probe.persistedBatchIdsBefore) !== JSON.stringify(expectedPriorBatchIds) ||
+      !Array.isArray(probe.persistedBatchIdsAfter) ||
+      JSON.stringify(probe.persistedBatchIdsAfter) !== JSON.stringify(expectedPriorBatchIds) ||
+      !Array.isArray(probe.findingsBefore) ||
+      !probe.findingsBefore.every(isBatchAuditFindingProjection) ||
+      probe.findingCountBefore !== 1 ||
+      probe.findingCountAfter !== 1 ||
+      !Array.isArray(probe.findingsAfter) ||
+      !probe.findingsAfter.every(isBatchAuditFindingProjection) ||
+      JSON.stringify(probe.findingsBefore) !== JSON.stringify(probe.findingsAfter) ||
+      JSON.stringify(probe.findingsBefore) !== JSON.stringify([phaseOne?.finding]) ||
+      probe.persistentStateUnchanged !== true
+    ) {
+      errors.push(`second process must prove batch ${batchIndex + 1} rejection left checkpoint, confirmations, findings, and inventory unchanged`)
+    }
   }
 
   if (!restartAgentIdentityIsVerified(phaseTwo?.agentIdentity)) {

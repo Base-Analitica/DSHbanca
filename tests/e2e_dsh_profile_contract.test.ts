@@ -894,6 +894,43 @@ const crossProcessCheckpointAtTwo = {
   nextBatchIndex: 2,
   nextBatchId: batchAuditIds[2],
 }
+const crossProcessCheckpointAt = (batchIndex: number) => {
+  const completedCharacters = batchIndex * 120
+  return {
+    ...crossProcessCheckpointAtTwo,
+    completedBatches: batchIndex,
+    completedCharacters,
+    coveragePercent: Math.round((completedCharacters / 595) * 10000) / 100,
+    nextBatchIndex: batchIndex,
+    nextBatchId: batchAuditIds[batchIndex],
+  }
+}
+const completeCrossProcessUnauditedAdvanceProbes = [2, 3, 4].map((batchIndex, probeIndex) => {
+  const checkpoint = crossProcessCheckpointAt(batchIndex)
+  const priorBatchIds = batchAuditIds.slice(0, batchIndex)
+  const inventoryDigest = ["8", "9", "0"][probeIndex].repeat(64)
+  return {
+    batchIndex,
+    batchId: batchAuditIds[batchIndex],
+    errorCode: "missing_batch_audit",
+    rejectionObserved: true,
+    checkpointBefore: { ...checkpoint },
+    checkpointAfter: { ...checkpoint },
+    persistenceBefore: { ...crossProcessPersistenceHashes },
+    persistenceAfter: { ...crossProcessPersistenceHashes },
+    workspaceInventoryBeforeSha256: inventoryDigest,
+    workspaceInventoryAfterSha256: inventoryDigest,
+    persistedReceiptCountBefore: batchIndex,
+    persistedReceiptCountAfter: batchIndex,
+    persistedBatchIdsBefore: priorBatchIds,
+    persistedBatchIdsAfter: [...priorBatchIds],
+    findingCountBefore: 1,
+    findingCountAfter: 1,
+    findingsBefore: [{ ...completeFindingProjection }],
+    findingsAfter: [{ ...completeFindingProjection }],
+    persistentStateUnchanged: true,
+  }
+})
 const crossProcessAuditorIdentity = (agentId: string) => ({
   createdVia: "ctx.agents.create",
   agentId,
@@ -1029,6 +1066,8 @@ const completeCrossProcessBatchAuditEvidence = {
       acceptedCount: 0,
       persistedFindingCount: 1,
     })),
+    unverifiedAdvancesBlocked: 3,
+    unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes,
     persistedReceiptCount: 5,
     persistedBatchIds: [...batchAuditIds],
     finalCheckpoint: {
@@ -1091,6 +1130,69 @@ describe("DSH process-restart recovery contract (#103)", () => {
   test("accepts independently observed sequential DSH process recovery", () => {
     expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(completeCrossProcessBatchAuditEvidence)).toEqual([])
     expect(profileEvidenceContract.classifyCrossProcessBatchAuditEvidenceStatus(completeCrossProcessBatchAuditEvidence)).toBe("PASS")
+  })
+
+  test("requires the resumed DSH process to reject unaudited advances before each remaining batch", () => {
+    const phaseTwoWithoutAdvanceDenials = {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        unverifiedAdvancesBlocked: undefined,
+      },
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(phaseTwoWithoutAdvanceDenials)).toContain(
+      "second process must reject unaudited advancement for all three remaining batches before auditing",
+    )
+  })
+
+  test.each([
+    ["zero denials", { unverifiedAdvancesBlocked: 0 }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["incomplete denial count", { unverifiedAdvancesBlocked: 2 }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["missing probe list", { unverifiedAdvanceProbes: undefined }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["unconfirmed rejection", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, rejectionObserved: false } : probe),
+    }, "second process must observe missing_batch_audit for unaudited batch 3"],
+    ["incomplete probe list", { unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.slice(0, 2) }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["wrong rejection code", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, errorCode: "unexpected" } : probe),
+    }, "second process must observe missing_batch_audit for unaudited batch 3"],
+    ["changed checkpoint", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, checkpointAfter: { ...probe.checkpointAfter, completedBatches: 3 } } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed first-probe baseline hashes", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        persistenceBefore: { ...probe.persistenceBefore, checkpointSha256: "0".repeat(64) },
+        persistenceAfter: { ...probe.persistenceAfter, checkpointSha256: "0".repeat(64) },
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+    ["changed audit confirmations", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        persistenceAfter: { ...probe.persistenceAfter, auditConfirmationsSha256: "0".repeat(64) },
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+    ["changed finding", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        findingsAfter: [{ ...completeFindingProjection, findingId: "0".repeat(64) }],
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+    ["changed workspace inventory", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        workspaceInventoryAfterSha256: "7".repeat(64),
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+  ])("rejects post-restart denial evidence mutation: %s", (_label, phaseTwoPatch, expectedError) => {
+    const evidence = {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        ...phaseTwoPatch,
+      },
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(evidence)).toContain(expectedError)
   })
 
   test.each([

@@ -607,6 +607,13 @@ const resultMessage = (result) => {
   if (content) return content.replace(/^Error:\\s*/, "");
   return typeof result?.value === "string" ? result.value : "";
 };
+export const crossProcessToolErrorCode = (message) => {
+  if (typeof message !== "string") return null;
+  const lines = message.split(String.fromCharCode(10));
+  if (lines.length !== 3 || lines[0] !== "context checkpoint error" || !lines[1].startsWith("code=") || !lines[2].startsWith("message=")) return null;
+  const code = lines[1].slice("code=".length);
+  return /^[a-z][a-z0-9_]*$/.test(code) ? code : null;
+};
 const runTool = async (context, callId, name, args, agent) => {
   const controller = new AbortController();
   const result = await context.tools.execute({ callId, name, arguments: args, agent, signal: controller.signal });
@@ -1448,6 +1455,12 @@ const crossProcessCheckpointEvidence = (meta) => ({
   nextBatchId: meta?.batch?.batchId ?? null,
   nextBatchIndex: meta?.batch?.index ?? null,
 });
+const crossProcessStoredCheckpointEvidence = (checkpoint, nextBatch) => ({
+  ...checkpoint,
+  manuscriptFingerprint: checkpoint?.fingerprint,
+  nextBatchId: nextBatch?.batchId ?? null,
+  nextBatchIndex: nextBatch?.index ?? null,
+});
 const crossProcessFindingProjection = (finding) => ({
   version: finding.version,
   findingId: finding.findingId,
@@ -1742,11 +1755,77 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
     if (JSON.stringify(checkpointBeforeQuery) !== JSON.stringify(checkpointAfterQuery) || !crossProcessSameProjection(persistenceBefore, persistenceAfterQuery) || storesAfterQuery.receipts.length !== 2 || storesAfterQuery.findings.length !== 1 || !recoveredFindingAfterQuery || !crossProcessSameProjection(recoveredFindingAfterQuery, expectation.finding)) fail("resume-only banca_context query changed persistent progress or the first-process finding");
     const batchAudits = [];
     const completedBatchIds = [];
+    const unverifiedAdvanceProbes = [];
+    let unverifiedAdvancesBlocked = 0;
     const allPlanBatchIds = [...expectation.completedBatchIds];
     for (let index = 2; index < 5; index++) {
       const batchId = meta?.batch?.batchId;
       if (meta?.batch?.index !== index || meta?.checkpoint?.completedBatches !== index || typeof batchId !== "string") fail("second DSH process observed a skipped or out-of-order remaining batch");
       allPlanBatchIds.push(batchId);
+
+      const persistenceBeforeAttempt = await crossProcessAnalysisHashes(workspace, expectation.planId);
+      const workspaceInventoryBeforeAttempt = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+      const storesBeforeAttempt = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
+      const checkpointBefore = crossProcessStoredCheckpointEvidence(storesBeforeAttempt.checkpoint, meta?.batch);
+      const persistedBatchIdsBefore = storesBeforeAttempt.receipts.map((receipt) => receipt.batchId);
+      const findingsBefore = storesBeforeAttempt.findings.map(crossProcessFindingProjection);
+      if (
+        checkpointBefore.planId !== expectation.planId ||
+        checkpointBefore.manuscriptFingerprint !== expectation.manuscriptFingerprint ||
+        checkpointBefore.completedBatches !== index ||
+        checkpointBefore.state !== "running" ||
+        checkpointBefore.nextBatchIndex !== index ||
+        checkpointBefore.nextBatchId !== batchId ||
+        storesBeforeAttempt.receipts.length !== index ||
+        JSON.stringify(persistedBatchIdsBefore) !== JSON.stringify(allPlanBatchIds.slice(0, index)) ||
+        storesBeforeAttempt.findings.length !== 1 ||
+        !crossProcessSameProjection(findingsBefore, [expectation.finding])
+      ) fail("second DSH process pre-attempt checkpoint, confirmations, or finding did not match the current unaudited batch");
+
+      const unverifiedAdvance = await runTool(ctx, "dshbanca-e2e-process-b-unverified-advance-" + index, "banca_context", { completedBatchId: batchId }, agent);
+      const rejectionCode = crossProcessToolErrorCode(unverifiedAdvance.message);
+      const rejectionObserved = rejectionCode === "missing_batch_audit";
+      if (!rejectionObserved) fail("second DSH process did not reject an unaudited advance with missing_batch_audit");
+
+      const storesAfterAttempt = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
+      const persistenceAfterAttempt = await crossProcessAnalysisHashes(workspace, expectation.planId);
+      const workspaceInventoryAfterAttempt = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+      const checkpointAfter = crossProcessStoredCheckpointEvidence(storesAfterAttempt.checkpoint, meta?.batch);
+      const persistedBatchIdsAfter = storesAfterAttempt.receipts.map((receipt) => receipt.batchId);
+      const findingsAfter = storesAfterAttempt.findings.map(crossProcessFindingProjection);
+      const persistentStateUnchanged =
+        crossProcessSameProjection(storesBeforeAttempt.checkpoint, storesAfterAttempt.checkpoint) &&
+        crossProcessSameProjection(checkpointBefore, checkpointAfter) &&
+        crossProcessSameProjection(persistenceBeforeAttempt, persistenceAfterAttempt) &&
+        workspaceInventoryBeforeAttempt === workspaceInventoryAfterAttempt &&
+        storesBeforeAttempt.receipts.length === storesAfterAttempt.receipts.length &&
+        JSON.stringify(persistedBatchIdsBefore) === JSON.stringify(persistedBatchIdsAfter) &&
+        crossProcessSameProjection(findingsBefore, findingsAfter);
+      if (!persistentStateUnchanged) fail("second DSH process unaudited-advance rejection mutated checkpoint, confirmations, findings, or workspace inventory");
+
+      unverifiedAdvanceProbes.push({
+        batchIndex: index,
+        batchId,
+        errorCode: rejectionCode,
+        rejectionObserved,
+        checkpointBefore,
+        checkpointAfter,
+        persistenceBefore: persistenceBeforeAttempt,
+        persistenceAfter: persistenceAfterAttempt,
+        workspaceInventoryBeforeSha256: workspaceInventoryBeforeAttempt,
+        workspaceInventoryAfterSha256: workspaceInventoryAfterAttempt,
+        persistedReceiptCountBefore: storesBeforeAttempt.receipts.length,
+        persistedReceiptCountAfter: storesAfterAttempt.receipts.length,
+        persistedBatchIdsBefore,
+        persistedBatchIdsAfter,
+        findingCountBefore: storesBeforeAttempt.findings.length,
+        findingCountAfter: storesAfterAttempt.findings.length,
+        findingsBefore,
+        findingsAfter,
+        persistentStateUnchanged,
+      });
+      unverifiedAdvancesBlocked++;
+
       const premature = await runTool(ctx, "dshbanca-e2e-process-b-premature-synthesis-" + index, "banca_sintese", {}, agent);
       if (!premature.result.isError || !premature.message.includes("synthesis input error")) fail("second DSH process released synthesis before all five batches");
       const audit = await runTool(ctx, "dshbanca-e2e-process-b-audit-" + index, "banca_auditar", { manuscriptFingerprint: expectation.manuscriptFingerprint, batchId, findings: [] }, agent);
@@ -1789,6 +1868,8 @@ export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
       agentIdentity: identity,
       completedBatchIds,
       batchAudits,
+      unverifiedAdvancesBlocked,
+      unverifiedAdvanceProbes,
       persistedReceiptCount: finalStores.receipts.length,
       persistedBatchIds: finalStores.receipts.map((receipt) => receipt.batchId),
       finalCheckpoint,
