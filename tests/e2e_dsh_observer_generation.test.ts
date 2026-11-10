@@ -14,6 +14,42 @@ import {
 import { e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "../scripts/lib/dsh-profile-e2e-observer-control.js"
 
+test("unauthorized E2E returns before any DSH CLI or academic project setup", () => {
+  const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const mainStart = runnerSource.indexOf("async function main(): Promise<void>")
+  const authorizationGate = runnerSource.indexOf('if (process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED !== "yes")', mainStart)
+  const dshLookup = runnerSource.indexOf('const dshExecutable = findExecutable("dsh", process.env.DSH_BIN)', mainStart)
+  const workspaceSetup = runnerSource.indexOf('const workspace = join(scratch, "synthetic-project")', mainStart)
+  expect(mainStart).toBeGreaterThanOrEqual(0)
+  expect(authorizationGate).toBeGreaterThan(mainStart)
+  expect(authorizationGate).toBeLessThan(dshLookup)
+  expect(authorizationGate).toBeLessThan(workspaceSetup)
+  expect(runnerSource.slice(authorizationGate, dshLookup)).toContain("dshCliInvocations: 0")
+  expect(runnerSource.slice(authorizationGate, dshLookup)).toContain("academicProjectInitialized: false")
+  expect(runnerSource).not.toContain('process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED = "yes"')
+})
+
+test("runner gates the second DSH spawn on host-verified phase-one recovery and legacy batch evidence", () => {
+  const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const phaseOneValidation = runnerSource.indexOf("validateCrossProcessPhaseOneEvidence(phaseOneEvidence)")
+  const legacyBatchValidation = runnerSource.indexOf("validateBatchAuditEvidence(observed.batchAuditEvidenceGate)")
+  const firstCloseCheck = runnerSource.indexOf("boot.closeObserved === true", phaseOneValidation)
+  const secondSpawn = runnerSource.indexOf("const secondBoot = await runDsh", phaseOneValidation)
+  expect(phaseOneValidation).toBeGreaterThanOrEqual(0)
+  expect(legacyBatchValidation).toBeGreaterThan(phaseOneValidation)
+  expect(firstCloseCheck).toBeGreaterThan(phaseOneValidation)
+  expect(secondSpawn).toBeGreaterThan(legacyBatchValidation)
+  expect(secondSpawn).toBeGreaterThan(firstCloseCheck)
+  expect(runnerSource.slice(phaseOneValidation, secondSpawn)).toContain("if (!phaseOneHostReady)")
+  expect(runnerSource.slice(phaseOneValidation, secondSpawn)).toContain("secondProcessStarted: false")
+  expect(runnerSource).toContain('openSync(restartWorkspace, "r")')
+  expect(runnerSource).toContain("fstatSync(directoryFd, { bigint: true })")
+  expect(runnerSource).toContain("opened.dev !== named.dev || opened.ino !== named.ino")
+  expect(runnerSource).toContain("secondProcessStartFilesystemIdentitySha256 !== restartWorkspaceIdentitySha256")
+  expect(runnerSource).toContain("completedBatchCharacters")
+  expect(runnerSource).toContain("planBatchIdsPrefix")
+})
+
 test("actual generated observer module binds the control preset ID without runner scope", async () => {
   const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
   expect(runnerSource).toContain("${renderControlPresetSelector(e2eControlPresetId)}")
@@ -26,12 +62,14 @@ test("actual generated observer module binds the control preset ID without runne
   const template = runnerSource.slice(contentStart, contentEnd)
   const renderObserver = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
-    "workspace", "observerResult", "renderControlPresetSelector", "e2eControlPresetId",
+    "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${template}\`;`,
   ) as (...args: unknown[]) => string
   const generatedModuleSource = renderObserver(
     "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
-    "/tmp/synthetic-workspace", "/tmp/observer-result.json", renderControlPresetSelector, e2eControlPresetId,
+    "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
+    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
   )
   expect(generatedModuleSource).toContain('const e2eControlPresetId = "dshbanca-e2e-control-neutral";')
 
@@ -43,7 +81,19 @@ test("actual generated observer module binds the control preset ID without runne
     const generatedModule = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}`)
     expect(typeof generatedModule.apply).toBe("function")
     expect(typeof generatedModule.runAcademicBatchAuditProbe).toBe("function")
+    expect(typeof generatedModule.runCrossProcessInitialProbe).toBe("function")
+    expect(typeof generatedModule.runCrossProcessResumeProbe).toBe("function")
+    expect(typeof generatedModule.crossProcessProcessIdentitySha256).toBe("function")
     expect(typeof generatedModule.runAcademicNativeQuestionsProbe).toBe("function")
+    expect(runnerSource).toContain('child.once("spawn"')
+    expect(generatedModuleSource).toContain("/proc/sys/kernel/random/boot_id")
+    expect(generatedModuleSource).toContain('readFile("/proc/" + process.pid + "/stat"')
+    expect(generatedModuleSource).toContain("analysis-audit-confirmations-store-v1")
+    expect(generatedModuleSource).toContain("DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE")
+    expect(generatedModuleSource).toContain('process.once("beforeExit"')
+    expect(generatedModuleSource).toContain("process.exitCode = 86")
+    expect(generatedModuleSource).toContain("nativeShutdownCompleted: process.exitCode === 0")
+    expect(generatedModuleSource).toContain("processExitCodeAtBeforeExit: process.exitCode ?? null")
     expect(generatedModuleSource).toContain("banca_auditar")
     expect(generatedModuleSource).toContain("missing_batch_audit")
     expect(generatedModuleSource).toContain("expectedTotalBatches")
@@ -149,13 +199,15 @@ test("generated auditor evidence uses the strict session projection contract", a
   const template = runnerSource.slice(contentStart, contentEnd)
   const renderObserver = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
-    "workspace", "observerResult", "renderControlPresetSelector", "e2eControlPresetId",
+    "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${template}\`;`,
   ) as (...args: unknown[]) => string
   const generatedModuleSource = renderObserver(
     "dshbanca-e2e-observer", expectedTools,
     canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
-    "/tmp/synthetic-workspace", "/tmp/observer-result.json", renderControlPresetSelector, e2eControlPresetId,
+    "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
+    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
   )
 
   // Evaluate the exact object literal embedded in the generated observer module.

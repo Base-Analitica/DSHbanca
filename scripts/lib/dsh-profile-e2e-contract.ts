@@ -126,7 +126,7 @@ export function classifyAcademicDecisionStatus(value: unknown): ProfileGateStatu
   return validateAcademicDecisionEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
-/** Keep legacy gates visible while incorporating native skills, batch audit, native questions, and academic decision verification. */
+/** Keep legacy gates visible while incorporating native skills, batch audit, native questions, academic decisions, and cross-process recovery. */
 export function classifyProfileGateStatuses(
   issue2Status: ProfileGateStatus,
   auditorMarkdownStatus: ProfileGateStatus,
@@ -134,6 +134,7 @@ export function classifyProfileGateStatuses(
   batchAuditStatus?: ProfileGateStatus,
   nativeQuestionsStatus?: ProfileGateStatus,
   academicDecisionStatus?: ProfileGateStatus,
+  crossProcessBatchAuditStatus?: ProfileGateStatus,
 ): {
   issue2Status: ProfileGateStatus
   auditorMarkdownStatus: ProfileGateStatus
@@ -141,6 +142,7 @@ export function classifyProfileGateStatuses(
   batchAuditStatus?: ProfileGateStatus
   nativeQuestionsStatus?: ProfileGateStatus
   academicDecisionStatus?: ProfileGateStatus
+  crossProcessBatchAuditStatus?: ProfileGateStatus
   overallStatus: ProfileGateStatus
   exitCode: number
 } {
@@ -149,6 +151,7 @@ export function classifyProfileGateStatuses(
   if (batchAuditStatus !== undefined) statuses.push(batchAuditStatus)
   if (nativeQuestionsStatus !== undefined) statuses.push(nativeQuestionsStatus)
   if (academicDecisionStatus !== undefined) statuses.push(academicDecisionStatus)
+  if (crossProcessBatchAuditStatus !== undefined) statuses.push(crossProcessBatchAuditStatus)
   const overallStatus: ProfileGateStatus = statuses.includes("FAIL")
     ? "FAIL"
     : statuses.includes("BLOCKED") ? "BLOCKED" : "PASS"
@@ -159,6 +162,7 @@ export function classifyProfileGateStatuses(
     ...(batchAuditStatus !== undefined ? { batchAuditStatus } : {}),
     ...(nativeQuestionsStatus !== undefined ? { nativeQuestionsStatus } : {}),
     ...(academicDecisionStatus !== undefined ? { academicDecisionStatus } : {}),
+    ...(crossProcessBatchAuditStatus !== undefined ? { crossProcessBatchAuditStatus } : {}),
     overallStatus,
     exitCode: overallStatus === "PASS" ? passExitCode() : overallStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
   }
@@ -1335,6 +1339,576 @@ export function classifyBatchAuditEvidenceStatus(value: unknown): ProfileGateSta
   return validateBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
+export interface CrossProcessBatchAuditEvidence {
+  probeExecuted: boolean
+  executionMode: string
+  syntheticProcessFixture: boolean
+  workspace: {
+    sameWorkspace: boolean
+    preservedBetweenProcesses: boolean
+    resetBetweenProcesses: boolean
+    identitySha256: string
+    firstProcessEndFilesystemIdentitySha256: string
+    secondProcessStartFilesystemIdentitySha256: string
+    secondProcessEndFilesystemIdentitySha256: string
+    firstProcessEndInventorySha256: string
+    secondProcessStartInventorySha256: string
+  }
+  processBoundary: {
+    observationSource: string
+    first: {
+      dshExecutableSha256: string
+      profileIdentitySha256: string
+      hostIdentitySha256: string
+      observerIdentitySha256: string
+      identityMatched: boolean
+      spawnObserved: boolean
+      kernelStartIdentityObserved: boolean
+      exitObserved: boolean
+      exitCode: number | null
+      signal: string | null
+      timedOut: boolean
+      forcedTermination: boolean
+      naturalBeforeExitObserved: boolean
+      nativeTeardownMarkerObserved: boolean
+    }
+    second: {
+      dshExecutableSha256: string
+      profileIdentitySha256: string
+      hostIdentitySha256: string
+      observerIdentitySha256: string
+      identityMatched: boolean
+      spawnObserved: boolean
+      kernelStartIdentityObserved: boolean
+      exitObserved: boolean
+      exitCode: number | null
+      signal: string | null
+      timedOut: boolean
+      forcedTermination: boolean
+      naturalBeforeExitObserved: boolean
+      nativeTeardownMarkerObserved: boolean
+    }
+    secondStartedAfterFirstExit: boolean
+    processesDidNotOverlap: boolean
+  }
+  totalBatches: number
+  totalCharacters: number
+  planId: string
+  manuscriptFingerprint: string
+  planBatchIds: string[]
+  phaseOne: {
+    checkpoint: Record<string, unknown>
+    completedBatchIds: string[]
+    batchAudits: Array<Record<string, unknown>>
+    persistence: Record<string, unknown>
+    persistedReceiptCount: number
+    persistedBatchIds: string[]
+    unverifiedAdvancesBlocked: number
+    workspaceInventorySha256: string
+    findingCount: number
+    finding: BatchAuditFindingProjectionEvidence
+    prematureSynthesisBlocked: boolean
+    synthesisReleased: boolean
+    agentIdentity: Record<string, unknown>
+    teardown: Record<string, unknown>
+  }
+  phaseTwo: {
+    resumeQuery: {
+      completedBatchIdProvided: boolean
+      checkpointBefore: Record<string, unknown>
+      checkpointAfter: Record<string, unknown>
+      persistenceBefore: Record<string, unknown>
+      persistenceAfter: Record<string, unknown>
+      recoveredFindingCount: number
+      recoveredFinding: BatchAuditFindingProjectionEvidence
+      persistedReceiptCount: number
+      persistedBatchIds: string[]
+    }
+    workspaceInventoryBeforeResumeSha256: string
+    agentIdentity: Record<string, unknown>
+    completedBatchIds: string[]
+    batchAudits: Array<Record<string, unknown>>
+    persistedReceiptCount: number
+    persistedBatchIds: string[]
+    finalCheckpoint: Record<string, unknown>
+    synthesis: {
+      state: string
+      totalBatches: number
+      completedBatches: number
+      totalCharacters: number
+      completedCharacters: number
+      coveragePercent: number
+      orderedBatchIds: string[]
+      findingsCount: number
+      finding: BatchAuditFindingProjectionEvidence
+    }
+    manuscriptPreserved: boolean
+    teardown: Record<string, unknown>
+  }
+}
+
+const restartPersistenceKeys = [
+  "analysisInventorySha256",
+  "checkpointSha256",
+  "auditConfirmationsSha256",
+  "findingsSha256",
+] as const
+
+function restartPersistenceMatches(left: unknown, right: unknown): boolean {
+  return isRecord(left) && isRecord(right) && restartPersistenceKeys.every((key) =>
+    isSha256Digest(left[key]) && left[key] === right[key],
+  )
+}
+
+function restartCheckpointMatches(
+  value: unknown,
+  expected: { completedBatches: number; completedCharacters: number; state: string; nextBatchIndex: number | null; nextBatchId: string | null },
+  planId: string,
+  fingerprint: string,
+  totalBatches: number,
+  totalCharacters: number,
+): boolean {
+  return isRecord(value) &&
+    value.planId === planId &&
+    value.manuscriptFingerprint === fingerprint &&
+    value.totalBatches === totalBatches &&
+    value.completedBatches === expected.completedBatches &&
+    value.completedCharacters === expected.completedCharacters &&
+    value.totalCharacters === totalCharacters &&
+    value.state === expected.state &&
+    value.nextBatchIndex === expected.nextBatchIndex &&
+    value.nextBatchId === expected.nextBatchId
+}
+
+function restartAgentIdentityIsVerified(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) &&
+    value.createdVia === "ctx.agents.create" &&
+    isSha256Digest(value.agentId) &&
+    value.agentId === value.sessionId &&
+    value.agentAndSessionIdMatch === true &&
+    value.agentRegistryContainsAgent === true &&
+    value.sessionStoreContainsSession === true &&
+    value.effectivePreset === "banca-auditor" &&
+    value.sessionPresetProjection === "banca-auditor" &&
+    value.toolRuntime === "ctx.tools.execute" &&
+    value.modelCalls === 0
+}
+
+function restartTeardownIsVerified(value: unknown): boolean {
+  return isRecord(value) &&
+    value.disposeCalled === true &&
+    value.agentUnregistered === true &&
+    value.sessionUnregistered === true &&
+    value.teardownFailed !== true
+}
+
+/** Validate phase one before the runner is allowed to start a second DSH process. */
+export function validateCrossProcessPhaseOneEvidence(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) return ["cross-process phase one evidence is missing"]
+  if (value.probeExecuted !== true || value.executionMode !== "cross-process-native-dsh") {
+    errors.push("phase one must execute the native DSH process-restart probe")
+  }
+  if (!isSha256Digest(value.workspaceIdentitySha256) || !isSha256Digest(value.workspaceInventorySha256)) {
+    errors.push("phase one must bind the workspace identity and complete persisted inventory")
+  }
+  if (!isSha256Digest(value.planId) || !isSha256Digest(value.manuscriptFingerprint)) {
+    errors.push("phase one plan identity must include SHA-256 plan and manuscript fingerprints")
+  }
+  if (value.totalBatches !== 5 || value.totalCharacters !== 595) {
+    errors.push("phase one must use the canonical 595-character five-batch synthetic project")
+  }
+  const completedBatchIds = Array.isArray(value.completedBatchIds) ? value.completedBatchIds : []
+  const planBatchIdsPrefix = Array.isArray(value.planBatchIdsPrefix) ? value.planBatchIdsPrefix : []
+  const completedBatchCharacters = Array.isArray(value.completedBatchCharacters) ? value.completedBatchCharacters : []
+  if (completedBatchIds.length !== 2 || completedBatchIds.some((batchId) => typeof batchId !== "string" || batchId.length === 0) || new Set(completedBatchIds).size !== 2) {
+    errors.push("phase one must persist exactly two unique ordered batch IDs")
+  }
+  if (
+    planBatchIdsPrefix.length !== 3 ||
+    planBatchIdsPrefix.some((batchId) => typeof batchId !== "string" || batchId.length === 0) ||
+    new Set(planBatchIdsPrefix).size !== 3 ||
+    JSON.stringify(planBatchIdsPrefix.slice(0, 2)) !== JSON.stringify(completedBatchIds)
+  ) {
+    errors.push("phase one must capture the first three ordered canonical plan batch IDs from context probes")
+  }
+  if (completedBatchCharacters.length !== 2 || completedBatchCharacters.some((characters) => !Number.isInteger(characters) || (characters as number) <= 0 || (characters as number) > 120)) {
+    errors.push("phase one must capture positive canonical character counts for both completed batches")
+  }
+  const validBatchCharacters = completedBatchCharacters.length === 2 && completedBatchCharacters.every((characters) => Number.isInteger(characters) && (characters as number) > 0 && (characters as number) <= 120)
+  const expectedCompletedCharacters = validBatchCharacters
+    ? completedBatchCharacters.reduce((sum: number, characters) => sum + (characters as number), 0)
+    : -1
+  const expectedFirstCoveragePercent = validBatchCharacters
+    ? Math.round(((completedBatchCharacters[0] as number) / 595) * 10_000) / 100
+    : -1
+  const expectedCoveragePercent = validBatchCharacters
+    ? Math.round((expectedCompletedCharacters / 595) * 10_000) / 100
+    : -1
+  const checkpointAfterFirstBatch = isRecord(value.checkpointAfterFirstBatch) ? value.checkpointAfterFirstBatch : undefined
+  const checkpoint = isRecord(value.checkpoint) ? value.checkpoint : undefined
+  if (
+    !restartCheckpointMatches(checkpointAfterFirstBatch, {
+      completedBatches: 1,
+      completedCharacters: validBatchCharacters ? completedBatchCharacters[0] as number : -1,
+      state: "running",
+      nextBatchIndex: 1,
+      nextBatchId: typeof planBatchIdsPrefix[1] === "string" ? planBatchIdsPrefix[1] : null,
+    }, value.planId as string, value.manuscriptFingerprint as string, 5, 595) ||
+    checkpointAfterFirstBatch?.coveragePercent !== expectedFirstCoveragePercent ||
+    !restartCheckpointMatches(checkpoint, {
+      completedBatches: 2,
+      completedCharacters: expectedCompletedCharacters,
+      state: "running",
+      nextBatchIndex: 2,
+      nextBatchId: typeof planBatchIdsPrefix[2] === "string" ? planBatchIdsPrefix[2] : null,
+    }, value.planId as string, value.manuscriptFingerprint as string, 5, 595) ||
+    checkpoint?.coveragePercent !== expectedCoveragePercent
+  ) {
+    errors.push("phase one must leave canonical 1/5 and 2/5 checkpoints matching observed batch characters, coverage, and next plan IDs")
+  }
+  if (!Array.isArray(value.batchAudits) || value.batchAudits.length !== 2 || value.batchAudits.some((audit, index) =>
+    !isRecord(audit) || audit.batchIndex !== index || audit.batchId !== completedBatchIds[index] ||
+    audit.acceptedCount !== (index === 1 ? 1 : 0) || audit.persistedFindingCount !== (index === 1 ? 1 : 0)
+  )) {
+    errors.push("phase one must persist two valid audit receipts with exactly one finding in batch two")
+  }
+  if (value.persistedReceiptCount !== 2 || !Array.isArray(value.persistedBatchIds) || JSON.stringify(value.persistedBatchIds) !== JSON.stringify(completedBatchIds)) {
+    errors.push("phase one durable receipt store must contain exactly the first two ordered batches")
+  }
+  if (value.unverifiedAdvancesBlocked !== 2 || value.prematureSynthesisBlocked !== true || value.synthesisReleased !== false) {
+    errors.push("phase one must fail closed on unaudited progress and incomplete synthesis")
+  }
+  const persistence = value.persistence
+  if (!isRecord(persistence) || restartPersistenceKeys.some((key) => !isSha256Digest(persistence[key]))) {
+    errors.push("phase one must capture durable checkpoint, audit, finding, and inventory hashes")
+  }
+  const finding = value.finding
+  if (value.findingCount !== 1 || !isBatchAuditFindingProjection(finding) || finding.planId !== value.planId || finding.manuscriptFingerprint !== value.manuscriptFingerprint || finding.batchId !== completedBatchIds[1]) {
+    errors.push("phase one must persist exactly one plan-backed finding in batch two")
+  }
+  if (!restartAgentIdentityIsVerified(value.agentIdentity)) errors.push("phase one must use a live native banca-auditor Agent/Session")
+  if (!restartTeardownIsVerified(value.teardown)) errors.push("phase one Agent/Session must be disposed before its DSH process exits")
+  return errors
+}
+
+/**
+ * Validate the second, cross-process vertical without weakening #44/#98/#100's
+ * existing same-process batch-audit contract. Host process identities are HMAC
+ * digests computed from child_process.spawn PID plus Linux procfs start identity;
+ * fixture values are never host observations.
+ */
+export function validateCrossProcessBatchAuditEvidence(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) return ["cross-process batch audit evidence is missing"]
+  if (value.probeExecuted !== true || value.executionMode !== "cross-process-native-dsh") {
+    errors.push("cross-process batch audit probe must execute through two native DSH processes")
+  }
+  if (value.syntheticProcessFixture !== false) {
+    errors.push("synthetic process fixtures are not sufficient host process evidence")
+  }
+
+  const workspace = isRecord(value.workspace) ? value.workspace : undefined
+  if (
+    workspace?.sameWorkspace !== true ||
+    workspace.preservedBetweenProcesses !== true ||
+    workspace.resetBetweenProcesses !== false ||
+    !isSha256Digest(workspace.identitySha256) ||
+    !isSha256Digest(workspace.firstProcessEndFilesystemIdentitySha256) ||
+    workspace.firstProcessEndFilesystemIdentitySha256 !== workspace.identitySha256 ||
+    !isSha256Digest(workspace.secondProcessStartFilesystemIdentitySha256) ||
+    workspace.secondProcessStartFilesystemIdentitySha256 !== workspace.identitySha256 ||
+    !isSha256Digest(workspace.secondProcessEndFilesystemIdentitySha256) ||
+    workspace.secondProcessEndFilesystemIdentitySha256 !== workspace.identitySha256 ||
+    !isSha256Digest(workspace.firstProcessEndInventorySha256) ||
+    !isSha256Digest(workspace.secondProcessStartInventorySha256) ||
+    workspace.firstProcessEndInventorySha256 !== workspace.secondProcessStartInventorySha256
+  ) {
+    errors.push("the same persisted synthetic workspace must be retained without reset between processes")
+  }
+
+  const processBoundary = isRecord(value.processBoundary) ? value.processBoundary : undefined
+  if (processBoundary?.observationSource !== "child_process.spawn+linux-procfs") {
+    errors.push("process identity must come from host spawn and kernel process-start observations")
+  }
+  const processRows = [processBoundary?.first, processBoundary?.second]
+  for (const [index, row] of processRows.entries()) {
+    const label = index === 0 ? "first" : "second"
+    if (
+      !isRecord(row) ||
+      !isSha256Digest(row.dshExecutableSha256) ||
+      !isSha256Digest(row.profileIdentitySha256) ||
+      !isSha256Digest(row.hostIdentitySha256) ||
+      !isSha256Digest(row.observerIdentitySha256) ||
+      row.identityMatched !== true ||
+      row.hostIdentitySha256 !== row.observerIdentitySha256 ||
+      row.spawnObserved !== true ||
+      row.kernelStartIdentityObserved !== true
+    ) {
+      errors.push(`${label} DSH process identity is not corroborated by host spawn and kernel observations`)
+    }
+    if (
+      !isRecord(row) ||
+      row.exitObserved !== true ||
+      row.exitCode !== 0 ||
+      row.signal !== null ||
+      row.timedOut !== false ||
+      row.forcedTermination !== false ||
+      row.naturalBeforeExitObserved !== true ||
+      row.nativeTeardownMarkerObserved !== true
+    ) {
+      errors.push(`${label} DSH process did not complete graceful teardown with exit code zero`)
+    }
+  }
+  if (
+    processBoundary?.secondStartedAfterFirstExit !== true ||
+    processBoundary.processesDidNotOverlap !== true ||
+    !isRecord(processBoundary.first) ||
+    !isRecord(processBoundary.second) ||
+    processBoundary.first.hostIdentitySha256 === processBoundary.second.hostIdentitySha256 ||
+    processBoundary.first.dshExecutableSha256 !== processBoundary.second.dshExecutableSha256 ||
+    processBoundary.first.profileIdentitySha256 !== processBoundary.second.profileIdentitySha256
+  ) {
+    errors.push("two distinct sequential DSH process instances must be observed; a reused process is rejected")
+  }
+
+  const totalBatches = value.totalBatches === 5 ? 5 : 0
+  const totalCharacters = value.totalCharacters === 595 ? 595 : 0
+  if (totalBatches !== 5 || totalCharacters !== 595) {
+    errors.push("cross-process recovery must use the canonical 595-character five-batch synthetic project")
+  }
+  if (!isSha256Digest(value.planId)) errors.push("cross-process planId must be a SHA-256 identity")
+  if (!isSha256Digest(value.manuscriptFingerprint)) errors.push("cross-process manuscript fingerprint must be a SHA-256 digest")
+  const planBatchIds = Array.isArray(value.planBatchIds) ? value.planBatchIds : []
+  if (
+    planBatchIds.length !== totalBatches ||
+    planBatchIds.some((batchId) => typeof batchId !== "string" || batchId.length === 0) ||
+    new Set(planBatchIds).size !== planBatchIds.length
+  ) {
+    errors.push("cross-process plan batch IDs must be complete, unique, and ordered")
+  }
+
+  const phaseOne = isRecord(value.phaseOne) ? value.phaseOne : undefined
+  const phaseTwo = isRecord(value.phaseTwo) ? value.phaseTwo : undefined
+  for (const phaseOneError of validateCrossProcessPhaseOneEvidence(phaseOne)) {
+    errors.push(`phase-one evidence: ${phaseOneError}`)
+  }
+  const expectedPlanId = value.planId
+  const expectedFingerprint = value.manuscriptFingerprint
+  const firstNextBatchId = typeof planBatchIds[2] === "string" ? planBatchIds[2] : null
+  const phaseOneCheckpoint = isRecord(phaseOne?.checkpoint) ? phaseOne.checkpoint : undefined
+  const firstCompletedCharacters = phaseOneCheckpoint?.completedCharacters
+  const firstCoveragePercent = Number.isInteger(firstCompletedCharacters)
+    ? Math.round((firstCompletedCharacters / totalCharacters) * 10_000) / 100
+    : -1
+  if (
+    !Number.isInteger(firstCompletedCharacters) ||
+    firstCompletedCharacters <= 0 ||
+    firstCompletedCharacters >= totalCharacters ||
+    phaseOneCheckpoint?.coveragePercent !== firstCoveragePercent ||
+    !restartCheckpointMatches(phaseOneCheckpoint, {
+      completedBatches: 2,
+      completedCharacters: Number.isInteger(firstCompletedCharacters) ? firstCompletedCharacters as number : -1,
+      state: "running",
+      nextBatchIndex: 2,
+      nextBatchId: firstNextBatchId,
+    }, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters)
+  ) {
+    errors.push("first process must leave an unreset checkpoint at exactly 2/5 matching its canonical character coverage and next batch ID")
+  }
+  if (
+    !Array.isArray(phaseOne?.completedBatchIds) ||
+    JSON.stringify(phaseOne.completedBatchIds) !== JSON.stringify(planBatchIds.slice(0, 2))
+  ) {
+    errors.push("first process must complete exactly the first two plan batches")
+  }
+  if (!Array.isArray(phaseOne?.planBatchIdsPrefix) || JSON.stringify(phaseOne.planBatchIdsPrefix) !== JSON.stringify(planBatchIds.slice(0, 3))) {
+    errors.push("first process observed plan prefix must match synthesis batch IDs across the restart boundary")
+  }
+  if (!Array.isArray(phaseOne?.batchAudits) || phaseOne.batchAudits.length !== 2 || phaseOne.batchAudits.some((audit, index) =>
+    !isRecord(audit) ||
+    audit.batchIndex !== index ||
+    audit.batchId !== planBatchIds[index] ||
+    audit.acceptedCount !== (index === 1 ? 1 : 0) ||
+    audit.persistedFindingCount !== (index === 1 ? 1 : 0)
+  )) {
+    errors.push("first process receipts must preserve the single finding in batch 2 and no finding in batch 1")
+  }
+  if (
+    phaseOne?.findingCount !== 1 ||
+    phaseOne.prematureSynthesisBlocked !== true ||
+    phaseOne.synthesisReleased !== false
+  ) {
+    errors.push("first process must preserve one finding and must not release incomplete synthesis")
+  }
+  if (
+    phaseOne?.persistedReceiptCount !== 2 ||
+    !Array.isArray(phaseOne?.persistedBatchIds) ||
+    JSON.stringify(phaseOne.persistedBatchIds) !== JSON.stringify(planBatchIds.slice(0, 2))
+  ) {
+    errors.push("first process must durably persist exactly two ordered audit receipts")
+  }
+  if (phaseOne?.unverifiedAdvancesBlocked !== 2) {
+    errors.push("first process must fail closed on both unaudited advancement attempts")
+  }
+  if (
+    !isSha256Digest(phaseOne?.workspaceInventorySha256) ||
+    phaseOne.workspaceInventorySha256 !== workspace?.firstProcessEndInventorySha256
+  ) {
+    errors.push("first-process synthetic workspace inventory must match the parent-observed post-exit workspace")
+  }
+  if (phaseOne?.workspaceIdentitySha256 !== workspace?.identitySha256) {
+    errors.push("first process workspace identity must be bound to the same host-observed directory inode")
+  }
+  const phaseOnePersistence = phaseOne?.persistence
+  if (
+    !isRecord(phaseOnePersistence) ||
+    restartPersistenceKeys.some((key) => !isSha256Digest(phaseOnePersistence[key]))
+  ) {
+    errors.push("first process must observe durable checkpoint, receipt, finding, and analysis inventory hashes")
+  }
+
+  if (!restartAgentIdentityIsVerified(phaseOne?.agentIdentity)) {
+    errors.push("first process Agent/Session identity must be verified by DSH registries and banca-auditor projection")
+  }
+  if (!restartTeardownIsVerified(phaseOne?.teardown)) {
+    errors.push("first process Agent and Session teardown must be complete before process exit")
+  }
+
+  const resumeQuery = isRecord(phaseTwo?.resumeQuery) ? phaseTwo.resumeQuery : undefined
+  if (phaseTwo?.workspaceIdentitySha256 !== workspace?.identitySha256) {
+    errors.push("second process must resume the same host-observed workspace directory inode")
+  }
+  if (resumeQuery?.completedBatchIdProvided !== false) {
+    errors.push("second process must query banca_context without completedBatchId")
+  }
+  if (
+    resumeQuery?.persistedReceiptCount !== 2 ||
+    !Array.isArray(resumeQuery?.persistedBatchIds) ||
+    JSON.stringify(resumeQuery.persistedBatchIds) !== JSON.stringify(planBatchIds.slice(0, 2))
+  ) {
+    errors.push("second process must recover the first two persisted audit receipts before advancing")
+  }
+  if (
+    !isSha256Digest(phaseTwo?.workspaceInventoryBeforeResumeSha256) ||
+    phaseTwo.workspaceInventoryBeforeResumeSha256 !== workspace?.secondProcessStartInventorySha256
+  ) {
+    errors.push("second-process workspace inventory must match the parent-observed restart boundary")
+  }
+  if (!restartCheckpointMatches(resumeQuery?.checkpointBefore, {
+    completedBatches: 2,
+    completedCharacters: Number.isInteger(firstCompletedCharacters) ? firstCompletedCharacters as number : -1,
+    state: "running",
+    nextBatchIndex: 2,
+    nextBatchId: firstNextBatchId,
+  }, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters)) {
+    errors.push("second process must recover the exact 2/5 checkpoint and identical plan/fingerprint")
+  }
+  if (!restartCheckpointMatches(resumeQuery?.checkpointAfter, {
+    completedBatches: 2,
+    completedCharacters: Number.isInteger(firstCompletedCharacters) ? firstCompletedCharacters as number : -1,
+    state: "running",
+    nextBatchIndex: 2,
+    nextBatchId: firstNextBatchId,
+  }, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters)) {
+    errors.push("resume-only banca_context query must leave checkpoint and next batch unchanged")
+  }
+  if (
+    !restartPersistenceMatches(phaseOnePersistence, resumeQuery?.persistenceBefore) ||
+    !restartPersistenceMatches(resumeQuery?.persistenceBefore, resumeQuery?.persistenceAfter)
+  ) {
+    errors.push("cross-process persistent hashes must match and remain unchanged across resume-only context query")
+  }
+
+  if (!restartAgentIdentityIsVerified(phaseTwo?.agentIdentity)) {
+    errors.push("second process must create and verify a new native banca-auditor Agent/Session")
+  } else if (
+    restartAgentIdentityIsVerified(phaseOne?.agentIdentity) &&
+    phaseTwo.agentIdentity.agentId === phaseOne.agentIdentity.agentId
+  ) {
+    errors.push("second process must use an Agent/Session identity distinct from the first process")
+  }
+  if (!restartTeardownIsVerified(phaseTwo?.teardown)) {
+    errors.push("second process Agent and Session teardown must complete without errors")
+  }
+  if (
+    !Array.isArray(phaseTwo?.completedBatchIds) ||
+    JSON.stringify(phaseTwo.completedBatchIds) !== JSON.stringify(planBatchIds.slice(2))
+  ) {
+    errors.push("second process must complete exactly the remaining three batches in plan order")
+  }
+  if (!Array.isArray(phaseTwo?.batchAudits) || phaseTwo.batchAudits.length !== 3 || phaseTwo.batchAudits.some((audit, index) =>
+    !isRecord(audit) ||
+    audit.batchIndex !== index + 2 ||
+    audit.batchId !== planBatchIds[index + 2] ||
+    audit.acceptedCount !== 0 ||
+    audit.persistedFindingCount !== 1
+  )) {
+    errors.push("second process receipts must complete batches 3-5 without adding or duplicating findings")
+  }
+  if (
+    phaseTwo?.persistedReceiptCount !== 5 ||
+    !Array.isArray(phaseTwo?.persistedBatchIds) ||
+    JSON.stringify(phaseTwo.persistedBatchIds) !== JSON.stringify(planBatchIds)
+  ) {
+    errors.push("final durable audit store must contain exactly one ordered receipt per canonical batch")
+  }
+  if (!restartCheckpointMatches(phaseTwo?.finalCheckpoint, {
+    completedBatches: 5,
+    completedCharacters: totalCharacters,
+    state: "complete",
+    nextBatchIndex: null,
+    nextBatchId: null,
+  }, expectedPlanId as string, expectedFingerprint as string, totalBatches, totalCharacters)) {
+    errors.push("second process must finish the same plan at exactly 5/5 complete coverage")
+  }
+  const synthesis = isRecord(phaseTwo?.synthesis) ? phaseTwo.synthesis : undefined
+  if (
+    synthesis?.state !== "complete" ||
+    synthesis.totalBatches !== totalBatches ||
+    synthesis.completedBatches !== totalBatches ||
+    synthesis.totalCharacters !== totalCharacters ||
+    synthesis.completedCharacters !== totalCharacters ||
+    synthesis.coveragePercent !== 100 ||
+    synthesis.findingsCount !== 1 ||
+    !Array.isArray(synthesis.orderedBatchIds) ||
+    JSON.stringify(synthesis.orderedBatchIds) !== JSON.stringify(planBatchIds)
+  ) {
+    errors.push("final synthesis input must contain complete ordered coverage and exactly one finding")
+  }
+  if (phaseTwo?.manuscriptPreserved !== true) errors.push("cross-process analysis must preserve the synthetic manuscript")
+
+  const firstFinding = phaseOne?.finding
+  const recoveredFinding = resumeQuery?.recoveredFinding
+  const synthesisFinding = synthesis?.finding
+  const findingProjections = [firstFinding, recoveredFinding, synthesisFinding]
+  if (
+    phaseOne?.findingCount !== 1 ||
+    resumeQuery?.recoveredFindingCount !== 1 ||
+    synthesis?.findingsCount !== 1 ||
+    !findingProjections.every(isBatchAuditFindingProjection)
+  ) {
+    errors.push("the original non-empty finding must remain present exactly once in storage and synthesis")
+  } else {
+    const expectedFinding = firstFinding as BatchAuditFindingProjectionEvidence
+    if (
+      expectedFinding.planId !== expectedPlanId ||
+      expectedFinding.manuscriptFingerprint !== expectedFingerprint ||
+      expectedFinding.batchId !== planBatchIds[1] ||
+      !findingProjections.slice(1).every((finding) =>
+        batchAuditFindingProjectionsEqual(expectedFinding, finding as BatchAuditFindingProjectionEvidence),
+      )
+    ) {
+      errors.push("first-process finding identity and provenance must be unchanged after restart and in synthesis")
+    }
+  }
+  return errors
+}
+
+export function classifyCrossProcessBatchAuditEvidenceStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.probeExecuted === undefined) return "BLOCKED"
+  return validateCrossProcessBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
 
 export interface QuestionBehaviorEvidence {
   questionId: string

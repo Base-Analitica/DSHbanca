@@ -34,6 +34,7 @@ import {
   validatePresetReferences,
   validateComposedProfilePlugins,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
+import * as profileEvidenceContract from "../scripts/lib/dsh-profile-e2e-contract.js"
 
 const completeAuditorMarkdownEvidence = {
   sourcePath: "assets/dsh/agents/banca-auditor.md",
@@ -675,12 +676,15 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
     const template = runnerSource.slice(contentStart, contentEnd)
     const renderObserver = new Function(
       "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
-      "workspace", "observerResult", "renderControlPresetSelector", "e2eControlPresetId",
+      "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
+      "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
       `return \`${template}\`;`,
     ) as (...args: unknown[]) => string
     const generatedModuleSource = renderObserver(
       "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
-      "/tmp/synthetic-workspace", "/tmp/observer-result.json", renderControlPresetSelector, e2eControlPresetId,
+      "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
+      "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+      renderControlPresetSelector, e2eControlPresetId,
     )
 
     const directory = mkdtempSync(join(tmpdir(), "dshbanca-observer-skills-"))
@@ -871,6 +875,396 @@ const completeBatchAuditEvidence = {
   synthesisInputCoverageState: "complete",
   manuscriptPreserved: true,
 }
+
+const crossProcessPersistenceHashes = {
+  analysisInventorySha256: "c".repeat(64),
+  checkpointSha256: "d".repeat(64),
+  auditConfirmationsSha256: "e".repeat(64),
+  findingsSha256: "f".repeat(64),
+}
+const crossProcessCheckpointAtTwo = {
+  planId: batchAuditPlanId,
+  manuscriptFingerprint: batchAuditFingerprint,
+  totalBatches: 5,
+  completedBatches: 2,
+  completedCharacters: 240,
+  totalCharacters: 595,
+  coveragePercent: 40.34,
+  state: "running",
+  nextBatchIndex: 2,
+  nextBatchId: batchAuditIds[2],
+}
+const crossProcessAuditorIdentity = (agentId: string) => ({
+  createdVia: "ctx.agents.create",
+  agentId,
+  sessionId: agentId,
+  agentAndSessionIdMatch: true,
+  agentRegistryContainsAgent: true,
+  sessionStoreContainsSession: true,
+  effectivePreset: "banca-auditor",
+  sessionPresetProjection: "banca-auditor",
+  toolRuntime: "ctx.tools.execute",
+  modelCalls: 0,
+})
+const crossProcessTeardown = {
+  disposeCalled: true,
+  agentUnregistered: true,
+  sessionUnregistered: true,
+  teardownFailed: false,
+}
+const completeCrossProcessBatchAuditEvidence = {
+  probeExecuted: true,
+  executionMode: "cross-process-native-dsh",
+  syntheticProcessFixture: false,
+  workspace: {
+    sameWorkspace: true,
+    preservedBetweenProcesses: true,
+    resetBetweenProcesses: false,
+    identitySha256: "1".repeat(64),
+    firstProcessEndFilesystemIdentitySha256: "1".repeat(64),
+    secondProcessStartFilesystemIdentitySha256: "1".repeat(64),
+    secondProcessEndFilesystemIdentitySha256: "1".repeat(64),
+    firstProcessEndInventorySha256: "a".repeat(64),
+    secondProcessStartInventorySha256: "a".repeat(64),
+  },
+  processBoundary: {
+    observationSource: "child_process.spawn+linux-procfs",
+    first: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: "2".repeat(64),
+      observerIdentitySha256: "2".repeat(64),
+      identityMatched: true,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      forcedTermination: false,
+      naturalBeforeExitObserved: true,
+      nativeTeardownMarkerObserved: true,
+    },
+    second: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: "3".repeat(64),
+      observerIdentitySha256: "3".repeat(64),
+      identityMatched: true,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      forcedTermination: false,
+      naturalBeforeExitObserved: true,
+      nativeTeardownMarkerObserved: true,
+    },
+    secondStartedAfterFirstExit: true,
+    processesDidNotOverlap: true,
+  },
+  totalBatches: 5,
+  totalCharacters: 595,
+  planId: batchAuditPlanId,
+  manuscriptFingerprint: batchAuditFingerprint,
+  planBatchIds: [...batchAuditIds],
+  phaseOne: {
+    probeExecuted: true,
+    executionMode: "cross-process-native-dsh",
+    workspaceIdentitySha256: "1".repeat(64),
+    workspaceInventorySha256: "a".repeat(64),
+    planId: batchAuditPlanId,
+    manuscriptFingerprint: batchAuditFingerprint,
+    totalBatches: 5,
+    totalCharacters: 595,
+    checkpoint: { ...crossProcessCheckpointAtTwo },
+    checkpointAfterFirstBatch: {
+      ...crossProcessCheckpointAtTwo,
+      completedBatches: 1,
+      completedCharacters: 120,
+      coveragePercent: 20.17,
+      nextBatchIndex: 1,
+      nextBatchId: batchAuditIds[1],
+    },
+    completedBatchIds: batchAuditIds.slice(0, 2),
+    planBatchIdsPrefix: batchAuditIds.slice(0, 3),
+    completedBatchCharacters: [120, 120],
+    batchAudits: batchAuditIds.slice(0, 2).map((batchId, batchIndex) => ({
+      batchIndex,
+      batchId,
+      acceptedCount: batchIndex === 1 ? 1 : 0,
+      persistedFindingCount: batchIndex === 1 ? 1 : 0,
+    })),
+    persistence: { ...crossProcessPersistenceHashes },
+    persistedReceiptCount: 2,
+    persistedBatchIds: batchAuditIds.slice(0, 2),
+    unverifiedAdvancesBlocked: 2,
+    findingCount: 1,
+    finding: { ...completeFindingProjection },
+    prematureSynthesisBlocked: true,
+    synthesisReleased: false,
+    agentIdentity: crossProcessAuditorIdentity("8".repeat(64)),
+    teardown: { ...crossProcessTeardown },
+  },
+  phaseTwo: {
+    workspaceIdentitySha256: "1".repeat(64),
+    resumeQuery: {
+      completedBatchIdProvided: false,
+      checkpointBefore: { ...crossProcessCheckpointAtTwo },
+      checkpointAfter: { ...crossProcessCheckpointAtTwo },
+      persistenceBefore: { ...crossProcessPersistenceHashes },
+      persistenceAfter: { ...crossProcessPersistenceHashes },
+      recoveredFindingCount: 1,
+      recoveredFinding: { ...completeFindingProjection },
+      persistedReceiptCount: 2,
+      persistedBatchIds: batchAuditIds.slice(0, 2),
+    },
+    workspaceInventoryBeforeResumeSha256: "a".repeat(64),
+    agentIdentity: crossProcessAuditorIdentity("9".repeat(64)),
+    completedBatchIds: batchAuditIds.slice(2),
+    batchAudits: batchAuditIds.slice(2).map((batchId, index) => ({
+      batchIndex: index + 2,
+      batchId,
+      acceptedCount: 0,
+      persistedFindingCount: 1,
+    })),
+    persistedReceiptCount: 5,
+    persistedBatchIds: [...batchAuditIds],
+    finalCheckpoint: {
+      planId: batchAuditPlanId,
+      manuscriptFingerprint: batchAuditFingerprint,
+      totalBatches: 5,
+      completedBatches: 5,
+      completedCharacters: 595,
+      totalCharacters: 595,
+      coveragePercent: 100,
+      state: "complete",
+      nextBatchIndex: null,
+      nextBatchId: null,
+    },
+    synthesis: {
+      state: "complete",
+      totalBatches: 5,
+      completedBatches: 5,
+      totalCharacters: 595,
+      completedCharacters: 595,
+      coveragePercent: 100,
+      orderedBatchIds: [...batchAuditIds],
+      findingsCount: 1,
+      finding: { ...completeFindingProjection },
+    },
+    manuscriptPreserved: true,
+    teardown: { ...crossProcessTeardown },
+  },
+}
+
+describe("DSH process-restart recovery contract (#103)", () => {
+  test("validates phase one before any phase-two process launch", () => {
+    expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(completeCrossProcessBatchAuditEvidence.phaseOne)).toEqual([])
+    const malformedEvidence = [
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, completedCharacters: 250 } },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, nextBatchId: "not-the-next-plan-batch" } },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, coveragePercent: 50 } },
+      {
+        ...completeCrossProcessBatchAuditEvidence.phaseOne,
+        checkpointAfterFirstBatch: { ...completeCrossProcessBatchAuditEvidence.phaseOne.checkpointAfterFirstBatch, nextBatchId: "wrong-next-id" },
+      },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, completedBatches: 3 } },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, planBatchIdsPrefix: [batchAuditIds[0], batchAuditIds[1], "wrong-next-id"] },
+    ]
+    for (const evidence of malformedEvidence) {
+      expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(evidence)).toContain(
+        "phase one must leave canonical 1/5 and 2/5 checkpoints matching observed batch characters, coverage, and next plan IDs",
+      )
+    }
+  })
+
+  test("cross-process BLOCKED status participates in the overall gate", () => {
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "BLOCKED")).toMatchObject({
+      crossProcessBatchAuditStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+  })
+
+  test("accepts independently observed sequential DSH process recovery", () => {
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(completeCrossProcessBatchAuditEvidence)).toEqual([])
+    expect(profileEvidenceContract.classifyCrossProcessBatchAuditEvidenceStatus(completeCrossProcessBatchAuditEvidence)).toBe("PASS")
+  })
+
+  test.each([
+    ["one DSH process reused across both phases", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        second: { ...completeCrossProcessBatchAuditEvidence.processBoundary.second, hostIdentitySha256: "2".repeat(64), observerIdentitySha256: "2".repeat(64) },
+      },
+    }, "two distinct sequential DSH process instances must be observed; a reused process is rejected"],
+    ["only PID-shaped text is supplied", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: { ...completeCrossProcessBatchAuditEvidence.processBoundary, observationSource: "pid text in observer report" },
+    }, "process identity must come from host spawn and kernel process-start observations"],
+    ["process identity is fixture-only", {
+      ...completeCrossProcessBatchAuditEvidence,
+      syntheticProcessFixture: true,
+    }, "synthetic process fixtures are not sufficient host process evidence"],
+    ["phase two started before phase one exited", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: { ...completeCrossProcessBatchAuditEvidence.processBoundary, secondStartedAfterFirstExit: false },
+    }, "two distinct sequential DSH process instances must be observed; a reused process is rejected"],
+    ["first process required forced termination", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        first: { ...completeCrossProcessBatchAuditEvidence.processBoundary.first, signal: "SIGTERM", forcedTermination: true },
+      },
+    }, "first DSH process did not complete graceful teardown with exit code zero"],
+    ["second process exited unsuccessfully", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        second: { ...completeCrossProcessBatchAuditEvidence.processBoundary.second, exitCode: 1 },
+      },
+    }, "second DSH process did not complete graceful teardown with exit code zero"],
+    ["native DSH teardown completion was not observed", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        first: { ...completeCrossProcessBatchAuditEvidence.processBoundary.first, nativeTeardownMarkerObserved: false },
+      },
+    }, "first DSH process did not complete graceful teardown with exit code zero"],
+    ["workspace was reset between phases", {
+      ...completeCrossProcessBatchAuditEvidence,
+      workspace: { ...completeCrossProcessBatchAuditEvidence.workspace, resetBetweenProcesses: true },
+    }, "the same persisted synthetic workspace must be retained without reset between processes"],
+    ["workspace inventory changed at process boundary", {
+      ...completeCrossProcessBatchAuditEvidence,
+      workspace: { ...completeCrossProcessBatchAuditEvidence.workspace, secondProcessStartInventorySha256: "b".repeat(64) },
+    }, "the same persisted synthetic workspace must be retained without reset between processes"],
+    ["same-content workspace was replaced with a new root directory", {
+      ...completeCrossProcessBatchAuditEvidence,
+      workspace: { ...completeCrossProcessBatchAuditEvidence.workspace, secondProcessStartFilesystemIdentitySha256: "b".repeat(64) },
+    }, "the same persisted synthetic workspace must be retained without reset between processes"],
+    ["phase one lacks durable receipts", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: { ...completeCrossProcessBatchAuditEvidence.phaseOne, persistedReceiptCount: 1 },
+    }, "first process must durably persist exactly two ordered audit receipts"],
+    ["second process did not recover first receipts", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery, persistedReceiptCount: 1 },
+      },
+    }, "second process must recover the first two persisted audit receipts before advancing"],
+    ["final receipt store omits a batch", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: { ...completeCrossProcessBatchAuditEvidence.phaseTwo, persistedReceiptCount: 4 },
+    }, "final durable audit store must contain exactly one ordered receipt per canonical batch"],
+    ["first phase checkpoint progressed beyond 2/5", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: {
+        ...completeCrossProcessBatchAuditEvidence.phaseOne,
+        checkpoint: { ...crossProcessCheckpointAtTwo, completedBatches: 3 },
+      },
+    }, "first process must leave an unreset checkpoint at exactly 2/5 matching its canonical character coverage and next batch ID"],
+    ["first phase plan was restarted", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: {
+        ...completeCrossProcessBatchAuditEvidence.phaseOne,
+        checkpoint: { ...crossProcessCheckpointAtTwo, planId: "a".repeat(64) },
+      },
+    }, "first process must leave an unreset checkpoint at exactly 2/5 matching its canonical character coverage and next batch ID"],
+    ["phase-one plan prefix diverged from final synthesis", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: { ...completeCrossProcessBatchAuditEvidence.phaseOne, planBatchIdsPrefix: [batchAuditIds[0], batchAuditIds[1], "wrong-next-id"] },
+    }, "first process observed plan prefix must match synthesis batch IDs across the restart boundary"],
+    ["resume query advanced progress", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          completedBatchIdProvided: true,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, completedBatches: 3 },
+        },
+      },
+    }, "second process must query banca_context without completedBatchId"],
+    ["resume query changed durable hashes", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          persistenceAfter: { ...crossProcessPersistenceHashes, findingsSha256: "a".repeat(64) },
+        },
+      },
+    }, "cross-process persistent hashes must match and remain unchanged across resume-only context query"],
+    ["second phase Agent/Session was not host verified", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        agentIdentity: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.agentIdentity, sessionStoreContainsSession: false },
+      },
+    }, "second process must create and verify a new native banca-auditor Agent/Session"],
+    ["second phase reused Agent/Session identity", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        agentIdentity: crossProcessAuditorIdentity("8".repeat(64)),
+      },
+    }, "second process must use an Agent/Session identity distinct from the first process"],
+    ["Agent teardown failed", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        teardown: { ...crossProcessTeardown, agentUnregistered: false },
+      },
+    }, "second process Agent and Session teardown must complete without errors"],
+    ["finding disappeared on process restart", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery, recoveredFindingCount: 0 },
+      },
+    }, "the original non-empty finding must remain present exactly once in storage and synthesis"],
+    ["finding provenance changed on restart", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          recoveredFinding: { ...completeFindingProjection, provenanceSha256: "b".repeat(64) },
+        },
+      },
+    }, "first-process finding identity and provenance must be unchanged after restart and in synthesis"],
+    ["finding duplicated in synthesis", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        synthesis: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.synthesis, findingsCount: 2 },
+      },
+    }, "final synthesis input must contain complete ordered coverage and exactly one finding"],
+    ["a resumed batch was skipped", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        completedBatchIds: batchAuditIds.slice(3),
+      },
+    }, "second process must complete exactly the remaining three batches in plan order"],
+    ["checkpoint was tampered after resume query", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        finalCheckpoint: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.finalCheckpoint, planId: "b".repeat(64) },
+      },
+    }, "second process must finish the same plan at exactly 5/5 complete coverage"],
+  ])("rejects integrity failure: %s", (_label, evidence, expectedError) => {
+    const errors = profileEvidenceContract.validateCrossProcessBatchAuditEvidence(evidence)
+    expect(errors).toContain(expectedError)
+    expect(profileEvidenceContract.classifyCrossProcessBatchAuditEvidenceStatus(evidence)).toBe("FAIL")
+  })
+})
 
 describe("DSH batch audit evidence gate contract (#44, #98, #100)", () => {
   test("accepts complete positive batch audit evidence with native Agent/Session handoff", () => {

@@ -1,9 +1,12 @@
 import { spawn, spawnSync } from "node:child_process"
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readlinkSync,
   readdirSync,
@@ -12,7 +15,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs"
-import { createHash } from "node:crypto"
+import { createHash, createHmac, randomBytes } from "node:crypto"
 import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -34,6 +37,7 @@ import {
   classifyBatchAuditEvidenceStatus,
   classifyNativeQuestionsStatus,
   classifyAcademicDecisionStatus,
+  classifyCrossProcessBatchAuditEvidenceStatus,
   classifyProfileGateStatuses,
   captureNativeSkillsEvidence,
   validateAuditorMarkdownEvidence,
@@ -41,6 +45,8 @@ import {
   validateBatchAuditEvidence,
   validateNativeQuestionsEvidence,
   validateAcademicDecisionEvidence,
+  validateCrossProcessPhaseOneEvidence,
+  validateCrossProcessBatchAuditEvidence,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -78,6 +84,10 @@ interface CommandResult {
   timedOut: boolean
   stdout: string
   stderr: string
+  spawnObserved?: boolean
+  exitObserved?: boolean
+  closeObserved?: boolean
+  hostProcessIdentitySha256?: string | null
 }
 
 interface GateReport {
@@ -121,13 +131,15 @@ const report: GateReport = {
   stages: {},
   failures: [],
   limitations: [
-    "Este gate não inicia agente nem chama modelo. Tool loop por modelo e validação acadêmica humana não são cobertos.",
-    "O resultado da identidade/guard (#2), o carregamento das instruções Markdown (#3), a descoberta/carregamento das skills nativas (#38), a evidência de auditoria por lote (#44), o contrato de perguntas estruturadas e aprovação (#46) e a decisão acadêmica E2E (#48) são reportados separadamente.",
-    "A sonda ativa agent/pre-step, skills nativas, auditoria acadêmica, perguntas nativas e decisão acadêmica exige DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes do boot do perfil.",
+    "O E2E ativo cria Agents/Sessions nativos do DSH, mas não inicia turnos de modelo; respostas acadêmicas humanas e qualidade de inferência não são cobertas.",
+    "Identidade/guard (#2), instruções Markdown (#3), skills nativas (#38), auditoria por lote (#44), perguntas estruturadas/aprovação (#46), decisão acadêmica (#48) e recuperação entre processos (#103) são gates separados.",
+    "A execução ativa requer DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes de invocar o CLI DSH, criar Agent/Session ou inicializar o projeto sintético.",
+    "O gate de identidade de processo usa child_process.spawn observado pelo pai e Linux procfs; plataformas sem essa evidência ficam BLOCKED, sem fallback baseado em texto de PID.",
   ],
 }
 
 let scratchRoot: string | undefined
+let restartWorkspaceDirectoryFd: number | undefined
 let finalStatus: GateReport["status"] = "BLOCKED"
 
 function commandVersion(command: string, args: string[], env?: NodeJS.ProcessEnv): string | null {
@@ -262,7 +274,22 @@ async function validateNativePresetConfig(dshExecutable: string) {
 }
 
 
-function run(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe" } ): Promise<CommandResult> {
+function linuxProcessIdentitySha256(pid: number, key: Buffer): string | null {
+  if (process.platform !== "linux") return null
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    const commandEnd = stat.lastIndexOf(")")
+    if (commandEnd < 0) return null
+    const startTicks = stat.slice(commandEnd + 1).trim().split(/\s+/)[19]
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim()
+    if (!/^\d+$/.test(startTicks ?? "") || !/^[a-f0-9-]{36}$/i.test(bootId)) return null
+    return createHmac("sha256", key).update(JSON.stringify(["dsh-process-v1", pid, bootId, startTicks]), "utf8").digest("hex")
+  } catch {
+    return null
+  }
+}
+
+function run(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe"; processIdentityKey?: Buffer } ): Promise<CommandResult> {
   return new Promise((resolveResult) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -277,6 +304,17 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
     let stdoutTruncated = false
     let stderrTruncated = false
     let timedOut = false
+    let spawnObserved = false
+    let exitObserved = false
+    let hostProcessIdentitySha256: string | null = null
+    child.once("spawn", () => {
+      spawnObserved = true
+      const pid = child.pid
+      if (options.processIdentityKey && pid !== undefined) {
+        hostProcessIdentitySha256 = linuxProcessIdentitySha256(pid, options.processIdentityKey)
+      }
+    })
+    child.once("exit", () => { exitObserved = true })
     const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const text = chunk.toString("utf8")
       let current = stream === "stdout" ? stdout : stderr
@@ -306,7 +344,17 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
     }, options.timeoutMs)
     child.once("error", (error) => {
       clearTimeout(timer)
-      resolveResult({ exitCode: null, signal: null, timedOut, stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout, stderr: `${stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr}\n${error.message}` })
+      resolveResult({
+        exitCode: null,
+        signal: null,
+        timedOut,
+        stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout,
+        stderr: `${stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr}\n${error.message}`,
+        spawnObserved,
+        exitObserved,
+        closeObserved: false,
+        hostProcessIdentitySha256,
+      })
     })
     child.once("close", (code, signal) => {
       clearTimeout(timer)
@@ -316,12 +364,16 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
         timedOut,
         stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout,
         stderr: stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr,
+        spawnObserved,
+        exitObserved,
+        closeObserved: true,
+        hostProcessIdentitySha256,
       })
     })
   })
 }
 
-function runDsh(nodeExecutable: string, dshExecutable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe" }): Promise<CommandResult> {
+function runDsh(nodeExecutable: string, dshExecutable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe"; processIdentityKey?: Buffer }): Promise<CommandResult> {
   // findExecutable resolves symlinks, so the DSH bin becomes lib/bin.js.
   // Invoke that script with the selected Node binary instead of relying on the
   // parent runtime's shebang handling for a directly spawned JavaScript file.
@@ -385,6 +437,32 @@ function inventoryTree(root: string): Record<string, string> {
   return inventory
 }
 
+function jsonSha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")
+}
+
+function crossProcessAnalysisStoreHashes(workspace: string, planId: string): Record<string, string | null> {
+  const allFiles = inventoryTree(workspace)
+  const analysisFiles = Object.fromEntries(Object.entries(allFiles).filter(([path]) => path.startsWith(".banca/analysis/")))
+  return {
+    analysisInventorySha256: jsonSha256(analysisFiles),
+    checkpointSha256: analysisFiles[".banca/analysis/checkpoints/" + planId + ".json"] ?? null,
+    auditConfirmationsSha256: analysisFiles[".banca/analysis/audit-confirmations/" + planId + ".json"] ?? null,
+    findingsSha256: analysisFiles[".banca/analysis/findings/" + planId + ".json"] ?? null,
+  }
+}
+
+function crossProcessWorkspaceFilesystemIdentitySha256(workspace: string, scratch: string, key: Buffer, directoryFd: number): string {
+  const opened = fstatSync(directoryFd, { bigint: true })
+  const named = statSync(workspace, { bigint: true })
+  if (!opened.isDirectory() || !named.isDirectory() || opened.dev !== named.dev || opened.ino !== named.ino) {
+    throw new Error("cross-process synthetic workspace path no longer refers to the parent-held original directory")
+  }
+  return createHmac("sha256", key)
+    .update(JSON.stringify(["dshbanca-workspace-fs-v1", relative(scratch, workspace), String(opened.dev), String(opened.ino)]), "utf8")
+    .digest("hex")
+}
+
 function repoStatus(): string | null {
   const result = spawnSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: repositoryRoot, encoding: "utf8", timeout: 10_000 })
   return result.status === 0 ? result.stdout : null
@@ -418,6 +496,11 @@ function createObserverPackage(
   observerRoot: string,
   workspace: string,
   observerResult: string,
+  restartWorkspace: string,
+  restartObserverResultOne: string,
+  restartObserverResultTwo: string,
+  restartTeardownMarkerOne: string,
+  restartTeardownMarkerTwo: string,
   auditorMarkdownSourceSha256: string | null,
   auditorMarkdownSourceSha1: string | null,
 ): void {
@@ -432,6 +515,7 @@ function createObserverPackage(
   copyRequiredAcademicDecisionModule(repositoryRoot, observerRoot)
   const observerSource = `import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFile, readdir, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const name = ${JSON.stringify(observerName)};
@@ -1333,6 +1417,407 @@ export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
     }
   }
   return batchAuditResult;
+}
+
+const crossProcessShaText = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+const crossProcessKey = () => {
+  const key = process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY ?? "";
+  if (!/^[a-f0-9]{64}$/.test(key)) fail("cross-process evidence identity key is unavailable");
+  return Buffer.from(key, "hex");
+};
+const crossProcessDigest = (value) => createHmac("sha256", crossProcessKey()).update(String(value), "utf8").digest("hex");
+export async function crossProcessProcessIdentitySha256() {
+  if (process.platform !== "linux") fail("cross-process process identity requires Linux procfs host evidence");
+  const stat = await readFile("/proc/" + process.pid + "/stat", "utf8");
+  const commandEnd = stat.lastIndexOf(")");
+  if (commandEnd < 0) fail("cross-process process identity could not parse kernel procfs stat");
+  const startTicks = stat.slice(commandEnd + 1).trim().split(/\\s+/)[19];
+  const bootId = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+  if (!/^\\d+$/.test(startTicks ?? "") || !/^[a-f0-9-]{36}$/i.test(bootId)) fail("cross-process kernel start identity is invalid");
+  return createHmac("sha256", crossProcessKey()).update(JSON.stringify(["dsh-process-v1", process.pid, bootId, startTicks]), "utf8").digest("hex");
+}
+const crossProcessCheckpointEvidence = (meta) => ({
+  planId: meta?.checkpoint?.planId,
+  manuscriptFingerprint: meta?.manuscript?.fingerprint,
+  totalBatches: meta?.checkpoint?.totalBatches,
+  completedBatches: meta?.checkpoint?.completedBatches,
+  completedCharacters: meta?.checkpoint?.completedCharacters,
+  totalCharacters: meta?.checkpoint?.totalCharacters,
+  coveragePercent: meta?.checkpoint?.coveragePercent,
+  state: meta?.checkpoint?.state,
+  nextBatchId: meta?.batch?.batchId ?? null,
+  nextBatchIndex: meta?.batch?.index ?? null,
+});
+const crossProcessFindingProjection = (finding) => ({
+  version: finding.version,
+  findingId: finding.findingId,
+  planId: finding.planId,
+  batchId: finding.batchId,
+  manuscriptFingerprint: finding.manuscriptFingerprint,
+  provenanceSha256: crossProcessShaText(JSON.stringify([
+    finding.category, finding.severity, finding.file, finding.startLine, finding.endLine, finding.sectionId,
+  ])),
+  claimSha256: crossProcessShaText(finding.claim),
+  evidenceSha256: crossProcessShaText(finding.evidence),
+});
+const crossProcessAnalysisHashes = async (workspace, planId) => {
+  const allFiles = await inventory(workspace);
+  const analysisFiles = Object.fromEntries(Object.entries(allFiles).filter(([path]) => path.startsWith(".banca/analysis/")));
+  const hashes = {
+    analysisInventorySha256: crossProcessShaText(JSON.stringify(analysisFiles)),
+    checkpointSha256: analysisFiles[".banca/analysis/checkpoints/" + planId + ".json"] ?? null,
+    auditConfirmationsSha256: analysisFiles[".banca/analysis/audit-confirmations/" + planId + ".json"] ?? null,
+    findingsSha256: analysisFiles[".banca/analysis/findings/" + planId + ".json"] ?? null,
+  };
+  if (Object.values(hashes).some((digest) => typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))) {
+    fail("cross-process checkpoint, receipt, finding, or analysis inventory was not durably stored");
+  }
+  return hashes;
+};
+const crossProcessReadStores = async (workspace, planId, fingerprint) => {
+  const checkpoint = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "checkpoints", planId + ".json"), "utf8"));
+  const receipts = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "audit-confirmations", planId + ".json"), "utf8"));
+  const findings = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "findings", planId + ".json"), "utf8"));
+  if (
+    checkpoint.planId !== planId || checkpoint.fingerprint !== fingerprint ||
+    receipts.version !== "analysis-audit-confirmations-store-v1" || receipts.planId !== planId || receipts.manuscriptFingerprint !== fingerprint || !Array.isArray(receipts.confirmations) ||
+    findings.version !== "analysis-findings-store-v1" || findings.planId !== planId || findings.manuscriptFingerprint !== fingerprint || !Array.isArray(findings.findings)
+  ) fail("cross-process durable stores do not match the live exhaustive plan identity");
+  return { checkpoint, receipts: receipts.confirmations, findings: findings.findings };
+};
+const crossProcessAgentIdentity = (ctx, agent) => {
+  const session = agent?.session;
+  const effectivePreset = ctx.agentPresets?.composedPreset?.(agent?.ctx) ?? "";
+  const sessionPresetProjection = ctx.sessionProjections?.stateOf?.(session, "agentPreset") ?? "";
+  const agentId = typeof agent?.id === "string" ? agent.id : "";
+  const sessionId = typeof session?.id === "string" ? session.id : "";
+  return {
+    createdVia: "ctx.agents.create",
+    agentId: agentId ? crossProcessDigest("agent:" + agentId) : "",
+    sessionId: sessionId ? crossProcessDigest("agent:" + sessionId) : "",
+    agentAndSessionIdMatch: Boolean(agentId) && agentId === sessionId,
+    agentRegistryContainsAgent: Boolean(agentId) && ctx.agents?.get(agentId) === agent,
+    sessionStoreContainsSession: Boolean(agentId) && ctx.sessions?.get(agentId) === session,
+    effectivePreset,
+    sessionPresetProjection,
+    toolRuntime: typeof ctx.tools?.execute === "function" ? "ctx.tools.execute" : "",
+    modelCalls: session ? modelEventCount(session) : -1,
+  };
+};
+const crossProcessManuscriptHashes = async (workspace) => {
+  const paths = ["main.tex", "referencias.bib", ...[1, 2, 3, 4, 5].map((index) => "capitulos/lote" + index + ".tex")];
+  return Object.fromEntries(await Promise.all(paths.map(async (path) => [path, await sha(join(workspace, path))])));
+};
+const crossProcessSectionSource = async (workspace, meta) => {
+  const prefix = String.fromCharCode(92) + "section{";
+  for (const chunk of Array.isArray(meta?.chunks) ? meta.chunks : []) {
+    const file = chunk?.file;
+    if (typeof file !== "string" || !file || file.startsWith("/") || file.split("/").some((part) => !part || part === "..")) continue;
+    if (!Number.isInteger(chunk.startLine) || !Number.isInteger(chunk.endLine) || !Number.isInteger(chunk.startOffset) || !Number.isInteger(chunk.endOffset)) continue;
+    const source = await readFile(join(workspace, file), "utf8");
+    const lines = source.split(String.fromCharCode(10));
+    for (let lineNumber = Math.max(1, chunk.startLine); lineNumber <= Math.min(lines.length, chunk.endLine); lineNumber++) {
+      const text = lines[lineNumber - 1].trim();
+      if (!text.startsWith(prefix) || !text.endsWith("}")) continue;
+      const sectionId = text.slice(prefix.length, -1);
+      const lineStart = lines.slice(0, lineNumber - 1).reduce((sum, line) => sum + line.length + 1, 0);
+      const lineEnd = lineStart + lines[lineNumber - 1].length;
+      if (sectionId && !sectionId.includes("{") && !sectionId.includes("}") && chunk.startOffset <= lineStart && chunk.endOffset >= lineEnd) {
+        return { file, startLine: lineNumber, endLine: lineNumber, sectionId, sourceLine: text };
+      }
+    }
+  }
+  return null;
+};
+const crossProcessReceipt = (toolResult) => { try { return JSON.parse(toolResult.message); } catch { return null; } };
+const crossProcessExpectedFinding = (findingInput, planId, fingerprint) => {
+  const fields = ["analysis-finding-v1", planId, fingerprint, findingInput.batchId, findingInput.category, findingInput.severity,
+    findingInput.claim, findingInput.evidence, findingInput.file, String(findingInput.startLine), String(findingInput.endLine), findingInput.sectionId];
+  const parts = [];
+  for (const field of fields) {
+    const bytes = Buffer.from(field, "utf8");
+    const header = Buffer.allocUnsafe(4);
+    header.writeUInt32BE(bytes.byteLength, 0);
+    parts.push(header, bytes);
+  }
+  return createHash("sha256").update(Buffer.concat(parts)).digest("hex");
+};
+const crossProcessSameProjection = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+
+export async function runCrossProcessInitialProbe(ctx, workspace) {
+  let handle;
+  let agent;
+  const teardown = { disposeCalled: false, agentUnregistered: false, sessionUnregistered: false, teardownFailed: false };
+  let evidence;
+  try {
+    handle = await ctx.agents.create({ sessionId: "dshbanca-e2e-process-a-" + process.pid + "-" + Date.now(), meta: { cwd: workspace } });
+    agent = handle.agent;
+    if (!agent || ctx.agents.get(agent.id) !== agent || ctx.sessions.get(agent.id) !== agent.session || agent.id !== agent.session.id) fail("first process failed to create a native DSH Agent/Session");
+    const init = await runTool(ctx, "dshbanca-e2e-process-a-init", "banca_init", {}, agent);
+    if (init.result.isError) fail("first DSH process could not initialize the synthetic academic project through banca_init");
+    const projectConfigPath = join(workspace, ".banca", "project.json");
+    const projectConfig = JSON.parse(await readFile(projectConfigPath, "utf8"));
+    projectConfig.analysis = { coverageMode: "exhaustive", maxCharactersPerBatch: 120 };
+    await writeFile(projectConfigPath, JSON.stringify(projectConfig, null, 2), { mode: 0o600 });
+    const selection = await ctx.agentPresets.select(agent, "banca-auditor");
+    if (selection !== "banca-auditor" || ctx.agentPresets.composedPreset(agent.ctx) !== "banca-auditor" || ctx.sessionProjections.stateOf(agent.session, "agentPreset") !== "banca-auditor") {
+      fail("first DSH process did not bind the auditor Agent/Session to banca-auditor");
+    }
+    const identity = crossProcessAgentIdentity(ctx, agent);
+    if (identity.toolRuntime !== "ctx.tools.execute" || identity.modelCalls !== 0 || !identity.agentRegistryContainsAgent || !identity.sessionStoreContainsSession) fail("first DSH process Agent/Session or native ToolRuntime identity was not verified");
+    const initial = await runTool(ctx, "dshbanca-e2e-process-a-plan", "banca_context", {}, agent);
+    if (initial.result.isError) fail("first DSH process could not create the canonical exhaustive analysis plan");
+    let meta = await parseContextMeta(initial.message);
+    const planId = meta?.checkpoint?.planId;
+    const fingerprint = meta?.manuscript?.fingerprint;
+    if (meta?.checkpoint?.totalBatches !== 5 || meta?.checkpoint?.totalCharacters !== 595 || meta?.checkpoint?.completedBatches !== 0 || meta?.plan?.status !== "complete" || !/^[a-f0-9]{64}$/.test(planId ?? "") || !/^[a-f0-9]{64}$/.test(fingerprint ?? "")) {
+      fail("first DSH process did not initialize the canonical 595-character five-batch plan");
+    }
+    const planBatchIds = [];
+    const completedBatchCharacters = [];
+    const batchAudits = [];
+    let checkpointAfterFirstBatch = null;
+    let expectedFinding = null;
+    let findingProjection = null;
+    let unverifiedAdvancesBlocked = 0;
+    let prematureSynthesisBlocked = 0;
+    for (let index = 0; index < 2; index++) {
+      const batchId = meta?.batch?.batchId;
+      if (meta?.batch?.index !== index || meta?.checkpoint?.completedBatches !== index || typeof batchId !== "string") fail("first DSH process observed a skipped or unexpected batch before audit");
+      if (!Number.isInteger(meta?.batch?.characters) || meta.batch.characters <= 0 || meta.batch.characters > 120) fail("first DSH process observed invalid canonical batch character coverage");
+      completedBatchCharacters.push(meta.batch.characters);
+      planBatchIds.push(batchId);
+      const beforeAttempt = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "checkpoints", planId + ".json"), "utf8"));
+      const unverified = await runTool(ctx, "dshbanca-e2e-process-a-unverified-" + index, "banca_context", { completedBatchId: batchId }, agent);
+      const afterAttempt = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "checkpoints", planId + ".json"), "utf8"));
+      if (!unverified.message.includes("missing_batch_audit") || JSON.stringify(beforeAttempt) !== JSON.stringify(afterAttempt)) fail("first DSH process did not fail closed on an unaudited progress attempt");
+      unverifiedAdvancesBlocked++;
+      const premature = await runTool(ctx, "dshbanca-e2e-process-a-premature-synthesis-" + index, "banca_sintese", {}, agent);
+      if (!premature.result.isError || !premature.message.includes("synthesis input error")) fail("first DSH process released synthesis before complete coverage");
+      prematureSynthesisBlocked++;
+      const findings = [];
+      if (index === 1) {
+        const section = await crossProcessSectionSource(workspace, meta);
+        if (!section) fail("second canonical batch did not contain the expected synthetic methodology section");
+        expectedFinding = {
+          category: "structure",
+          severity: "low",
+          claim: "The synthetic LaTeX span contains an explicit section heading.",
+          evidence: section.file + ":" + section.startLine + "-" + section.endLine + ": " + section.sourceLine,
+          file: section.file,
+          startLine: section.startLine,
+          endLine: section.endLine,
+          sectionId: section.sectionId,
+          manuscriptFingerprint: fingerprint,
+          batchId,
+        };
+        findings.push(expectedFinding);
+      }
+      const audit = await runTool(ctx, "dshbanca-e2e-process-a-audit-" + index, "banca_auditar", { manuscriptFingerprint: fingerprint, batchId, findings }, agent);
+      if (audit.result.isError) fail("first DSH process banca_auditar dispatch failed");
+      const receipt = crossProcessReceipt(audit);
+      const stores = await crossProcessReadStores(workspace, planId, fingerprint);
+      const acceptedCount = index === 1 ? 1 : 0;
+      if (!receipt || receipt.kind !== "openbanca-audit-receipt-v2" || receipt.planId !== planId || receipt.manuscriptFingerprint !== fingerprint || receipt.batchId !== batchId || receipt.batchIndex !== index || receipt.acceptedCount !== acceptedCount || !Array.isArray(receipt.findings) || receipt.findings.length !== acceptedCount || stores.receipts.length !== index + 1 || stores.findings.length !== acceptedCount) fail("first DSH process receipt and durable stores did not preserve the expected finding count");
+      if (acceptedCount === 1) {
+        const expectedId = crossProcessExpectedFinding(expectedFinding, planId, fingerprint);
+        if (receipt.findings[0]?.findingId !== expectedId || stores.findings[0]?.findingId !== expectedId) fail("first DSH process finding did not retain its deterministic plan-backed identity");
+        findingProjection = crossProcessFindingProjection(stores.findings[0]);
+      }
+      batchAudits.push({ batchIndex: index, batchId, acceptedCount, persistedFindingCount: stores.findings.length, findingId: acceptedCount === 1 ? receipt.findings[0].findingId : null });
+      const advanced = await runTool(ctx, "dshbanca-e2e-process-a-advance-" + index, "banca_context", { completedBatchId: batchId }, agent);
+      if (advanced.result.isError) fail("first DSH process failed to advance an audited canonical batch");
+      meta = await parseContextMeta(advanced.message);
+      if (meta?.checkpoint?.completedBatches !== index + 1 || meta?.checkpoint?.planId !== planId || meta?.manuscript?.fingerprint !== fingerprint || (index === 0 && meta?.batch?.index !== 1) || (index === 1 && meta?.batch?.index !== 2)) fail("first DSH process progress was not exactly one batch per accepted audit");
+      if (index === 0) checkpointAfterFirstBatch = crossProcessCheckpointEvidence(meta);
+    }
+    const incompleteSynthesis = await runTool(ctx, "dshbanca-e2e-process-a-stop-at-two", "banca_sintese", {}, agent);
+    if (!incompleteSynthesis.result.isError || !incompleteSynthesis.message.includes("synthesis input error")) fail("first DSH process did not stop at 2/5 before synthesis");
+    prematureSynthesisBlocked++;
+    const finalStores = await crossProcessReadStores(workspace, planId, fingerprint);
+    const persistedIds = finalStores.receipts.map((receipt) => receipt.batchId);
+    if (finalStores.receipts.length !== 2 || JSON.stringify(persistedIds) !== JSON.stringify(planBatchIds) || finalStores.findings.length !== 1 || !findingProjection || !crossProcessSameProjection(findingProjection, crossProcessFindingProjection(finalStores.findings[0]))) fail("first DSH process did not persist two ordered receipts and exactly one finding");
+    const checkpoint = crossProcessCheckpointEvidence(meta);
+    const expectedCompletedCharacters = completedBatchCharacters.reduce((sum, count) => sum + count, 0);
+    const expectedCoveragePercent = Math.round((expectedCompletedCharacters / 595) * 10_000) / 100;
+    const expectedFirstCoveragePercent = Math.round((completedBatchCharacters[0] / 595) * 10_000) / 100;
+    if (
+      !checkpointAfterFirstBatch || checkpointAfterFirstBatch.completedBatches !== 1 ||
+      checkpointAfterFirstBatch.completedCharacters !== completedBatchCharacters[0] ||
+      checkpointAfterFirstBatch.coveragePercent !== expectedFirstCoveragePercent ||
+      checkpointAfterFirstBatch.nextBatchIndex !== 1 || checkpointAfterFirstBatch.nextBatchId !== planBatchIds[1] ||
+      checkpoint.completedBatches !== 2 || checkpoint.completedCharacters !== expectedCompletedCharacters ||
+      checkpoint.coveragePercent !== expectedCoveragePercent || checkpoint.totalBatches !== 5 ||
+      checkpoint.totalCharacters !== 595 || checkpoint.state !== "running" || checkpoint.nextBatchIndex !== 2 ||
+      typeof checkpoint.nextBatchId !== "string" || planBatchIds.includes(checkpoint.nextBatchId)
+    ) fail("first DSH process did not leave a canonical 2/5 checkpoint matching observed batch characters and next batch");
+    if (modelEventCount(agent.session) !== 0) fail("first DSH process made a model request during no-model academic audit");
+    evidence = {
+      probeExecuted: true,
+      executionMode: "cross-process-native-dsh",
+      workspaceIdentitySha256: process.env.DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256,
+      workspaceInventorySha256: crossProcessShaText(JSON.stringify(await inventory(workspace))),
+      manuscriptHashes: await crossProcessManuscriptHashes(workspace),
+      planId,
+      manuscriptFingerprint: fingerprint,
+      totalBatches: 5,
+      totalCharacters: 595,
+      completedBatchIds: [...planBatchIds],
+      planBatchIdsPrefix: [...planBatchIds, checkpoint.nextBatchId],
+      completedBatchCharacters: [...completedBatchCharacters],
+      checkpointAfterFirstBatch,
+      checkpoint,
+      batchAudits,
+      persistedReceiptCount: finalStores.receipts.length,
+      persistedBatchIds: persistedIds,
+      persistence: await crossProcessAnalysisHashes(workspace, planId),
+      findingCount: finalStores.findings.length,
+      finding: findingProjection,
+      prematureSynthesisBlocked: prematureSynthesisBlocked === 3,
+      synthesisReleased: false,
+      unverifiedAdvancesBlocked,
+      agentIdentity: identity,
+      teardown,
+    };
+  } finally {
+    if (handle) {
+      try {
+        await handle.dispose();
+        teardown.disposeCalled = true;
+      } catch {
+        teardown.teardownFailed = true;
+      }
+      teardown.agentUnregistered = ctx.agents.get(agent?.id) === undefined;
+      teardown.sessionUnregistered = ctx.sessions.get(agent?.id) === undefined;
+      if (!teardown.agentUnregistered || !teardown.sessionUnregistered || teardown.teardownFailed) fail("first DSH process Agent/Session teardown failed or remained registered");
+      if (evidence) evidence.teardown = { ...teardown };
+    }
+  }
+  if (!evidence) fail("first DSH process cross-process evidence was not produced");
+  return evidence;
+}
+
+export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
+  let handle;
+  let agent;
+  const teardown = { disposeCalled: false, agentUnregistered: false, sessionUnregistered: false, teardownFailed: false };
+  let evidence;
+  try {
+    const inventoryBefore = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+    if (inventoryBefore !== expectation.workspaceInventorySha256 || process.env.DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256 !== expectation.workspaceIdentitySha256) fail("second DSH process did not open the unchanged first-process synthetic workspace");
+    const persistenceBefore = await crossProcessAnalysisHashes(workspace, expectation.planId);
+    if (!crossProcessSameProjection(persistenceBefore, expectation.persistence)) fail("second DSH process found changed checkpoint, receipt, finding, or analysis inventory hashes before resume");
+    const storesBefore = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
+    const persistedBatchIds = storesBefore.receipts.map((receipt) => receipt.batchId);
+    const recoveredFinding = storesBefore.findings.length === 1 ? crossProcessFindingProjection(storesBefore.findings[0]) : null;
+    if (storesBefore.receipts.length !== 2 || JSON.stringify(persistedBatchIds) !== JSON.stringify(expectation.completedBatchIds) || !recoveredFinding || !crossProcessSameProjection(recoveredFinding, expectation.finding)) fail("second DSH process did not recover the original receipts and single finding before context query");
+    handle = await ctx.agents.create({ sessionId: "dshbanca-e2e-process-b-" + process.pid + "-" + Date.now(), meta: { cwd: workspace } });
+    agent = handle.agent;
+    if (!agent || ctx.agents.get(agent.id) !== agent || ctx.sessions.get(agent.id) !== agent.session || agent.id !== agent.session.id) fail("second process failed to create a native DSH Agent/Session");
+    const selection = await ctx.agentPresets.select(agent, "banca-auditor");
+    if (selection !== "banca-auditor" || ctx.agentPresets.composedPreset(agent.ctx) !== "banca-auditor" || ctx.sessionProjections.stateOf(agent.session, "agentPreset") !== "banca-auditor") fail("second DSH process did not bind its new Agent/Session to banca-auditor");
+    const identity = crossProcessAgentIdentity(ctx, agent);
+    if (!identity.agentRegistryContainsAgent || !identity.sessionStoreContainsSession || identity.toolRuntime !== "ctx.tools.execute" || identity.modelCalls !== 0) fail("second DSH process Agent/Session or ToolRuntime identity was not verified");
+    const rawCheckpointBefore = JSON.parse(await readFile(join(workspace, ".banca", "analysis", "checkpoints", expectation.planId + ".json"), "utf8"));
+    if (rawCheckpointBefore.completedBatches !== 2 || rawCheckpointBefore.totalBatches !== 5 || rawCheckpointBefore.planId !== expectation.planId || rawCheckpointBefore.fingerprint !== expectation.manuscriptFingerprint || rawCheckpointBefore.state !== "running") fail("second DSH process checkpoint was reset or altered before resume query");
+    const query = await runTool(ctx, "dshbanca-e2e-process-b-resume-context", "banca_context", {}, agent);
+    if (query.result.isError) fail("second DSH process could not recover the persisted banca_context plan");
+    let meta = await parseContextMeta(query.message);
+    const checkpointAfterQuery = crossProcessCheckpointEvidence(meta);
+    const checkpointBeforeQuery = {
+      planId: rawCheckpointBefore.planId,
+      manuscriptFingerprint: rawCheckpointBefore.fingerprint,
+      totalBatches: rawCheckpointBefore.totalBatches,
+      completedBatches: rawCheckpointBefore.completedBatches,
+      completedCharacters: rawCheckpointBefore.completedCharacters,
+      totalCharacters: rawCheckpointBefore.totalCharacters,
+      coveragePercent: rawCheckpointBefore.coveragePercent,
+      state: rawCheckpointBefore.state,
+      nextBatchIndex: expectation.checkpoint.nextBatchIndex,
+      nextBatchId: expectation.checkpoint.nextBatchId,
+    };
+    const persistenceAfterQuery = await crossProcessAnalysisHashes(workspace, expectation.planId);
+    const storesAfterQuery = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
+    const recoveredFindingAfterQuery = storesAfterQuery.findings.length === 1 ? crossProcessFindingProjection(storesAfterQuery.findings[0]) : null;
+    if (JSON.stringify(checkpointBeforeQuery) !== JSON.stringify(checkpointAfterQuery) || !crossProcessSameProjection(persistenceBefore, persistenceAfterQuery) || storesAfterQuery.receipts.length !== 2 || storesAfterQuery.findings.length !== 1 || !recoveredFindingAfterQuery || !crossProcessSameProjection(recoveredFindingAfterQuery, expectation.finding)) fail("resume-only banca_context query changed persistent progress or the first-process finding");
+    const batchAudits = [];
+    const completedBatchIds = [];
+    const allPlanBatchIds = [...expectation.completedBatchIds];
+    for (let index = 2; index < 5; index++) {
+      const batchId = meta?.batch?.batchId;
+      if (meta?.batch?.index !== index || meta?.checkpoint?.completedBatches !== index || typeof batchId !== "string") fail("second DSH process observed a skipped or out-of-order remaining batch");
+      allPlanBatchIds.push(batchId);
+      const premature = await runTool(ctx, "dshbanca-e2e-process-b-premature-synthesis-" + index, "banca_sintese", {}, agent);
+      if (!premature.result.isError || !premature.message.includes("synthesis input error")) fail("second DSH process released synthesis before all five batches");
+      const audit = await runTool(ctx, "dshbanca-e2e-process-b-audit-" + index, "banca_auditar", { manuscriptFingerprint: expectation.manuscriptFingerprint, batchId, findings: [] }, agent);
+      if (audit.result.isError) fail("second DSH process could not submit a zero-finding audit receipt");
+      const receipt = crossProcessReceipt(audit);
+      const stores = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
+      if (!receipt || receipt.batchId !== batchId || receipt.batchIndex !== index || receipt.acceptedCount !== 0 || !Array.isArray(receipt.findings) || receipt.findings.length !== 0 || stores.findings.length !== 1 || stores.receipts.length !== index + 1) fail("second DSH process changed or duplicated the stored finding while auditing a remaining batch");
+      batchAudits.push({ batchIndex: index, batchId, acceptedCount: 0, persistedFindingCount: stores.findings.length, findingId: null });
+      completedBatchIds.push(batchId);
+      const advance = await runTool(ctx, "dshbanca-e2e-process-b-advance-" + index, "banca_context", { completedBatchId: batchId }, agent);
+      if (advance.result.isError) fail("second DSH process failed to advance a valid audited batch");
+      meta = await parseContextMeta(advance.message);
+      if (meta?.checkpoint?.completedBatches !== index + 1 || meta?.checkpoint?.planId !== expectation.planId || meta?.manuscript?.fingerprint !== expectation.manuscriptFingerprint) fail("second DSH process progress did not advance exactly one audited batch");
+    }
+    const synthesisResult = await runTool(ctx, "dshbanca-e2e-process-b-final-synthesis", "banca_sintese", {}, agent);
+    if (synthesisResult.result.isError || synthesisResult.message.includes("synthesis input error")) fail("second DSH process did not release synthesis after complete coverage");
+    const synthesis = JSON.parse(synthesisResult.message);
+    const finalStores = await crossProcessReadStores(workspace, expectation.planId, expectation.manuscriptFingerprint);
+    const synthesisFinding = Array.isArray(synthesis.findings) && synthesis.findings.length === 1 ? crossProcessFindingProjection(synthesis.findings[0]) : null;
+    const finalFinding = finalStores.findings.length === 1 ? crossProcessFindingProjection(finalStores.findings[0]) : null;
+    const planBatchIds = synthesis.coverage?.orderedBatchIds;
+    if (synthesis.version !== "global-analysis-synthesis-input-v1" || synthesis.planId !== expectation.planId || synthesis.manuscriptFingerprint !== expectation.manuscriptFingerprint || synthesis.coverage?.state !== "complete" || synthesis.coverage?.totalBatches !== 5 || synthesis.coverage?.completedBatches !== 5 || synthesis.coverage?.totalCharacters !== 595 || synthesis.coverage?.completedCharacters !== 595 || synthesis.coverage?.coveragePercent !== 100 || JSON.stringify(planBatchIds) !== JSON.stringify(allPlanBatchIds) || synthesis.findings.length !== 1 || finalStores.receipts.length !== 5 || finalStores.findings.length !== 1 || !synthesisFinding || !finalFinding || !crossProcessSameProjection(synthesisFinding, expectation.finding) || !crossProcessSameProjection(finalFinding, expectation.finding)) fail("second DSH process synthesis did not contain complete ordered coverage and the original finding exactly once");
+    const finalCheckpoint = crossProcessCheckpointEvidence(meta);
+    const manuscriptPreserved = crossProcessSameProjection(await crossProcessManuscriptHashes(workspace), expectation.manuscriptHashes);
+    if (!manuscriptPreserved || modelEventCount(agent.session) !== 0) fail("second DSH process altered the manuscript or invoked a model");
+    evidence = {
+      workspaceIdentitySha256: expectation.workspaceIdentitySha256,
+      resumeQuery: {
+        completedBatchIdProvided: false,
+        checkpointBefore: checkpointBeforeQuery,
+        checkpointAfter: checkpointAfterQuery,
+        persistenceBefore,
+        persistenceAfter: persistenceAfterQuery,
+        recoveredFindingCount: storesAfterQuery.findings.length,
+        recoveredFinding: recoveredFindingAfterQuery,
+        persistedReceiptCount: storesAfterQuery.receipts.length,
+        persistedBatchIds: storesAfterQuery.receipts.map((receipt) => receipt.batchId),
+      },
+      workspaceInventoryBeforeResumeSha256: inventoryBefore,
+      agentIdentity: identity,
+      completedBatchIds,
+      batchAudits,
+      persistedReceiptCount: finalStores.receipts.length,
+      persistedBatchIds: finalStores.receipts.map((receipt) => receipt.batchId),
+      finalCheckpoint,
+      synthesis: {
+        state: synthesis.coverage.state,
+        totalBatches: synthesis.coverage.totalBatches,
+        completedBatches: synthesis.coverage.completedBatches,
+        totalCharacters: synthesis.coverage.totalCharacters,
+        completedCharacters: synthesis.coverage.completedCharacters,
+        coveragePercent: synthesis.coverage.coveragePercent,
+        orderedBatchIds: planBatchIds,
+        findingsCount: synthesis.findings.length,
+        finding: synthesisFinding,
+      },
+      manuscriptPreserved,
+      teardown,
+    };
+  } finally {
+    if (handle) {
+      try { await handle.dispose(); teardown.disposeCalled = true; }
+      catch { teardown.teardownFailed = true; }
+      teardown.agentUnregistered = ctx.agents.get(agent?.id) === undefined;
+      teardown.sessionUnregistered = ctx.sessions.get(agent?.id) === undefined;
+      if (!teardown.agentUnregistered || !teardown.sessionUnregistered || teardown.teardownFailed) fail("second DSH process Agent/Session teardown failed or remained registered");
+      if (evidence) evidence.teardown = { ...teardown };
+    }
+  }
+  if (!evidence) fail("second DSH process cross-process recovery evidence was not produced");
+  return evidence;
 }
 
 export async function runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions = []) {
@@ -2402,6 +2887,37 @@ export async function captureNativeSkillsEvidence(ctx, workspace) {
 export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
   const reportPath = ${JSON.stringify(observerResult)};
+  const restartWorkspace = ${JSON.stringify(restartWorkspace)};
+  const restartObserverResultOne = ${JSON.stringify(restartObserverResultOne)};
+  const restartObserverResultTwo = ${JSON.stringify(restartObserverResultTwo)};
+  const restartTeardownMarkerOne = ${JSON.stringify(restartTeardownMarkerOne)};
+  const restartTeardownMarkerTwo = ${JSON.stringify(restartTeardownMarkerTwo)};
+  const restartPhase = process.env.DSHBANCA_DSH_PROFILE_PHASE ?? "first";
+  const observerProcessIdentitySha256 = await crossProcessProcessIdentitySha256();
+  const teardownMarkerPath = restartPhase === "resume" ? restartTeardownMarkerTwo : restartTeardownMarkerOne;
+  // DSH's native ProcessShutdown sets process.exitCode only after the entire profile fiber disposes.
+  // A nonzero sentinel makes natural exit without that completion signal fail closed.
+  process.exitCode = 86;
+  process.once("beforeExit", () => {
+    try {
+      writeFileSync(teardownMarkerPath, JSON.stringify({
+        event: "beforeExit",
+        observerProcessIdentitySha256,
+        processExitCodeAtBeforeExit: process.exitCode ?? null,
+        nativeShutdownCompleted: process.exitCode === 0,
+      }) + "\\n", { mode: 0o600, flag: "wx" });
+    } catch {
+      process.exitCode = 1;
+    }
+  });
+  if (restartPhase === "resume") {
+    const expectation = JSON.parse(process.env.DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE ?? "null");
+    if (!expectation || expectation.probeExecuted !== true) fail("second DSH process did not receive validated phase-one evidence");
+    const crossProcessPhaseTwo = await runCrossProcessResumeProbe(ctx, restartWorkspace, expectation);
+    await writeFile(restartObserverResultTwo, JSON.stringify({ observerProcessIdentitySha256, crossProcessPhaseTwo }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+    return;
+  }
+  if (restartPhase !== "first") fail("unknown cross-process phase selector");
   let tools = [];
   let skillFound = false;
 
@@ -2906,6 +3422,7 @@ export async function apply(ctx) {
     const batchAuditEvidenceGate = await runAcademicBatchAuditProbe(ctx, workspace, agent);
     const nativeQuestionsEvidence = await runAcademicNativeQuestionsProbe(ctx, workspace, agent, unverifiedAgent, controlObservedDecisions);
     const academicDecisionEvidence = await runAcademicDecisionProbe(ctx, workspace, agent, unverifiedAgent, nativeSkillsEvidence);
+    const crossProcessPhaseOne = await runCrossProcessInitialProbe(ctx, restartWorkspace);
 
     result = {
       lifecycle: "observer Cordis apply reached; real DSH AgentRegistry.create + AgentLoop publication; preset registry resolution and selection observed; direct ToolRuntime calls only",
@@ -2963,6 +3480,7 @@ export async function apply(ctx) {
       skillFound,
       nativeSkillsEvidence,
       batchAuditEvidenceGate,
+      crossProcessPhaseOne,
       nativeQuestionsEvidence,
       academicDecisionEvidence,
       executedTools: ["banca_init", "banca_snapshot", "banca_corrigir", "banca_restore", "banca_status", "banca_context", "banca_auditar", "banca_sintese", "ask_user_question"],
@@ -3082,7 +3600,8 @@ export async function apply(ctx) {
   result.agentTeardown.controlAgentUnregistered = controlAgentUnregistered
   result.agentTeardown.unverifiedAgentUnregistered = unverifiedAgentUnregistered
   if (!auditorAgentUnregistered || !controlAgentUnregistered || !unverifiedAgentUnregistered) fail("disposed auditor/control/unverified Agent or Session remained registered");
-  await writeFile(reportPath, JSON.stringify(result, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+  await writeFile(reportPath, JSON.stringify({ ...result, observerProcessIdentitySha256 }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+  await writeFile(restartObserverResultOne, JSON.stringify({ observerProcessIdentitySha256, crossProcessPhaseOne: result.crossProcessPhaseOne }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
 }
 export default { name, inject, apply };
 `
@@ -3094,6 +3613,28 @@ async function main(): Promise<void> {
   const initialRepoStatus = repoStatus()
   report.repository.revision = gitValue(["rev-parse", "HEAD"]) ?? "unknown"
   report.repository.dirty = initialRepoStatus === null || initialRepoStatus.trim().length > 0
+  if (process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED !== "yes") {
+    report.stages.profileBoot = {
+      status: "BLOCKED",
+      started: false,
+      dshCliInvocations: 0,
+      agentHandlesCreated: 0,
+      sessionsCreated: 0,
+      academicProjectInitialized: false,
+    }
+    report.stages.crossProcessBatchAudit = {
+      status: "BLOCKED",
+      processLaunches: 0,
+      reason: "Issue #103 active DSH lifecycle evidence is unauthorized in this execution.",
+    }
+    fail("BLOCKED: without explicit authorization, no DSH CLI process, Agent/Session, or academic synthetic project is started", "BLOCKED")
+    return
+  }
+  if (process.platform !== "linux") {
+    report.stages.crossProcessBatchAudit = { status: "BLOCKED", processLaunches: 0, reason: "Host-derived process identity requires Linux procfs." }
+    fail("BLOCKED: Issue #103 host-derived kernel process identity is unavailable on this platform", "BLOCKED")
+    return
+  }
   const dshExecutable = findExecutable("dsh", process.env.DSH_BIN)
   if (!dshExecutable) {
     fail("DSH CLI not found or DSH_BIN does not point to a file; install/provision the real DSH host", "BLOCKED")
@@ -3279,6 +3820,13 @@ async function main(): Promise<void> {
   const observerRoot = join(scratch, "observer")
   const workspace = join(scratch, "synthetic-project")
   const observerResult = join(scratch, "observer-result.json")
+  const restartWorkspace = join(scratch, "process-restart-project")
+  const restartObserverResultOne = join(scratch, "process-a-observer-result.json")
+  const restartObserverResultTwo = join(scratch, "process-b-observer-result.json")
+  const restartTeardownMarkerOne = join(scratch, "process-a-natural-shutdown.json")
+  const restartTeardownMarkerTwo = join(scratch, "process-b-natural-shutdown.json")
+  const processIdentityKey = randomBytes(32)
+  const processIdentityKeyHex = processIdentityKey.toString("hex")
   const auditorMarkdownSourcePath = join(repositoryRoot, "assets", "dsh", "agents", "banca-auditor.md")
   const auditorMarkdownSourceSha256 = existsSync(auditorMarkdownSourcePath) ? hashFile(auditorMarkdownSourcePath) : null
   const auditorMarkdownSourceSha1 = existsSync(auditorMarkdownSourcePath)
@@ -3300,7 +3848,22 @@ async function main(): Promise<void> {
       writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
     }
   }
-  createObserverPackage(observerRoot, workspace, observerResult, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1)
+  mkdirSync(restartWorkspace, { recursive: true, mode: 0o700 })
+  const retainedWorkspaceDirectoryFd = openSync(restartWorkspace, "r")
+  restartWorkspaceDirectoryFd = retainedWorkspaceDirectoryFd
+  const restartWorkspaceIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(restartWorkspace, scratch, processIdentityKey, retainedWorkspaceDirectoryFd)
+  mkdirSync(join(restartWorkspace, ".git"), { recursive: false, mode: 0o700 })
+  mkdirSync(join(restartWorkspace, "capitulos"), { recursive: true, mode: 0o700 })
+  writeFileSync(join(restartWorkspace, "main.tex"), "\\documentclass{article}\n\\begin{document}\nTexto acadêmico sintético de validação.\\end{document}\n", { mode: 0o600 })
+  writeFileSync(join(restartWorkspace, "referencias.bib"), "@article{synthetic2026, title={Referência Sintética}, author={Pessoa, Exemplo}, year={2026}}\n", { mode: 0o600 })
+  for (let i = 1; i <= 5; i++) {
+    if (i === 2) {
+      writeFileSync(join(restartWorkspace, "capitulos", "lote2.tex"), "\\section{Delineamento Amostral e Metodologia}\nA amostragem foi definida por conveniência em 30 participantes, com omissão de justificativa do critério amostral e confronto bibliográfico com synthetic2026.\nCapitulo sintetico 2 para analise academica exaustiva e2e.\n", { mode: 0o600 })
+    } else {
+      writeFileSync(join(restartWorkspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
+    }
+  }
+  createObserverPackage(observerRoot, workspace, observerResult, restartWorkspace, restartObserverResultOne, restartObserverResultTwo, restartTeardownMarkerOne, restartTeardownMarkerTwo, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1)
   const overlayPath = join(scratch, "observer.patch.yml")
   writeFileSync(overlayPath, buildSdkPresetOverlayPatch(observerName), { mode: 0o600 })
 
@@ -3502,9 +4065,30 @@ async function main(): Promise<void> {
 
   const projectBeforeBoot = inventoryTree(workspace)
   const statusBeforeBoot = repoStatus()
-  const boot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], { cwd: workspace, env, timeoutMs: bootTimeoutMs })
-  report.stages.profileBoot = { exitCode: boot.exitCode, signal: boot.signal, timedOut: boot.timedOut, stdin: "EOF; no SDK request or model call sent" }
-  if (boot.exitCode !== 0 || boot.timedOut) {
+  const dshExecutableSha256 = hashFile(dshExecutable)
+  const firstProcessEnv: NodeJS.ProcessEnv = {
+    ...env,
+    DSHBANCA_DSH_PROFILE_PHASE: "first",
+    DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY: processIdentityKeyHex,
+    DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256: restartWorkspaceIdentitySha256,
+  }
+  const boot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], {
+    cwd: scratch,
+    env: firstProcessEnv,
+    timeoutMs: bootTimeoutMs,
+    processIdentityKey,
+  })
+  report.stages.profileBoot = {
+    exitCode: boot.exitCode,
+    signal: boot.signal,
+    timedOut: boot.timedOut,
+    spawnObserved: boot.spawnObserved === true,
+    exitObserved: boot.exitObserved === true,
+    closeObserved: boot.closeObserved === true,
+    hostProcessIdentitySha256: boot.hostProcessIdentitySha256 ?? null,
+    stdin: "EOF triggers native SDK stdin-lifetime shutdown; no request or model call is sent",
+  }
+  if (boot.exitCode !== 0 || boot.timedOut || boot.signal !== null || !boot.spawnObserved || !boot.exitObserved || !boot.closeObserved || !boot.hostProcessIdentitySha256) {
     fail(`Real DSH SDK profile boot failed, timed out, or exited unexpectedly before evidence: ${safeOutput(boot)}`)
     return
   }
@@ -3513,6 +4097,190 @@ async function main(): Promise<void> {
     return
   }
   const observed = JSON.parse(readFileSync(observerResult, "utf8"))
+  if (!existsSync(restartObserverResultOne)) {
+    report.stages.crossProcessBatchAudit = { status: "FAIL", phaseOneStarted: true, hostProcessExitObserved: boot.exitObserved === true }
+    fail("Issue #103 phase-one observer evidence is missing; the second DSH process was not started")
+    return
+  }
+  const phaseOneSidecar = JSON.parse(readFileSync(restartObserverResultOne, "utf8"))
+  const phaseOneEvidence = observed.crossProcessPhaseOne
+  const phaseOneErrors = validateCrossProcessPhaseOneEvidence(phaseOneEvidence)
+  const baselineBatchErrors = validateBatchAuditEvidence(observed.batchAuditEvidenceGate)
+  const phaseOneHostIdentity = boot.hostProcessIdentitySha256 ?? null
+  const phaseOneObserverIdentity = observed.observerProcessIdentitySha256 ?? null
+  const phaseOneWorkspaceFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(restartWorkspace, scratch, processIdentityKey, retainedWorkspaceDirectoryFd)
+  const phaseOneShutdownMarker = existsSync(restartTeardownMarkerOne)
+    ? JSON.parse(readFileSync(restartTeardownMarkerOne, "utf8"))
+    : null
+  const phaseOneWorkspaceInventorySha256 = jsonSha256(inventoryTree(restartWorkspace))
+  const phaseOneHostPersistence = crossProcessAnalysisStoreHashes(restartWorkspace, phaseOneEvidence?.planId ?? "")
+  const phaseOneHostReady =
+    boot.exitCode === 0 && boot.signal === null && !boot.timedOut &&
+    boot.spawnObserved === true && boot.exitObserved === true && boot.closeObserved === true &&
+    typeof phaseOneHostIdentity === "string" && phaseOneHostIdentity === phaseOneObserverIdentity &&
+    phaseOneShutdownMarker?.event === "beforeExit" && phaseOneShutdownMarker?.nativeShutdownCompleted === true &&
+    phaseOneShutdownMarker?.processExitCodeAtBeforeExit === 0 &&
+    phaseOneShutdownMarker?.observerProcessIdentitySha256 === phaseOneHostIdentity &&
+    phaseOneSidecar.observerProcessIdentitySha256 === phaseOneObserverIdentity &&
+    JSON.stringify(phaseOneSidecar.crossProcessPhaseOne) === JSON.stringify(phaseOneEvidence) &&
+    phaseOneWorkspaceInventorySha256 === phaseOneEvidence?.workspaceInventorySha256 &&
+    phaseOneEvidence?.workspaceIdentitySha256 === restartWorkspaceIdentitySha256 &&
+    phaseOneWorkspaceFilesystemIdentitySha256 === restartWorkspaceIdentitySha256 &&
+    hashFile(dshExecutable) === dshExecutableSha256 &&
+    JSON.stringify(phaseOneHostPersistence) === JSON.stringify(phaseOneEvidence?.persistence) &&
+    phaseOneErrors.length === 0 && baselineBatchErrors.length === 0
+  if (!phaseOneHostReady) {
+    report.stages.crossProcessBatchAudit = {
+      status: "FAIL",
+      phaseOneValidationErrors: phaseOneErrors,
+      preservedSameProcessBatchAuditValidationErrors: baselineBatchErrors,
+      hostProcessIdentityMatched: phaseOneHostIdentity !== null && phaseOneHostIdentity === phaseOneObserverIdentity,
+      hostWorkspaceInventoryMatched: phaseOneWorkspaceInventorySha256 === phaseOneEvidence?.workspaceInventorySha256,
+      hostWorkspaceFilesystemIdentityMatched: phaseOneWorkspaceFilesystemIdentitySha256 === restartWorkspaceIdentitySha256,
+      hostPersistentHashesMatched: JSON.stringify(phaseOneHostPersistence) === JSON.stringify(phaseOneEvidence?.persistence),
+      secondProcessStarted: false,
+    }
+    fail("Issue #103 phase one failed host, checkpoint, finding, receipt, or existing #100 gate validation; the second DSH process was not started")
+    return
+  }
+  const profileIdentitySha256 = createHmac("sha256", processIdentityKey)
+    .update(JSON.stringify(["dsh-profile-v1", profileName]), "utf8")
+    .digest("hex")
+  const secondProcessStartFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(restartWorkspace, scratch, processIdentityKey, retainedWorkspaceDirectoryFd)
+  const secondProcessStartInventorySha256 = jsonSha256(inventoryTree(restartWorkspace))
+  if (secondProcessStartFilesystemIdentitySha256 !== restartWorkspaceIdentitySha256) {
+    report.stages.crossProcessBatchAudit = { status: "FAIL", phaseOneValidated: true, secondProcessStarted: false, workspaceInodeIdentityMatched: false }
+    fail("Issue #103 synthetic workspace root was replaced before phase two; the second DSH process was not started")
+    return
+  }
+  const phaseOneExpectation = {
+    ...phaseOneEvidence,
+    workspaceInventorySha256: phaseOneWorkspaceInventorySha256,
+  }
+  const secondProcessEnv: NodeJS.ProcessEnv = {
+    ...firstProcessEnv,
+    DSHBANCA_DSH_PROFILE_PHASE: "resume",
+    DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE: JSON.stringify(phaseOneExpectation),
+  }
+  const secondDshExecutableSha256 = hashFile(dshExecutable)
+  const secondBoot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], {
+    cwd: scratch,
+    env: secondProcessEnv,
+    timeoutMs: bootTimeoutMs,
+    processIdentityKey,
+  })
+  const secondDshExecutableAfterSha256 = hashFile(dshExecutable)
+  const secondProcessEndFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(restartWorkspace, scratch, processIdentityKey, retainedWorkspaceDirectoryFd)
+  if (
+    secondDshExecutableSha256 !== dshExecutableSha256 || secondDshExecutableAfterSha256 !== secondDshExecutableSha256 ||
+    secondProcessEndFilesystemIdentitySha256 !== restartWorkspaceIdentitySha256 ||
+    secondBoot.exitCode !== 0 || secondBoot.signal !== null || secondBoot.timedOut ||
+    !secondBoot.spawnObserved || !secondBoot.exitObserved || !secondBoot.closeObserved ||
+    !secondBoot.hostProcessIdentitySha256 || !existsSync(restartObserverResultTwo) || !existsSync(restartTeardownMarkerTwo)
+  ) {
+    report.stages.crossProcessBatchAudit = {
+      status: "FAIL",
+      phaseOneValidated: true,
+      secondProcess: {
+        exitCode: secondBoot.exitCode,
+        signal: secondBoot.signal,
+        timedOut: secondBoot.timedOut,
+        spawnObserved: secondBoot.spawnObserved === true,
+        exitObserved: secondBoot.exitObserved === true,
+        closeObserved: secondBoot.closeObserved === true,
+      },
+    }
+    fail(`Issue #103 second native DSH process failed, was forced to stop, or omitted recovery evidence: ${safeOutput(secondBoot)}`)
+    return
+  }
+  const phaseTwoSidecar = JSON.parse(readFileSync(restartObserverResultTwo, "utf8"))
+  const phaseTwoShutdownMarker = JSON.parse(readFileSync(restartTeardownMarkerTwo, "utf8"))
+  const phaseTwoEvidence = phaseTwoSidecar.crossProcessPhaseTwo
+  const phaseTwoHostIdentity = secondBoot.hostProcessIdentitySha256
+  const phaseTwoObserverIdentity = phaseTwoSidecar.observerProcessIdentitySha256
+  const crossProcessEvidence = {
+    probeExecuted: true,
+    executionMode: "cross-process-native-dsh",
+    syntheticProcessFixture: false,
+    workspace: {
+      sameWorkspace: true,
+      preservedBetweenProcesses: phaseOneWorkspaceInventorySha256 === secondProcessStartInventorySha256 &&
+        secondProcessStartInventorySha256 === phaseTwoEvidence?.workspaceInventoryBeforeResumeSha256 &&
+        phaseOneWorkspaceFilesystemIdentitySha256 === restartWorkspaceIdentitySha256 &&
+        secondProcessStartFilesystemIdentitySha256 === restartWorkspaceIdentitySha256 &&
+        secondProcessEndFilesystemIdentitySha256 === restartWorkspaceIdentitySha256,
+      resetBetweenProcesses: phaseOneWorkspaceInventorySha256 !== secondProcessStartInventorySha256 ||
+        phaseOneWorkspaceFilesystemIdentitySha256 !== secondProcessStartFilesystemIdentitySha256 ||
+        secondProcessEndFilesystemIdentitySha256 !== restartWorkspaceIdentitySha256,
+      identitySha256: restartWorkspaceIdentitySha256,
+      firstProcessEndFilesystemIdentitySha256: phaseOneWorkspaceFilesystemIdentitySha256,
+      secondProcessStartFilesystemIdentitySha256,
+      secondProcessEndFilesystemIdentitySha256,
+      firstProcessEndInventorySha256: phaseOneWorkspaceInventorySha256,
+      secondProcessStartInventorySha256,
+    },
+    processBoundary: {
+      observationSource: "child_process.spawn+linux-procfs",
+      first: {
+        dshExecutableSha256,
+        profileIdentitySha256,
+        hostIdentitySha256: phaseOneHostIdentity,
+        observerIdentitySha256: phaseOneObserverIdentity,
+        identityMatched: phaseOneHostIdentity === phaseOneObserverIdentity,
+        spawnObserved: boot.spawnObserved === true,
+        kernelStartIdentityObserved: Boolean(phaseOneHostIdentity),
+        exitObserved: boot.exitObserved === true,
+        exitCode: boot.exitCode,
+        signal: boot.signal,
+        timedOut: boot.timedOut,
+        forcedTermination: boot.timedOut || boot.signal !== null,
+        naturalBeforeExitObserved: phaseOneShutdownMarker?.event === "beforeExit",
+        nativeTeardownMarkerObserved: phaseOneShutdownMarker?.nativeShutdownCompleted === true && phaseOneShutdownMarker?.processExitCodeAtBeforeExit === 0 && phaseOneShutdownMarker?.observerProcessIdentitySha256 === phaseOneHostIdentity,
+      },
+      second: {
+        dshExecutableSha256,
+        profileIdentitySha256,
+        hostIdentitySha256: phaseTwoHostIdentity,
+        observerIdentitySha256: phaseTwoObserverIdentity,
+        identityMatched: phaseTwoHostIdentity === phaseTwoObserverIdentity,
+        spawnObserved: secondBoot.spawnObserved === true,
+        kernelStartIdentityObserved: Boolean(phaseTwoHostIdentity),
+        exitObserved: secondBoot.exitObserved === true,
+        exitCode: secondBoot.exitCode,
+        signal: secondBoot.signal,
+        timedOut: secondBoot.timedOut,
+        forcedTermination: secondBoot.timedOut || secondBoot.signal !== null,
+        naturalBeforeExitObserved: phaseTwoShutdownMarker?.event === "beforeExit",
+        nativeTeardownMarkerObserved: phaseTwoShutdownMarker?.nativeShutdownCompleted === true && phaseTwoShutdownMarker?.processExitCodeAtBeforeExit === 0 && phaseTwoShutdownMarker?.observerProcessIdentitySha256 === phaseTwoHostIdentity,
+      },
+      secondStartedAfterFirstExit: boot.exitObserved === true && boot.closeObserved === true,
+      processesDidNotOverlap: boot.exitObserved === true && boot.closeObserved === true,
+    },
+    totalBatches: phaseOneEvidence.totalBatches,
+    totalCharacters: phaseOneEvidence.totalCharacters,
+    planId: phaseOneEvidence.planId,
+    manuscriptFingerprint: phaseOneEvidence.manuscriptFingerprint,
+    planBatchIds: phaseTwoEvidence?.synthesis?.orderedBatchIds,
+    phaseOne: phaseOneEvidence,
+    phaseTwo: phaseTwoEvidence,
+  }
+  const crossProcessErrors = validateCrossProcessBatchAuditEvidence(crossProcessEvidence)
+  const crossProcessStatus = classifyCrossProcessBatchAuditEvidenceStatus(crossProcessEvidence)
+  report.stages.crossProcessBatchAudit = {
+    status: crossProcessStatus,
+    evidence: crossProcessEvidence,
+    validationErrors: crossProcessErrors,
+    hostContract: {
+      dshProfile: "same native dsh --profile invocation launched twice via existing runner",
+      sdkShutdown: "native sdk-app stdin EOF -> DSH bounded profile shutdown; both exits must be observed as code 0",
+      processIdentity: "parent-observed child PID + Linux procfs boot ID/start ticks, HMAC-redacted and corroborated by observer",
+      agentLifecycle: "ctx.agents.create + native banca-auditor preset + AgentHandle.dispose in each process",
+      modelCalls: 0,
+    },
+    firstProcess: { exitCode: boot.exitCode, signal: boot.signal, timedOut: boot.timedOut, identityMatched: phaseOneHostIdentity === phaseOneObserverIdentity },
+    secondProcess: { exitCode: secondBoot.exitCode, signal: secondBoot.signal, timedOut: secondBoot.timedOut, identityMatched: phaseTwoHostIdentity === phaseTwoObserverIdentity },
+  }
+  if (crossProcessStatus !== "PASS") fail(`Issue #103 cross-process recovery evidence failed: ${crossProcessErrors.join("; ")}`)
   const errors = validateEvidence(observed)
   const auditorMarkdownEvidence = observed.auditorMarkdownEvidence
   const auditorMarkdownErrors = validateAuditorMarkdownEvidence(auditorMarkdownEvidence)
@@ -3531,7 +4299,7 @@ async function main(): Promise<void> {
   const academicDecisionStatus = classifyAcademicDecisionStatus(academicDecisionEvidence)
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
-  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus, academicDecisionStatus)
+  const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus, academicDecisionStatus, crossProcessStatus)
   report.stages.gateSummary = gateStatuses
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
@@ -3719,6 +4487,14 @@ try {
 } catch (error) {
   fail(`Unhandled gate error: ${error instanceof Error ? error.message.replaceAll(scratchRoot ?? "\0", "<sandbox>").replaceAll(repositoryRoot, "<checkout>") : "unknown error"}`)
 } finally {
+  if (restartWorkspaceDirectoryFd !== undefined) {
+    try {
+      closeSync(restartWorkspaceDirectoryFd)
+      restartWorkspaceDirectoryFd = undefined
+    } catch (error) {
+      fail(`Synthetic workspace identity handle teardown failed: ${error instanceof Error ? error.message : "unknown error"}`)
+    }
+  }
   if (scratchRoot && existsSync(scratchRoot)) {
     try {
       const resolvedScratch = realpathSync(scratchRoot)
@@ -3764,7 +4540,10 @@ const nativeQuestionsStatus = typeof report.stages.nativeQuestions === "object" 
 const academicDecisionStatus = typeof report.stages.academicDecision === "object" && report.stages.academicDecision !== null
   ? (report.stages.academicDecision as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}\n`)
+const crossProcessBatchAuditStatus = typeof report.stages.crossProcessBatchAudit === "object" && report.stages.crossProcessBatchAudit !== null
+  ? (report.stages.crossProcessBatchAudit as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}; sequential process-restart recovery (#103): ${crossProcessBatchAuditStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 if (report.versions.dsh) process.stdout.write(`DSH ${report.versions.dsh}; Cordis ${report.versions.cordis ?? "unknown"}; loader ${report.versions.cordisPluginLoader ?? "unknown"}; Skill ${report.versions.dshSkill ?? "unknown"}; Agent ${report.versions.dshAgent ?? "unknown"}; AgentLoop ${report.versions.dshAgentLoop ?? "unknown"}; Tools ${report.versions.dshTools ?? "unknown"}; AgentPreset ${report.versions.dshAgentPreset ?? "unknown"}; PresetRegistry ${report.versions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${report.versions.dshApiSessionController ?? "unknown"}; Bun ${report.versions.bun ?? "unknown"}; Node ${report.versions.node ?? "unknown"}; pnpm ${report.versions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)
