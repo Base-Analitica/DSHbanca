@@ -34,6 +34,7 @@ import {
   validatePresetReferences,
   validateComposedProfilePlugins,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
+import * as profileEvidenceContract from "../scripts/lib/dsh-profile-e2e-contract.js"
 
 const completeAuditorMarkdownEvidence = {
   sourcePath: "assets/dsh/agents/banca-auditor.md",
@@ -675,12 +676,15 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
     const template = runnerSource.slice(contentStart, contentEnd)
     const renderObserver = new Function(
       "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
-      "workspace", "observerResult", "renderControlPresetSelector", "e2eControlPresetId",
+      "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
+      "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
       `return \`${template}\`;`,
     ) as (...args: unknown[]) => string
     const generatedModuleSource = renderObserver(
       "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
-      "/tmp/synthetic-workspace", "/tmp/observer-result.json", renderControlPresetSelector, e2eControlPresetId,
+      "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
+      "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+      renderControlPresetSelector, e2eControlPresetId,
     )
 
     const directory = mkdtempSync(join(tmpdir(), "dshbanca-observer-skills-"))
@@ -799,6 +803,89 @@ const completeAgentSessionResumeEvidence = {
     sessionUnregistered: true,
   },
 }
+const incompleteCoverageMessage = (state: "pending" | "running") =>
+  `global synthesis requires checkpoint.state === "complete"; received "${state}"`
+const incompleteCoverageValue = (state: "pending" | "running") => [
+  "synthesis input error",
+  "code=incomplete_coverage",
+  `message=${incompleteCoverageMessage(state)}`,
+].join("\n")
+const storedCheckpointEvidence = (checkpoint: {
+  planId: string
+  manuscriptFingerprint: string
+  totalBatches: number
+  completedBatches: number
+  completedCharacters: number
+  totalCharacters: number
+  coveragePercent: number
+  state: string
+  nextBatchIndex: number | null
+  nextBatchId: string | null
+}) => ({
+  version: "analysis-checkpoint-v2",
+  planId: checkpoint.planId,
+  fingerprint: checkpoint.manuscriptFingerprint,
+  strategy: "ordered-source-spans-exhaustive-v1",
+  totalBatches: checkpoint.totalBatches,
+  completedBatches: checkpoint.completedBatches,
+  totalCharacters: checkpoint.totalCharacters,
+  completedCharacters: checkpoint.completedCharacters,
+  coveragePercent: checkpoint.coveragePercent,
+  state: checkpoint.state,
+  manuscriptFingerprint: checkpoint.manuscriptFingerprint,
+  nextBatchId: checkpoint.nextBatchId,
+  nextBatchIndex: checkpoint.nextBatchIndex,
+})
+const completeBatchAuditSynthesisProbes = batchAuditIds.map((batchId, batchIndex) => {
+  const completedCharacters = batchIndex * 120
+  const state = batchIndex === 0 ? "pending" : "running"
+  const checkpoint = storedCheckpointEvidence({
+    planId: batchAuditPlanId,
+    manuscriptFingerprint: batchAuditFingerprint,
+    totalBatches: 5,
+    completedBatches: batchIndex,
+    completedCharacters,
+    totalCharacters: 595,
+    coveragePercent: Math.round((completedCharacters / 595) * 10_000) / 100,
+    state,
+    nextBatchIndex: batchIndex,
+    nextBatchId: batchId,
+  })
+  const findings = batchIndex === 0 ? [] : [{ ...completeFindingProjection }]
+  const persistedBatchIds = batchAuditIds.slice(0, batchIndex + 1)
+  const persistence = {
+    analysisInventorySha256: "a".repeat(64),
+    checkpointSha256: "b".repeat(64),
+    auditConfirmationsSha256: "c".repeat(64),
+    findingsSha256: "d".repeat(64),
+  }
+  const workspaceInventory = ["4", "5", "6", "7", "8"][batchIndex]!.repeat(64)
+  return {
+    batchIndex,
+    batchId,
+    toolRuntimeIsError: false,
+    toolResultValue: incompleteCoverageValue(state),
+    toolMessage: incompleteCoverageValue(state),
+    errorCode: "incomplete_coverage",
+    errorMessage: incompleteCoverageMessage(state),
+    rejectionObserved: true,
+    checkpointBefore: { ...checkpoint },
+    checkpointAfter: { ...checkpoint },
+    persistenceBefore: { ...persistence },
+    persistenceAfter: { ...persistence },
+    workspaceInventoryBeforeSha256: workspaceInventory,
+    workspaceInventoryAfterSha256: workspaceInventory,
+    persistedReceiptCountBefore: batchIndex + 1,
+    persistedReceiptCountAfter: batchIndex + 1,
+    persistedBatchIdsBefore: [...persistedBatchIds],
+    persistedBatchIdsAfter: [...persistedBatchIds],
+    findingCountBefore: findings.length,
+    findingCountAfter: findings.length,
+    findingsBefore: findings.map((finding) => ({ ...finding })),
+    findingsAfter: findings.map((finding) => ({ ...finding })),
+    persistentStateUnchanged: true,
+  }
+})
 const completeBatchAuditEvidence = {
   probeExecuted: true,
   totalBatches: 5,
@@ -808,6 +895,7 @@ const completeBatchAuditEvidence = {
   planBatchIds: [...batchAuditIds],
   unverifiedAdvancesBlocked: 5,
   prematureSynthesisBlocked: 5,
+  prematureSynthesisProbes: completeBatchAuditSynthesisProbes,
   auditsCompletedWithZeroFindings: 4,
   batchAudits: batchAuditIds.map((batchId, batchIndex) => ({
     batchIndex,
@@ -871,6 +959,835 @@ const completeBatchAuditEvidence = {
   synthesisInputCoverageState: "complete",
   manuscriptPreserved: true,
 }
+
+const crossProcessPersistenceHashes = {
+  analysisInventorySha256: "c".repeat(64),
+  checkpointSha256: "d".repeat(64),
+  auditConfirmationsSha256: "e".repeat(64),
+  findingsSha256: "f".repeat(64),
+}
+const crossProcessCheckpointAtTwo = {
+  planId: batchAuditPlanId,
+  manuscriptFingerprint: batchAuditFingerprint,
+  totalBatches: 5,
+  completedBatches: 2,
+  completedCharacters: 240,
+  totalCharacters: 595,
+  coveragePercent: 40.34,
+  state: "running",
+  nextBatchIndex: 2,
+  nextBatchId: batchAuditIds[2],
+}
+const crossProcessCheckpointAt = (batchIndex: number) => {
+  const completedCharacters = batchIndex * 120
+  const state = batchIndex === 0 ? "pending" : "running"
+  return {
+    ...crossProcessCheckpointAtTwo,
+    completedBatches: batchIndex,
+    completedCharacters,
+    coveragePercent: Math.round((completedCharacters / 595) * 10000) / 100,
+    state,
+    nextBatchIndex: batchIndex,
+    nextBatchId: batchAuditIds[batchIndex],
+  }
+}
+const crossProcessStoredCheckpointAt = (batchIndex: number) =>
+  storedCheckpointEvidence(crossProcessCheckpointAt(batchIndex))
+const completeCrossProcessUnauditedAdvanceProbes = [2, 3, 4].map((batchIndex, probeIndex) => {
+  const checkpoint = crossProcessStoredCheckpointAt(batchIndex)
+  const priorBatchIds = batchAuditIds.slice(0, batchIndex)
+  const inventoryDigest = ["7", "9", "0"][probeIndex].repeat(64)
+  return {
+    batchIndex,
+    batchId: batchAuditIds[batchIndex],
+    toolRuntimeIsError: false,
+    toolResultValue: [
+      "context checkpoint error",
+      "code=missing_batch_audit",
+      `message=cannot advance checkpoint: audit confirmation missing for batch ${batchAuditIds[batchIndex]}`,
+    ].join("\n"),
+    errorCode: "missing_batch_audit",
+    rejectionObserved: true,
+    checkpointBefore: { ...checkpoint },
+    checkpointAfter: { ...checkpoint },
+    persistenceBefore: { ...crossProcessPersistenceHashes },
+    persistenceAfter: { ...crossProcessPersistenceHashes },
+    workspaceInventoryBeforeSha256: inventoryDigest,
+    workspaceInventoryAfterSha256: inventoryDigest,
+    persistedReceiptCountBefore: batchIndex,
+    persistedReceiptCountAfter: batchIndex,
+    persistedBatchIdsBefore: priorBatchIds,
+    persistedBatchIdsAfter: [...priorBatchIds],
+    findingCountBefore: 1,
+    findingCountAfter: 1,
+    findingsBefore: [{ ...completeFindingProjection }],
+    findingsAfter: [{ ...completeFindingProjection }],
+    persistentStateUnchanged: true,
+  }
+})
+const completePhaseOneSynthesisProbes = [0, 1, 2].map((batchIndex) => {
+  const receiptCount = Math.min(batchIndex + 1, 2)
+  const findings = batchIndex === 0 ? [] : [{ ...completeFindingProjection }]
+  const persistence = { ...crossProcessPersistenceHashes }
+  const inventoryDigest = ["4", "5", "6"][batchIndex]!.repeat(64)
+  const checkpoint = crossProcessStoredCheckpointAt(batchIndex)
+  const state = batchIndex === 0 ? "pending" : "running"
+  return {
+    batchIndex,
+    batchId: batchAuditIds[batchIndex],
+    toolRuntimeIsError: false,
+    toolResultValue: incompleteCoverageValue(state),
+    toolMessage: incompleteCoverageValue(state),
+    errorCode: "incomplete_coverage",
+    errorMessage: incompleteCoverageMessage(state),
+    rejectionObserved: true,
+    checkpointBefore: { ...checkpoint },
+    checkpointAfter: { ...checkpoint },
+    persistenceBefore: { ...persistence },
+    persistenceAfter: { ...persistence },
+    workspaceInventoryBeforeSha256: inventoryDigest,
+    workspaceInventoryAfterSha256: inventoryDigest,
+    persistedReceiptCountBefore: receiptCount,
+    persistedReceiptCountAfter: receiptCount,
+    persistedBatchIdsBefore: batchAuditIds.slice(0, receiptCount),
+    persistedBatchIdsAfter: batchAuditIds.slice(0, receiptCount),
+    findingCountBefore: findings.length,
+    findingCountAfter: findings.length,
+    findingsBefore: findings.map((finding) => ({ ...finding })),
+    findingsAfter: findings.map((finding) => ({ ...finding })),
+    persistentStateUnchanged: true,
+  }
+})
+const completePhaseTwoSynthesisProbes = [2, 3, 4].map((batchIndex, probeIndex) => {
+  const priorAdvanceProbe = completeCrossProcessUnauditedAdvanceProbes[probeIndex]!
+  return {
+    batchIndex,
+    batchId: batchAuditIds[batchIndex],
+    toolRuntimeIsError: false,
+    toolResultValue: incompleteCoverageValue("running"),
+    toolMessage: incompleteCoverageValue("running"),
+    errorCode: "incomplete_coverage",
+    errorMessage: incompleteCoverageMessage("running"),
+    rejectionObserved: true,
+    checkpointBefore: { ...priorAdvanceProbe.checkpointAfter },
+    checkpointAfter: { ...priorAdvanceProbe.checkpointAfter },
+    persistenceBefore: { ...priorAdvanceProbe.persistenceAfter },
+    persistenceAfter: { ...priorAdvanceProbe.persistenceAfter },
+    workspaceInventoryBeforeSha256: priorAdvanceProbe.workspaceInventoryAfterSha256,
+    workspaceInventoryAfterSha256: priorAdvanceProbe.workspaceInventoryAfterSha256,
+    persistedReceiptCountBefore: priorAdvanceProbe.persistedReceiptCountAfter,
+    persistedReceiptCountAfter: priorAdvanceProbe.persistedReceiptCountAfter,
+    persistedBatchIdsBefore: [...priorAdvanceProbe.persistedBatchIdsAfter],
+    persistedBatchIdsAfter: [...priorAdvanceProbe.persistedBatchIdsAfter],
+    findingCountBefore: priorAdvanceProbe.findingCountAfter,
+    findingCountAfter: priorAdvanceProbe.findingCountAfter,
+    findingsBefore: priorAdvanceProbe.findingsAfter.map((finding) => ({ ...finding })),
+    findingsAfter: priorAdvanceProbe.findingsAfter.map((finding) => ({ ...finding })),
+    persistentStateUnchanged: true,
+  }
+})
+const crossProcessAuditorIdentity = (agentId: string) => ({
+  createdVia: "ctx.agents.create",
+  agentId,
+  sessionId: agentId,
+  agentAndSessionIdMatch: true,
+  agentRegistryContainsAgent: true,
+  sessionStoreContainsSession: true,
+  effectivePreset: "banca-auditor",
+  sessionPresetProjection: "banca-auditor",
+  toolRuntime: "ctx.tools.execute",
+  modelCalls: 0,
+})
+const crossProcessTeardown = {
+  disposeCalled: true,
+  agentUnregistered: true,
+  sessionUnregistered: true,
+  teardownFailed: false,
+}
+const completeCrossProcessBatchAuditEvidence = {
+  probeExecuted: true,
+  executionMode: "cross-process-native-dsh",
+  syntheticProcessFixture: false,
+  workspace: {
+    sameWorkspace: true,
+    preservedBetweenProcesses: true,
+    resetBetweenProcesses: false,
+    identitySha256: "1".repeat(64),
+    firstProcessEndFilesystemIdentitySha256: "1".repeat(64),
+    secondProcessStartFilesystemIdentitySha256: "1".repeat(64),
+    secondProcessEndFilesystemIdentitySha256: "1".repeat(64),
+    firstProcessEndInventorySha256: "a".repeat(64),
+    secondProcessStartInventorySha256: "a".repeat(64),
+  },
+  processBoundary: {
+    observationSource: "child_process.spawn+linux-procfs",
+    first: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: "2".repeat(64),
+      observerIdentitySha256: "2".repeat(64),
+      identityMatched: true,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      forcedTermination: false,
+      naturalBeforeExitObserved: true,
+      nativeTeardownMarkerObserved: true,
+    },
+    second: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: "3".repeat(64),
+      observerIdentitySha256: "3".repeat(64),
+      identityMatched: true,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      forcedTermination: false,
+      naturalBeforeExitObserved: true,
+      nativeTeardownMarkerObserved: true,
+    },
+    secondStartedAfterFirstExit: true,
+    processesDidNotOverlap: true,
+  },
+  totalBatches: 5,
+  totalCharacters: 595,
+  planId: batchAuditPlanId,
+  manuscriptFingerprint: batchAuditFingerprint,
+  planBatchIds: [...batchAuditIds],
+  phaseOne: {
+    probeExecuted: true,
+    executionMode: "cross-process-native-dsh",
+    workspaceIdentitySha256: "1".repeat(64),
+    workspaceInventorySha256: "a".repeat(64),
+    planId: batchAuditPlanId,
+    manuscriptFingerprint: batchAuditFingerprint,
+    totalBatches: 5,
+    totalCharacters: 595,
+    checkpoint: { ...crossProcessCheckpointAtTwo },
+    checkpointAfterFirstBatch: {
+      ...crossProcessCheckpointAtTwo,
+      completedBatches: 1,
+      completedCharacters: 120,
+      coveragePercent: 20.17,
+      nextBatchIndex: 1,
+      nextBatchId: batchAuditIds[1],
+    },
+    completedBatchIds: batchAuditIds.slice(0, 2),
+    planBatchIdsPrefix: batchAuditIds.slice(0, 3),
+    completedBatchCharacters: [120, 120],
+    batchAudits: batchAuditIds.slice(0, 2).map((batchId, batchIndex) => ({
+      batchIndex,
+      batchId,
+      acceptedCount: batchIndex === 1 ? 1 : 0,
+      persistedFindingCount: batchIndex === 1 ? 1 : 0,
+    })),
+    persistence: { ...crossProcessPersistenceHashes },
+    persistedReceiptCount: 2,
+    persistedBatchIds: batchAuditIds.slice(0, 2),
+    unverifiedAdvancesBlocked: 2,
+    findingCount: 1,
+    finding: { ...completeFindingProjection },
+    prematureSynthesisBlocked: true,
+    prematureSynthesisProbes: completePhaseOneSynthesisProbes,
+    synthesisReleased: false,
+    agentIdentity: crossProcessAuditorIdentity("8".repeat(64)),
+    teardown: { ...crossProcessTeardown },
+  },
+  phaseTwo: {
+    workspaceIdentitySha256: "1".repeat(64),
+    resumeQuery: {
+      completedBatchIdProvided: false,
+      checkpointBefore: { ...crossProcessCheckpointAtTwo },
+      checkpointAfter: { ...crossProcessCheckpointAtTwo },
+      persistenceBefore: { ...crossProcessPersistenceHashes },
+      persistenceAfter: { ...crossProcessPersistenceHashes },
+      recoveredFindingCount: 1,
+      recoveredFinding: { ...completeFindingProjection },
+      persistedReceiptCount: 2,
+      persistedBatchIds: batchAuditIds.slice(0, 2),
+    },
+    workspaceInventoryBeforeResumeSha256: "a".repeat(64),
+    workspaceInventoryAfterResumeQuerySha256: "7".repeat(64),
+    agentIdentity: crossProcessAuditorIdentity("9".repeat(64)),
+    completedBatchIds: batchAuditIds.slice(2),
+    batchAudits: batchAuditIds.slice(2).map((batchId, index) => ({
+      batchIndex: index + 2,
+      batchId,
+      acceptedCount: 0,
+      persistedFindingCount: 1,
+    })),
+    unverifiedAdvancesBlocked: 3,
+    unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes,
+    prematureSynthesisBlocked: true,
+    prematureSynthesisProbes: completePhaseTwoSynthesisProbes,
+    persistedReceiptCount: 5,
+    persistedBatchIds: [...batchAuditIds],
+    finalCheckpoint: {
+      planId: batchAuditPlanId,
+      manuscriptFingerprint: batchAuditFingerprint,
+      totalBatches: 5,
+      completedBatches: 5,
+      completedCharacters: 595,
+      totalCharacters: 595,
+      coveragePercent: 100,
+      state: "complete",
+      nextBatchIndex: null,
+      nextBatchId: null,
+    },
+    synthesis: {
+      state: "complete",
+      totalBatches: 5,
+      completedBatches: 5,
+      totalCharacters: 595,
+      completedCharacters: 595,
+      coveragePercent: 100,
+      orderedBatchIds: [...batchAuditIds],
+      findingsCount: 1,
+      finding: { ...completeFindingProjection },
+    },
+    manuscriptPreserved: true,
+    teardown: { ...crossProcessTeardown },
+  },
+}
+
+describe("DSH process-restart recovery contract (#103)", () => {
+  test("validates phase one before any phase-two process launch", () => {
+    expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(completeCrossProcessBatchAuditEvidence.phaseOne)).toEqual([])
+    const malformedEvidence = [
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, completedCharacters: 250 } },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, nextBatchId: "not-the-next-plan-batch" } },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, coveragePercent: 50 } },
+      {
+        ...completeCrossProcessBatchAuditEvidence.phaseOne,
+        checkpointAfterFirstBatch: { ...completeCrossProcessBatchAuditEvidence.phaseOne.checkpointAfterFirstBatch, nextBatchId: "wrong-next-id" },
+      },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, checkpoint: { ...crossProcessCheckpointAtTwo, completedBatches: 3 } },
+      { ...completeCrossProcessBatchAuditEvidence.phaseOne, planBatchIdsPrefix: [batchAuditIds[0], batchAuditIds[1], "wrong-next-id"] },
+    ]
+    for (const evidence of malformedEvidence) {
+      expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(evidence)).toContain(
+        "phase one must leave canonical 1/5 and 2/5 checkpoints matching observed batch characters, coverage, and next plan IDs",
+      )
+    }
+  })
+
+  test.each([
+    ["ToolRuntime dispatch error", { toolRuntimeIsError: true }],
+    ["successful JSON synthesis", { toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), errorCode: null }],
+    ["wrong domain code", { toolResultValue: incompleteCoverageValue("pending").replace("incomplete_coverage", "missing_findings"), errorCode: "missing_findings" }],
+    ["wrong checkpoint message", { toolResultValue: incompleteCoverageValue("pending").replace('received "pending"', 'received "running"'), errorMessage: incompleteCoverageMessage("running") }],
+    ["checkpoint changed during refusal", { checkpointAfter: { ...crossProcessCheckpointAt(0), completedBatches: 1 } }],
+    ["persisted store changed during refusal", { persistenceAfter: { ...crossProcessPersistenceHashes, findingsSha256: "0".repeat(64) } }],
+    ["workspace changed during refusal", { workspaceInventoryAfterSha256: "0".repeat(64) }],
+  ])("phase-one premature synthesis rejects %s", (_label, probePatch) => {
+    const phaseOne = {
+      ...completeCrossProcessBatchAuditEvidence.phaseOne,
+      prematureSynthesisProbes: completePhaseOneSynthesisProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        ...probePatch,
+        rejectionObserved: false,
+      } : probe),
+    }
+    expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(phaseOne)).toContain(
+      "phase one must observe exact incomplete_coverage domain refusals without persistent-state mutation",
+    )
+  })
+
+  test.each([
+    ["running at 0/5", 0, "running"],
+    ["pending after 0/5", 1, "pending"],
+  ])("phase one rejects %s despite a matching refusal message", (_label, probeIndex, wrongState) => {
+    const phaseOne = {
+      ...completeCrossProcessBatchAuditEvidence.phaseOne,
+      prematureSynthesisProbes: completePhaseOneSynthesisProbes.map((probe, index) => index === probeIndex ? {
+        ...probe,
+        toolResultValue: incompleteCoverageValue(wrongState),
+        toolMessage: incompleteCoverageValue(wrongState),
+        errorMessage: incompleteCoverageMessage(wrongState),
+        checkpointBefore: { ...probe.checkpointBefore, state: wrongState },
+        checkpointAfter: { ...probe.checkpointAfter, state: wrongState },
+      } : probe),
+    }
+    expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(phaseOne)).toContain(
+      "phase one must observe exact incomplete_coverage domain refusals without persistent-state mutation",
+    )
+  })
+
+  test.each([
+    ["ToolRuntime error is not a domain refusal", { toolRuntimeIsError: true }],
+    ["successful output releases synthesis", { toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), errorCode: null }],
+    ["persisted checkpoint mutates", { checkpointAfter: { ...crossProcessCheckpointAt(2), completedBatches: 3 } }],
+    ["persisted checkpoint metadata mutates", { checkpointAfter: { ...crossProcessCheckpointAt(2), fingerprint: "wrong-fingerprint" } }],
+    ["receipts mutate", { persistedBatchIdsAfter: [batchAuditIds[0]] }],
+    ["findings mutate", { findingsAfter: [] }],
+    ["workspace mutates", { workspaceInventoryAfterSha256: "0".repeat(64) }],
+  ])("phase-two premature synthesis rejects %s", (_label, probePatch) => {
+    const phaseTwo = {
+      ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+      prematureSynthesisProbes: completePhaseTwoSynthesisProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        ...probePatch,
+        rejectionObserved: false,
+      } : probe),
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence({
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo,
+    })).toContain("second process must observe exact incomplete_coverage domain refusals without persistent-state mutation")
+  })
+
+  test("cross-process BLOCKED status participates in the overall gate", () => {
+    expect(classifyProfileGateStatuses("PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "BLOCKED")).toMatchObject({
+      crossProcessBatchAuditStatus: "BLOCKED",
+      overallStatus: "BLOCKED",
+      exitCode: 2,
+    })
+  })
+
+  test("accepts independently observed sequential DSH process recovery", () => {
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(completeCrossProcessBatchAuditEvidence)).toEqual([])
+    expect(profileEvidenceContract.classifyCrossProcessBatchAuditEvidenceStatus(completeCrossProcessBatchAuditEvidence)).toBe("PASS")
+  })
+
+  test("accepts the observer's full persisted checkpoint snapshots for resumed batches 3-5", () => {
+    for (const probe of completeCrossProcessBatchAuditEvidence.phaseTwo.unverifiedAdvanceProbes) {
+      expect(Object.keys(probe.checkpointBefore)).toEqual([
+        "version",
+        "planId",
+        "fingerprint",
+        "strategy",
+        "totalBatches",
+        "completedBatches",
+        "totalCharacters",
+        "completedCharacters",
+        "coveragePercent",
+        "state",
+        "manuscriptFingerprint",
+        "nextBatchId",
+        "nextBatchIndex",
+      ])
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(completeCrossProcessBatchAuditEvidence)).toEqual([])
+  })
+
+  test("resume checkpoint snapshots compare structurally despite different property insertion order", () => {
+    const checkpoint = crossProcessCheckpointAtTwo
+    const checkpointBefore = Object.fromEntries(Object.entries(checkpoint).reverse())
+    const checkpointAfterEntries = Object.entries(checkpoint).filter(([key]) => key !== "nextBatchIndex" && key !== "nextBatchId")
+    const checkpointAfter = Object.fromEntries([
+      ...checkpointAfterEntries,
+      ["nextBatchId", checkpoint.nextBatchId],
+      ["nextBatchIndex", checkpoint.nextBatchIndex],
+    ])
+    expect(JSON.stringify(checkpointBefore)).not.toBe(JSON.stringify(checkpointAfter))
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence({
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointBefore,
+          checkpointAfter,
+        },
+      },
+    })).toEqual([])
+  })
+
+  test("refusal checkpoint projections remain equivalent across reordered fields", () => {
+    const phaseTwo = completeCrossProcessBatchAuditEvidence.phaseTwo
+    const reorder = (checkpoint: Record<string, unknown>, reverse: boolean) => {
+      if (reverse) return Object.fromEntries(Object.entries(checkpoint).reverse())
+      const otherEntries = Object.entries(checkpoint).filter(([key]) => key !== "nextBatchIndex" && key !== "nextBatchId")
+      return Object.fromEntries([
+        ...otherEntries,
+        ["nextBatchId", checkpoint.nextBatchId],
+        ["nextBatchIndex", checkpoint.nextBatchIndex],
+      ])
+    }
+    const unverifiedAdvanceProbes = phaseTwo.unverifiedAdvanceProbes.map((probe, index) => index === 0
+      ? { ...probe, checkpointBefore: reorder(probe.checkpointBefore, true), checkpointAfter: reorder(probe.checkpointAfter, false) }
+      : probe)
+    const prematureSynthesisProbes = phaseTwo.prematureSynthesisProbes.map((probe, index) => index === 0
+      ? {
+        ...probe,
+        checkpointBefore: reorder({ ...probe.checkpointBefore, fingerprint: batchAuditFingerprint }, true),
+        checkpointAfter: reorder({ ...probe.checkpointAfter, fingerprint: batchAuditFingerprint }, false),
+      }
+      : probe)
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence({
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: { ...phaseTwo, unverifiedAdvanceProbes, prematureSynthesisProbes },
+    })).toEqual([])
+  })
+
+  test("requires the resumed DSH process to reject unaudited advances before each remaining batch", () => {
+    const phaseTwoWithoutAdvanceDenials = {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        unverifiedAdvancesBlocked: undefined,
+      },
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(phaseTwoWithoutAdvanceDenials)).toContain(
+      "second process must reject unaudited advancement for all three remaining batches before auditing",
+    )
+  })
+
+  test.each([
+    ["zero denials", { unverifiedAdvancesBlocked: 0 }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["incomplete denial count", { unverifiedAdvancesBlocked: 2 }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["missing probe list", { unverifiedAdvanceProbes: undefined }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["unconfirmed rejection", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, rejectionObserved: false } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["incomplete probe list", { unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.slice(0, 2) }, "second process must reject unaudited advancement for all three remaining batches before auditing"],
+    ["wrong rejection code", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, errorCode: "unexpected" } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["native ToolRuntime error is confused with the returned domain refusal", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, toolRuntimeIsError: true } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["successful output only contains a confusable code line", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        toolResultValue: ["successful context", "code=missing_batch_audit", "more context"].join(String.fromCharCode(10)),
+      } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["domain error names a different batch", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        toolResultValue: completeCrossProcessUnauditedAdvanceProbes[1].toolResultValue,
+      } : probe),
+    }, "second process must observe the exact missing_batch_audit application refusal in a successful ToolRuntime value for unaudited batch 3"],
+    ["missing post-query workspace baseline", { workspaceInventoryAfterResumeQuerySha256: undefined }, "second-process post-query workspace inventory must be captured before unaudited-advance probes"],
+    ["changed first-probe workspace baseline", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        workspaceInventoryBeforeSha256: "8".repeat(64),
+        workspaceInventoryAfterSha256: "8".repeat(64),
+      } : probe),
+    }, "first unaudited-advance probe must start from the captured post-resume workspace inventory"],
+    ["changed checkpoint", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? { ...probe, checkpointAfter: { ...probe.checkpointAfter, completedBatches: 3 } } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed persisted checkpoint version", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        checkpointBefore: { ...probe.checkpointBefore, version: "analysis-checkpoint-v1" },
+        checkpointAfter: { ...probe.checkpointAfter, version: "analysis-checkpoint-v1" },
+      } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed persisted checkpoint fingerprint", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        checkpointBefore: { ...probe.checkpointBefore, fingerprint: "wrong-fingerprint" },
+        checkpointAfter: { ...probe.checkpointAfter, fingerprint: "wrong-fingerprint" },
+      } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed persisted checkpoint strategy", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        checkpointBefore: { ...probe.checkpointBefore, strategy: "unexpected-strategy" },
+        checkpointAfter: { ...probe.checkpointAfter, strategy: "unexpected-strategy" },
+      } : probe),
+    }, "unaudited advance probe for batch 3 must preserve the current ordered checkpoint"],
+    ["changed first-probe baseline hashes", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        persistenceBefore: { ...probe.persistenceBefore, checkpointSha256: "0".repeat(64) },
+        persistenceAfter: { ...probe.persistenceAfter, checkpointSha256: "0".repeat(64) },
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+    ["changed audit confirmations", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        persistenceAfter: { ...probe.persistenceAfter, auditConfirmationsSha256: "0".repeat(64) },
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+    ["changed finding", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        findingsAfter: [{ ...completeFindingProjection, findingId: "0".repeat(64) }],
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+    ["changed workspace inventory", {
+      unverifiedAdvanceProbes: completeCrossProcessUnauditedAdvanceProbes.map((probe, index) => index === 0 ? {
+        ...probe,
+        workspaceInventoryAfterSha256: "5".repeat(64),
+      } : probe),
+    }, "second process must prove batch 3 rejection left checkpoint, confirmations, findings, and inventory unchanged"],
+  ])("rejects post-restart denial evidence mutation: %s", (_label, phaseTwoPatch, expectedError) => {
+    const evidence = {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        ...phaseTwoPatch,
+      },
+    }
+    expect(profileEvidenceContract.validateCrossProcessBatchAuditEvidence(evidence)).toContain(expectedError)
+  })
+
+  test.each([
+    ["one DSH process reused across both phases", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        second: { ...completeCrossProcessBatchAuditEvidence.processBoundary.second, hostIdentitySha256: "2".repeat(64), observerIdentitySha256: "2".repeat(64) },
+      },
+    }, "two distinct sequential DSH process instances must be observed; a reused process is rejected"],
+    ["only PID-shaped text is supplied", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: { ...completeCrossProcessBatchAuditEvidence.processBoundary, observationSource: "pid text in observer report" },
+    }, "process identity must come from host spawn and kernel process-start observations"],
+    ["process identity is fixture-only", {
+      ...completeCrossProcessBatchAuditEvidence,
+      syntheticProcessFixture: true,
+    }, "synthetic process fixtures are not sufficient host process evidence"],
+    ["phase two started before phase one exited", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: { ...completeCrossProcessBatchAuditEvidence.processBoundary, secondStartedAfterFirstExit: false },
+    }, "two distinct sequential DSH process instances must be observed; a reused process is rejected"],
+    ["first process required forced termination", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        first: { ...completeCrossProcessBatchAuditEvidence.processBoundary.first, signal: "SIGTERM", forcedTermination: true },
+      },
+    }, "first DSH process did not complete graceful teardown with exit code zero"],
+    ["second process exited unsuccessfully", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        second: { ...completeCrossProcessBatchAuditEvidence.processBoundary.second, exitCode: 1 },
+      },
+    }, "second DSH process did not complete graceful teardown with exit code zero"],
+    ["native DSH teardown completion was not observed", {
+      ...completeCrossProcessBatchAuditEvidence,
+      processBoundary: {
+        ...completeCrossProcessBatchAuditEvidence.processBoundary,
+        first: { ...completeCrossProcessBatchAuditEvidence.processBoundary.first, nativeTeardownMarkerObserved: false },
+      },
+    }, "first DSH process did not complete graceful teardown with exit code zero"],
+    ["workspace was reset between phases", {
+      ...completeCrossProcessBatchAuditEvidence,
+      workspace: { ...completeCrossProcessBatchAuditEvidence.workspace, resetBetweenProcesses: true },
+    }, "the same persisted synthetic workspace must be retained without reset between processes"],
+    ["workspace inventory changed at process boundary", {
+      ...completeCrossProcessBatchAuditEvidence,
+      workspace: { ...completeCrossProcessBatchAuditEvidence.workspace, secondProcessStartInventorySha256: "b".repeat(64) },
+    }, "the same persisted synthetic workspace must be retained without reset between processes"],
+    ["same-content workspace was replaced with a new root directory", {
+      ...completeCrossProcessBatchAuditEvidence,
+      workspace: { ...completeCrossProcessBatchAuditEvidence.workspace, secondProcessStartFilesystemIdentitySha256: "b".repeat(64) },
+    }, "the same persisted synthetic workspace must be retained without reset between processes"],
+    ["phase one lacks durable receipts", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: { ...completeCrossProcessBatchAuditEvidence.phaseOne, persistedReceiptCount: 1 },
+    }, "first process must durably persist exactly two ordered audit receipts"],
+    ["second process did not recover first receipts", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery, persistedReceiptCount: 1 },
+      },
+    }, "second process must recover the first two persisted audit receipts before advancing"],
+    ["final receipt store omits a batch", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: { ...completeCrossProcessBatchAuditEvidence.phaseTwo, persistedReceiptCount: 4 },
+    }, "final durable audit store must contain exactly one ordered receipt per canonical batch"],
+    ["first phase checkpoint progressed beyond 2/5", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: {
+        ...completeCrossProcessBatchAuditEvidence.phaseOne,
+        checkpoint: { ...crossProcessCheckpointAtTwo, completedBatches: 3 },
+      },
+    }, "first process must leave an unreset checkpoint at exactly 2/5 matching its canonical character coverage and next batch ID"],
+    ["first phase plan was restarted", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: {
+        ...completeCrossProcessBatchAuditEvidence.phaseOne,
+        checkpoint: { ...crossProcessCheckpointAtTwo, planId: "a".repeat(64) },
+      },
+    }, "first process must leave an unreset checkpoint at exactly 2/5 matching its canonical character coverage and next batch ID"],
+    ["phase-one plan prefix diverged from final synthesis", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseOne: { ...completeCrossProcessBatchAuditEvidence.phaseOne, planBatchIdsPrefix: [batchAuditIds[0], batchAuditIds[1], "wrong-next-id"] },
+    }, "first process observed plan prefix must match synthesis batch IDs across the restart boundary"],
+    ["resume query advanced progress", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          completedBatchIdProvided: true,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, completedBatches: 3 },
+        },
+      },
+    }, "second process must query banca_context without completedBatchId"],
+    ["resume query changed checkpoint state", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, state: "pending" },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
+    ["resume query changed checkpoint coverage", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, completedCharacters: 241, coveragePercent: 40.5 },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
+    ["resume query changed only checkpoint coverage", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, coveragePercent: 40.35 },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
+    ["resume query added an unknown checkpoint field", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          checkpointAfter: { ...crossProcessCheckpointAtTwo, unrecognizedField: true },
+        },
+      },
+    }, "resume-only banca_context query must leave checkpoint and next batch unchanged"],
+    ["resume query changed durable hashes", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          persistenceAfter: { ...crossProcessPersistenceHashes, findingsSha256: "a".repeat(64) },
+        },
+      },
+    }, "cross-process persistent hashes must match and remain unchanged across resume-only context query"],
+    ["resume query recovered incompatible receipt IDs", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          persistedBatchIds: [batchAuditIds[0], "wrong-receipt-id"],
+        },
+      },
+    }, "second process must recover the first two persisted audit receipts before advancing"],
+    ["resume query recovered an incompatible finding", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          recoveredFinding: { ...completeFindingProjection, findingId: "b".repeat(64) },
+        },
+      },
+    }, "first-process finding identity and provenance must be unchanged after restart and in synthesis"],
+    ["second phase Agent/Session was not host verified", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        agentIdentity: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.agentIdentity, sessionStoreContainsSession: false },
+      },
+    }, "second process must create and verify a new native banca-auditor Agent/Session"],
+    ["second phase reused Agent/Session identity", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        agentIdentity: crossProcessAuditorIdentity("8".repeat(64)),
+      },
+    }, "second process must use an Agent/Session identity distinct from the first process"],
+    ["Agent teardown failed", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        teardown: { ...crossProcessTeardown, agentUnregistered: false },
+      },
+    }, "second process Agent and Session teardown must complete without errors"],
+    ["finding disappeared on process restart", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery, recoveredFindingCount: 0 },
+      },
+    }, "the original non-empty finding must remain present exactly once in storage and synthesis"],
+    ["finding provenance changed on restart", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        resumeQuery: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.resumeQuery,
+          recoveredFinding: { ...completeFindingProjection, provenanceSha256: "b".repeat(64) },
+        },
+      },
+    }, "first-process finding identity and provenance must be unchanged after restart and in synthesis"],
+    ["finding duplicated in synthesis", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        synthesis: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.synthesis, findingsCount: 2 },
+      },
+    }, "final synthesis input must contain complete ordered coverage and exactly one finding"],
+    ["a resumed batch was skipped", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        completedBatchIds: batchAuditIds.slice(3),
+      },
+    }, "second process must complete exactly the remaining three batches in plan order"],
+    ["checkpoint was tampered after resume query", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        finalCheckpoint: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.finalCheckpoint, planId: "b".repeat(64) },
+      },
+    }, "second process must finish the same plan at exactly 5/5 complete coverage"],
+    ["checkpoint claims complete before 5/5", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        finalCheckpoint: {
+          ...completeCrossProcessBatchAuditEvidence.phaseTwo.finalCheckpoint,
+          completedBatches: 4,
+          completedCharacters: 480,
+          coveragePercent: 80.67,
+          state: "complete",
+          nextBatchIndex: 4,
+          nextBatchId: batchAuditIds[4],
+        },
+      },
+    }, "second process must finish the same plan at exactly 5/5 complete coverage"],
+    ["checkpoint is not complete at 5/5", {
+      ...completeCrossProcessBatchAuditEvidence,
+      phaseTwo: {
+        ...completeCrossProcessBatchAuditEvidence.phaseTwo,
+        finalCheckpoint: { ...completeCrossProcessBatchAuditEvidence.phaseTwo.finalCheckpoint, state: "running" },
+      },
+    }, "second process must finish the same plan at exactly 5/5 complete coverage"],
+  ])("rejects integrity failure: %s", (_label, evidence, expectedError) => {
+    const errors = profileEvidenceContract.validateCrossProcessBatchAuditEvidence(evidence)
+    expect(errors).toContain(expectedError)
+    expect(profileEvidenceContract.classifyCrossProcessBatchAuditEvidenceStatus(evidence)).toBe("FAIL")
+  })
+})
 
 describe("DSH batch audit evidence gate contract (#44, #98, #100)", () => {
   test("accepts complete positive batch audit evidence with native Agent/Session handoff", () => {
@@ -1187,6 +2104,41 @@ describe("DSH batch audit evidence gate contract (#44, #98, #100)", () => {
 
   test.each([
     ["probe was skipped", { ...completeBatchAuditEvidence, probeExecuted: false }, "batch audit probe must have executed"],
+    [
+      "exact synthesis probes are missing",
+      { ...completeBatchAuditEvidence, prematureSynthesisProbes: [] },
+      "each incomplete batch must record an exact synthesis refusal",
+    ],
+    [
+      "synthesis dispatch error is mistaken for domain refusal",
+      {
+        ...completeBatchAuditEvidence,
+        prematureSynthesisProbes: completeBatchAuditSynthesisProbes.map((probe, index) => index === 0
+          ? { ...probe, toolRuntimeIsError: true }
+          : probe),
+      },
+      "incomplete batch 0 must return the exact incomplete_coverage ToolRuntime value without mutation",
+    ],
+    [
+      "synthesis returns successful output instead of refusal",
+      {
+        ...completeBatchAuditEvidence,
+        prematureSynthesisProbes: completeBatchAuditSynthesisProbes.map((probe, index) => index === 0
+          ? { ...probe, toolResultValue: JSON.stringify({ coverage: { state: "complete" } }), toolMessage: JSON.stringify({ coverage: { state: "complete" } }) }
+          : probe),
+      },
+      "incomplete batch 0 must return the exact incomplete_coverage ToolRuntime value without mutation",
+    ],
+    [
+      "synthesis refusal mutates durable state",
+      {
+        ...completeBatchAuditEvidence,
+        prematureSynthesisProbes: completeBatchAuditSynthesisProbes.map((probe, index) => index === 0
+          ? { ...probe, persistenceAfter: { ...probe.persistenceAfter, findingsSha256: "e".repeat(64) }, persistentStateUnchanged: false }
+          : probe),
+      },
+      "incomplete batch 0 must return the exact incomplete_coverage ToolRuntime value without mutation",
+    ],
     [
       "Agent and Session identity is fabricated",
       {
@@ -2641,5 +3593,265 @@ describe("DSH Cordis composed profile plugin deduplication contract (#48 P1)", (
       userApprovalUnique: true,
       askUserToolPresent: true,
     })).toEqual([])
+  })
+})
+
+describe("DSH E2E diagnostic redaction", () => {
+  test("runtime version outputs are allowlisted before report or terminal use", () => {
+    const safeRuntimeVersion = Reflect.get(profileEvidenceContract, "safeRuntimeVersion") as (value: unknown) => string | null
+    expect(safeRuntimeVersion("v26.7.0")).toBe("v26.7.0")
+    expect(safeRuntimeVersion("1.4.2")).toBe("1.4.2")
+    expect(safeRuntimeVersion("9.15.9")).toBe("9.15.9")
+    expect(safeRuntimeVersion("/private-root/token=arbitrary-output")).toBeNull()
+    expect(safeRuntimeVersion("v26.7.0 arbitrary output")).toBeNull()
+    expect(safeRuntimeVersion("api-secret123456789012")).toBeNull()
+  })
+
+  test.each([["PASS"], ["FAIL"], ["BLOCKED"]])("preserves the complete canonical report shape in %s reports", (status) => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const composedProfile = {
+      exitCode: status === "PASS" ? 0 : status === "FAIL" ? 1 : null,
+      stdoutBytes: 512,
+      stderrBytes: status === "FAIL" ? 24 : 0,
+      outputTruncated: false,
+      containsDshbancaEntry: true,
+      containsObserverEntry: true,
+      containsPresetRegistryEntry: true,
+      containsAuditorPresetEntry: true,
+      containsControlPresetEntry: true,
+      containsUserQuestionsEntry: true,
+      containsUserApprovalEntry: true,
+      containsAskUserToolEntry: true,
+      userQuestionsCount: 1,
+      userApprovalCount: 1,
+      askUserToolCount: 1,
+      userQuestionsUnique: true,
+      userApprovalUnique: true,
+      askUserToolPresent: true,
+      askUserToolUnique: true,
+      pluginInstancesUnique: true,
+    }
+    const versions = {
+      dsh: "0.2.1-rc.5",
+      cordis: "4.0.5",
+      cordisPluginLoader: "1.0.6",
+      dshSkill: "0.2.1-rc.5",
+      dshAgent: "0.2.1-rc.5",
+      dshAgentLoop: "0.2.1-rc.5",
+      dshTools: "0.2.1-rc.5",
+      dshAgentPreset: "0.2.1-rc.5",
+      dshAgentPresetRegistry: "0.2.1-rc.5",
+      dshAgentInstructions: "0.2.1-rc.5",
+      dshApiSessionController: "0.2.1-rc.5",
+      dshUserQuestions: "0.2.1-rc.5",
+      dshUserApproval: "0.2.1-rc.5",
+      dshToolAskUser: "0.2.1-rc.5",
+      node: "v22.23.2",
+      bun: "1.4.2",
+      pnpm: "9.15.9",
+    }
+    const report = {
+      schemaVersion: 1,
+      status,
+      startedAt: "2026-11-10T00:00:00.000Z",
+      finishedAt: "2026-11-10T00:00:01.000Z",
+      repository: { revision: "a".repeat(40), dirty: false },
+      versions,
+      sandbox: { isolated: true, removed: true },
+      stages: { composedProfile },
+      failures: status === "FAIL" ? ["/private-root/failure.log"] : [],
+      limitations: ["synthetic evidence fixture; host E2E not run"],
+    }
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport(report)))
+    expect(Object.keys(sanitized)).toEqual(Object.keys(report))
+    expect(Object.keys(sanitized.repository)).toEqual(Object.keys(report.repository))
+    expect(Object.keys(sanitized.versions)).toEqual(Object.keys(versions))
+    expect(sanitized.versions).toEqual(versions)
+    const safeVersions = (sanitizeReport({ versions }) as { versions: typeof versions }).versions
+    expect(safeVersions).toEqual(versions)
+    expect(Object.keys(sanitized.sandbox)).toEqual(Object.keys(report.sandbox))
+    expect(Object.keys(sanitized.stages.composedProfile)).toEqual(Object.keys(composedProfile))
+    expect(sanitized.stages.composedProfile).toEqual(composedProfile)
+    expect(sanitized.failures).toEqual(status === "FAIL" ? ["<absolute-path>"] : [])
+    expect(sanitized.status).toBe(status)
+    expect(sanitized.schemaVersion).toBe(1)
+  })
+
+  test("canonical key exemptions still redact their untrusted values", () => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const report = {
+      versions: { dshApiSessionController: "api-secret123456789012" },
+      stages: {
+        composedProfile: {
+          containsAskUserToolEntry: "session-abcdef123456",
+          askUserToolCount: 1,
+          askUserToolUnique: true,
+          askUserToolPresent: true,
+        },
+      },
+    }
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport(report)))
+    expect(Object.keys(sanitized.versions)).toEqual(["dshApiSessionController"])
+    expect(sanitized.versions.dshApiSessionController).toBe("<redacted>")
+    expect(Object.keys(sanitized.stages.composedProfile)).toEqual(Object.keys(report.stages.composedProfile))
+    expect(sanitized.stages.composedProfile.containsAskUserToolEntry).toBe("<redacted-native-id>")
+  })
+
+  test("canonical key exemptions do not leak into array-contained dynamic maps", () => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const report = {
+      versions: [{ dshApiSessionController: "api-secret123456789012" }],
+      stages: {
+        composedProfile: [{ askUserToolCount: 1, askUserToolUnique: true }],
+      },
+    }
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport(report)))
+    expect(Object.keys(sanitized.versions[0])).toEqual(["dsh<redacted>"])
+    expect(sanitized.versions[0]["dsh<redacted>"]).toBe("<redacted>")
+    expect(Object.keys(sanitized.stages.composedProfile[0])).toEqual(["a<redacted>", "a<redacted>#1"])
+    expect(Object.values(sanitized.stages.composedProfile[0])).toEqual([1, true])
+  })
+
+  test("sanitizes dynamic untrusted report keys without collisions or data loss", () => {
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    const dynamicMap = Object.fromEntries([
+      ["/private-root/first", "first"],
+      ["/private-root/second", "second"],
+      ["api-secret123456789012", "third"],
+      ["<redacted>", "fourth"],
+      ["file:///private-root/uri", "fifth"],
+      ["session-abcdef123456", "sixth"],
+      ["<redacted-native-id>", "seventh"],
+      ["askUserToolCount", "eighth"],
+      ["askUserToolUnique", "ninth"],
+      ["__proto__", "tenth"],
+    ])
+    const sanitized = JSON.parse(JSON.stringify(sanitizeReport({ status: "BLOCKED", stages: { dynamicMap } })))
+    const entries = Object.entries(sanitized.stages.dynamicMap)
+    expect(entries).toHaveLength(10)
+    expect(new Set(entries.map(([key]) => key)).size).toBe(10)
+    expect(entries.map(([, value]) => value)).toEqual(["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"])
+    const dynamicJson = JSON.stringify(sanitized.stages.dynamicMap)
+    expect(dynamicJson).not.toContain("private-root")
+    expect(dynamicJson).not.toContain("api-secret")
+    expect(dynamicJson).not.toContain("file:///")
+    expect(dynamicJson).not.toContain("session-abcdef123456")
+    expect(dynamicJson).not.toContain("askUserToolCount")
+    expect(dynamicJson).not.toContain("askUserToolUnique")
+  })
+
+  test("command failures and nested reports retain status metadata without local paths, URIs, or native IDs", () => {
+    const safeOutput = Reflect.get(profileEvidenceContract, "safeOutput") as (result: Record<string, unknown>) => string
+    const formatCommandFailure = Reflect.get(profileEvidenceContract, "formatCommandFailure") as (
+      stage: string,
+      nature: string,
+      result: Record<string, unknown>,
+    ) => string
+    const sanitizeReport = Reflect.get(profileEvidenceContract, "sanitizeReport") as (report: unknown) => unknown
+    expect(typeof safeOutput).toBe("function")
+    expect(typeof formatCommandFailure).toBe("function")
+    expect(typeof sanitizeReport).toBe("function")
+
+    const command = {
+      exitCode: 2,
+      signal: null,
+      timedOut: false,
+      spawnObserved: true,
+      exitObserved: true,
+      closeObserved: true,
+      stdout: "/private-root/checkouts/dshbanca file:///private-root/scratch/observer native-agent-secret-123",
+      stderr: 'sessionId=native-session-secret-456 local://workspace/private agentId=native-agent-secret-123',
+    }
+    const diagnostic = formatCommandFailure("phase-two synthesis", "incomplete coverage refusal failed", command)
+    expect(diagnostic).toContain("phase-two synthesis")
+    expect(diagnostic).toContain("incomplete coverage refusal failed")
+    expect(diagnostic).toContain("exitCode=2")
+    expect(diagnostic).not.toContain("private-root")
+    expect(diagnostic).not.toContain("file://")
+    expect(diagnostic).not.toContain("local://")
+    expect(diagnostic).not.toContain("native-agent-secret")
+    expect(diagnostic).not.toContain("native-session-secret")
+    expect(safeOutput(command)).toBe(diagnostic.slice(diagnostic.indexOf("exitCode=")))
+    const longDiagnostic = formatCommandFailure("report persistence", "observer output was withheld", {
+      ...command,
+      stdout: `${"x".repeat(20_000)} /private-root/trailing-native-session-secret-456`,
+    })
+    expect(longDiagnostic.length).toBeLessThan(500)
+    expect(longDiagnostic).not.toContain("private-root")
+    expect(longDiagnostic).not.toContain("native-session-secret")
+
+    const hostileReport = {
+      status: "BLOCKED",
+      failures: [diagnostic],
+      stages: {
+        boot: { status: "FAIL", exitCode: 2, failureKind: "native_profile_boot_failed", diagnostic: "/private-root/checkouts/dshbanca/file:///private-root/logs/boot.log" },
+        academicDecision: { evidence: { agentIdentity: { agentId: "native-agent-secret-123", sessionId: "native-session-secret-456" } } },
+        nativeQuestions: { request: { requestId: "native-request-secret-789" }, event: { id: "550e8400-e29b-41d4-a716-446655440000" } },
+        alternateIdentityKeys: {
+          "session-id": "hyphen-session-secret-123",
+          agent_id: "underscore-agent-secret-456",
+          processId: "process-secret-789",
+          process: { ids: ["opaque-process-array-secret"] },
+          pid: "pid-secret-abc",
+        },
+        serializedIdentity: '{"session_id":"serialized-session-secret-234","pid":"serialized-pid-secret-def"}',
+        platform: {
+          windowsPath: "C:\\Users\\fake\\repo",
+          uncPath: "\\\\fakehost\\share\\repo",
+          uri: "file:///private-root/a%20b",
+          localUris: ["file:/private-root/x", "file://localhost/C:/Users/fake/x", "local://workspace/path", "local:/workspace/path"],
+          uriWithSpaces: "opening file:///private root/sensitive-uri-path; retry",
+          pathWithSpaces: "/private root/checkouts/unique-X",
+        },
+      },
+    }
+    const sanitized = JSON.stringify(sanitizeReport(hostileReport))
+    for (const secret of [
+      "/private-root",
+      "/private root",
+      "unique-X",
+      "sensitive-uri-path",
+      "C:\\Users\\fake\\repo",
+      "fakehost\\share",
+      "file:",
+      "local://",
+      "native-agent-secret",
+      "native-session-secret",
+      "native-request-secret",
+      "hyphen-session-secret",
+      "underscore-agent-secret",
+      "process-secret",
+      "opaque-process-array-secret",
+      "pid-secret",
+      "serialized-session-secret",
+      "serialized-pid-secret",
+      "550e8400-e29b-41d4-a716-446655440000",
+    ]) expect(sanitized).not.toContain(secret)
+    expect(sanitized).toContain('"status":"BLOCKED"')
+    expect(sanitized).toContain('"failureKind":"native_profile_boot_failed"')
+    expect(sanitized).toContain('"exitCode":2')
+    expect(sanitized).toContain("phase-two synthesis")
+    expect(sanitized).toContain("incomplete coverage refusal failed")
+  })
+
+  test("runner sanitizes the complete report and withholds raw exception and child output", () => {
+    const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+    const writeReportStart = runnerSource.indexOf("function writeReport(): void")
+    const failFunctionStart = runnerSource.indexOf("function fail(message:", writeReportStart)
+    const writeReportSource = runnerSource.slice(writeReportStart, failFunctionStart)
+    expect(writeReportSource).toContain("sanitizeReport(report)")
+    expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable")
+    expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable")
+    expect(runnerSource).toContain("const reportedVersion = safeRuntimeVersion(pnpmCheck.stdout")
+    expect(runnerSource).toContain("const safeVersions = (sanitizeReport({ versions: report.versions }) as { versions: GateReport[\"versions\"] }).versions")
+    expect(runnerSource).not.toContain("sanitizeReport(report.versions)")
+    expect(runnerSource).not.toContain("Node ${report.versions.node")
+    expect(runnerSource).not.toContain('execution reported "${reportedVersion}"')
+    expect(runnerSource).toContain('fail("Runner orchestration: unexpected exception; details withheld")')
+    expect(runnerSource).toContain('report.failures.push("Report persistence failed; details withheld")')
+    expect(runnerSource).toContain('formatCommandFailure("native DSH profile boot"')
+    expect(runnerSource).toContain('const reportPathLabel = configuredReportPath')
+    expect(runnerSource).not.toContain("error.message.replaceAll(scratchRoot")
+    expect(runnerSource).not.toContain("Could not preserve sanitized report at ${reportPathLabel}: ${error.message")
   })
 })
