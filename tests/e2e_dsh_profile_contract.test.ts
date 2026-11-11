@@ -1319,10 +1319,11 @@ describe("DSH source drift restart contract (#105)", () => {
   })
   test("sanitized report hides native identifiers, secrets and local paths without relaxing raw validation", () => {
     const evidence = sourceDriftFixture()
-    evidence.diagnostic = { agentId: "agent-raw-native-identifier", token: "sk-12345678901234567890", file: "/private/workspace/main.tex" }
+    const syntheticToken = ["sk", "12345678901234567890"].join("-")
+    evidence.diagnostic = { agentId: "agent-raw-native-identifier", token: syntheticToken, file: "/private/workspace/main.tex" }
     const safe = profileEvidenceContract.sanitizeReport(evidence) as any
     const serialized = JSON.stringify(safe)
-    for (const secret of ["agent-raw-native-identifier", "sk-12345678901234567890", "/private/workspace/main.tex"]) expect(serialized).not.toContain(secret)
+    for (const secret of ["agent-raw-native-identifier", syntheticToken, "/private/workspace/main.tex"]) expect(serialized).not.toContain(secret)
     for (const phase of ["phaseOne", "phaseTwo"]) {
       expect(safe[phase].agentIdentity.agentId).toBe("<redacted-native-id>")
       expect(safe[phase].agentIdentity.sessionId).toBe("<redacted-native-id>")
