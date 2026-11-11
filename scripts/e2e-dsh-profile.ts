@@ -20,6 +20,10 @@ import { tmpdir } from "node:os"
 import { dirname, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { parse as parseYaml } from "yaml"
+import { loadConfig } from "../src/lib/config.js"
+import { loadCanonicalLatexManuscript } from "../src/lib/latex_loader.js"
+import { planExhaustiveAnalysisBatches } from "../src/lib/analysis_coverage.js"
+import { computePlanIdentity } from "../src/lib/analysis_checkpoint.js"
 import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "./lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "./lib/dsh-profile-e2e-observer-control.js"
 import { copyRequiredAcademicDecisionModule } from "./lib/dsh-profile-observer-package.js"
@@ -53,6 +57,8 @@ import {
   validateAcademicDecisionEvidence,
   validateCrossProcessPhaseOneEvidence,
   validateCrossProcessBatchAuditEvidence,
+  validateSourceDriftEvidence,
+  classifySourceDriftEvidenceStatus,
   validateEvidence,
   validateProfileEvidence,
   validatePresetReferences,
@@ -131,7 +137,7 @@ const report: GateReport = {
     pnpm: null,
   },
   sandbox: { isolated: false, removed: null },
-  stages: {},
+  stages: { sourceDrift: { status: "BLOCKED", processLaunches: 0, reason: "Issue #105 native source-drift evidence has not executed." } },
   failures: [],
   limitations: [
     "O E2E ativo cria Agents/Sessions nativos do DSH, mas não inicia turnos de modelo; respostas acadêmicas humanas e qualidade de inferência não são cobertas.",
@@ -143,6 +149,7 @@ const report: GateReport = {
 
 let scratchRoot: string | undefined
 let restartWorkspaceDirectoryFd: number | undefined
+let driftWorkspaceDirectoryFd: number | undefined
 let finalStatus: GateReport["status"] = "BLOCKED"
 
 function commandVersion(command: string, args: string[], env?: NodeJS.ProcessEnv): string | null {
@@ -466,6 +473,47 @@ function crossProcessWorkspaceFilesystemIdentitySha256(workspace: string, scratc
   return createHmac("sha256", key)
     .update(JSON.stringify(["dshbanca-workspace-fs-v1", relative(scratch, workspace), String(opened.dev), String(opened.ino)]), "utf8")
     .digest("hex")
+}
+
+// Pure fixture edit: one BMP prose span only; no commands, newlines or identity/store edits.
+function mutateSyntheticLatexContent(content: string): string {
+  const oldText = "30 participantes"
+  const newText = "31 participantes"
+  if (content.split(oldText).length !== 2 || oldText.length !== newText.length) {
+    throw new Error("source drift synthetic prose anchor is absent or ambiguous")
+  }
+  const changed = content.replace(oldText, newText)
+  if (changed === content || changed.length !== content.length) throw new Error("source drift must preserve UTF-16 length")
+  return changed
+}
+
+function canonicalSyntheticPlan(workspace: string) {
+  const config = loadConfig(workspace)
+  const manuscript = loadCanonicalLatexManuscript(workspace, config)
+  const plan = planExhaustiveAnalysisBatches(manuscript, config.analysis.maxCharactersPerBatch)
+  if (plan.status !== "complete" || plan.coverage.batchCount !== 5 || plan.coverage.totalCharacters !== 595) {
+    throw new Error("source drift canonical synthetic plan is not complete with five batches and 595 characters")
+  }
+  return {
+    planId: computePlanIdentity(plan), manuscriptFingerprint: plan.fingerprint,
+    totalBatches: plan.coverage.batchCount, totalCharacters: plan.coverage.totalCharacters,
+    firstBatchId: plan.batches[0].batchId,
+  }
+}
+
+function sourceDriftProcessProof(result: CommandResult, sidecar: any, markerPath: string, dshExecutableSha256: string, profileIdentitySha256: string) {
+  const marker = existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, "utf8")) : null
+  const hostIdentitySha256 = result.hostProcessIdentitySha256
+  if (result.exitCode !== 0 || result.signal !== null || result.timedOut || !result.spawnObserved || !result.exitObserved || !result.closeObserved || !hostIdentitySha256 || sidecar?.observerProcessIdentitySha256 !== hostIdentitySha256 || marker?.event !== "beforeExit" || marker?.nativeShutdownCompleted !== true || marker?.processExitCodeAtBeforeExit !== 0 || marker?.observerProcessIdentitySha256 !== hostIdentitySha256) {
+    throw new Error("source drift requires observed native process shutdown, sidecar identity and teardown before continuing")
+  }
+  return {
+    dshExecutableSha256, profileIdentitySha256, hostIdentitySha256,
+    observerIdentitySha256: sidecar.observerProcessIdentitySha256, identityMatched: true,
+    spawnObserved: true, kernelStartIdentityObserved: true, exitObserved: true,
+    exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
+    forcedTermination: false, naturalBeforeExitObserved: true, nativeTeardownMarkerObserved: true,
+  }
 }
 
 function repoStatus(): string | null {
@@ -1827,6 +1875,97 @@ export async function runCrossProcessInitialProbe(ctx, workspace) {
   return evidence;
 }
 
+// A returned academic refusal is a SUCCESS value of ToolRuntime, never a native error.
+export const sourceDriftDomainRefusal = (outcome, expectedValue) =>
+  outcome?.result?.isError === false && outcome.result.value === expectedValue && outcome.message === expectedValue;
+
+export async function runSourceDriftProbe(ctx, workspace, expectation) {
+  let handle;
+  let agent;
+  let evidence;
+  const teardown = { disposeCalled: false, agentUnregistered: false, sessionUnregistered: false, teardownFailed: false };
+  try {
+    const old = expectation.phaseOne;
+    const inventoryBeforeContext = await inventory(workspace);
+    const oldStoresBefore = await crossProcessReadStores(workspace, old.planId, old.manuscriptFingerprint);
+    if (oldStoresBefore.findings.length !== 1 || oldStoresBefore.receipts.length !== 2) fail("source drift did not recover the historical one finding and two confirmations");
+    const oldFinding = oldStoresBefore.findings[0];
+    const oldFindingBefore = crossProcessFindingProjection(oldFinding);
+    const oldReceiptIdsBefore = oldStoresBefore.receipts.map((receipt) => receipt.batchId);
+    if (!crossProcessSameProjection(oldFindingBefore, old.finding) || !crossProcessSameProjection(oldReceiptIdsBefore, old.completedBatchIds)) fail("source drift historical identity changed before fresh context");
+    handle = await ctx.agents.create({ sessionId: "dshbanca-e2e-source-drift-" + process.pid + "-" + Date.now(), meta: { cwd: workspace } });
+    agent = handle.agent;
+    const selected = await ctx.agentPresets.select(agent, "banca-auditor");
+    const identity = crossProcessAgentIdentity(ctx, agent);
+    if (selected !== "banca-auditor" || identity.effectivePreset !== "banca-auditor" || identity.sessionPresetProjection !== "banca-auditor" || !identity.agentRegistryContainsAgent || !identity.sessionStoreContainsSession || identity.agentId === old.agentIdentity.agentId || identity.modelCalls !== 0) fail("source drift second process lacks a distinct native auditor identity");
+    // The fresh query is allowed to create exactly a new checkpoint and context pack.
+    const context = await runTool(ctx, "dshbanca-e2e-drift-fresh-context", "banca_context", {}, agent);
+    if (context.result.isError !== false) fail("source drift fresh context dispatch failed");
+    const meta = await parseContextMeta(context.message);
+    const checkpoint = crossProcessCheckpointEvidence(meta);
+    const planId = checkpoint.planId;
+    const manuscriptFingerprint = checkpoint.manuscriptFingerprint;
+    if (planId !== expectation.canonicalAfter.planId || manuscriptFingerprint !== expectation.canonicalAfter.manuscriptFingerprint || planId === old.planId || manuscriptFingerprint === old.manuscriptFingerprint || checkpoint.state !== "pending" || checkpoint.completedBatches !== 0 || checkpoint.completedCharacters !== 0 || checkpoint.coveragePercent !== 0 || checkpoint.totalBatches !== 5 || checkpoint.totalCharacters !== 595 || checkpoint.nextBatchIndex !== 0 || checkpoint.nextBatchId !== expectation.canonicalAfter.firstBatchId) fail("source drift context inherited old progress or did not match the live canonical plan");
+    const readNew = async (directory) => {
+      try { return JSON.parse(await readFile(join(workspace, ".banca", "analysis", directory, planId + ".json"), "utf8")); }
+      catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+    };
+    const rawCheckpoint = await readNew("checkpoints");
+    const storedCheckpoint = crossProcessStoredCheckpointEvidence(rawCheckpoint, meta.batch);
+    const findingsStore = await readNew("findings");
+    const auditStore = await readNew("audit-confirmations");
+    if (findingsStore !== null || auditStore !== null) fail("source drift new plan inherited findings or audit confirmations");
+    const inventoryAfterContext = await inventory(workspace);
+    const baseline = crossProcessShaText(JSON.stringify(inventoryAfterContext));
+    const refusals = [];
+    const oldBatchId = old.completedBatchIds[1];
+    const replayFinding = Object.fromEntries(["category", "severity", "claim", "evidence", "file", "startLine", "endLine", "sectionId"].map((key) => [key, oldFinding[key]]));
+    const attempts = [
+      { kind: "stale-advance", toolName: "banca_context", args: { completedBatchId: oldBatchId }, code: "unknown_batch", message: "batchId is not part of the plan: " + oldBatchId, header: "context checkpoint error" },
+      { kind: "stale-fingerprint", toolName: "banca_auditar", args: { manuscriptFingerprint: old.manuscriptFingerprint, batchId: oldBatchId, findings: [replayFinding] }, code: "fingerprint_mismatch", message: "manuscriptFingerprint does not match the current plan fingerprint", header: "audit validation error" },
+      { kind: "stale-batch", toolName: "banca_auditar", args: { manuscriptFingerprint, batchId: oldBatchId, findings: [replayFinding] }, code: "unknown_batch", message: "batchId is not present in the plan: " + oldBatchId, header: "audit validation error" },
+      { kind: "premature-synthesis", toolName: "banca_sintese", args: {}, code: "missing_findings", message: "no persisted findings store exists for the current plan", header: "synthesis input error" },
+    ];
+    for (const attempt of attempts) {
+      const inventoryBeforeSha256 = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+      if (inventoryBeforeSha256 !== baseline) fail("source drift state changed between refusal probes");
+      const outcome = await runTool(ctx, "dshbanca-e2e-drift-" + attempt.kind, attempt.toolName, attempt.args, agent);
+      const expectedValue = [attempt.header, "code=" + attempt.code, "message=" + attempt.message].join(String.fromCharCode(10));
+      if (!sourceDriftDomainRefusal(outcome, expectedValue)) fail("source drift did not return the exact expected domain refusal");
+      const inventoryAfterSha256 = crossProcessShaText(JSON.stringify(await inventory(workspace)));
+      if (inventoryAfterSha256 !== inventoryBeforeSha256) fail("source drift refusal mutated persisted evidence");
+      refusals.push({
+        kind: attempt.kind, toolName: attempt.toolName,
+        input: { manuscriptFingerprint: attempt.args.manuscriptFingerprint ?? null, batchId: attempt.args.completedBatchId ?? attempt.args.batchId ?? null, findingId: attempt.args.findings?.length === 1 ? oldFinding.findingId : null, findingsCount: attempt.args.findings?.length ?? 0 },
+        toolRuntimeIsError: outcome.result.isError, toolResultValue: outcome.result.value, toolMessage: outcome.message,
+        errorCode: attempt.code, inventoryBeforeSha256, inventoryAfterSha256,
+      });
+    }
+    const oldStoresAfter = await crossProcessReadStores(workspace, old.planId, old.manuscriptFingerprint);
+    if (!crossProcessSameProjection(oldStoresBefore, oldStoresAfter)) fail("source drift altered historical checkpoint, confirmations or findings");
+    const modelCalls = modelEventCount(agent.session);
+    if (modelCalls !== 0) fail("source drift probe emitted model events");
+    evidence = {
+      probeExecuted: true, workspaceIdentitySha256: process.env.DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256,
+      planId, manuscriptFingerprint, checkpoint, storedCheckpoint, findingsStore, auditStore,
+      inventoryBeforeContext, inventoryAfterContext, inventoryFinal: await inventory(workspace),
+      oldFindingBefore, oldFindingAfter: crossProcessFindingProjection(oldStoresAfter.findings[0]),
+      oldReceiptIdsBefore, oldReceiptIdsAfter: oldStoresAfter.receipts.map((receipt) => receipt.batchId),
+      refusals, agentIdentity: identity, teardown, modelCalls, credentialsUsed: false,
+    };
+  } finally {
+    if (handle) {
+      try { await handle.dispose(); teardown.disposeCalled = true; } catch { teardown.teardownFailed = true; }
+      teardown.agentUnregistered = ctx.agents.get(agent?.id) === undefined;
+      teardown.sessionUnregistered = ctx.sessions.get(agent?.id) === undefined;
+      if (!teardown.agentUnregistered || !teardown.sessionUnregistered || teardown.teardownFailed) fail("source drift native Agent/Session teardown failed");
+      if (evidence) evidence.teardown = { ...teardown };
+    }
+  }
+  if (!evidence) fail("source drift second phase evidence missing");
+  return evidence;
+}
+
 export async function runCrossProcessResumeProbe(ctx, workspace, expectation) {
   let handle;
   let agent;
@@ -3106,14 +3245,15 @@ export async function captureNativeSkillsEvidence(ctx, workspace) {
 export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
   const reportPath = ${JSON.stringify(observerResult)};
-  const restartWorkspace = ${JSON.stringify(restartWorkspace)};
-  const restartObserverResultOne = ${JSON.stringify(restartObserverResultOne)};
-  const restartObserverResultTwo = ${JSON.stringify(restartObserverResultTwo)};
-  const restartTeardownMarkerOne = ${JSON.stringify(restartTeardownMarkerOne)};
-  const restartTeardownMarkerTwo = ${JSON.stringify(restartTeardownMarkerTwo)};
   const restartPhase = process.env.DSHBANCA_DSH_PROFILE_PHASE ?? "first";
+  const driftMode = restartPhase === "drift-initial" || restartPhase === "drift-resume";
+  const restartWorkspace = driftMode ? join(${JSON.stringify(restartWorkspace)}, "..", "source-drift-project") : ${JSON.stringify(restartWorkspace)};
+  const restartObserverResultOne = ${JSON.stringify(restartObserverResultOne)} + (driftMode ? ".drift" : "");
+  const restartObserverResultTwo = ${JSON.stringify(restartObserverResultTwo)} + (driftMode ? ".drift" : "");
+  const restartTeardownMarkerOne = ${JSON.stringify(restartTeardownMarkerOne)} + (driftMode ? ".drift" : "");
+  const restartTeardownMarkerTwo = ${JSON.stringify(restartTeardownMarkerTwo)} + (driftMode ? ".drift" : "");
   const observerProcessIdentitySha256 = await crossProcessProcessIdentitySha256();
-  const teardownMarkerPath = restartPhase === "resume" ? restartTeardownMarkerTwo : restartTeardownMarkerOne;
+  const teardownMarkerPath = restartPhase === "resume" || restartPhase === "drift-resume" ? restartTeardownMarkerTwo : restartTeardownMarkerOne;
   // DSH's native ProcessShutdown sets process.exitCode only after the entire profile fiber disposes.
   // A nonzero sentinel makes natural exit without that completion signal fail closed.
   process.exitCode = 86;
@@ -3129,6 +3269,21 @@ export async function apply(ctx) {
       process.exitCode = 1;
     }
   });
+  if (driftMode) {
+    // These phases dispatch tools only: no Agent.send, model turn or authentication.
+    ctx.on("agent/request", () => fail("source drift forbids model requests"));
+    ctx.on("agent/pre-step", () => ({ kind: "reject", reason: "source drift has no model turns" }));
+    const expectation = JSON.parse(process.env.DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE ?? "null");
+    if (restartPhase === "drift-initial") {
+      const crossProcessPhaseOne = await runCrossProcessInitialProbe(ctx, restartWorkspace);
+      await writeFile(restartObserverResultOne, JSON.stringify({ observerProcessIdentitySha256, crossProcessPhaseOne }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+    } else {
+      if (!expectation?.phaseOne?.probeExecuted) fail("source drift second phase lacks validated initial evidence");
+      const sourceDriftPhaseTwo = await runSourceDriftProbe(ctx, restartWorkspace, expectation);
+      await writeFile(restartObserverResultTwo, JSON.stringify({ observerProcessIdentitySha256, sourceDriftPhaseTwo }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+    }
+    return;
+  }
   if (restartPhase === "resume") {
     const expectation = JSON.parse(process.env.DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE ?? "null");
     if (!expectation || expectation.probeExecuted !== true) fail("second DSH process did not receive validated phase-one evidence");
@@ -4509,7 +4664,97 @@ async function main(): Promise<void> {
     firstProcess: { exitCode: boot.exitCode, signal: boot.signal, timedOut: boot.timedOut, identityMatched: phaseOneHostIdentity === phaseOneObserverIdentity },
     secondProcess: { exitCode: secondBoot.exitCode, signal: secondBoot.signal, timedOut: secondBoot.timedOut, identityMatched: phaseTwoHostIdentity === phaseTwoObserverIdentity },
   }
-  if (crossProcessStatus !== "PASS") fail(`Issue #103 cross-process recovery evidence failed: ${crossProcessErrors.join("; ")}`)
+  if (crossProcessStatus !== "PASS") {
+    fail(`Issue #103 cross-process recovery evidence failed: ${crossProcessErrors.join("; ")}`)
+    return
+  }
+
+  // Vertical 04 is isolated from the unchanged-source positive control above.
+  // Reuse the existing DSH runner/profile and initial probe, not another harness.
+  report.stages.sourceDrift = { status: "FAIL", phaseOneStarted: false, secondProcessStarted: false }
+  const driftWorkspace = join(scratch, "source-drift-project")
+  ensureInside(scratch, driftWorkspace)
+  mkdirSync(driftWorkspace, { mode: 0o700 })
+  mkdirSync(join(driftWorkspace, ".git"), { mode: 0o700 })
+  mkdirSync(join(driftWorkspace, "capitulos"), { mode: 0o700 })
+  const driftFd = openSync(driftWorkspace, "r")
+  driftWorkspaceDirectoryFd = driftFd
+  const driftIdentity = crossProcessWorkspaceFilesystemIdentitySha256(driftWorkspace, scratch, processIdentityKey, driftFd)
+  for (const file of ["main.tex", "referencias.bib", ...[1, 2, 3, 4, 5].map((index) => `capitulos/lote${index}.tex`)]) {
+    writeFileSync(join(driftWorkspace, file), readFileSync(join(restartWorkspace, file)), { mode: 0o600, flag: "wx" })
+  }
+  const driftInitialEnv: NodeJS.ProcessEnv = {
+    ...firstProcessEnv,
+    DSHBANCA_DSH_PROFILE_PHASE: "drift-initial",
+    DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256: driftIdentity,
+  }
+  const driftFirstBoot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], {
+    cwd: scratch, env: driftInitialEnv, timeoutMs: bootTimeoutMs, processIdentityKey,
+  })
+  const driftFirstSidecar = existsSync(restartObserverResultOne + ".drift")
+    ? JSON.parse(readFileSync(restartObserverResultOne + ".drift", "utf8")) : null
+  // This verifies close, native beforeExit and Agent/Session disposal BEFORE any edit.
+  const driftFirstProof = sourceDriftProcessProof(driftFirstBoot, driftFirstSidecar, restartTeardownMarkerOne + ".drift", hashFile(dshExecutable), profileIdentitySha256)
+  const driftPhaseOne = driftFirstSidecar?.crossProcessPhaseOne
+  const driftPhaseOneErrors = validateCrossProcessPhaseOneEvidence(driftPhaseOne)
+  const driftBeforeInventory = inventoryTree(driftWorkspace)
+  if (driftPhaseOneErrors.length > 0 || driftPhaseOne.workspaceIdentitySha256 !== driftIdentity || driftFirstProof.dshExecutableSha256 !== dshExecutableSha256 || jsonSha256(driftBeforeInventory) !== driftPhaseOne.workspaceInventorySha256 || JSON.stringify(crossProcessAnalysisStoreHashes(driftWorkspace, driftPhaseOne.planId)) !== JSON.stringify(driftPhaseOne.persistence)) {
+    fail("Issue #105 initial phase lacks canonical 2/5, one finding or host-corroborated historical records")
+    return
+  }
+  const driftFirstFilesystemIdentity = crossProcessWorkspaceFilesystemIdentitySha256(driftWorkspace, scratch, processIdentityKey, driftFd)
+  if (driftFirstFilesystemIdentity !== driftIdentity) throw new Error("source drift workspace was replaced before mutation")
+  const canonicalBefore = canonicalSyntheticPlan(driftWorkspace)
+  if (canonicalBefore.planId !== driftPhaseOne.planId || canonicalBefore.manuscriptFingerprint !== driftPhaseOne.manuscriptFingerprint) throw new Error("source drift initial native plan differs from product recomputation")
+  const driftFile = "capitulos/lote2.tex"
+  const originalDriftContent = readFileSync(join(driftWorkspace, driftFile), "utf8")
+  const changedDriftContent = mutateSyntheticLatexContent(originalDriftContent)
+  writeFileSync(join(driftWorkspace, driftFile), changedDriftContent, { mode: 0o600 })
+  const driftAfterInventory = inventoryTree(driftWorkspace)
+  const canonicalAfter = canonicalSyntheticPlan(driftWorkspace)
+  const mutation = {
+    file: driftFile, utf16LengthBefore: originalDriftContent.length, utf16LengthAfter: changedDriftContent.length,
+    sha256Before: driftBeforeInventory[driftFile], sha256After: driftAfterInventory[driftFile],
+    afterFirstExit: driftFirstBoot.exitObserved === true && driftFirstBoot.closeObserved === true,
+    inventoryBefore: driftBeforeInventory, inventoryAfter: driftAfterInventory,
+  }
+  const changedPaths = [...new Set([...Object.keys(driftBeforeInventory), ...Object.keys(driftAfterInventory)])].filter((path) => driftBeforeInventory[path] !== driftAfterInventory[path])
+  if (changedPaths.length !== 1 || changedPaths[0] !== driftFile || mutation.sha256Before === mutation.sha256After || canonicalBefore.manuscriptFingerprint === canonicalAfter.manuscriptFingerprint || canonicalBefore.planId === canonicalAfter.planId) throw new Error("source drift did not change only the synthetic prose and its canonical identity")
+  const driftSecondStartFilesystemIdentity = crossProcessWorkspaceFilesystemIdentitySha256(driftWorkspace, scratch, processIdentityKey, driftFd)
+  if (driftSecondStartFilesystemIdentity !== driftIdentity) throw new Error("source drift workspace was replaced before second process")
+  const driftResumeEnv: NodeJS.ProcessEnv = {
+    ...driftInitialEnv,
+    DSHBANCA_DSH_PROFILE_PHASE: "drift-resume",
+    DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE: JSON.stringify({ phaseOne: driftPhaseOne, canonicalAfter }),
+  }
+  const driftSecondBoot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], {
+    cwd: scratch, env: driftResumeEnv, timeoutMs: bootTimeoutMs, processIdentityKey,
+  })
+  const driftSecondSidecar = existsSync(restartObserverResultTwo + ".drift")
+    ? JSON.parse(readFileSync(restartObserverResultTwo + ".drift", "utf8")) : null
+  const driftSecondProof = sourceDriftProcessProof(driftSecondBoot, driftSecondSidecar, restartTeardownMarkerTwo + ".drift", hashFile(dshExecutable), profileIdentitySha256)
+  const sourceDriftEvidence = {
+    probeExecuted: true, executionMode: "source-drift-native-dsh", syntheticProcessFixture: false,
+    phaseOne: driftPhaseOne, phaseTwo: driftSecondSidecar?.sourceDriftPhaseTwo,
+    processBoundary: {
+      observationSource: "child_process.spawn+linux-procfs", first: driftFirstProof, second: driftSecondProof,
+      secondStartedAfterFirstExit: driftFirstBoot.exitObserved === true && driftFirstBoot.closeObserved === true,
+      processesDidNotOverlap: driftFirstBoot.exitObserved === true && driftFirstBoot.closeObserved === true,
+    },
+    workspace: {
+      identitySha256: driftIdentity, firstProcessEndFilesystemIdentitySha256: driftFirstFilesystemIdentity,
+      secondProcessStartFilesystemIdentitySha256: driftSecondStartFilesystemIdentity,
+      secondProcessEndFilesystemIdentitySha256: crossProcessWorkspaceFilesystemIdentitySha256(driftWorkspace, scratch, processIdentityKey, driftFd),
+    },
+    mutation, canonicalBefore, canonicalAfter, parentFinalInventory: inventoryTree(driftWorkspace),
+  }
+  const sourceDriftErrors = validateSourceDriftEvidence(sourceDriftEvidence)
+  const sourceDriftStatus = classifySourceDriftEvidenceStatus(sourceDriftEvidence)
+  report.stages.sourceDrift = { status: sourceDriftStatus, evidence: sourceDriftEvidence, validationErrors: sourceDriftErrors }
+  if (sourceDriftStatus !== "PASS") {
+    fail(`Issue #105 source drift evidence failed: ${sourceDriftErrors.join("; ")}`, sourceDriftStatus === "BLOCKED" ? "BLOCKED" : "FAIL")
+    return
+  }
   const errors = validateEvidence(observed)
   const auditorMarkdownEvidence = observed.auditorMarkdownEvidence
   const auditorMarkdownErrors = validateAuditorMarkdownEvidence(auditorMarkdownEvidence)
@@ -4529,7 +4774,7 @@ async function main(): Promise<void> {
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
   const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus, academicDecisionStatus, crossProcessStatus)
-  report.stages.gateSummary = gateStatuses
+  report.stages.gateSummary = { ...gateStatuses, sourceDriftStatus }
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
     toolNames: observed.toolNames,
@@ -4716,6 +4961,14 @@ try {
 } catch {
   fail("Runner orchestration: unexpected exception; details withheld")
 } finally {
+  if (driftWorkspaceDirectoryFd !== undefined) {
+    try {
+      closeSync(driftWorkspaceDirectoryFd)
+      driftWorkspaceDirectoryFd = undefined
+    } catch {
+      fail("Source drift workspace identity handle teardown failed; details withheld")
+    }
+  }
   if (restartWorkspaceDirectoryFd !== undefined) {
     try {
       closeSync(restartWorkspaceDirectoryFd)
@@ -4772,7 +5025,10 @@ const academicDecisionStatus = typeof report.stages.academicDecision === "object
 const crossProcessBatchAuditStatus = typeof report.stages.crossProcessBatchAudit === "object" && report.stages.crossProcessBatchAudit !== null
   ? (report.stages.crossProcessBatchAudit as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}; sequential process-restart recovery (#103): ${crossProcessBatchAuditStatus}\n`)
+const sourceDriftStatus = typeof report.stages.sourceDrift === "object" && report.stages.sourceDrift !== null
+  ? (report.stages.sourceDrift as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}; sequential process-restart recovery (#103): ${crossProcessBatchAuditStatus}; source drift between processes (#105): ${sourceDriftStatus}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 const safeVersions = (sanitizeReport({ versions: report.versions }) as { versions: GateReport["versions"] }).versions
 if (safeVersions.dsh) process.stdout.write(`DSH ${safeVersions.dsh}; Cordis ${safeVersions.cordis ?? "unknown"}; loader ${safeVersions.cordisPluginLoader ?? "unknown"}; Skill ${safeVersions.dshSkill ?? "unknown"}; Agent ${safeVersions.dshAgent ?? "unknown"}; AgentLoop ${safeVersions.dshAgentLoop ?? "unknown"}; Tools ${safeVersions.dshTools ?? "unknown"}; AgentPreset ${safeVersions.dshAgentPreset ?? "unknown"}; PresetRegistry ${safeVersions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${safeVersions.dshApiSessionController ?? "unknown"}; Bun ${safeVersions.bun ?? "unknown"}; Node ${safeVersions.node ?? "unknown"}; pnpm ${safeVersions.pnpm ?? "unknown"}\n`)

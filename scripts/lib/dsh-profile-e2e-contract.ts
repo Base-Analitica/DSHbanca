@@ -1912,6 +1912,138 @@ export interface CrossProcessBatchAuditEvidence {
   }
 }
 
+// Inventory digests bind the exact serialized parent/observer inventory; equality
+// below is structural, so object insertion order never creates a false mutation.
+function sourceDriftInventoryHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value) ?? "null").digest("hex")
+}
+
+function sourceDriftInventoryValid(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.keys(value).length > 0 && Object.entries(value).every(([path, digest]) =>
+    path.length > 0 && !/[:\\\\\x00-\x1f\x7f]/.test(path) &&
+    path.split("/").every(segment => segment.length > 0 && segment !== "." && segment !== "..") &&
+    isSha256Digest(digest),
+  )
+}
+
+/** Source drift is a separate mandatory vertical, never an alias for #103. */
+export function classifySourceDriftEvidenceStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.probeExecuted === undefined) return "BLOCKED"
+  return validateSourceDriftEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
+/** Validate recorded native observations; a hermetic fixture is not host proof. */
+export function validateSourceDriftEvidence(value: unknown): string[] {
+  if (!isRecord(value)) return ["source-drift evidence is missing"]
+  const errors: string[] = []
+  const require = (condition: boolean, message: string) => { if (!condition) errors.push(message) }
+  require(value.probeExecuted === true && value.executionMode === "source-drift-native-dsh" && value.syntheticProcessFixture === false,
+    "source drift requires two real native DSH processes")
+  const one = isRecord(value.phaseOne) ? value.phaseOne : {}
+  for (const error of validateCrossProcessPhaseOneEvidence(value.phaseOne)) errors.push(`phase-one evidence: ${error}`)
+  require(isRecord(one.teardown) && one.teardown.teardownFailed === false, "phase one teardown must explicitly succeed")
+  const boundary = isRecord(value.processBoundary) ? value.processBoundary : {}
+  require(boundary.observationSource === "child_process.spawn+linux-procfs", "source drift requires native process-start observations")
+  for (const label of ["first", "second"]) {
+    const row = isRecord(boundary[label]) ? boundary[label] : {}
+    require(["dshExecutableSha256", "profileIdentitySha256", "hostIdentitySha256", "observerIdentitySha256"].every(key => isSha256Digest(row[key])) &&
+      row.hostIdentitySha256 === row.observerIdentitySha256 && row.identityMatched === true && row.spawnObserved === true && row.kernelStartIdentityObserved === true,
+      `${label} source-drift process identity is not corroborated`)
+    require(row.exitObserved === true && row.exitCode === 0 && row.signal === null && row.timedOut === false && row.forcedTermination === false &&
+      row.naturalBeforeExitObserved === true && row.nativeTeardownMarkerObserved === true,
+      `${label} source-drift process must exit naturally after native teardown`)
+  }
+  require(boundary.secondStartedAfterFirstExit === true && boundary.processesDidNotOverlap === true &&
+    isRecord(boundary.first) && isRecord(boundary.second) && boundary.first.hostIdentitySha256 !== boundary.second.hostIdentitySha256 &&
+    boundary.first.dshExecutableSha256 === boundary.second.dshExecutableSha256 && boundary.first.profileIdentitySha256 === boundary.second.profileIdentitySha256,
+    "source drift requires distinct sequential process instances")
+  const workspace = isRecord(value.workspace) ? value.workspace : {}
+  require(isSha256Digest(one.workspaceIdentitySha256) && ["identitySha256", "firstProcessEndFilesystemIdentitySha256", "secondProcessStartFilesystemIdentitySha256", "secondProcessEndFilesystemIdentitySha256"].every(key => workspace[key] === one.workspaceIdentitySha256),
+    "source drift must preserve the physical workspace identity")
+  const before = isRecord(value.canonicalBefore) ? value.canonicalBefore : {}
+  const after = isRecord(value.canonicalAfter) ? value.canonicalAfter : {}
+  require(isSha256Digest(before.planId) && isSha256Digest(before.manuscriptFingerprint) && before.planId === one.planId && before.manuscriptFingerprint === one.manuscriptFingerprint && before.totalBatches === 5 && before.totalCharacters === 595,
+    "pre-mutation canonical identity must match phase one")
+  require(isSha256Digest(after.planId) && isSha256Digest(after.manuscriptFingerprint) && after.planId !== before.planId && after.manuscriptFingerprint !== before.manuscriptFingerprint && after.totalBatches === 5 && after.totalCharacters === 595 &&
+    after.firstBatchId === `ordered-source-spans-exhaustive-v1:${after.manuscriptFingerprint}:120:0`,
+    "same-length source drift must produce a distinct canonical plan and fingerprint")
+  const oldBatchIds = Array.isArray(one.planBatchIdsPrefix) ? one.planBatchIdsPrefix : []
+  require(!oldBatchIds.includes(after.firstBatchId), "new canonical batch must not reuse an old batch ID")
+  const mutation = isRecord(value.mutation) ? value.mutation : {}
+  require(mutation.file === "capitulos/lote2.tex" && mutation.afterFirstExit === true && Number.isSafeInteger(mutation.utf16LengthBefore) && mutation.utf16LengthBefore > 0 && mutation.utf16LengthBefore === mutation.utf16LengthAfter &&
+    isSha256Digest(mutation.sha256Before) && isSha256Digest(mutation.sha256After) && mutation.sha256Before !== mutation.sha256After,
+    "source drift must change only lote2 bytes at equal positive UTF-16 length after first exit")
+  const two = isRecord(value.phaseTwo) ? value.phaseTwo : {}
+  const maps = [mutation.inventoryBefore, mutation.inventoryAfter, two.inventoryBeforeContext, two.inventoryAfterContext, two.inventoryFinal, value.parentFinalInventory]
+  require(maps.every(sourceDriftInventoryValid), "source drift requires complete safe relative-path SHA-256 inventories")
+  if (maps.every(sourceDriftInventoryValid)) {
+    const [pre, post, preContext, postContext, final, parent] = maps as Record<string, string>[]
+    require(sourceDriftInventoryHash(pre) === one.workspaceInventorySha256, "mutation inventory must bind phase-one workspace digest")
+    require(pre[mutation.file] === mutation.sha256Before && post[mutation.file] === mutation.sha256After && Object.keys(pre).length === Object.keys(post).length &&
+      Object.keys(pre).every(path => Object.hasOwn(post, path) && (path === mutation.file || pre[path] === post[path])),
+      "mutation must change exactly one existing manuscript file without additions or deletions")
+    require(restartCheckpointEvidenceEqual(post, preContext), "second process must start with the mutated inventory")
+    const additions = Object.keys(postContext).filter(path => !Object.hasOwn(preContext, path))
+    const newCheckpointPath = `.banca/analysis/checkpoints/${after.planId}.json`
+    require(Object.keys(preContext).every(path => preContext[path] === postContext[path]) && additions.length === 2 && additions.includes(newCheckpointPath) &&
+      additions.filter(path => /^\.banca\/context\/context-\d+\.md$/.test(path)).length === 1,
+      "fresh context may add only its new checkpoint and one context pack")
+    // state.saveAnalysisCheckpoint writes these ten raw fields, in this order,
+    // with JSON.stringify(checkpoint, null, 2), without the three context fields.
+    const stored = isRecord(two.storedCheckpoint) ? two.storedCheckpoint : {}
+    const rawCheckpoint = Object.fromEntries(["version", "planId", "fingerprint", "strategy", "totalBatches", "completedBatches", "totalCharacters", "completedCharacters", "coveragePercent", "state"].map(key => [key, stored[key]]))
+    const checkpointDigest = createHash("sha256").update(JSON.stringify(rawCheckpoint, null, 2)).digest("hex")
+    require(postContext[newCheckpointPath] === checkpointDigest, "new checkpoint inventory digest must bind the exact pending checkpoint JSON bytes")
+    require(restartCheckpointEvidenceEqual(postContext, final) && restartCheckpointEvidenceEqual(final, parent), "refusals and parent observation must preserve the post-context inventory")
+    const persistence = isRecord(one.persistence) ? one.persistence : {}
+    require(persistence.analysisInventorySha256 === sourceDriftInventoryHash(Object.fromEntries(Object.entries(pre).filter(([path]) => path.startsWith(".banca/analysis/")))),
+      "phase-one analysis inventory digest must bind all historical analysis files")
+    for (const [directory, hash] of [["checkpoints", "checkpointSha256"], ["audit-confirmations", "auditConfirmationsSha256"], ["findings", "findingsSha256"]]) {
+      const path = `.banca/analysis/${directory}/${one.planId}.json`
+      require(maps.every(map => map[path] === persistence[hash]), `historical ${directory} file must remain byte-identical`)
+    }
+    require(maps.every(map => !Object.hasOwn(map, `.banca/analysis/findings/${after.planId}.json`) && !Object.hasOwn(map, `.banca/analysis/audit-confirmations/${after.planId}.json`)),
+      "new plan must have no finding or confirmation store")
+    const manuscriptPaths = ["main.tex", "referencias.bib", ...[1, 2, 3, 4, 5].map(index => `capitulos/lote${index}.tex`)]
+    const hashes = one.manuscriptHashes
+    require(sourceDriftInventoryValid(hashes) && Object.keys(hashes).length === 7 && manuscriptPaths.every(path => hashes[path] === pre[path]),
+      "phase-one seven manuscript hashes must bind the pre-mutation inventory")
+  }
+  require(two.probeExecuted === true && two.workspaceIdentitySha256 === one.workspaceIdentitySha256 && two.planId === after.planId && two.manuscriptFingerprint === after.manuscriptFingerprint,
+    "phase two must observe the new canonical plan in the same workspace")
+  const expectedCheckpoint = { completedBatches: 0, completedCharacters: 0, state: "pending", nextBatchIndex: 0, nextBatchId: typeof after.firstBatchId === "string" ? after.firstBatchId : null }
+  require(restartCheckpointProjectionMatches(two.checkpoint, expectedCheckpoint, after.planId, after.manuscriptFingerprint, 5, 595) && restartStoredCheckpointMatches(two.storedCheckpoint, expectedCheckpoint, after.planId, after.manuscriptFingerprint, 5, 595),
+    "new context must remain pending at exactly 0/5 and 0/595 with its first canonical batch")
+  require(two.findingsStore === null && two.auditStore === null, "new plan finding and confirmation stores must be absent")
+  require(isBatchAuditFindingProjection(one.finding) && restartCheckpointEvidenceEqual(two.oldFindingBefore, one.finding) && restartCheckpointEvidenceEqual(two.oldFindingAfter, one.finding) &&
+    Array.isArray(one.completedBatchIds) && restartCheckpointEvidenceEqual(two.oldReceiptIdsBefore, one.completedBatchIds) && restartCheckpointEvidenceEqual(two.oldReceiptIdsAfter, one.completedBatchIds),
+    "historical finding and ordered receipt IDs must remain unchanged")
+  require(restartAgentIdentityIsVerified(two.agentIdentity) && two.agentIdentity.agentId !== one.agentIdentity?.agentId,
+    "phase two must use a distinct verified native auditor Agent/Session")
+  require(restartTeardownIsVerified(two.teardown) && two.teardown.teardownFailed === false, "phase two Agent/Session teardown must explicitly succeed")
+  require(two.modelCalls === 0 && two.credentialsUsed === false, "source drift must not use a model or credentials")
+  const oldBatch = Array.isArray(one.completedBatchIds) ? one.completedBatchIds[1] : undefined
+  const expectedRefusals = [
+    ["stale-advance", "banca_context", "unknown_batch", "context checkpoint error", `batchId is not part of the plan: ${oldBatch}`],
+    ["stale-fingerprint", "banca_auditar", "fingerprint_mismatch", "audit validation error", "manuscriptFingerprint does not match the current plan fingerprint"],
+    ["stale-batch", "banca_auditar", "unknown_batch", "audit validation error", `batchId is not present in the plan: ${oldBatch}`],
+    ["premature-synthesis", "banca_sintese", "missing_findings", "synthesis input error", "no persisted findings store exists for the current plan"],
+  ]
+  const expectedInputs = [
+    { manuscriptFingerprint: null, batchId: oldBatch, findingId: null, findingsCount: 0 },
+    { manuscriptFingerprint: one.manuscriptFingerprint, batchId: oldBatch, findingId: one.finding?.findingId, findingsCount: 1 },
+    { manuscriptFingerprint: after.manuscriptFingerprint, batchId: oldBatch, findingId: one.finding?.findingId, findingsCount: 1 },
+    { manuscriptFingerprint: null, batchId: null, findingId: null, findingsCount: 0 },
+  ]
+  const inventoryDigest = sourceDriftInventoryHash(two.inventoryAfterContext)
+  require(Array.isArray(two.refusals) && two.refusals.length === 4 && expectedRefusals.every(([kind, toolName, errorCode, header, message], index) => {
+    const row = two.refusals[index]
+    const result = `${header}\ncode=${errorCode}\nmessage=${message}`
+    return isRecord(row) && restartCheckpointEvidenceEqual(row.input, expectedInputs[index]) && row.kind === kind && row.toolName === toolName && row.errorCode === errorCode && row.toolRuntimeIsError === false && row.toolResultValue === result && row.toolMessage === result && row.inventoryBeforeSha256 === inventoryDigest && row.inventoryAfterSha256 === inventoryDigest
+  }), "source drift requires four exact ordered non-mutating domain refusals, not ToolRuntime errors")
+  return errors
+}
+
 const restartPersistenceKeys = [
   "analysisInventorySha256",
   "checkpointSha256",
