@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -1256,6 +1257,187 @@ const completeCrossProcessBatchAuditEvidence = {
     teardown: { ...crossProcessTeardown },
   },
 }
+
+const driftJsonHash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex")
+function sourceDriftFixture(): any {
+  const phaseOne: any = structuredClone(completeCrossProcessBatchAuditEvidence.phaseOne)
+  const manuscriptHashes = Object.fromEntries(["main.tex", "referencias.bib", ...[1, 2, 3, 4, 5].map(n => `capitulos/lote${n}.tex`)].map(path => [path, "6".repeat(64)]))
+  const inventoryBefore = {
+    ...manuscriptHashes,
+    [`.banca/analysis/checkpoints/${phaseOne.planId}.json`]: phaseOne.persistence.checkpointSha256,
+    [`.banca/analysis/audit-confirmations/${phaseOne.planId}.json`]: phaseOne.persistence.auditConfirmationsSha256,
+    [`.banca/analysis/findings/${phaseOne.planId}.json`]: phaseOne.persistence.findingsSha256,
+    ".banca/context/context-100.md": "5".repeat(64),
+  }
+  phaseOne.manuscriptHashes = manuscriptHashes
+  phaseOne.workspaceInventorySha256 = driftJsonHash(inventoryBefore)
+  phaseOne.persistence.analysisInventorySha256 = driftJsonHash(Object.fromEntries(Object.entries(inventoryBefore).filter(([path]) => path.startsWith(".banca/analysis/"))))
+  const inventoryAfter = { ...inventoryBefore, "capitulos/lote2.tex": "7".repeat(64) }
+  const canonicalAfter = { planId: "2".repeat(64), manuscriptFingerprint: "3".repeat(64), totalBatches: 5, totalCharacters: 595, firstBatchId: `ordered-source-spans-exhaustive-v1:${"3".repeat(64)}:120:0` }
+  const inventoryFinal = { ...inventoryAfter, [`.banca/analysis/checkpoints/${canonicalAfter.planId}.json`]: "4".repeat(64), ".banca/context/context-101.md": "8".repeat(64) }
+  const checkpoint = { planId: canonicalAfter.planId, manuscriptFingerprint: canonicalAfter.manuscriptFingerprint, totalBatches: 5, completedBatches: 0, totalCharacters: 595, completedCharacters: 0, coveragePercent: 0, state: "pending", nextBatchId: canonicalAfter.firstBatchId, nextBatchIndex: 0 }
+  const storedCheckpoint = storedCheckpointEvidence(checkpoint)
+  const checkpointBytes = JSON.stringify(Object.fromEntries(["version", "planId", "fingerprint", "strategy", "totalBatches", "completedBatches", "totalCharacters", "completedCharacters", "coveragePercent", "state"].map(key => [key, (storedCheckpoint as any)[key]])), null, 2)
+  inventoryFinal[`.banca/analysis/checkpoints/${canonicalAfter.planId}.json`] = createHash("sha256").update(checkpointBytes).digest("hex")
+  const oldBatch = phaseOne.completedBatchIds[1]
+  const refusalInputs = [
+    { manuscriptFingerprint: null, batchId: oldBatch, findingId: null, findingsCount: 0 },
+    { manuscriptFingerprint: phaseOne.manuscriptFingerprint, batchId: oldBatch, findingId: phaseOne.finding.findingId, findingsCount: 1 },
+    { manuscriptFingerprint: canonicalAfter.manuscriptFingerprint, batchId: oldBatch, findingId: phaseOne.finding.findingId, findingsCount: 1 },
+    { manuscriptFingerprint: null, batchId: null, findingId: null, findingsCount: 0 },
+  ]
+  const refusals = [
+    ["stale-advance", "banca_context", "unknown_batch", "context checkpoint error", `batchId is not part of the plan: ${oldBatch}`],
+    ["stale-fingerprint", "banca_auditar", "fingerprint_mismatch", "audit validation error", "manuscriptFingerprint does not match the current plan fingerprint"],
+    ["stale-batch", "banca_auditar", "unknown_batch", "audit validation error", `batchId is not present in the plan: ${oldBatch}`],
+    ["premature-synthesis", "banca_sintese", "missing_findings", "synthesis input error", "no persisted findings store exists for the current plan"],
+  ].map(([kind, toolName, errorCode, header, message], index) => ({ kind, toolName, errorCode, input: refusalInputs[index], toolRuntimeIsError: false, toolResultValue: `${header}\ncode=${errorCode}\nmessage=${message}`, toolMessage: `${header}\ncode=${errorCode}\nmessage=${message}`, inventoryBeforeSha256: driftJsonHash(inventoryFinal), inventoryAfterSha256: driftJsonHash(inventoryFinal) }))
+  return {
+    probeExecuted: true, executionMode: "source-drift-native-dsh", syntheticProcessFixture: false,
+    phaseOne, processBoundary: structuredClone(completeCrossProcessBatchAuditEvidence.processBoundary),
+    workspace: { identitySha256: phaseOne.workspaceIdentitySha256, firstProcessEndFilesystemIdentitySha256: phaseOne.workspaceIdentitySha256, secondProcessStartFilesystemIdentitySha256: phaseOne.workspaceIdentitySha256, secondProcessEndFilesystemIdentitySha256: phaseOne.workspaceIdentitySha256 },
+    canonicalBefore: { planId: phaseOne.planId, manuscriptFingerprint: phaseOne.manuscriptFingerprint, totalBatches: 5, totalCharacters: 595 }, canonicalAfter,
+    mutation: { file: "capitulos/lote2.tex", utf16LengthBefore: 120, utf16LengthAfter: 120, sha256Before: inventoryBefore["capitulos/lote2.tex"], sha256After: inventoryAfter["capitulos/lote2.tex"], afterFirstExit: true, inventoryBefore, inventoryAfter },
+    parentFinalInventory: inventoryFinal,
+    phaseTwo: { probeExecuted: true, workspaceIdentitySha256: phaseOne.workspaceIdentitySha256, planId: canonicalAfter.planId, manuscriptFingerprint: canonicalAfter.manuscriptFingerprint, checkpoint, storedCheckpoint: storedCheckpointEvidence(checkpoint), findingsStore: null, auditStore: null, inventoryBeforeContext: inventoryAfter, inventoryAfterContext: inventoryFinal, inventoryFinal, oldFindingBefore: structuredClone(phaseOne.finding), oldFindingAfter: structuredClone(phaseOne.finding), oldReceiptIdsBefore: [...phaseOne.completedBatchIds], oldReceiptIdsAfter: [...phaseOne.completedBatchIds], refusals, agentIdentity: crossProcessAuditorIdentity("9".repeat(64)), teardown: { ...crossProcessTeardown }, modelCalls: 0, credentialsUsed: false },
+  }
+}
+
+const sourceDriftContract = profileEvidenceContract as unknown as { validateSourceDriftEvidence(value: unknown): string[]; classifySourceDriftEvidenceStatus(value: unknown): string }
+describe("DSH source drift restart contract (#105)", () => {
+  test("exports strict validator and classifies unexecuted gates as BLOCKED", () => {
+    expect(typeof sourceDriftContract.validateSourceDriftEvidence).toBe("function")
+    for (const value of [undefined, null, {}, { probeExecuted: undefined }]) expect(sourceDriftContract.classifySourceDriftEvidenceStatus(value)).toBe("BLOCKED")
+    for (const probeExecuted of [true, false, null, "true", 1]) expect(sourceDriftContract.classifySourceDriftEvidenceStatus({ probeExecuted })).toBe("FAIL")
+    const tampered = sourceDriftFixture()
+    delete tampered.probeExecuted
+    expect(sourceDriftContract.classifySourceDriftEvidenceStatus(tampered)).toBe("BLOCKED")
+  })
+  test("accepts fresh pending context without finding or audit stores", () => {
+    expect(sourceDriftContract.validateSourceDriftEvidence(sourceDriftFixture())).toEqual([])
+    expect(sourceDriftContract.classifySourceDriftEvidenceStatus(sourceDriftFixture())).toBe("PASS")
+  })
+  test("sanitized report hides native identifiers, secrets and local paths without relaxing raw validation", () => {
+    const evidence = sourceDriftFixture()
+    const syntheticToken = ["sk", "12345678901234567890"].join("-")
+    evidence.diagnostic = { agentId: "agent-raw-native-identifier", token: syntheticToken, file: "/private/workspace/main.tex" }
+    const safe = profileEvidenceContract.sanitizeReport(evidence) as any
+    const serialized = JSON.stringify(safe)
+    for (const secret of ["agent-raw-native-identifier", syntheticToken, "/private/workspace/main.tex"]) expect(serialized).not.toContain(secret)
+    for (const phase of ["phaseOne", "phaseTwo"]) {
+      expect(safe[phase].agentIdentity.agentId).toBe("<redacted-native-id>")
+      expect(safe[phase].agentIdentity.sessionId).toBe("<redacted-native-id>")
+    }
+    expect(safe.phaseTwo.refusals[3].errorCode).toBe("missing_findings")
+    // Existing report sanitation flattens exact domain strings and redacts IDs;
+    // strict native evidence is validated in memory before that boundary.
+    expect(sourceDriftContract.validateSourceDriftEvidence(safe).length).toBeGreaterThan(0)
+  })
+  test("new persisted checkpoint bytes must bind its pending projection", () => {
+    const evidence = sourceDriftFixture()
+    const path = `.banca/analysis/checkpoints/${evidence.canonicalAfter.planId}.json`
+    evidence.phaseTwo.inventoryAfterContext[path] = "0".repeat(64)
+    for (const refusal of evidence.phaseTwo.refusals) {
+      refusal.inventoryBeforeSha256 = driftJsonHash(evidence.phaseTwo.inventoryAfterContext)
+      refusal.inventoryAfterSha256 = refusal.inventoryBeforeSha256
+    }
+    expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+  })
+  test("analysis inventory aggregate must bind the historical inventory", () => {
+    const evidence = sourceDriftFixture()
+    evidence.phaseOne.persistence.analysisInventorySha256 = "0".repeat(64)
+    expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+  })
+  const mutations: Array<[string, (e: any) => void]> = [
+    ["synthetic process", e => { e.syntheticProcessFixture = true }],
+    ["missing phase two", e => { delete e.phaseTwo }],
+    ["missing teardown", e => { delete e.phaseTwo.teardown }],
+    ["unspecified teardown failure", e => { delete e.phaseTwo.teardown.teardownFailed }],
+    ["reused agent", e => { e.phaseTwo.agentIdentity = e.phaseOne.agentIdentity }],
+    ["overlap", e => { e.processBoundary.processesDidNotOverlap = false }],
+    ["forced exit", e => { e.processBoundary.first.forcedTermination = true }],
+    ["no natural exit", e => { delete e.processBoundary.second.naturalBeforeExitObserved }],
+    ["new workspace", e => { e.workspace.secondProcessStartFilesystemIdentitySha256 = "0".repeat(64) }],
+    ["same fingerprint", e => { e.canonicalAfter.manuscriptFingerprint = e.canonicalBefore.manuscriptFingerprint }],
+    ["same plan", e => { e.canonicalAfter.planId = e.canonicalBefore.planId }],
+    ["wrong first batch", e => { e.canonicalAfter.firstBatchId = "old-batch" }],
+    ["changed length", e => { e.mutation.utf16LengthAfter++ }],
+    ["mutation before exit", e => { e.mutation.afterFirstExit = false }],
+    ["no changed bytes", e => { e.mutation.sha256After = e.mutation.sha256Before }],
+    ["missing map", e => { delete e.mutation.inventoryBefore }],
+    ["unsafe inventory path", e => { e.mutation.inventoryBefore["../escape"] = "0".repeat(64) }],
+    ["invalid inventory digest", e => { e.mutation.inventoryBefore["main.tex"] = "invalid" }],
+    ["unbound manuscript", e => { e.phaseOne.manuscriptHashes["main.tex"] = "0".repeat(64) }],
+    ["missing manuscript", e => { delete e.phaseOne.manuscriptHashes["main.tex"] }],
+    ["historical checkpoint hash", e => { e.mutation.inventoryBefore[`.banca/analysis/checkpoints/${e.phaseOne.planId}.json`] = "0".repeat(64) }],
+    ["historical finding missing", e => { delete e.phaseTwo.inventoryFinal[`.banca/analysis/findings/${e.phaseOne.planId}.json`] }],
+    ["extra mutation", e => { e.mutation.inventoryAfter["main.tex"] = "0".repeat(64) }],
+    ["added mutation file", e => { e.mutation.inventoryAfter["extra"] = "0".repeat(64) }],
+    ["extra context addition", e => { e.phaseTwo.inventoryAfterContext[".banca/context/context-102.md"] = "0".repeat(64) }],
+    ["replaced old context", e => { e.phaseTwo.inventoryAfterContext[".banca/context/context-100.md"] = "0".repeat(64) }],
+    ["missing pending checkpoint", e => { delete e.phaseTwo.inventoryAfterContext[`.banca/analysis/checkpoints/${e.canonicalAfter.planId}.json`] }],
+    ["new findings file", e => { e.phaseTwo.inventoryFinal[`.banca/analysis/findings/${e.canonicalAfter.planId}.json`] = "0".repeat(64) }],
+    ["non-null audit store", e => { e.phaseTwo.auditStore = {} }],
+    ["non-null finding store", e => { e.phaseTwo.findingsStore = {} }],
+    ["old finding changed", e => { e.phaseTwo.oldFindingAfter.claimSha256 = "0".repeat(64) }],
+    ["old receipts changed", e => { e.phaseTwo.oldReceiptIdsAfter.reverse() }],
+    ["checkpoint coverage", e => { e.phaseTwo.checkpoint.completedBatches = 2 }],
+    ["checkpoint extra field", e => { e.phaseTwo.checkpoint.extra = true }],
+    ["stored checkpoint metadata", e => { e.phaseTwo.storedCheckpoint.fingerprint = "0".repeat(64) }],
+    ["missing refusal", e => { e.phaseTwo.refusals.pop() }],
+    ["reordered refusals", e => { e.phaseTwo.refusals.reverse() }],
+    ["ToolRuntime error", e => { e.phaseTwo.refusals[0].toolRuntimeIsError = true }],
+    ["wrong domain code", e => { e.phaseTwo.refusals[3].errorCode = "incomplete_coverage" }],
+    ["false refusal string", e => { e.phaseTwo.refusals[1].toolResultValue = "fingerprint_mismatch" }],
+    ["message mismatch", e => { e.phaseTwo.refusals[2].toolMessage = "unknown_batch" }],
+    ["refusal mutation", e => { e.phaseTwo.refusals[3].inventoryAfterSha256 = "0".repeat(64) }],
+    ["model call", e => { e.phaseTwo.modelCalls = 1 }],
+    ["credentials", e => { e.phaseTwo.credentialsUsed = true }],
+  ]
+  test.each(mutations)("rejects %s", (_label, mutate) => {
+    const evidence = sourceDriftFixture()
+    mutate(evidence)
+    expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+    expect(sourceDriftContract.classifySourceDriftEvidenceStatus(evidence)).toBe("FAIL")
+  })
+  test("refusals bind exact replay inputs rather than just returned strings", () => {
+    for (let index = 0; index < 4; index++) {
+      const evidence = sourceDriftFixture()
+      evidence.phaseTwo.refusals[index].input = { manuscriptFingerprint: "0".repeat(64), batchId: "fake", findingId: null, findingsCount: 0 }
+      expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+    }
+  })
+  test("required root and nested proof fields cannot be omitted", () => {
+    for (const parent of ["", "mutation", "canonicalBefore", "canonicalAfter", "workspace", "processBoundary", "processBoundary.first", "processBoundary.second", "phaseTwo.agentIdentity", "phaseTwo.teardown", "phaseTwo.checkpoint", "phaseTwo.storedCheckpoint"]) {
+      const source = parent.split(".").filter(Boolean).reduce((node, key) => node[key], sourceDriftFixture())
+      for (const key of Object.keys(source)) {
+        const evidence = sourceDriftFixture()
+        const target = parent.split(".").filter(Boolean).reduce((node, segment) => node[segment], evidence)
+        delete target[key]
+        expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+      }
+    }
+    for (let index = 0; index < 4; index++) {
+      for (const key of Object.keys(sourceDriftFixture().phaseTwo.refusals[index])) {
+        const evidence = sourceDriftFixture()
+        delete evidence.phaseTwo.refusals[index][key]
+        expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+      }
+      for (const key of Object.keys(sourceDriftFixture().phaseTwo.refusals[index].input)) {
+        const evidence = sourceDriftFixture()
+        delete evidence.phaseTwo.refusals[index].input[key]
+        expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+      }
+    }
+  })
+  test("every required phase-two field is fail-closed on omission", () => {
+    for (const key of Object.keys(sourceDriftFixture().phaseTwo)) {
+      const evidence = sourceDriftFixture()
+      delete evidence.phaseTwo[key]
+      expect(sourceDriftContract.validateSourceDriftEvidence(evidence).length).toBeGreaterThan(0)
+    }
+  })
+})
 
 describe("DSH process-restart recovery contract (#103)", () => {
   test("validates phase one before any phase-two process launch", () => {

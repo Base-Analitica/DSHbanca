@@ -3,7 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { readFileSync } from "node:fs"
+import { readFileSync, readdirSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { loadConfig } from "../src/lib/config.js"
+import { loadCanonicalLatexManuscript } from "../src/lib/latex_loader.js"
+import { planExhaustiveAnalysisBatches } from "../src/lib/analysis_coverage.js"
+import { computePlanIdentity } from "../src/lib/analysis_checkpoint.js"
+import { bancaContext } from "../src/tools/banca_context.js"
+import { bancaAuditar } from "../src/tools/banca_auditar.js"
+import { bancaSintese } from "../src/tools/banca_sintese.js"
 import {
   canonicalAuditorMarkdownSha1,
   canonicalAuditorMarkdownSha256,
@@ -116,6 +124,28 @@ test("both process phases verify successful incomplete-coverage refusal and pers
   expect(runnerSource).toContain("manuscriptFingerprint: checkpoint?.fingerprint")
   expect(secondPhase).toContain("const checkpointBefore = crossProcessStoredCheckpointEvidence(storesBeforeAttempt.checkpoint, meta?.batch)")
   expect(secondPhase).toContain("const checkpointAfter = crossProcessStoredCheckpointEvidence(storesAfterAttempt.checkpoint, meta?.batch)")
+})
+
+test("source drift is mandatory and edits only synthetic prose after first shutdown", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  expect(source).toContain("export async function runSourceDriftProbe")
+  expect(source).toContain('DSHBANCA_DSH_PROFILE_PHASE: "drift-initial"')
+  expect(source).toContain('DSHBANCA_DSH_PROFILE_PHASE: "drift-resume"')
+  expect(source).toContain("validateSourceDriftEvidence(sourceDriftEvidence)")
+  expect(source).toContain('report.stages.sourceDrift = {')
+  expect(source).toContain('if (sourceDriftStatus !== "PASS")')
+  expect(source).toContain("mutateSyntheticLatexContent")
+  const first = source.indexOf("const driftFirstProof = sourceDriftProcessProof(")
+  const validation = source.indexOf("validateCrossProcessPhaseOneEvidence(driftPhaseOne)", first)
+  const edit = source.indexOf("const changedDriftContent = mutateSyntheticLatexContent(", validation)
+  const second = source.indexOf("const driftSecondBoot = await runDsh(", edit)
+  expect(first).toBeGreaterThan(0)
+  expect(validation).toBeGreaterThan(first)
+  expect(edit).toBeGreaterThan(validation)
+  expect(second).toBeGreaterThan(edit)
+  expect(source.slice(first, edit)).toContain("return")
+  expect(source.slice(source.indexOf("function sourceDriftProcessProof"), source.indexOf("function repoStatus"))).toContain("!result.closeObserved")
+  expect(source.slice(source.indexOf("function sourceDriftProcessProof"), source.indexOf("function repoStatus"))).toContain('marker?.nativeShutdownCompleted !== true')
 })
 
 test("actual generated observer module binds the control preset ID without runner scope", async () => {
@@ -458,6 +488,150 @@ test("generated auditor evidence uses the strict session projection contract", a
   expect(validateAuditorMarkdownEvidence({ ...emitted, sessionProjectionPreset: "banca-corretor" })).toContain(
     "auditor instruction content is not bound to the live banca-auditor Agent and Session",
   )
+})
+
+test("generated drift probe matches real local academic tools without loading the DSH Host", async () => {
+  // This is explicitly a hermetic adapter fixture, NOT native lifecycle evidence.
+  const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const templateStart = runnerSource.indexOf("const observerSource = `") + "const observerSource = `".length
+  const templateEnd = runnerSource.indexOf('\n`\n  writeFileSync(join(observerRoot, "index.js"), observerSource', templateStart)
+  const render = new Function(
+    "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
+    "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+    `return \`${runnerSource.slice(templateStart, templateEnd)}\`;`,
+  )
+  const directory = mkdtempSync(join(tmpdir(), "dshbanca-hermetic-drift-"))
+  const workspace = join(directory, "project")
+  mkdirSync(join(workspace, "capitulos"), { recursive: true })
+  mkdirSync(join(workspace, ".banca"))
+  writeFileSync(join(workspace, ".banca", "project.json"), JSON.stringify({ version: 1, analysis: { coverageMode: "exhaustive", maxCharactersPerBatch: 120 } }))
+  writeFileSync(join(workspace, "main.tex"), "\\documentclass{article}\n\\begin{document}\nTexto acadêmico sintético de validação.\\end{document}\n")
+  writeFileSync(join(workspace, "referencias.bib"), "@article{synthetic2026, title={Referência Sintética}, author={Pessoa, Exemplo}, year={2026}}\n")
+  for (let i = 1; i <= 5; i++) writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), i === 2
+    ? "\\section{Delineamento Amostral e Metodologia}\nA amostragem foi definida por conveniência em 30 participantes, com omissão de justificativa do critério amostral e confronto bibliográfico com synthetic2026.\nCapitulo sintetico 2 para analise academica exaustiva e2e.\n"
+    : `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`)
+  const source = render("fixture-observer", expectedTools, "fixture-sha256", "fixture-sha1", workspace, "unused", workspace, "unused-a", "unused-b", "unused-c", "unused-d", renderControlPresetSelector, e2eControlPresetId)
+  const modulePath = join(directory, "observer.mjs")
+  writeFileSync(modulePath, source)
+  const oldKey = process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
+  const oldIdentity = process.env.DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256
+  process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY = "ab".repeat(32)
+  process.env.DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256 = "cd".repeat(32)
+  const hash = (value: string) => createHash("sha256").update(value).digest("hex")
+  const inventory = (root: string, prefix = ""): Record<string, string> => Object.fromEntries(readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap(entry => {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+    return entry.isDirectory() ? Object.entries(inventory(join(root, entry.name), rel)) : [[rel, hash(readFileSync(join(root, entry.name), "utf8"))]]
+  }))
+  const agents = new Map<string, any>()
+  const sessions = new Map<string, any>()
+  const dispatches: string[] = []
+  const ctx = {
+    agents: {
+      get: (id: string) => agents.get(id),
+      async create({ sessionId }: { sessionId: string }) {
+        const session = { id: sessionId, snapshotEvents: () => [] }
+        const agent = { id: sessionId, session, ctx: { preset: "" } }
+        agents.set(sessionId, agent); sessions.set(sessionId, session)
+        return { agent, async dispose() { agents.delete(sessionId); sessions.delete(sessionId) } }
+      },
+    },
+    sessions: { get: (id: string) => sessions.get(id) },
+    agentPresets: {
+      async select(agent: any, preset: string) { agent.ctx.preset = preset; return preset },
+      composedPreset: (context: any) => context.preset,
+    },
+    sessionProjections: { stateOf: (session: any) => agents.get(session.id)?.ctx.preset },
+    tools: { async execute(input: any) {
+      dispatches.push(input.name)
+      // Skip banca_init's compiler discovery subprocess: synthetic config exists already.
+      if (input.name === "banca_init") return { isError: false, value: "hermetic fixture initialized" }
+      const tools: Record<string, any> = { banca_context: bancaContext, banca_auditar: bancaAuditar, banca_sintese: bancaSintese }
+      const value = await tools[input.name].execute(input.arguments, { directory: workspace })
+      return { isError: false, value }
+    } },
+  }
+  try {
+    const generated = await import(`${pathToFileURL(modulePath).href}?drift=1`)
+    expect(typeof generated.runSourceDriftProbe).toBe("function")
+    const phaseOne = await generated.runCrossProcessInitialProbe(ctx, workspace)
+    expect(phaseOne.checkpoint.completedBatches).toBe(2)
+    expect(phaseOne.findingCount).toBe(1)
+    expect(profileEvidenceContract.validateCrossProcessPhaseOneEvidence(phaseOne)).toEqual([])
+    const beforeInventory = inventory(workspace)
+    const beforePlan = planExhaustiveAnalysisBatches(loadCanonicalLatexManuscript(workspace, loadConfig(workspace)), 120)
+    const mutationStart = runnerSource.indexOf("function mutateSyntheticLatexContent(")
+    const mutationEnd = runnerSource.indexOf("\nfunction canonicalSyntheticPlan", mutationStart)
+    const mutatorSource = runnerSource.slice(mutationStart, mutationEnd).replace("(content: string): string", "(content)")
+    const mutate = new Function(`return (${mutatorSource});`)() as (content: string) => string
+    const latexPath = join(workspace, "capitulos", "lote2.tex")
+    const oldLatex = readFileSync(latexPath, "utf8")
+    const newLatex = mutate(oldLatex)
+    expect(newLatex.length).toBe(oldLatex.length)
+    expect(hash(newLatex)).not.toBe(hash(oldLatex))
+    expect(newLatex.replace("31 participantes", "30 participantes")).toBe(oldLatex)
+    expect(() => mutate("no expected prose")).toThrow("absent or ambiguous")
+    expect(() => mutate(oldLatex + oldLatex)).toThrow("absent or ambiguous")
+    writeFileSync(latexPath, newLatex)
+    const afterPlan = planExhaustiveAnalysisBatches(loadCanonicalLatexManuscript(workspace, loadConfig(workspace)), 120)
+    expect(afterPlan.fingerprint).not.toBe(beforePlan.fingerprint)
+    expect(computePlanIdentity(afterPlan)).not.toBe(computePlanIdentity(beforePlan))
+    expect(afterPlan.coverage).toEqual(beforePlan.coverage)
+    expect(afterPlan.batches.every(batch => !beforePlan.batches.some(old => old.batchId === batch.batchId))).toBe(true)
+    const canonicalAfter = { planId: computePlanIdentity(afterPlan), manuscriptFingerprint: afterPlan.fingerprint, firstBatchId: afterPlan.batches[0]!.batchId }
+    dispatches.length = 0
+    const phaseTwo = await generated.runSourceDriftProbe(ctx, workspace, { phaseOne, canonicalAfter })
+    expect(dispatches).toEqual(["banca_context", "banca_context", "banca_auditar", "banca_auditar", "banca_sintese"])
+    expect(phaseTwo.checkpoint.completedBatches).toBe(0)
+    expect(phaseTwo.checkpoint.completedCharacters).toBe(0)
+    expect(phaseTwo.checkpoint.state).toBe("pending")
+    expect(phaseTwo.findingsStore).toBeNull()
+    expect(phaseTwo.auditStore).toBeNull()
+    expect(phaseTwo.oldFindingBefore).toEqual(phaseOne.finding)
+    expect(phaseTwo.oldFindingAfter).toEqual(phaseOne.finding)
+    expect(phaseTwo.oldReceiptIdsAfter).toEqual(phaseOne.completedBatchIds)
+    for (const [path, digest] of Object.entries(beforeInventory).filter(([path]) => path.startsWith(".banca/analysis/"))) expect(phaseTwo.inventoryFinal[path]).toBe(digest)
+    expect(phaseTwo.refusals.map((refusal: any) => refusal.errorCode)).toEqual(["unknown_batch", "fingerprint_mismatch", "unknown_batch", "missing_findings"])
+    for (const refusal of phaseTwo.refusals) {
+      expect(refusal.toolRuntimeIsError).toBe(false)
+      expect(refusal.inventoryBeforeSha256).toBe(refusal.inventoryAfterSha256)
+      const value = { result: { isError: false, value: refusal.toolResultValue }, message: refusal.toolMessage }
+      expect(generated.sourceDriftDomainRefusal(value, refusal.toolResultValue)).toBe(true)
+      expect(generated.sourceDriftDomainRefusal({ ...value, result: { ...value.result, isError: true } }, refusal.toolResultValue)).toBe(false)
+      expect(generated.sourceDriftDomainRefusal({ ...value, message: "wrong result" }, refusal.toolResultValue)).toBe(false)
+    }
+    const additions = Object.keys(phaseTwo.inventoryAfterContext).filter(path => !(path in phaseTwo.inventoryBeforeContext))
+    expect(additions.length).toBe(2)
+    expect(additions).toContain(`.banca/analysis/checkpoints/${canonicalAfter.planId}.json`)
+    expect(additions.filter(path => /^\.banca\/context\/context-\d+\.md$/.test(path)).length).toBe(1)
+    expect(phaseTwo.inventoryFinal).toEqual(phaseTwo.inventoryAfterContext)
+    // Fabricated boundary rows below are a contract fixture only, never a report of DSH execution.
+    const boundaryRow = (label: string) => ({
+      dshExecutableSha256: hash("fixture-cli"), profileIdentitySha256: hash("fixture-profile"),
+      hostIdentitySha256: hash(label), observerIdentitySha256: hash(label), identityMatched: true,
+      spawnObserved: true, kernelStartIdentityObserved: true, exitObserved: true, exitCode: 0,
+      signal: null, timedOut: false, forcedTermination: false, naturalBeforeExitObserved: true, nativeTeardownMarkerObserved: true,
+    })
+    const completeFixture = {
+      probeExecuted: true, executionMode: "source-drift-native-dsh", syntheticProcessFixture: false,
+      phaseOne, phaseTwo, processBoundary: { observationSource: "child_process.spawn+linux-procfs", first: boundaryRow("fixture-A"), second: boundaryRow("fixture-B"), secondStartedAfterFirstExit: true, processesDidNotOverlap: true },
+      workspace: Object.fromEntries(["identitySha256", "firstProcessEndFilesystemIdentitySha256", "secondProcessStartFilesystemIdentitySha256", "secondProcessEndFilesystemIdentitySha256"].map(key => [key, "cd".repeat(32)])),
+      mutation: { file: "capitulos/lote2.tex", utf16LengthBefore: oldLatex.length, utf16LengthAfter: newLatex.length, sha256Before: hash(oldLatex), sha256After: hash(newLatex), afterFirstExit: true, inventoryBefore: beforeInventory, inventoryAfter: phaseTwo.inventoryBeforeContext },
+      canonicalBefore: { planId: computePlanIdentity(beforePlan), manuscriptFingerprint: beforePlan.fingerprint, totalBatches: 5, totalCharacters: 595 },
+      canonicalAfter: { ...canonicalAfter, totalBatches: 5, totalCharacters: 595 }, parentFinalInventory: inventory(workspace),
+    }
+    expect(profileEvidenceContract.validateSourceDriftEvidence(completeFixture)).toEqual([])
+    expect(profileEvidenceContract.validateSourceDriftEvidence({ ...completeFixture, phaseTwo: { ...phaseTwo, probeExecuted: false } }).length).toBeGreaterThan(0)
+    expect(phaseTwo.teardown).toEqual({ disposeCalled: true, agentUnregistered: true, sessionUnregistered: true, teardownFailed: false })
+    expect(agents.size).toBe(0)
+    expect(sessions.size).toBe(0)
+  } finally {
+    if (oldKey === undefined) delete process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
+    else process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY = oldKey
+    if (oldIdentity === undefined) delete process.env.DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256
+    else process.env.DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256 = oldIdentity
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test("selected DSH dependency version checks honor exact and tilde declarations", () => {
