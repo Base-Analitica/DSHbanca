@@ -4772,3 +4772,222 @@ describe("Runner phase-B absence gate decision (#107 R2)", () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Issue #107 R3: the abrupt provider must build the exact envelope its own
+// validator consumes. Inputs below mimic the real sidecars (observer envelope +
+// crossProcessPhaseOne/Two payloads) and parent observations; the builder is the
+// same one called by the runner.
+// ---------------------------------------------------------------------------
+
+function abruptIntegrationInputs(): any {
+  const phaseOne = structuredClone(completeCrossProcessBatchAuditEvidence.phaseOne) as any
+  const phaseTwo = structuredClone(completeCrossProcessBatchAuditEvidence.phaseTwo) as any
+  const readinessObserverIdentitySha256 = "2".repeat(64)
+  const recoveryObserverIdentitySha256 = "3".repeat(64)
+  const workspaceIdentitySha256 = "1".repeat(64)
+  return {
+    phaseOneSidecar: {
+      observerProcessIdentitySha256: readinessObserverIdentitySha256,
+      crossProcessPhaseOne: phaseOne,
+      parentBarrierArmed: true,
+    },
+    phaseTwoSidecar: {
+      observerProcessIdentitySha256: recoveryObserverIdentitySha256,
+      crossProcessPhaseTwo: phaseTwo,
+    },
+    parentObservedHostIdentitySha256: readinessObserverIdentitySha256,
+    barrierObserverIdentitySha256: readinessObserverIdentitySha256,
+    parentVerifiedPersistence: {
+      source: "parent-read-persisted-files",
+      verifiedBeforeSignal: true,
+      checkpointFileParsed: true,
+      receiptFileParsed: true,
+      findingFileParsed: true,
+      workspaceInventorySha256: phaseOne.workspaceInventorySha256,
+      persistence: { ...phaseOne.persistence },
+      checkpoint: { ...phaseOne.checkpoint },
+      receiptCount: 2,
+      receiptBatchIds: [...phaseOne.persistedBatchIds],
+      findingsCount: 1,
+      finding: { ...phaseOne.finding },
+    },
+    firstProcess: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: readinessObserverIdentitySha256,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: null,
+      signal: "SIGKILL",
+      timedOut: false,
+      forcedTermination: true,
+      naturalBeforeExitObserved: false,
+      nativeTeardownMarkerObserved: false,
+      runnerOwnedChild: true,
+      childIdentityRevalidatedBeforeSignal: true,
+      parentBarrierArmed: true,
+      killRequestedByParent: true,
+      killSignalRequested: "SIGKILL",
+      timeoutContainmentSignalsRequested: [],
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    },
+    secondProcess: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: recoveryObserverIdentitySha256,
+      observerIdentitySha256: recoveryObserverIdentitySha256,
+      identityMatched: true,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      forcedTermination: false,
+      naturalBeforeExitObserved: true,
+      nativeTeardownMarkerObserved: true,
+      runnerOwnedChild: true,
+      controlCompleted: true,
+      controlFailed: false,
+      closeObserved: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    },
+    secondStartedAfterFirstExit: true,
+    processesDidNotOverlap: true,
+    workspace: {
+      sameWorkspace: true,
+      preservedBetweenProcesses: true,
+      resetBetweenProcesses: false,
+      identitySha256: workspaceIdentitySha256,
+      firstProcessEndFilesystemIdentitySha256: workspaceIdentitySha256,
+      secondProcessStartFilesystemIdentitySha256: workspaceIdentitySha256,
+      secondProcessEndFilesystemIdentitySha256: workspaceIdentitySha256,
+      firstProcessEndInventorySha256: phaseOne.workspaceInventorySha256,
+      secondProcessStartInventorySha256: phaseOne.workspaceInventorySha256,
+      secondProcessEndInventorySha256: "a".repeat(64),
+    },
+    teardown: {
+      firstExitObserved: true,
+      firstCloseObserved: true,
+      firstTargetAbsentAfterClose: true,
+      firstProcessGroupAbsentAfterClose: true,
+      secondExitObserved: true,
+      secondCloseObserved: true,
+      secondTargetAbsentAfterClose: true,
+      secondProcessGroupAbsentAfterClose: true,
+      secondAgentSessionDisposed: true,
+      teardownFailed: false,
+    },
+  }
+}
+
+async function abruptIntegrationBuilder(): Promise<any> {
+  const runner = await import("../scripts/e2e-dsh-profile.js") as any
+  return runner.buildAbruptRestartEvidence
+}
+
+describe("Abrupt producer → validator integration (#107 R3)", () => {
+  test("the runner builder produces a complete envelope that the full validator accepts as PASS", async () => {
+    const build = await abruptIntegrationBuilder()
+    expect(typeof build).toBe("function")
+    const inputs = abruptIntegrationInputs()
+    const evidence = build(inputs)
+    expect(evidence.totalBatches).toBe(5)
+    expect(evidence.totalCharacters).toBe(595)
+    expect(evidence.planId).toBe(inputs.phaseOneSidecar.crossProcessPhaseOne.planId)
+    expect(evidence.manuscriptFingerprint).toBe(inputs.phaseOneSidecar.crossProcessPhaseOne.manuscriptFingerprint)
+    expect(evidence.planBatchIds).toEqual(inputs.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds)
+    expect(evidence.phaseOne.checkpoint.completedBatches).toBe(2)
+    expect(evidence.phaseTwo.finalCheckpoint.completedBatches).toBe(5)
+    expect(evidence.phaseTwo.synthesis.findingsCount).toBe(1)
+    expect(evidence.processBoundary.first.observerIdentitySha256).toBe(inputs.phaseOneSidecar.observerProcessIdentitySha256)
+    expect(evidence.processBoundary.first.identityMatched).toBe(true)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence)).toEqual([])
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("PASS")
+  })
+
+  test("retains the readiness-envelope observer digest instead of copying the host digest", async () => {
+    const build = await abruptIntegrationBuilder()
+    const inputs = abruptIntegrationInputs()
+    const differentObserver = "d".repeat(64)
+    inputs.phaseOneSidecar.observerProcessIdentitySha256 = differentObserver
+    inputs.barrierObserverIdentitySha256 = differentObserver
+    const evidence = build(inputs)
+    expect(evidence.processBoundary.first.observerIdentitySha256).toBe(differentObserver)
+    expect(evidence.processBoundary.first.hostIdentitySha256).toBe(inputs.parentObservedHostIdentitySha256)
+    expect(evidence.processBoundary.first.identityMatched).toBe(false)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("rejects missing or contradictory projections and identities from builder inputs", async () => {
+    const build = await abruptIntegrationBuilder()
+    const cases: Array<[string, (input: any) => void]> = [
+      ["missing readiness observer digest", (i) => { delete i.phaseOneSidecar.observerProcessIdentitySha256 }],
+      ["null readiness observer digest", (i) => { i.phaseOneSidecar.observerProcessIdentitySha256 = null }],
+      ["readiness observer digest diverges from host", (i) => { i.phaseOneSidecar.observerProcessIdentitySha256 = "9".repeat(64) }],
+      ["barrier digest diverges from readiness", (i) => { i.barrierObserverIdentitySha256 = "8".repeat(64) }],
+      ["missing phase-one planId", (i) => { delete i.phaseOneSidecar.crossProcessPhaseOne.planId }],
+      ["phase-two planId diverges", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.resumeQuery.checkpointBefore.planId = "5".repeat(64) }],
+      ["missing manuscript fingerprint", (i) => { delete i.phaseOneSidecar.crossProcessPhaseOne.manuscriptFingerprint }],
+      ["phase-two fingerprint diverges", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.finalCheckpoint.manuscriptFingerprint = "6".repeat(64) }],
+      ["incompatible total batches", (i) => { i.phaseOneSidecar.crossProcessPhaseOne.totalBatches = 4 }],
+      ["incompatible total characters", (i) => { i.phaseOneSidecar.crossProcessPhaseOne.totalCharacters = 597 }],
+      ["duplicated batch ids", (i) => {
+        const ids = i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds
+        ids[1] = ids[0]
+      }],
+      ["reordered batch ids", (i) => {
+        const ids = i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds
+        ;[ids[0], ids[1]] = [ids[1], ids[0]]
+      }],
+      ["missing batch id", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds.pop() }],
+      ["incomplete synthesis", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.completedBatches = 4 }],
+      ["duplicated synthesis finding", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.findingsCount = 2 }],
+      ["missing second teardown absence proof", (i) => { delete i.teardown.secondTargetAbsentAfterClose }],
+      ["false first teardown absence proof", (i) => { i.teardown.firstProcessGroupAbsentAfterClose = false }],
+      ["missing phase-two sidecar payload", (i) => { delete i.phaseTwoSidecar.crossProcessPhaseTwo }],
+    ]
+    for (const [label, mutate] of cases) {
+      const inputs = abruptIntegrationInputs()
+      mutate(inputs)
+      const evidence = build(inputs)
+      expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length, label).toBeGreaterThan(0)
+      expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence), label).toBe("FAIL")
+    }
+  })
+
+  test("phase B receives the flat resume expectation the resume probe consumes", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.buildAbruptResumeExpectation).toBe("function")
+    const inputs = abruptIntegrationInputs()
+    const phaseOne = inputs.phaseOneSidecar.crossProcessPhaseOne
+    const expectation = runner.buildAbruptResumeExpectation(phaseOne, phaseOne.workspaceInventorySha256)
+    for (const key of ["probeExecuted", "workspaceIdentitySha256", "planId", "manuscriptFingerprint", "persistence", "completedBatchIds", "checkpoint", "finding"]) {
+      expect(Object.prototype.hasOwnProperty.call(expectation, key), key).toBe(true)
+      expect(expectation[key], key).toEqual(phaseOne[key])
+    }
+    expect(expectation.workspaceInventorySha256).toBe(phaseOne.workspaceInventorySha256)
+    expect(Object.prototype.hasOwnProperty.call(expectation, "phaseOne")).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(expectation, "parentVerifiedPersistence")).toBe(false)
+    const empty = runner.buildAbruptResumeExpectation(undefined, "a".repeat(64))
+    expect(empty.planId).toBeUndefined()
+    expect(empty.probeExecuted).toBeUndefined()
+    expect(empty.workspaceInventorySha256).toBe("a".repeat(64))
+  })
+
+  test("the retired provider shape without root projections or envelope identity is rejected", async () => {
+    const build = await abruptIntegrationBuilder()
+    const evidence = build(abruptIntegrationInputs()) as any
+    for (const key of ["totalBatches", "totalCharacters", "planId", "manuscriptFingerprint", "planBatchIds"]) delete evidence[key]
+    evidence.processBoundary.first.observerIdentitySha256 = null
+    evidence.processBoundary.first.identityMatched = false
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+})

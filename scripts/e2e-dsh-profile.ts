@@ -554,6 +554,110 @@ export function abruptSecondProcessAbsenceDecision(input: {
   }
 }
 
+function isRecordValue(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Phase A's observer identity must come from the readiness envelope digest the
+ * parent already validated, and must equal both the parent's host observation
+ * and the post-validation barrier confirmation. The host digest is never copied
+ * into the observer field, so a missing/mismatched envelope keeps
+ * `identityMatched: false` and fails closed in the contract.
+ */
+export function abruptFirstProcessIdentityFields(input: {
+  readinessObserverIdentitySha256: unknown
+  parentObservedHostIdentitySha256: string | null
+  barrierObserverIdentitySha256: unknown
+}): { observerIdentitySha256: string | null; identityMatched: boolean } {
+  const readiness = typeof input.readinessObserverIdentitySha256 === "string" && input.readinessObserverIdentitySha256.length > 0
+    ? input.readinessObserverIdentitySha256
+    : null
+  const barrier = typeof input.barrierObserverIdentitySha256 === "string" && input.barrierObserverIdentitySha256.length > 0
+    ? input.barrierObserverIdentitySha256
+    : null
+  const host = input.parentObservedHostIdentitySha256
+  return {
+    observerIdentitySha256: readiness,
+    identityMatched: readiness !== null && barrier !== null && host !== null && readiness === barrier && readiness === host,
+  }
+}
+
+/**
+ * Builds the exact #107 envelope consumed by `validateAbruptRestartEvidence`.
+ * Academic root projections are derived from the validated phase-A readiness
+ * sidecar and phase-B synthesis; observer identity is derived from the retained
+ * readiness envelope. Missing or contradictory inputs produce undefined/false
+ * projections instead of constants or fixture fallbacks, so the strict validator
+ * rejects them.
+ */
+export function buildAbruptRestartEvidence(input: {
+  phaseOneSidecar: unknown
+  phaseTwoSidecar: unknown
+  parentObservedHostIdentitySha256: string | null
+  barrierObserverIdentitySha256: unknown
+  parentVerifiedPersistence: Record<string, unknown> | null
+  firstProcess: Record<string, unknown>
+  secondProcess: Record<string, unknown>
+  secondStartedAfterFirstExit: boolean
+  processesDidNotOverlap: boolean
+  workspace: Record<string, unknown>
+  teardown: Record<string, unknown>
+}): Record<string, unknown> {
+  const phaseOneSidecar = isRecordValue(input.phaseOneSidecar) ? input.phaseOneSidecar : undefined
+  const phaseTwoSidecar = isRecordValue(input.phaseTwoSidecar) ? input.phaseTwoSidecar : undefined
+  const phaseOne = phaseOneSidecar?.crossProcessPhaseOne
+  const phaseTwo = phaseTwoSidecar?.crossProcessPhaseTwo
+  const phaseOneRecord = isRecordValue(phaseOne) ? phaseOne : undefined
+  const phaseTwoRecord = isRecordValue(phaseTwo) ? phaseTwo : undefined
+  const synthesis = isRecordValue(phaseTwoRecord?.synthesis) ? phaseTwoRecord.synthesis : undefined
+  const firstProcessIdentity = abruptFirstProcessIdentityFields({
+    readinessObserverIdentitySha256: phaseOneSidecar?.observerProcessIdentitySha256,
+    parentObservedHostIdentitySha256: input.parentObservedHostIdentitySha256,
+    barrierObserverIdentitySha256: input.barrierObserverIdentitySha256,
+  })
+  return {
+    probeExecuted: true,
+    executionMode: "abrupt-restart-native-dsh",
+    syntheticProcessFixture: false,
+    totalBatches: phaseOneRecord?.totalBatches,
+    totalCharacters: phaseOneRecord?.totalCharacters,
+    planId: phaseOneRecord?.planId,
+    manuscriptFingerprint: phaseOneRecord?.manuscriptFingerprint,
+    planBatchIds: synthesis?.orderedBatchIds,
+    phaseOne,
+    phaseTwo,
+    parentVerifiedPersistence: input.parentVerifiedPersistence,
+    processBoundary: {
+      observationSource: "child_process.spawn+linux-procfs",
+      first: { ...input.firstProcess, ...firstProcessIdentity },
+      second: input.secondProcess,
+      secondStartedAfterFirstExit: input.secondStartedAfterFirstExit,
+      processesDidNotOverlap: input.processesDidNotOverlap,
+    },
+    workspace: input.workspace,
+    teardown: input.teardown,
+  }
+}
+
+/**
+ * Phase B's observer consumes the flat phase-one expectation envelope used by
+ * `runCrossProcessResumeProbe` (the same shape #103 passes), not the nested
+ * report projection. Returns the plan-bound payload plus the parent-observed
+ * durable inventory hash so B revalidates the unchanged workspace before
+ * resuming. Missing phase-one data yields an expectation without plan fields,
+ * which the probe rejects fail-closed.
+ */
+export function buildAbruptResumeExpectation(
+  phaseOne: unknown,
+  parentObservedInventorySha256: unknown,
+): Record<string, unknown> {
+  return {
+    ...(isRecordValue(phaseOne) ? phaseOne : {}),
+    workspaceInventorySha256: parentObservedInventorySha256,
+  }
+}
+
 export function mayStartAbruptPhaseTwo(input: {
   parentBarrierArmed: boolean
   parentVerifiedPersistence: boolean
@@ -5542,6 +5646,8 @@ async function main(): Promise<void> {
     report.limitations.push("Issue #107 abruptRestart remains BLOCKED / NEEDS_APPROVAL; no abrupt-restart DSH process was launched.")
   } else {
     let abruptPhaseOne: any = null
+    let abruptReadinessSidecar: Record<string, any> | null = null
+    let abruptBarrierObserverIdentitySha256: string | null = null
     let parentVerifiedPersistence: Record<string, unknown> | null = null
     let abruptFirstChild: ReturnType<typeof spawn> | undefined
     let firstIdentityRevalidatedBeforeSignal = false
@@ -5587,6 +5693,10 @@ async function main(): Promise<void> {
             sidecar?.parentBarrierArmed !== true ||
             abruptPhaseOne?.workspaceIdentitySha256 !== abruptWorkspaceIdentitySha256
           ) throw new Error("phase-one readiness did not prove durable state, a waiting parent barrier, and matching child identity")
+          // Retain the original readiness envelope after the parent validated its
+          // observer digest; the evidence builder must use this digest, not the
+          // host-observed digest copied into the observer field.
+          abruptReadinessSidecar = sidecar
           const parentValidation = verifyParentAbruptRestartPersistence(abruptRestartWorkspace, abruptPhaseOne)
           if (parentValidation.errors.length > 0 || !parentValidation.evidence) {
             throw new Error("parent failed raw persisted checkpoint, receipt, finding, hash, or inventory validation")
@@ -5599,6 +5709,9 @@ async function main(): Promise<void> {
             parentBarrier?.observerProcessIdentitySha256 !== hostIdentity ||
             parentBarrier?.parentValidationAcknowledged !== true
           ) throw new Error("phase-A child did not enter the post-validation parent-signal barrier")
+          abruptBarrierObserverIdentitySha256 = typeof parentBarrier?.observerProcessIdentitySha256 === "string"
+            ? parentBarrier.observerProcessIdentitySha256
+            : null
           firstParentBarrierArmed = true
           const preSignalWorkspaceIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
             abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
@@ -5634,13 +5747,10 @@ async function main(): Promise<void> {
       )
       const firstProcessGroupAbsentAfterClose = abruptFirstBoot.closeObserved === true && processGroupAbsentAfterClose(abruptFirstChild?.pid)
       if (!firstTargetAbsentAfterClose || !firstProcessGroupAbsentAfterClose) preserveScratchForSafety = true
-      const firstAbruptProof = {
+      const firstProcessObservation = {
         dshExecutableSha256,
         profileIdentitySha256,
         hostIdentitySha256: abruptFirstBoot.hostProcessIdentitySha256 ?? null,
-        observerIdentitySha256: abruptPhaseOne?.observerProcessIdentitySha256 ?? null,
-        identityMatched: abruptFirstBoot.hostProcessIdentitySha256 !== null &&
-          abruptFirstBoot.hostProcessIdentitySha256 === abruptPhaseOne?.observerProcessIdentitySha256,
         spawnObserved: abruptFirstBoot.spawnObserved === true,
         kernelStartIdentityObserved: Boolean(abruptFirstBoot.hostProcessIdentitySha256),
         exitObserved: abruptFirstBoot.exitObserved === true,
@@ -5658,6 +5768,14 @@ async function main(): Promise<void> {
         timeoutContainmentSignalsRequested: abruptFirstBoot.timeoutContainmentSignalsRequested ?? [],
         targetAbsentAfterClose: firstTargetAbsentAfterClose,
         processGroupAbsentAfterClose: firstProcessGroupAbsentAfterClose,
+      }
+      const firstAbruptProof = {
+        ...firstProcessObservation,
+        ...abruptFirstProcessIdentityFields({
+          readinessObserverIdentitySha256: abruptReadinessSidecar?.observerProcessIdentitySha256,
+          parentObservedHostIdentitySha256: abruptFirstBoot.hostProcessIdentitySha256 ?? null,
+          barrierObserverIdentitySha256: abruptBarrierObserverIdentitySha256,
+        }),
       }
       if (!mayStartAbruptPhaseTwo({
         parentBarrierArmed: firstParentBarrierArmed,
@@ -5696,14 +5814,14 @@ async function main(): Promise<void> {
         fail("Issue #107 stopped before phase B because the durable workspace identity or inventory changed", "FAIL")
         return
       }
+      const abruptResumeExpectation = buildAbruptResumeExpectation(
+        abruptPhaseOne,
+        parentVerifiedPersistence.workspaceInventorySha256,
+      )
       const abruptResumeEnv: NodeJS.ProcessEnv = {
         ...abruptInitialEnv,
         DSHBANCA_DSH_PROFILE_PHASE: "abrupt-resume",
-        DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE: JSON.stringify({
-          probeExecuted: true,
-          phaseOne: abruptPhaseOne,
-          parentVerifiedPersistence,
-        }),
+        DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE: JSON.stringify(abruptResumeExpectation),
       }
       let abruptSecondChild: ReturnType<typeof spawn> | undefined
       let abruptSecondProcessGroupId: number | null = null
@@ -5765,20 +5883,20 @@ async function main(): Promise<void> {
       const secondProcessEndFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
         abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
       )
-      const abruptEvidence = {
-        probeExecuted: true,
-        executionMode: "abrupt-restart-native-dsh",
-        syntheticProcessFixture: false,
-        phaseOne: abruptPhaseOne,
-        phaseTwo,
+      // The single builder used by the real runner derives the academic root
+      // projections from the retained validated sidecars and the observer
+      // identity from the readiness envelope, so producer and validator cannot
+      // drift apart again.
+      const abruptEvidence = buildAbruptRestartEvidence({
+        phaseOneSidecar: abruptReadinessSidecar,
+        phaseTwoSidecar: abruptSecondSidecar,
+        parentObservedHostIdentitySha256: abruptFirstBoot.hostProcessIdentitySha256 ?? null,
+        barrierObserverIdentitySha256: abruptBarrierObserverIdentitySha256,
         parentVerifiedPersistence,
-        processBoundary: {
-          observationSource: "child_process.spawn+linux-procfs",
-          first: firstAbruptProof,
-          second: abruptSecondProof,
-          secondStartedAfterFirstExit: abruptFirstBoot.exitObserved === true && abruptFirstBoot.closeObserved === true,
-          processesDidNotOverlap: abruptFirstBoot.exitObserved === true && abruptFirstBoot.closeObserved === true,
-        },
+        firstProcess: firstProcessObservation,
+        secondProcess: abruptSecondProof,
+        secondStartedAfterFirstExit: abruptFirstBoot.exitObserved === true && abruptFirstBoot.closeObserved === true,
+        processesDidNotOverlap: abruptFirstBoot.exitObserved === true && abruptFirstBoot.closeObserved === true,
         workspace: {
           sameWorkspace: true,
           preservedBetweenProcesses: true,
@@ -5805,7 +5923,7 @@ async function main(): Promise<void> {
             phaseTwo?.teardown?.teardownFailed === false,
           teardownFailed: phaseTwo?.teardown?.teardownFailed === true,
         },
-      }
+      })
       const abruptErrors = validateAbruptRestartEvidence(abruptEvidence)
       abruptRestartStatus = classifyAbruptRestartEvidenceStatus(abruptEvidence)
       report.stages.abruptRestart = {
