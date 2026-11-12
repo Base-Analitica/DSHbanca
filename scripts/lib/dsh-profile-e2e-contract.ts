@@ -2491,9 +2491,13 @@ function validateCrossProcessBatchAuditEvidenceCore(value: unknown, firstProcess
         row.timedOut !== false ||
         row.forcedTermination !== false ||
         row.naturalBeforeExitObserved !== true ||
-        row.nativeTeardownMarkerObserved !== true
+        row.nativeTeardownMarkerObserved !== true ||
+        row.closeObserved !== true ||
+        row.processGroupIdObserved !== true ||
+        row.targetAbsentAfterClose !== true ||
+        row.processGroupAbsentAfterClose !== true
       ) {
-        errors.push("recovery DSH process must be an independently owned child with validated startup and timeout control")
+        errors.push("recovery DSH process must be an independently owned child with validated exit and close, a private observed process group, and no surviving target or process-group member after close")
       }
     } else if (
       !isRecord(row) ||
@@ -2940,6 +2944,9 @@ export function validateAbruptRestartEvidence(value: unknown): string[] {
     "parent-parsed findings must contain the original valid finding exactly once",
   )
   const teardown = isRecord(value.teardown) ? value.teardown : undefined
+  const secondBoundary = isRecord(value.processBoundary) && isRecord(value.processBoundary.second)
+    ? value.processBoundary.second
+    : undefined
   require(
     teardown?.firstExitObserved === true &&
       teardown.firstCloseObserved === true &&
@@ -2947,9 +2954,13 @@ export function validateAbruptRestartEvidence(value: unknown): string[] {
       teardown.firstProcessGroupAbsentAfterClose === true &&
       teardown.secondExitObserved === true &&
       teardown.secondCloseObserved === true &&
+      teardown.secondTargetAbsentAfterClose === true &&
+      teardown.secondProcessGroupAbsentAfterClose === true &&
+      teardown.secondTargetAbsentAfterClose === secondBoundary?.targetAbsentAfterClose &&
+      teardown.secondProcessGroupAbsentAfterClose === secondBoundary?.processGroupAbsentAfterClose &&
       teardown.secondAgentSessionDisposed === true &&
       teardown.teardownFailed === false,
-    "abrupt DSH child and runner-owned process group, independent recovery child, Agent/Session, and teardown must all be observed without survivors",
+    "abrupt DSH child and runner-owned process group, independent recovery child target and private process group, Agent/Session, and teardown must all be observed without survivors; second-process absence must be present, true, and consistent with processBoundary.second",
   )
   return errors
 }

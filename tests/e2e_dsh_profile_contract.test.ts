@@ -4061,6 +4061,10 @@ function abruptRestartEvidenceFixture(): any {
     runnerOwnedChild: true,
     controlCompleted: true,
     controlFailed: false,
+    closeObserved: true,
+    processGroupIdObserved: true,
+    targetAbsentAfterClose: true,
+    processGroupAbsentAfterClose: true,
   }
   evidence.processBoundary.first = {
     ...evidence.processBoundary.first,
@@ -4099,9 +4103,23 @@ function abruptRestartEvidenceFixture(): any {
     firstProcessGroupAbsentAfterClose: true,
     secondExitObserved: true,
     secondCloseObserved: true,
+    secondTargetAbsentAfterClose: true,
+    secondProcessGroupAbsentAfterClose: true,
     secondAgentSessionDisposed: true,
     teardownFailed: false,
   }
+  return evidence
+}
+
+// The former positive fixture before R2: it never proves that phase B's target
+// and private process group are empty after close.
+function abruptRestartEvidenceWithoutSecondAbsence(): any {
+  const evidence = abruptRestartEvidenceFixture()
+  for (const key of ["closeObserved", "processGroupIdObserved", "targetAbsentAfterClose", "processGroupAbsentAfterClose"]) {
+    delete evidence.processBoundary.second[key]
+  }
+  delete evidence.teardown.secondTargetAbsentAfterClose
+  delete evidence.teardown.secondProcessGroupAbsentAfterClose
   return evidence
 }
 
@@ -4151,9 +4169,60 @@ describe("DSH abrupt process-restart evidence gate (#107)", () => {
     ["cleanup or teardown failed", (e: any) => { e.teardown.teardownFailed = true }],
     ["target process survived close", (e: any) => { e.teardown.firstTargetAbsentAfterClose = false }],
     ["runner-owned process group has survivor", (e: any) => { e.teardown.firstProcessGroupAbsentAfterClose = false }],
+    ["recovery target process survived close", (e: any) => { e.processBoundary.second.targetAbsentAfterClose = false }],
+    ["recovery process group has survivor", (e: any) => { e.processBoundary.second.processGroupAbsentAfterClose = false }],
+    ["recovery private process group not observed", (e: any) => { e.processBoundary.second.processGroupIdObserved = false }],
+    ["recovery close not observed after exit", (e: any) => { e.processBoundary.second.closeObserved = false }],
+    ["teardown claims surviving recovery target absence", (e: any) => { e.teardown.secondTargetAbsentAfterClose = false }],
+    ["teardown claims surviving recovery group member", (e: any) => { e.teardown.secondProcessGroupAbsentAfterClose = false }],
   ])("fails closed for %s", (_label, mutate) => {
     const evidence = abruptRestartEvidenceFixture()
     mutate(evidence)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("rejects the former positive fixture once phase-B absence and private-PGID proof are absent", () => {
+    const evidence = abruptRestartEvidenceWithoutSecondAbsence()
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("requires every phase-B absence, close, and private-PGID observation", () => {
+    const required: Array<[string, (e: any) => void]> = [
+      ["processBoundary.second.closeObserved", (e) => { delete e.processBoundary.second.closeObserved }],
+      ["processBoundary.second.processGroupIdObserved", (e) => { delete e.processBoundary.second.processGroupIdObserved }],
+      ["processBoundary.second.targetAbsentAfterClose", (e) => { delete e.processBoundary.second.targetAbsentAfterClose }],
+      ["processBoundary.second.processGroupAbsentAfterClose", (e) => { delete e.processBoundary.second.processGroupAbsentAfterClose }],
+      ["teardown.secondTargetAbsentAfterClose", (e) => { delete e.teardown.secondTargetAbsentAfterClose }],
+      ["teardown.secondProcessGroupAbsentAfterClose", (e) => { delete e.teardown.secondProcessGroupAbsentAfterClose }],
+    ]
+    for (const [field, mutate] of required) {
+      const evidence = abruptRestartEvidenceFixture()
+      mutate(evidence)
+      expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length, field).toBeGreaterThan(0)
+      expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence), field).toBe("FAIL")
+    }
+  })
+
+  test("rejects contradictory phase-B absence between process boundary and teardown", () => {
+    const boundaryOnly = abruptRestartEvidenceFixture()
+    boundaryOnly.processBoundary.second.targetAbsentAfterClose = false
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(boundaryOnly).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(boundaryOnly)).toBe("FAIL")
+    const teardownOnly = abruptRestartEvidenceFixture()
+    teardownOnly.teardown.secondProcessGroupAbsentAfterClose = false
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(teardownOnly).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(teardownOnly)).toBe("FAIL")
+  })
+
+  test("a simulated surviving member of phase B's private process group fails closed", () => {
+    const stat = (pid: number, groupId: number) => `${pid} (dsh-child) S 1 ${groupId} ${groupId} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+    const groupId = 7301
+    const survivorRows = [{ pid: 7302, stat: stat(7302, groupId) }]
+    expect(processGroupAbsentFromProcRows(groupId, survivorRows)).toBe(false)
+    const evidence = abruptRestartEvidenceFixture()
+    evidence.processBoundary.second.processGroupAbsentAfterClose = processGroupAbsentFromProcRows(groupId, survivorRows)
     expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
     expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
   })
@@ -4614,5 +4683,62 @@ describe("P1 report-writer and controlled-process regressions", () => {
       { processGroupAbsentAfterClose: false },
       { nativeTeardownMarkerObserved: true },
     ]) expect(mayStartAbruptPhaseTwo({ ...ready, ...change })).toBe(false)
+  })
+})
+
+describe("Runner phase-B absence gate decision (#107 R2)", () => {
+  test("preserves scratch unless B's target and private process group are absent after exit and close", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.abruptSecondProcessAbsenceDecision).toBe("function")
+    const ready = {
+      closeObserved: true,
+      controlCompleted: true,
+      runnerOwnedChild: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    }
+    expect(runner.abruptSecondProcessAbsenceDecision(ready)).toEqual({
+      closeConfirmed: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+      preserveScratch: false,
+    })
+    // Exit 0 plus close alone (or any unproven observation) cannot accept the gate.
+    for (const change of [
+      { closeObserved: false },
+      { controlCompleted: false },
+      { runnerOwnedChild: false },
+      { processGroupIdObserved: false },
+      { targetAbsentAfterClose: false },
+      { processGroupAbsentAfterClose: false },
+    ]) {
+      const decision = runner.abruptSecondProcessAbsenceDecision({ ...ready, ...change })
+      expect(decision.preserveScratch, JSON.stringify(change)).toBe(true)
+      expect(decision.targetAbsentAfterClose && decision.processGroupAbsentAfterClose, JSON.stringify(change)).toBe(false)
+    }
+  })
+
+  test("ties the read-only procfs survivor and scan-failure observations to scratch preservation", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    const stat = (pid: number, groupId: number) => `${pid} (dsh-child) S 1 ${groupId} ${groupId} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+    const ready = {
+      closeObserved: true,
+      controlCompleted: true,
+      runnerOwnedChild: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    }
+    const survivor = processGroupAbsentFromProcRows(8101, [{ pid: 8102, stat: stat(8102, 8101) }])
+    const unreadableScan = processGroupAbsentFromProcRows(8101, [])
+    expect(survivor).toBe(false)
+    expect(unreadableScan).toBe(false)
+    for (const observed of [survivor, unreadableScan]) {
+      const decision = runner.abruptSecondProcessAbsenceDecision({ ...ready, processGroupAbsentAfterClose: observed })
+      expect(decision.processGroupAbsentAfterClose).toBe(false)
+      expect(decision.preserveScratch).toBe(true)
+    }
   })
 })

@@ -504,6 +504,45 @@ function processGroupAbsentAfterClose(groupId: number | undefined): boolean {
   return processGroupAbsentFromProcRows(groupId, rows)
 }
 
+// Read-only observation of the child's own process group before it is reaped.
+// The runner spawns detached, so the private group must be the direct child PID;
+// a missing or different PGID is ambiguous and must fail closed.
+function linuxProcessGroupIdOfProcess(pid: number | undefined): number | null {
+  if (process.platform !== "linux" || pid === undefined || !Number.isSafeInteger(pid) || pid <= 1) return null
+  try {
+    return parseLinuxProcStatProcessGroupId(readFileSync(`/proc/${pid}/stat`, "utf8"))
+  } catch {
+    return null
+  }
+}
+
+export function abruptSecondProcessAbsenceDecision(input: {
+  closeObserved: boolean
+  controlCompleted: boolean
+  runnerOwnedChild: boolean
+  processGroupIdObserved: boolean
+  targetAbsentAfterClose: boolean
+  processGroupAbsentAfterClose: boolean
+}): {
+  closeConfirmed: boolean
+  processGroupIdObserved: boolean
+  targetAbsentAfterClose: boolean
+  processGroupAbsentAfterClose: boolean
+  preserveScratch: boolean
+} {
+  const closeConfirmed = input.closeObserved === true && input.controlCompleted === true && input.runnerOwnedChild === true
+  const processGroupIdObserved = input.processGroupIdObserved === true
+  const targetAbsentAfterClose = closeConfirmed && input.targetAbsentAfterClose === true
+  const processGroupAbsentAfterClose = closeConfirmed && processGroupIdObserved && input.processGroupAbsentAfterClose === true
+  return {
+    closeConfirmed,
+    processGroupIdObserved,
+    targetAbsentAfterClose,
+    processGroupAbsentAfterClose,
+    preserveScratch: !(targetAbsentAfterClose && processGroupAbsentAfterClose),
+  }
+}
+
 export function mayStartAbruptPhaseTwo(input: {
   parentBarrierArmed: boolean
   parentVerifiedPersistence: boolean
@@ -5656,6 +5695,7 @@ async function main(): Promise<void> {
         }),
       }
       let abruptSecondChild: ReturnType<typeof spawn> | undefined
+      let abruptSecondProcessGroupId: number | null = null
       abruptPhaseTwoStarted = true
       const abruptSecondBoot = await runDsh(nodeExecutable, dshExecutable, abruptArgs, {
         cwd: scratch,
@@ -5667,6 +5707,7 @@ async function main(): Promise<void> {
           if (signal.aborted || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
             throw new Error("recovery phase DSH child identity did not match the runner-owned invocation")
           }
+          abruptSecondProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)
         },
         onControlTimeout: (child, hostIdentity, maySignal) =>
           terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGTERM", maySignal)
@@ -5677,6 +5718,25 @@ async function main(): Promise<void> {
       })
       const abruptSecondSidecar = existsSync(abruptObserverResultTwo)
         ? JSON.parse(readFileSync(abruptObserverResultTwo, "utf8")) : null
+      // Phase B must prove, after its own observed exit/close, that the direct
+      // child target and the visible members of its private process group are
+      // gone. The private PGID is read from the child's own procfs entry while
+      // it is alive; an unreadable or non-private group fails closed and keeps
+      // the scratch directory for inspection.
+      const secondProcessGroupIdObserved = abruptSecondChild?.pid !== undefined &&
+        abruptSecondProcessGroupId !== null && abruptSecondProcessGroupId === abruptSecondChild.pid
+      const secondAbsenceDecision = abruptSecondProcessAbsenceDecision({
+        closeObserved: abruptSecondBoot.closeObserved === true,
+        controlCompleted: abruptSecondBoot.controlCompleted === true,
+        runnerOwnedChild: abruptSecondChild?.pid !== undefined,
+        processGroupIdObserved: secondProcessGroupIdObserved,
+        targetAbsentAfterClose: processTargetAbsentAfterClose(
+          abruptSecondChild?.pid, abruptSecondBoot.hostProcessIdentitySha256 ?? null, processIdentityKey,
+        ),
+        processGroupAbsentAfterClose: secondProcessGroupIdObserved &&
+          processGroupAbsentAfterClose(abruptSecondProcessGroupId ?? undefined),
+      })
+      if (secondAbsenceDecision.preserveScratch) preserveScratchForSafety = true
       const abruptSecondProof = {
         ...sourceDriftProcessProof(
           abruptSecondBoot, abruptSecondSidecar, abruptTeardownMarkerTwo, dshExecutableSha256, profileIdentitySha256,
@@ -5684,6 +5744,10 @@ async function main(): Promise<void> {
         runnerOwnedChild: abruptSecondChild?.pid !== undefined,
         controlCompleted: abruptSecondBoot.controlCompleted === true,
         controlFailed: abruptSecondBoot.controlFailed === true,
+        closeObserved: abruptSecondBoot.closeObserved === true,
+        processGroupIdObserved: secondAbsenceDecision.processGroupIdObserved,
+        targetAbsentAfterClose: secondAbsenceDecision.targetAbsentAfterClose,
+        processGroupAbsentAfterClose: secondAbsenceDecision.processGroupAbsentAfterClose,
       }
       const phaseTwo = abruptSecondSidecar?.crossProcessPhaseTwo
       const secondProcessEndFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
@@ -5722,6 +5786,8 @@ async function main(): Promise<void> {
           firstProcessGroupAbsentAfterClose,
           secondExitObserved: abruptSecondBoot.exitObserved === true,
           secondCloseObserved: abruptSecondBoot.closeObserved === true,
+          secondTargetAbsentAfterClose: secondAbsenceDecision.targetAbsentAfterClose,
+          secondProcessGroupAbsentAfterClose: secondAbsenceDecision.processGroupAbsentAfterClose,
           secondAgentSessionDisposed: phaseTwo?.teardown?.disposeCalled === true &&
             phaseTwo?.teardown?.agentUnregistered === true && phaseTwo?.teardown?.sessionUnregistered === true &&
             phaseTwo?.teardown?.teardownFailed === false,
