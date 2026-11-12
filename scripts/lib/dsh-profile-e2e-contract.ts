@@ -4015,8 +4015,8 @@ export function validateAbruptTerminalReceipt(value: unknown): string[] {
   if (value.schemaVersion !== abruptTerminalReceiptSchemaVersion) errors.push("terminal receipt schema version is not supported")
   if (value.status !== "PASS" && value.status !== "FAIL" && value.status !== "BLOCKED") errors.push("terminal receipt status must be PASS, FAIL, or BLOCKED")
   if (!isSha256Digest(value.evidenceReportSha256)) errors.push("terminal receipt must bind the SHA-256 of the persisted evidence report bytes")
-  if (!isRepositoryRevisionDigest(value.repositorySha) && !isSha256Digest(value.repositorySha)) {
-    errors.push("terminal receipt must bind the audited checkout SHA identity")
+  if (!isRepositoryRevisionDigest(value.repositorySha)) {
+    errors.push("terminal receipt must bind the audited checkout revision (40-hex git SHA)")
   }
   const sandbox = isRecord(value.sandbox) ? value.sandbox : undefined
   if (!sandbox || typeof sandbox.attempted !== "boolean" || typeof sandbox.removed !== "boolean" || typeof sandbox.observed !== "boolean") {
@@ -4063,13 +4063,38 @@ export function validateAbruptEvidencePair(input: {
     if (report.evidenceStatus === "PASS" && report.terminalState !== "pending-cleanup") {
       errors.push("valid academic evidence with an unobserved cleanup must be pending-cleanup")
     }
+    if (report.evidenceStatus === "PASS") {
+      const stages = isRecord(report.stages) ? report.stages : undefined
+      const gateSummary = stages && isRecord(stages.gateSummary) ? stages.gateSummary : undefined
+      const abruptStage = stages && isRecord(stages.abruptRestart) ? stages.abruptRestart : undefined
+      const crossProcess = stages && isRecord(stages.crossProcessBatchAudit) ? stages.crossProcessBatchAudit : undefined
+      const drift = stages && isRecord(stages.sourceDrift) ? stages.sourceDrift : undefined
+      if (!abruptStage || abruptStage.status !== "PASS") {
+        errors.push("pre-cleanup evidence report must carry the validated #107 subgate PASS evidence")
+      }
+      if (abruptStage && (!Array.isArray(abruptStage.validationErrors) || abruptStage.validationErrors.length !== 0)) {
+        errors.push("pre-cleanup evidence report must carry empty #107 validation errors")
+      }
+      if (!crossProcess || crossProcess.status !== "PASS") errors.push("pre-cleanup evidence report must carry #103 recovery PASS evidence")
+      if (!drift || drift.status !== "PASS") errors.push("pre-cleanup evidence report must carry #105 source-drift PASS evidence")
+      if (!gateSummary || gateSummary.overallStatus === "PASS") {
+        errors.push("pre-cleanup gate summary must remain non-conclusive (never nested integral PASS)")
+      }
+    }
     const sandbox = isRecord(report.sandbox) ? report.sandbox : undefined
     if (!sandbox || sandbox.removed !== null) errors.push("pre-cleanup evidence report must leave sandbox.removed unknown (null)")
-    if (isSha256Digest(input.evidenceReportSha256) && isRecord(input.evidenceReportBytes)) {
-      const bytesHash = createHash("sha256").update(JSON.stringify(input.evidenceReportBytes), "utf8").digest("hex")
-      if (bytesHash !== input.evidenceReportSha256) errors.push("evidence report digest does not match the exact persisted bytes")
-    } else if (!isSha256Digest(input.evidenceReportSha256)) {
+    if (!isSha256Digest(input.evidenceReportSha256)) {
       errors.push("evidence report digest must be the SHA-256 of the persisted bytes")
+    } else if (input.evidenceReportBytes !== undefined) {
+      const bytes = typeof input.evidenceReportBytes === "string"
+        ? Buffer.from(input.evidenceReportBytes, "utf8")
+        : input.evidenceReportBytes instanceof Uint8Array ? Buffer.from(input.evidenceReportBytes) : null
+      if (bytes === null) {
+        errors.push("evidence report bytes must be the persisted string or byte buffer")
+      } else {
+        const bytesHash = createHash("sha256").update(bytes).digest("hex")
+        if (bytesHash !== input.evidenceReportSha256) errors.push("evidence report digest does not match the exact persisted bytes")
+      }
     }
   }
   const receipt = isRecord(input.terminalReceipt) ? input.terminalReceipt : undefined
@@ -4080,10 +4105,9 @@ export function validateAbruptEvidencePair(input: {
     if (report && receipt.evidenceReportSha256 !== input.evidenceReportSha256) {
       errors.push("terminal receipt digest does not match the persisted evidence report bytes")
     }
-    if (
-      (isSha256Digest(input.repositorySha) || isRepositoryRevisionDigest(input.repositorySha)) &&
-      receipt.repositorySha !== input.repositorySha
-    ) {
+    if (!isRepositoryRevisionDigest(input.repositorySha)) {
+      errors.push("expected audited checkout revision is missing or not a 40-hex git SHA")
+    } else if (receipt.repositorySha !== input.repositorySha) {
       errors.push("terminal receipt checkout SHA diverges from the audited repository SHA")
     }
     const sandbox = isRecord(receipt.sandbox) ? receipt.sandbox : undefined

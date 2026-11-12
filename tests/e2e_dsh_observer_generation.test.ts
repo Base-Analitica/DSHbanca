@@ -879,7 +879,7 @@ test("abrupt restart is SHA-bound and terminates only the verified owned child a
   expect(secondOptions).toContain("onControlHardTimeout:")
   expect(secondOptions).not.toContain("terminateProcessTree")
   expect(source).toContain("process.kill(pid, requested)")
-  expect(source).toContain('report.stages.abruptRestart = {\n      status: "BLOCKED"')
+  expect(source).toMatch(/report\.stages\.abruptRestart = \{\s*\n\s*status: "BLOCKED"/)
   expect(source).toContain("targetAbsentAfterClose")
   expect(source).toContain("processGroupAbsentAfterClose")
   expect(source).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED")
@@ -1125,4 +1125,27 @@ test("R6 two-artifact protocol is wired into destinations, aggregator, and final
   expect(protocol).toContain('status: input.evidenceStatus === "PASS" ? "BLOCKED" : input.evidenceStatus')
   expect(protocol).toContain('terminalState: input.evidenceStatus === "PASS"')
   expect(protocol).toContain("removed: null")
+})
+
+
+test("R6 preflight validates both destinations and academic evidence before PASS", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const mainStart = source.indexOf("async function main(): Promise<void>")
+  const lifecycle = source.indexOf('process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED !== "yes"', mainStart)
+  const earlyBlocker = source.indexOf("const earlyBlocker = abruptRestartAuthorizationBlocker(", lifecycle)
+  const firstScratch = source.indexOf("scratchRoot = mkdtempSync(", mainStart)
+  const firstDsh = source.indexOf("await runDsh(", mainStart)
+  expect(lifecycle).toBeGreaterThanOrEqual(0)
+  expect(earlyBlocker).toBeGreaterThan(lifecycle)
+  expect(earlyBlocker).toBeLessThan(firstScratch)
+  expect(earlyBlocker).toBeLessThan(firstDsh)
+  expect(source).toContain("both exclusive destinations")
+  // The non-conclusive evidence projection must remap nested aggregate status.
+  expect(source).toContain('overallStatus: "pending-cleanup"')
+  // Candidate pair must validate before a PASS receipt is persisted.
+  const protocolStart = source.indexOf("export function executeTerminalProtocol(input: {")
+  const protocolEnd = source.indexOf("function finalizeAbruptTerminal(): void {", protocolStart)
+  const protocol = source.slice(protocolStart, protocolEnd)
+  expect(protocol.indexOf("validateAbruptEvidencePair({")).toBeLessThan(protocol.lastIndexOf("persist(input.terminalPlan"))
+  expect(protocol).toContain('terminalState = "pair-validation-failed"')
 })

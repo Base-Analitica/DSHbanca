@@ -5243,6 +5243,33 @@ async function main(): Promise<void> {
     fail("BLOCKED: without explicit authorization, no DSH CLI process, Agent/Session, or academic synthetic project is started", "BLOCKED")
     return
   }
+  if (abruptRestartRequested) {
+    // Both #107 destinations and the exact-SHA authorization are validated
+    // BEFORE any scratch creation, DSH CLI invocation, Agent/Session or signal.
+    const earlyAuthorization = {
+      approved: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED,
+      sha256: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256,
+      scenario: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO,
+      environment: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_ENVIRONMENT,
+      reportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH,
+      terminalReportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH,
+    }
+    const earlyBlocker = abruptRestartAuthorizationBlocker(
+      report.repository.revision, await repoStatus(processIdentityKey), earlyAuthorization,
+    )
+    if (earlyBlocker) {
+      report.stages.abruptRestart = {
+        status: "BLOCKED",
+        probeExecuted: false,
+        processLaunches: 0,
+        reason: earlyBlocker,
+        authorization: "NEEDS_APPROVAL for exact SHA, scenario, both exclusive destinations, and scratch-only environment",
+      }
+      report.limitations.push("Issue #107 destinations/authorization were refused before any active lifecycle; no DSH process was launched.")
+      fail(`BLOCKED: Issue #107 preflight refused active lifecycle: ${earlyBlocker}`, "BLOCKED")
+      return
+    }
+  }
   if (process.platform !== "linux") {
     report.stages.crossProcessBatchAudit = { status: "BLOCKED", processLaunches: 0, reason: "Host-derived process identity requires Linux procfs." }
     fail("BLOCKED: Issue #103 host-derived kernel process identity is unavailable on this platform", "BLOCKED")
@@ -6041,17 +6068,6 @@ async function main(): Promise<void> {
     return
   }
 
-  const abruptRestartAuthorization = {
-    approved: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED,
-    sha256: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256,
-    scenario: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO,
-    environment: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_ENVIRONMENT,
-    reportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH,
-    terminalReportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH,
-  }
-  const abruptAuthorizationBlocker = abruptRestartAuthorizationBlocker(
-    report.repository.revision, await repoStatus(processIdentityKey), abruptRestartAuthorization,
-  )
   let abruptRestartStatus: "PASS" | "FAIL" | "BLOCKED" | "NOT_REQUESTED" = "BLOCKED"
   if (!abruptRestartRequested) {
     abruptRestartStatus = "NOT_REQUESTED"
@@ -6063,15 +6079,6 @@ async function main(): Promise<void> {
       reason: "Issue #107 abrupt-restart evidence was not requested in this execution.",
     }
     report.limitations.push("Issue #107 was not requested; a PASS of the regular controls does not claim abrupt-restart evidence.")
-  } else if (abruptAuthorizationBlocker) {
-    report.stages.abruptRestart = {
-      status: "BLOCKED",
-      probeExecuted: false,
-      processLaunches: 0,
-      reason: abruptAuthorizationBlocker,
-      authorization: "NEEDS_APPROVAL for exact SHA, scenario, and scratch-only environment",
-    }
-    report.limitations.push("Issue #107 abruptRestart remains BLOCKED / NEEDS_APPROVAL; no abrupt-restart DSH process was launched.")
   } else {
     let abruptPhaseOne: any = null
     let abruptReadinessSidecar: Record<string, any> | null = null
@@ -6653,8 +6660,19 @@ export function executeTerminalProtocol(input: {
   const priorSandbox = typeof input.evidenceReport.sandbox === "object" && input.evidenceReport.sandbox !== null
     ? input.evidenceReport.sandbox as Record<string, unknown>
     : {}
+  const priorStages = typeof input.evidenceReport.stages === "object" && input.evidenceReport.stages !== null
+    ? input.evidenceReport.stages as Record<string, unknown>
+    : {}
+  const projectedStages: Record<string, unknown> = { ...priorStages }
+  if (typeof projectedStages.gateSummary === "object" && projectedStages.gateSummary !== null) {
+    projectedStages.gateSummary = {
+      ...(projectedStages.gateSummary as Record<string, unknown>),
+      overallStatus: "pending-cleanup",
+    }
+  }
   const evidenceProjection: Record<string, unknown> = {
     ...input.evidenceReport,
+    stages: projectedStages,
     reportKind: abruptEvidenceReportKind,
     evidenceStatus: input.evidenceStatus,
     terminalState: input.evidenceStatus === "PASS"
@@ -6746,7 +6764,7 @@ export function executeTerminalProtocol(input: {
       }
     }
   }
-  const receipt = buildTerminalReceipt({
+  let receipt = buildTerminalReceipt({
     status: finalStatus,
     evidenceSha256,
     repositorySha: input.repositorySha ?? "unknown",
@@ -6755,6 +6773,31 @@ export function executeTerminalProtocol(input: {
     reason: failReason,
     generatedAt: generatedAt(),
   })
+  // Validate the candidate pair BEFORE persisting a PASS receipt; a rejection
+  // must never leave a PASS/exit-0 receipt on disk while the run exits FAIL.
+  if (finalStatus === "PASS") {
+    const pairErrors = validateAbruptEvidencePair({
+      evidenceReport: evidenceProjection,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceSha256,
+      repositorySha: input.repositorySha,
+      observedExitCode: input.exitCodeFor("PASS"),
+    })
+    if (pairErrors.length > 0) {
+      finalStatus = "FAIL"
+      terminalState = "pair-validation-failed"
+      failReason = "the evidence report and terminal receipt pair did not validate"
+      receipt = buildTerminalReceipt({
+        status: "FAIL",
+        evidenceSha256,
+        repositorySha: input.repositorySha ?? "unknown",
+        cleanup: cleanupOutcome,
+        exitCode: input.exitCodeFor("FAIL"),
+        reason: failReason,
+        generatedAt: generatedAt(),
+      })
+    }
+  }
   let receiptOutcome: "written" | "blocked" | "failed" = "failed"
   try {
     receiptOutcome = persist(input.terminalPlan, receipt).outcome
@@ -6765,20 +6808,6 @@ export function executeTerminalProtocol(input: {
     finalStatus = "FAIL"
     terminalState = "receipt-persistence-failed"
     failReason = "the exclusive terminal receipt could not be persisted"
-  }
-  if (finalStatus === "PASS") {
-    const pairErrors = validateAbruptEvidencePair({
-      evidenceReport: evidenceProjection,
-      terminalReceipt: receipt,
-      evidenceReportSha256: evidenceSha256,
-      repositorySha: input.repositorySha,
-      observedExitCode: input.exitCodeFor(finalStatus),
-    })
-    if (pairErrors.length > 0) {
-      finalStatus = "FAIL"
-      terminalState = "pair-validation-failed"
-      failReason = "the evidence report and terminal receipt pair did not validate"
-    }
   }
   return { finalStatus, evidenceOutcome, evidenceSha256, receiptOutcome, cleanup: cleanupOutcome, terminalState, reason: failReason }
 }
@@ -6831,18 +6860,6 @@ function attemptWriteReport(): "written" | "blocked" | "failed" {
     process.stderr.write(`FAIL: report persistence failed (${reportPathLabel})\n`)
     return "failed"
   }
-}
-
-function abruptScratchDecision(teardownProven: boolean, persistence?: { failed: boolean; blocked: boolean }) {
-  return decideScratchCleanup({
-    abruptMode: true,
-    scratchExists: Boolean(scratchRoot && existsSync(scratchRoot)),
-    finalStatus,
-    containmentIncident: containmentIncident !== null || preserveScratchForSafety,
-    reportPersistenceFailed: persistence?.failed ?? false,
-    reportPersistenceBlocked: persistence?.blocked ?? false,
-    teardownProven,
-  })
 }
 
 function finalizeLegacyTerminal(): void {

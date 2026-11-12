@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
@@ -5396,6 +5396,10 @@ describe("R5 terminal scratch and evidence preservation", () => {
 
 describe("R6 terminal evidence protocol", () => {
   const repoSha = "a".repeat(40)
+  const temporaryRoots: string[] = []
+  afterEach(() => {
+    for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
 
   async function r6Api(): Promise<{ runner: any; contract: any }> {
     const runner = await import("../scripts/e2e-dsh-profile.js") as any
@@ -5411,6 +5415,7 @@ describe("R6 terminal evidence protocol", () => {
 
   function destinations(): { root: string; evidencePath: string; terminalPath: string } {
     const root = mkdtempSync(join(tmpdir(), "dshbanca-r6-"))
+    temporaryRoots.push(root)
     const parent = join(root, "reports")
     mkdirSync(parent, { mode: 0o700 })
     return { root, evidencePath: join(parent, "evidence.json"), terminalPath: join(parent, "terminal.json") }
@@ -5431,7 +5436,12 @@ describe("R6 terminal evidence protocol", () => {
       repository: { revision: repoSha, dirty: false },
       versions: {},
       sandbox: { isolated: true, removed: null },
-      stages: {},
+      stages: {
+        gateSummary: { overallStatus: "PASS", crossProcessBatchAuditStatus: "PASS", sourceDriftStatus: "PASS" },
+        abruptRestart: { status: "PASS", probeExecuted: true, validationErrors: [] },
+        crossProcessBatchAudit: { status: "PASS", validationErrors: [] },
+        sourceDrift: { status: "PASS", validationErrors: [] },
+      },
       failures: [],
       limitations: [],
     }
@@ -5476,6 +5486,7 @@ describe("R6 terminal evidence protocol", () => {
     expect(evidence.evidenceStatus).toBe("PASS")
     expect(evidence.terminalState).toBe("pending-cleanup")
     expect(evidence.sandbox.removed).toBeNull()
+    expect(evidence.stages.gateSummary.overallStatus).toBe("pending-cleanup")
     const evidenceDigest = createHash("sha256").update(evidenceBytes).digest("hex")
     expect(result.evidenceSha256).toBe(evidenceDigest)
     const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
@@ -5489,6 +5500,7 @@ describe("R6 terminal evidence protocol", () => {
       evidenceReport: evidence,
       terminalReceipt: receipt,
       evidenceReportSha256: evidenceDigest,
+      evidenceReportBytes: evidenceBytes,
       repositorySha: repoSha,
       observedExitCode: 0,
     })).toEqual([])
@@ -5696,10 +5708,18 @@ describe("R6 terminal evidence protocol", () => {
     expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, sandbox: { attempted: false, removed: false, observed: false } }, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
     expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, exitCode: 1 }, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
     expect(contract.validateAbruptTerminalReceipt({ kind: "wrong", schemaVersion: 1 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 })).toEqual([])
     const changed = Buffer.from(bytes)
     changed[0] ^= 0xff
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: changed, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
     const changedDigest = createHash("sha256").update(changed).digest("hex")
     expect(changedDigest).not.toBe(digest)
+    // No academic/#107 subgate evidence is not a valid PASS pair (F1 regression).
+    const emptyStages = { ...evidence, stages: {} }
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: emptyStages, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.classifyAbruptEvidencePairStatus({ evidenceReport: emptyStages, terminalReceipt: receipt, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 })).toBe("FAIL")
+    // Missing/invalid expected checkout SHA must fail closed (F6).
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: "unknown", observedExitCode: 0 }).length).toBeGreaterThan(0)
   })
 
   test("evidence and terminal destinations must be distinct and explicitly authorized", async () => {
@@ -5724,6 +5744,33 @@ describe("R6 terminal evidence protocol", () => {
     })
     expect(notRequested.authorized).toBe(false)
     expect(runner.abruptReportPairAuthorized(evidencePlan, notRequested).authorized).toBe(false)
+  })
+
+  test("a rejected candidate pair never persists a PASS terminal receipt", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory()
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: "unknown",
+      evidenceStatus: "PASS",
+      scratchRoot: scratch,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).not.toBe("PASS")
+    expect(receipt.exitCode).not.toBe(0)
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
   })
 
   test("aggregator preserves normal controls and never promotes an unrequested #107", async () => {
