@@ -12,6 +12,7 @@ import {
   readFileSync,
   readlinkSync,
   readdirSync,
+  readSync,
   realpathSync,
   rmSync,
   statSync,
@@ -63,6 +64,10 @@ import {
   validateCrossProcessBatchAuditEvidence,
   validateAbruptRestartEvidence,
   classifyAbruptRestartEvidenceStatus,
+  aggregateProfileAndAbruptStatus,
+  abruptEvidenceReportKind,
+  abruptTerminalReceiptKind,
+  validateAbruptEvidencePair,
   validateSourceDriftEvidence,
   classifySourceDriftEvidenceStatus,
   validateEvidence,
@@ -82,12 +87,14 @@ import {
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH
 const abruptRestartReportPath = process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH
+const abruptRestartTerminalReportPath = process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH
 const abruptRestartRequestVariables = [
   "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED",
   "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256",
   "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO",
   "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_ENVIRONMENT",
   "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH",
+  "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH",
 ] as const
 const abruptRestartRequested = abruptRestartRequestVariables.some((key) => (process.env[key] ?? "").trim() !== "")
 // #107 requests the strict containment authority for the WHOLE run: only a
@@ -105,6 +112,14 @@ const reportPersistencePlan = createReportPersistencePlan({
   abruptRestartRequested,
   configuredReportPath,
   abruptReportPath: abruptRestartReportPath,
+  repositoryRoot,
+  temporaryRoot: tmpdir(),
+  defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
+})
+const terminalReportPersistencePlan = createAbruptTerminalReportPlan({
+  abruptRestartRequested,
+  configuredReportPath: abruptRestartTerminalReportPath,
+  abruptReportPath: abruptRestartTerminalReportPath,
   repositoryRoot,
   temporaryRoot: tmpdir(),
   defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
@@ -203,12 +218,15 @@ export interface ReportPersistenceOptions {
 
 interface GateReport {
   schemaVersion: 1
+  reportKind?: string
   status: "PASS" | "FAIL" | "BLOCKED"
+  evidenceStatus?: "PASS" | "FAIL" | "BLOCKED"
+  terminalState?: string
   startedAt: string
   finishedAt?: string
   repository: { revision: string; dirty: boolean }
   versions: Record<string, string | null>
-  sandbox: { isolated: boolean; removed: boolean | null }
+  sandbox: { isolated: boolean; removed: boolean | null; attempted?: boolean; observed?: boolean }
   stages: Record<string, unknown>
   failures: string[]
   limitations: string[]
@@ -1561,25 +1579,54 @@ export function createReportPersistencePlan(options: ReportPersistenceOptions): 
   }
 }
 
-export function persistReportWithPlan(plan: ReportPersistencePlan, value: unknown): "written" | "blocked" {
-  if (!plan.authorized || !plan.path) return "blocked"
+export function createAbruptTerminalReportPlan(options: ReportPersistenceOptions & { terminalReportPath?: string }): ReportPersistencePlan {
+  if (!options.abruptRestartRequested) {
+    return Object.freeze({ mode: "abrupt" as const, authorized: false, reason: "terminal receipt is only used for requested #107 evidence" })
+  }
+  return createReportPersistencePlan({
+    ...options,
+    configuredReportPath: options.terminalReportPath,
+    abruptReportPath: options.terminalReportPath,
+  })
+}
+
+export function abruptReportPairAuthorized(
+  evidencePlan: ReportPersistencePlan,
+  terminalPlan: ReportPersistencePlan,
+): { authorized: boolean; reason: string | null } {
+  if (!evidencePlan.authorized || evidencePlan.mode !== "abrupt" || !evidencePlan.path) {
+    return { authorized: false, reason: "pre-cleanup evidence report destination is not authorized" }
+  }
+  if (!terminalPlan.authorized || terminalPlan.mode !== "abrupt" || !terminalPlan.path) {
+    return { authorized: false, reason: "terminal receipt destination is not authorized" }
+  }
+  if (evidencePlan.path === terminalPlan.path) {
+    return { authorized: false, reason: "evidence report and terminal receipt destinations must be distinct" }
+  }
+  return { authorized: true, reason: null }
+}
+
+export function evidenceReportDigest(contents: string | Uint8Array): string {
+  return createHash("sha256").update(contents).digest("hex")
+}
+
+export type ReportPersistenceDigestResult = { outcome: "written"; sha256: string } | { outcome: "blocked" }
+
+export function persistReportWithPlanAndDigest(plan: ReportPersistencePlan, value: unknown): ReportPersistenceDigestResult {
+  if (!plan.authorized || !plan.path) return { outcome: "blocked" }
   const safeReport = sanitizeReport(value)
-  const contents = `${JSON.stringify(safeReport, null, 2)}\n`
+  const contents = Buffer.from(`${JSON.stringify(safeReport, null, 2)}\n`, "utf8")
   if (plan.mode === "legacy") {
     mkdirSync(dirname(plan.path), { recursive: true })
     writeFileSync(plan.path, contents, { mode: 0o600 })
-    return "written"
+    return { outcome: "written", sha256: evidenceReportDigest(contents) }
   }
   if (!plan.canonicalParent || plan.parentDevice === undefined || plan.parentInode === undefined) {
     throw new Error("abrupt report persistence plan lacks canonical parent identity")
   }
   const currentParent = realpathSync(dirname(plan.path))
   if (currentParent !== plan.canonicalParent) throw new Error("abrupt report parent path changed after authorization")
-  // Bind the exclusive leaf creation to this validated directory descriptor, not a second path lookup.
-  const parentDescriptor = openSync(
-    currentParent,
-    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-  )
+  const parentDescriptor = openSync(currentParent, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW)
   try {
     const parentStat = fstatSync(parentDescriptor)
     if (parentStat.dev !== plan.parentDevice || parentStat.ino !== plan.parentInode) {
@@ -1587,21 +1634,29 @@ export function persistReportWithPlan(plan: ReportPersistencePlan, value: unknow
     }
     const descriptor = openSync(
       `/proc/self/fd/${parentDescriptor}/${basename(plan.path)}`,
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
       0o600,
     )
     try {
       writeFileSync(descriptor, contents)
       fsyncSync(descriptor)
+      // Read back the exact persisted bytes through the same descriptor.
+      const readBack = Buffer.alloc(contents.byteLength)
+      const bytesRead = readSync(descriptor, readBack, 0, contents.byteLength, 0)
+      if (bytesRead !== contents.byteLength) throw new Error("persisted report read-back length mismatch")
+      if (!readBack.equals(contents)) throw new Error("persisted report read-back bytes differ from the written bytes")
+      return { outcome: "written", sha256: evidenceReportDigest(readBack) }
     } finally {
       closeSync(descriptor)
     }
   } finally {
     closeSync(parentDescriptor)
   }
-  return "written"
 }
 
+export function persistReportWithPlan(plan: ReportPersistencePlan, value: unknown): "written" | "blocked" {
+  return persistReportWithPlanAndDigest(plan, value).outcome
+}
 function writeReport(): "written" | "blocked" {
   report.finishedAt = new Date().toISOString()
   report.status = finalStatus
@@ -1628,10 +1683,11 @@ async function gitValue(args: string[], identityKey: Buffer): Promise<string | n
 function abruptRestartAuthorizationBlocker(
   currentSha: string | null,
   workingTreeStatus: string | null,
-  authorization: { approved?: string; sha256?: string; scenario?: string; environment?: string; reportPath?: string },
+  authorization: { approved?: string; sha256?: string; scenario?: string; environment?: string; reportPath?: string; terminalReportPath?: string },
 ): string | null {
-  if (abruptRestartRequested && (!reportPersistencePlan.authorized || reportPersistencePlan.mode !== "abrupt")) {
-    return `BLOCKED: abrupt report persistence was refused (${reportPersistencePlan.reason ?? "destination not authorized"})`
+  const reportPair = abruptReportPairAuthorized(reportPersistencePlan, terminalReportPersistencePlan)
+  if (abruptRestartRequested && !reportPair.authorized) {
+    return `BLOCKED: abrupt evidence/terminal destinations were refused (${reportPair.reason ?? "destinations not authorized"})`
   }
   if (authorization.approved !== "yes") return "NEEDS_APPROVAL: DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED=yes was not supplied"
   if (!currentSha || authorization.sha256 !== currentSha) return "NEEDS_APPROVAL: authorization SHA does not equal the exact current runner commit"
@@ -1640,7 +1696,16 @@ function abruptRestartAuthorizationBlocker(
   if (
     !authorization.reportPath || !configuredReportPath || authorization.reportPath !== configuredReportPath ||
     reportPersistencePlan.mode !== "abrupt" || !reportPersistencePlan.authorized || reportPersistencePlan.path !== authorization.reportPath
-  ) return "NEEDS_APPROVAL: a new isolated report path must be approved explicitly outside the checkout"
+  ) return "NEEDS_APPROVAL: a new isolated pre-cleanup evidence report path must be approved explicitly outside the checkout"
+  if (
+    !authorization.terminalReportPath || !abruptRestartTerminalReportPath ||
+    authorization.terminalReportPath !== abruptRestartTerminalReportPath ||
+    terminalReportPersistencePlan.mode !== "abrupt" || !terminalReportPersistencePlan.authorized ||
+    terminalReportPersistencePlan.path !== authorization.terminalReportPath
+  ) return "NEEDS_APPROVAL: a new isolated terminal receipt path must be approved explicitly outside the checkout"
+  if (reportPersistencePlan.path === terminalReportPersistencePlan.path) {
+    return "NEEDS_APPROVAL: evidence report and terminal receipt destinations must be distinct"
+  }
   if (workingTreeStatus !== "") return "BLOCKED: the approved runner commit must have a clean working tree"
   if (process.platform !== "linux") return "BLOCKED: owned-child identity verification requires Linux procfs"
   return null
@@ -5982,12 +6047,23 @@ async function main(): Promise<void> {
     scenario: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO,
     environment: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_ENVIRONMENT,
     reportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH,
+    terminalReportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH,
   }
   const abruptAuthorizationBlocker = abruptRestartAuthorizationBlocker(
     report.repository.revision, await repoStatus(processIdentityKey), abruptRestartAuthorization,
   )
-  let abruptRestartStatus: "PASS" | "FAIL" | "BLOCKED" = "BLOCKED"
-  if (abruptAuthorizationBlocker) {
+  let abruptRestartStatus: "PASS" | "FAIL" | "BLOCKED" | "NOT_REQUESTED" = "BLOCKED"
+  if (!abruptRestartRequested) {
+    abruptRestartStatus = "NOT_REQUESTED"
+    report.stages.abruptRestart = {
+      status: "NOT_REQUESTED",
+      requested: false,
+      probeExecuted: false,
+      processLaunches: 0,
+      reason: "Issue #107 abrupt-restart evidence was not requested in this execution.",
+    }
+    report.limitations.push("Issue #107 was not requested; a PASS of the regular controls does not claim abrupt-restart evidence.")
+  } else if (abruptAuthorizationBlocker) {
     report.stages.abruptRestart = {
       status: "BLOCKED",
       probeExecuted: false,
@@ -6326,9 +6402,10 @@ async function main(): Promise<void> {
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
   const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus, academicDecisionStatus, crossProcessStatus)
-  const overallStatus: GateReport["status"] =
-    gateStatuses.overallStatus === "FAIL" || abruptRestartStatus === "FAIL" ? "FAIL" :
-      gateStatuses.overallStatus === "BLOCKED" || abruptRestartStatus === "BLOCKED" ? "BLOCKED" : "PASS"
+  const overallStatus: GateReport["status"] = aggregateProfileAndAbruptStatus({
+    gateStatus: gateStatuses.overallStatus,
+    abruptStatus: abruptRestartStatus,
+  })
   report.stages.gateSummary = { ...gateStatuses, sourceDriftStatus, abruptRestartStatus, overallStatus }
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
@@ -6512,6 +6589,234 @@ async function main(): Promise<void> {
 }
 
 
+export interface TerminalProtocolResult {
+  finalStatus: "PASS" | "FAIL" | "BLOCKED"
+  evidenceOutcome: "written" | "blocked" | "failed"
+  evidenceSha256: string | null
+  receiptOutcome: "written" | "blocked" | "failed" | "not-attempted"
+  cleanup: ScratchCleanupOutcome
+  terminalState: string
+  reason: string | null
+}
+
+function buildTerminalReceipt(input: {
+  status: "PASS" | "FAIL" | "BLOCKED"
+  evidenceSha256: string
+  repositorySha: string
+  cleanup: ScratchCleanupOutcome
+  exitCode: number
+  reason: string | null
+  generatedAt: string
+}): Record<string, unknown> {
+  return {
+    kind: abruptTerminalReceiptKind,
+    schemaVersion: 1,
+    status: input.status,
+    evidenceReportSha256: input.evidenceSha256,
+    repositorySha: input.repositorySha,
+    sandbox: { attempted: input.cleanup.attempted, removed: input.cleanup.removed, observed: input.cleanup.observed },
+    exitCode: input.exitCode,
+    reason: input.status === "PASS" ? null : (input.reason ?? "terminal result was not PASS"),
+    generatedAt: input.generatedAt,
+  }
+}
+
+/**
+ * Implements the human-approved Option A terminal protocol: persist the
+ * non-conclusive pre-cleanup evidence report first, perform only the runner's
+ * own verified cleanup, then persist an exclusive terminal receipt bound to the
+ * exact evidence bytes and the audited checkout SHA. PASS is only returned when
+ * every artifact, cleanup observation, and exit-code requirement is coherent.
+ * This function is the implementation actually called by runCli(); tests inject
+ * temporary destinations and filesystem cleanup.
+ */
+export function executeTerminalProtocol(input: {
+  evidencePlan: ReportPersistencePlan
+  terminalPlan: ReportPersistencePlan
+  evidenceReport: Record<string, unknown>
+  repositorySha: string | null
+  evidenceStatus: "PASS" | "FAIL" | "BLOCKED"
+  scratchRoot: string | undefined
+  temporaryRoot: string
+  scratchIsolated: boolean
+  containmentIncident: boolean
+  teardownProven: boolean
+  exitCodeFor: (status: "PASS" | "FAIL" | "BLOCKED") => number
+  persist?: (plan: ReportPersistencePlan, value: unknown) => ReportPersistenceDigestResult
+  cleanup?: (input: { scratchRoot: string | undefined; temporaryRoot: string; decision: ScratchCleanupDecision }) => ScratchCleanupOutcome
+  generatedAt?: () => string
+}): TerminalProtocolResult {
+  const persist = input.persist ?? persistReportWithPlanAndDigest
+  const cleanup = input.cleanup ?? applyScratchCleanup
+  const generatedAt = input.generatedAt ?? (() => new Date().toISOString())
+  const scratchExists = input.scratchRoot !== undefined && existsSync(input.scratchRoot)
+  const priorSandbox = typeof input.evidenceReport.sandbox === "object" && input.evidenceReport.sandbox !== null
+    ? input.evidenceReport.sandbox as Record<string, unknown>
+    : {}
+  const evidenceProjection: Record<string, unknown> = {
+    ...input.evidenceReport,
+    reportKind: abruptEvidenceReportKind,
+    evidenceStatus: input.evidenceStatus,
+    terminalState: input.evidenceStatus === "PASS"
+      ? "pending-cleanup"
+      : input.evidenceStatus === "FAIL" ? "failed-before-cleanup" : "blocked-before-cleanup",
+    status: input.evidenceStatus === "PASS" ? "BLOCKED" : input.evidenceStatus,
+    sandbox: { ...priorSandbox, isolated: input.scratchIsolated, removed: null },
+  }
+  let evidenceOutcome: "written" | "blocked" | "failed" = "failed"
+  let evidenceSha256: string | null = null
+  try {
+    const persisted = persist(input.evidencePlan, evidenceProjection)
+    evidenceOutcome = persisted.outcome
+    if (persisted.outcome === "written") evidenceSha256 = persisted.sha256
+  } catch {
+    evidenceOutcome = "failed"
+  }
+  if (evidenceOutcome !== "written" || evidenceSha256 === null) {
+    return {
+      finalStatus: input.evidenceStatus === "PASS" ? "FAIL" : input.evidenceStatus,
+      evidenceOutcome,
+      evidenceSha256,
+      receiptOutcome: "not-attempted",
+      cleanup: { attempted: false, removed: false, observed: false, error: null },
+      terminalState: "evidence-persistence-failed",
+      reason: "the pre-cleanup evidence report was not persisted; no cleanup or receipt was attempted",
+    }
+  }
+  const emptyCleanup: ScratchCleanupOutcome = { attempted: false, removed: false, observed: false, error: null }
+  if (input.evidenceStatus !== "PASS") {
+    const cleanupOutcome = emptyCleanup
+    const receiptStatus = input.evidenceStatus
+    const receipt = buildTerminalReceipt({
+      status: receiptStatus,
+      evidenceSha256,
+      repositorySha: input.repositorySha ?? "unknown",
+      cleanup: cleanupOutcome,
+      exitCode: input.exitCodeFor(receiptStatus),
+      reason: input.evidenceStatus === "FAIL" ? "evidence gates failed" : "evidence gates blocked",
+      generatedAt: generatedAt(),
+    })
+    let receiptOutcome: "written" | "blocked" | "failed" = "failed"
+    try {
+      receiptOutcome = persist(input.terminalPlan, receipt).outcome
+    } catch {
+      receiptOutcome = "failed"
+    }
+    return {
+      finalStatus: receiptStatus,
+      evidenceOutcome,
+      evidenceSha256,
+      receiptOutcome,
+      cleanup: cleanupOutcome,
+      terminalState: "terminal-not-attempted",
+      reason: null,
+    }
+  }
+  let finalStatus: "PASS" | "FAIL" | "BLOCKED" = "FAIL"
+  let cleanupOutcome = emptyCleanup
+  let terminalState = "cleanup-not-attempted"
+  let failReason: string | null = null
+  if (!input.scratchIsolated) {
+    terminalState = "no-scratch"
+    failReason = "no scratch sandbox was created for this execution"
+  } else if (!scratchExists) {
+    terminalState = "scratch-vanished"
+    failReason = "the scratch disappeared externally; runner cleanup was not executed or observed"
+  } else {
+    const decision = decideScratchCleanup({
+      abruptMode: true,
+      scratchExists: true,
+      finalStatus: "PASS",
+      containmentIncident: input.containmentIncident,
+      reportPersistenceFailed: false,
+      reportPersistenceBlocked: false,
+      teardownProven: input.teardownProven,
+    })
+    if (!decision.remove) {
+      terminalState = "cleanup-refused"
+      failReason = decision.reason ?? "cleanup was not authorized by the terminal decision"
+    } else {
+      cleanupOutcome = cleanup({ scratchRoot: input.scratchRoot, temporaryRoot: input.temporaryRoot, decision })
+      if (cleanupOutcome.error !== null || cleanupOutcome.observed !== true || cleanupOutcome.removed !== true) {
+        terminalState = "cleanup-failed"
+        failReason = cleanupOutcome.error ?? "cleanup success was not observed"
+      } else {
+        finalStatus = "PASS"
+        terminalState = "cleanup-observed"
+      }
+    }
+  }
+  const receipt = buildTerminalReceipt({
+    status: finalStatus,
+    evidenceSha256,
+    repositorySha: input.repositorySha ?? "unknown",
+    cleanup: cleanupOutcome,
+    exitCode: input.exitCodeFor(finalStatus),
+    reason: failReason,
+    generatedAt: generatedAt(),
+  })
+  let receiptOutcome: "written" | "blocked" | "failed" = "failed"
+  try {
+    receiptOutcome = persist(input.terminalPlan, receipt).outcome
+  } catch {
+    receiptOutcome = "failed"
+  }
+  if (receiptOutcome !== "written" && finalStatus === "PASS") {
+    finalStatus = "FAIL"
+    terminalState = "receipt-persistence-failed"
+    failReason = "the exclusive terminal receipt could not be persisted"
+  }
+  if (finalStatus === "PASS") {
+    const pairErrors = validateAbruptEvidencePair({
+      evidenceReport: evidenceProjection,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceSha256,
+      repositorySha: input.repositorySha,
+      observedExitCode: input.exitCodeFor(finalStatus),
+    })
+    if (pairErrors.length > 0) {
+      finalStatus = "FAIL"
+      terminalState = "pair-validation-failed"
+      failReason = "the evidence report and terminal receipt pair did not validate"
+    }
+  }
+  return { finalStatus, evidenceOutcome, evidenceSha256, receiptOutcome, cleanup: cleanupOutcome, terminalState, reason: failReason }
+}
+
+function finalizeAbruptTerminal(): void {
+  report.finishedAt = new Date().toISOString()
+  const evidenceStatus = finalStatus
+  const result = executeTerminalProtocol({
+    evidencePlan: reportPersistencePlan,
+    terminalPlan: terminalReportPersistencePlan,
+    evidenceReport: report as unknown as Record<string, unknown>,
+    repositorySha: report.repository.revision,
+    evidenceStatus,
+    scratchRoot,
+    temporaryRoot: tmpdir(),
+    scratchIsolated: report.sandbox.isolated,
+    containmentIncident: containmentIncident !== null || preserveScratchForSafety,
+    teardownProven: evidenceStatus === "PASS",
+    exitCodeFor: (status) => status === "PASS" ? passExitCode() : status === "BLOCKED" ? missingHostExitCode() : failureExitCode(),
+  })
+  finalStatus = result.finalStatus
+  report.reportKind = abruptEvidenceReportKind
+  report.evidenceStatus = evidenceStatus
+  report.terminalState = result.terminalState
+  report.sandbox.attempted = result.cleanup.attempted
+  report.sandbox.observed = result.cleanup.observed
+  report.sandbox.removed = result.cleanup.observed && result.cleanup.removed ? null : false
+  if (finalStatus !== "PASS") {
+    preserveScratchForSafety = true
+    if (scratchRoot !== undefined && existsSync(scratchRoot)) {
+      report.limitations.push("Terminal result is not PASS; the isolated scratch sandbox was preserved.")
+    }
+  }
+  if (result.reason !== null) report.limitations.push(`Terminal #107 protocol: ${result.reason}.`)
+  if (result.evidenceOutcome !== "written") report.failures.push("Pre-cleanup evidence report was not persisted; PASS is impossible")
+  if (result.receiptOutcome !== "written") report.limitations.push("Terminal receipt was not persisted; integral PASS is impossible.")
+}
+
 function attemptWriteReport(): "written" | "blocked" | "failed" {
   try {
     const persistence = writeReport()
@@ -6538,44 +6843,6 @@ function abruptScratchDecision(teardownProven: boolean, persistence?: { failed: 
     reportPersistenceBlocked: persistence?.blocked ?? false,
     teardownProven,
   })
-}
-
-function finalizeAbruptTerminal(): void {
-  if (!reportPersistencePlan.authorized && finalStatus === "PASS") {
-    fail("Abrupt report persistence was not authorized; no report file was written", "BLOCKED")
-  }
-  const scratchExists = Boolean(scratchRoot && existsSync(scratchRoot))
-  const teardownProven = finalStatus === "PASS"
-  let decision = abruptScratchDecision(teardownProven)
-  if (scratchRoot === undefined) report.sandbox.removed = null
-  else if (!scratchExists) report.sandbox.removed = true
-  else report.sandbox.removed = decision.remove ? null : false
-  if (decision.preserve && decision.reason !== null) {
-    report.limitations.push(`Scratch preserved before report persistence: ${decision.reason}.`)
-  }
-  // Evidence is persisted exclusively BEFORE any destructive cleanup.
-  const persistence = attemptWriteReport()
-  decision = abruptScratchDecision(finalStatus === "PASS", {
-    failed: persistence === "failed",
-    blocked: persistence === "blocked",
-  })
-  if (decision.preserve) {
-    preserveScratchForSafety = true
-    report.sandbox.removed = false
-    if (persistence === "failed") {
-      report.limitations.push("Exclusive report persistence failed; the scratch was preserved for diagnosis.")
-    }
-    return
-  }
-  const outcome = applyScratchCleanup({ scratchRoot, temporaryRoot: tmpdir(), decision })
-  if (outcome.error !== null || (outcome.observed && outcome.removed !== true)) {
-    report.sandbox.removed = false
-    fail("Scratch cleanup failed after evidence persistence; details withheld")
-    return
-  }
-  // The exclusive report was frozen before cleanup by design; it deliberately
-  // does not claim sandbox.removed=true (no post-cleanup rewrite exists).
-  report.sandbox.removed = null
 }
 
 function finalizeLegacyTerminal(): void {

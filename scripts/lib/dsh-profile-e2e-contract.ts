@@ -3980,6 +3980,158 @@ export function validateAcademicDecisionEvidence(value: unknown): string[] {
   return errors
 }
 
+
+// ---------------------------------------------------------------------------
+// Issue #107 R6: two-artifact terminal evidence protocol.
+// The pre-cleanup evidence report is intentionally non-conclusive for PASS; the
+// terminal receipt is written only after observing the runner's own cleanup and
+// binds to the exact bytes of the persisted evidence report plus the checkout SHA.
+// ---------------------------------------------------------------------------
+
+export const abruptEvidenceReportKind = "dsh-abrupt-evidence-report-v1"
+export const abruptTerminalReceiptKind = "dsh-abrupt-terminal-receipt-v1"
+export const abruptTerminalReceiptSchemaVersion = 1
+
+export interface AbruptTerminalReceiptEvidence {
+  kind: typeof abruptTerminalReceiptKind
+  schemaVersion: 1
+  status: ProfileGateStatus
+  evidenceReportSha256: string
+  repositorySha: string
+  sandbox: { attempted: boolean; removed: boolean; observed: boolean }
+  exitCode: number
+  reason: string | null
+  generatedAt: string
+}
+
+function isRepositoryRevisionDigest(value: unknown): boolean {
+  return typeof value === "string" && /^[a-f0-9]{40}$/i.test(value)
+}
+
+export function validateAbruptTerminalReceipt(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) return ["terminal receipt is missing"]
+  if (value.kind !== abruptTerminalReceiptKind) errors.push("terminal receipt kind is not the canonical terminal receipt")
+  if (value.schemaVersion !== abruptTerminalReceiptSchemaVersion) errors.push("terminal receipt schema version is not supported")
+  if (value.status !== "PASS" && value.status !== "FAIL" && value.status !== "BLOCKED") errors.push("terminal receipt status must be PASS, FAIL, or BLOCKED")
+  if (!isSha256Digest(value.evidenceReportSha256)) errors.push("terminal receipt must bind the SHA-256 of the persisted evidence report bytes")
+  if (!isRepositoryRevisionDigest(value.repositorySha) && !isSha256Digest(value.repositorySha)) {
+    errors.push("terminal receipt must bind the audited checkout SHA identity")
+  }
+  const sandbox = isRecord(value.sandbox) ? value.sandbox : undefined
+  if (!sandbox || typeof sandbox.attempted !== "boolean" || typeof sandbox.removed !== "boolean" || typeof sandbox.observed !== "boolean") {
+    errors.push("terminal receipt must record attempted/removed/observed cleanup evidence")
+  }
+  if (!Number.isSafeInteger(value.exitCode) || (value.exitCode as number) < 0) errors.push("terminal receipt must declare a non-negative exit code")
+  if (typeof value.generatedAt !== "string" || value.generatedAt.length === 0) errors.push("terminal receipt must record a generatedAt timestamp")
+  if (value.reason !== null && typeof value.reason !== "string") errors.push("terminal receipt reason must be a sanitized string or null")
+  if (value.status === "PASS") {
+    if (!sandbox || sandbox.attempted !== true || sandbox.removed !== true || sandbox.observed !== true) {
+      errors.push("terminal receipt PASS requires an attempted, observed, and successful cleanup")
+    }
+    if (value.exitCode !== 0) errors.push("terminal receipt PASS requires exit code 0")
+    if (value.reason !== null) errors.push("terminal receipt PASS cannot carry a failure reason")
+  }
+  return errors
+}
+
+/**
+ * Validates the pair as consumed by the maintainer. `observedExitCode` is the
+ * external observation of the runner exit code, never the receipt's own claim.
+ * PASS is returned only when the evidence report, terminal receipt, digest,
+ * repository SHA, cleanup flags, and external exit code all agree.
+ */
+export function validateAbruptEvidencePair(input: {
+  evidenceReport: unknown
+  terminalReceipt: unknown
+  evidenceReportSha256: unknown
+  evidenceReportBytes?: unknown
+  repositorySha: unknown
+  observedExitCode: unknown
+}): string[] {
+  const errors: string[] = []
+  const report = isRecord(input.evidenceReport) ? input.evidenceReport : undefined
+  if (!report) {
+    errors.push("pre-cleanup evidence report is missing")
+  } else {
+    if (report.reportKind !== abruptEvidenceReportKind) errors.push("evidence report kind is not the canonical pre-cleanup evidence report")
+    if (report.schemaVersion !== 1) errors.push("evidence report schema version is not supported")
+    if (report.evidenceStatus !== "PASS" && report.evidenceStatus !== "FAIL" && report.evidenceStatus !== "BLOCKED") {
+      errors.push("evidence report must identify the evidence gate status separately from the terminal status")
+    }
+    if (report.status === "PASS") errors.push("pre-cleanup evidence report must never claim integral PASS")
+    if (report.evidenceStatus === "PASS" && report.terminalState !== "pending-cleanup") {
+      errors.push("valid academic evidence with an unobserved cleanup must be pending-cleanup")
+    }
+    const sandbox = isRecord(report.sandbox) ? report.sandbox : undefined
+    if (!sandbox || sandbox.removed !== null) errors.push("pre-cleanup evidence report must leave sandbox.removed unknown (null)")
+    if (isSha256Digest(input.evidenceReportSha256) && isRecord(input.evidenceReportBytes)) {
+      const bytesHash = createHash("sha256").update(JSON.stringify(input.evidenceReportBytes), "utf8").digest("hex")
+      if (bytesHash !== input.evidenceReportSha256) errors.push("evidence report digest does not match the exact persisted bytes")
+    } else if (!isSha256Digest(input.evidenceReportSha256)) {
+      errors.push("evidence report digest must be the SHA-256 of the persisted bytes")
+    }
+  }
+  const receipt = isRecord(input.terminalReceipt) ? input.terminalReceipt : undefined
+  if (!receipt) {
+    errors.push("terminal receipt is missing")
+  } else {
+    errors.push(...validateAbruptTerminalReceipt(receipt).map((error) => `terminal receipt: ${error}`))
+    if (report && receipt.evidenceReportSha256 !== input.evidenceReportSha256) {
+      errors.push("terminal receipt digest does not match the persisted evidence report bytes")
+    }
+    if (
+      (isSha256Digest(input.repositorySha) || isRepositoryRevisionDigest(input.repositorySha)) &&
+      receipt.repositorySha !== input.repositorySha
+    ) {
+      errors.push("terminal receipt checkout SHA diverges from the audited repository SHA")
+    }
+    const sandbox = isRecord(receipt.sandbox) ? receipt.sandbox : undefined
+    if (receipt.status === "PASS") {
+      if (!report || report.evidenceStatus !== "PASS" || report.terminalState !== "pending-cleanup") {
+        errors.push("terminal receipt cannot claim PASS unless the pre-cleanup evidence report passed academic/process gates")
+      }
+      if (input.observedExitCode !== 0) errors.push("integral PASS requires the externally observed runner exit code to be 0")
+      if (!sandbox || sandbox.attempted !== true || sandbox.removed !== true || sandbox.observed !== true) {
+        errors.push("integral PASS requires the runner's own cleanup to be attempted, observed, and successful")
+      }
+    }
+  }
+  return errors
+}
+
+export function classifyAbruptEvidencePairStatus(input: {
+  evidenceReport: unknown
+  terminalReceipt: unknown
+  evidenceReportSha256: unknown
+  repositorySha: unknown
+  observedExitCode: unknown
+}): ProfileGateStatus {
+  if (!isRecord(input.terminalReceipt)) return "BLOCKED"
+  if (!isRecord(input.evidenceReport)) return "BLOCKED"
+  const errors = validateAbruptEvidencePair(input)
+  if (errors.length > 0) return "FAIL"
+  const receipt = input.terminalReceipt as Record<string, unknown>
+  return receipt.status === "PASS" && input.observedExitCode === 0 ? "PASS" : "FAIL"
+}
+
+/**
+ * Aggregates the regular controls with the #107 subgate. A #107 that was not
+ * requested is explicitly NOT_REQUESTED and never blocks a normal authorized
+ * control run; FAIL prevails over BLOCKED.
+ */
+export function aggregateProfileAndAbruptStatus(input: {
+  gateStatus: ProfileGateStatus
+  abruptStatus: "PASS" | "FAIL" | "BLOCKED" | "NOT_REQUESTED"
+}): ProfileGateStatus {
+  if (input.gateStatus === "FAIL" || input.abruptStatus === "FAIL") return "FAIL"
+  if (input.gateStatus === "BLOCKED") return "BLOCKED"
+  if (input.abruptStatus === "BLOCKED") return "BLOCKED"
+  return "PASS"
+}
+
+// createHash is used for byte-level evidence digest verification.
+
 export function missingHostExitCode(): number {
   return 2
 }

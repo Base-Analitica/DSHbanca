@@ -4032,7 +4032,7 @@ describe("DSH E2E diagnostic redaction", () => {
 
   test("runner sanitizes the complete report and withholds raw exception and child output", () => {
     const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
-    const writeReportStart = runnerSource.indexOf("export function persistReportWithPlan(")
+    const writeReportStart = runnerSource.indexOf("export function persistReportWithPlanAndDigest(")
     const failFunctionStart = runnerSource.indexOf("function fail(message:", writeReportStart)
     const writeReportSource = runnerSource.slice(writeReportStart, failFunctionStart)
     expect(writeReportSource).toContain("sanitizeReport(value)")
@@ -5383,5 +5383,358 @@ describe("R5 terminal scratch and evidence preservation", () => {
     expect(outcome.removed).toBe(false)
     expect(typeof outcome.error).toBe("string")
     expect(existsSync(notRunnerOwned)).toBe(true)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R6: two-artifact terminal evidence protocol (human-approved
+// Option A). Exercises the real executeTerminalProtocol used by runCli() with
+// temporary destinations, real exclusive persistence, real filesystem cleanup,
+// digest binding, and the aggregator used by main().
+// ---------------------------------------------------------------------------
+
+describe("R6 terminal evidence protocol", () => {
+  const repoSha = "a".repeat(40)
+
+  async function r6Api(): Promise<{ runner: any; contract: any }> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    const contract = await import("../scripts/lib/dsh-profile-e2e-contract.js") as any
+    for (const name of ["executeTerminalProtocol", "createReportPersistencePlan", "createAbruptTerminalReportPlan", "abruptReportPairAuthorized", "persistReportWithPlanAndDigest", "evidenceReportDigest"]) {
+      expect(typeof runner[name], name).toBe("function")
+    }
+    for (const name of ["validateAbruptTerminalReceipt", "validateAbruptEvidencePair", "classifyAbruptEvidencePairStatus", "aggregateProfileAndAbruptStatus"]) {
+      expect(typeof contract[name], name).toBe("function")
+    }
+    return { runner, contract }
+  }
+
+  function destinations(): { root: string; evidencePath: string; terminalPath: string } {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-r6-"))
+    const parent = join(root, "reports")
+    mkdirSync(parent, { mode: 0o700 })
+    return { root, evidencePath: join(parent, "evidence.json"), terminalPath: join(parent, "terminal.json") }
+  }
+
+  function plans(runner: any, target: { evidencePath: string; terminalPath: string }) {
+    const base = { abruptRestartRequested: true, repositoryRoot: process.cwd(), temporaryRoot: tmpdir(), defaultReportPath: "docs/evidence/x.json" }
+    const evidencePlan = runner.createReportPersistencePlan({ ...base, configuredReportPath: target.evidencePath, abruptReportPath: target.evidencePath })
+    const terminalPlan = runner.createAbruptTerminalReportPlan({ ...base, terminalReportPath: target.terminalPath })
+    return { evidencePlan, terminalPlan }
+  }
+
+  function evidenceReportFixture() {
+    return {
+      schemaVersion: 1,
+      status: "BLOCKED",
+      startedAt: new Date().toISOString(),
+      repository: { revision: repoSha, dirty: false },
+      versions: {},
+      sandbox: { isolated: true, removed: null },
+      stages: {},
+      failures: [],
+      limitations: [],
+    }
+  }
+
+  function scratchDirectory(): string {
+    const scratch = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r6-"))
+    writeFileSync(join(scratch, "diagnostic.txt"), "diagnostic evidence\n", { mode: 0o600 })
+    return scratch
+  }
+
+  function runProtocol(runner: any, input: Record<string, unknown> = {}) {
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory()
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : status === "BLOCKED" ? 2 : 1,
+      ...input,
+    })
+    return { result, target, scratch }
+  }
+
+  test("valid evidence + observed cleanup + receipt yields a coherent PASS pair", async () => {
+    const { runner, contract } = await r6Api()
+    const { result, target, scratch } = runProtocol(runner)
+    expect(result.finalStatus).toBe("PASS")
+    expect(existsSync(scratch)).toBe(false)
+    const evidenceBytes = readFileSync(target.evidencePath)
+    const evidence = JSON.parse(evidenceBytes.toString("utf8"))
+    expect(evidence.reportKind).toBe(contract.abruptEvidenceReportKind)
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
+    expect(evidence.terminalState).toBe("pending-cleanup")
+    expect(evidence.sandbox.removed).toBeNull()
+    const evidenceDigest = createHash("sha256").update(evidenceBytes).digest("hex")
+    expect(result.evidenceSha256).toBe(evidenceDigest)
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).toBe("PASS")
+    expect(receipt.kind).toBe(contract.abruptTerminalReceiptKind)
+    expect(receipt.evidenceReportSha256).toBe(evidenceDigest)
+    expect(receipt.repositorySha).toBe(repoSha)
+    expect(receipt.exitCode).toBe(0)
+    expect(receipt.sandbox).toEqual({ attempted: true, removed: true, observed: true })
+    expect(contract.validateAbruptEvidencePair({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceDigest,
+      repositorySha: repoSha,
+      observedExitCode: 0,
+    })).toEqual([])
+    expect(contract.classifyAbruptEvidencePairStatus({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceDigest,
+      repositorySha: repoSha,
+      observedExitCode: 0,
+    })).toBe("PASS")
+    // External exit code is authoritative: a non-zero observation cannot PASS.
+    expect(contract.classifyAbruptEvidencePairStatus({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceDigest,
+      repositorySha: repoSha,
+      observedExitCode: 1,
+    })).toBe("FAIL")
+  })
+
+  test("cleanup failure never leaves a PASS-reachable pair and preserves the scratch", async () => {
+    const { runner, contract } = await r6Api()
+    const { result, target, scratch } = runProtocol(runner, { temporaryRoot: process.cwd() })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("cleanup-failed")
+    expect(existsSync(scratch)).toBe(true)
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
+    expect(evidence.terminalState).toBe("pending-cleanup")
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).toBe("FAIL")
+    expect(receipt.sandbox.removed).toBe(false)
+    const digest = createHash("sha256").update(readFileSync(target.evidencePath)).digest("hex")
+    expect(contract.classifyAbruptEvidencePairStatus({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: digest,
+      repositorySha: repoSha,
+      observedExitCode: 1,
+    })).toBe("FAIL")
+    rmSync(scratch, { recursive: true, force: true })
+  })
+
+  test("initial evidence persistence failure prevents cleanup and receipt", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory()
+    writeFileSync(target.evidencePath, "sentinel\n", { mode: 0o600 })
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(["failed", "blocked"]).toContain(result.evidenceOutcome)
+    expect(existsSync(scratch)).toBe(true)
+    expect(readFileSync(target.evidencePath, "utf8")).toBe("sentinel\n")
+    expect(existsSync(target.terminalPath)).toBe(false)
+    rmSync(scratch, { recursive: true, force: true })
+  })
+
+  test("receipt persistence failure after successful cleanup cannot PASS and preserves evidence", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory()
+    writeFileSync(target.terminalPath, "sentinel-terminal\n", { mode: 0o600 })
+    const unauthorizedTerminal = runner.createAbruptTerminalReportPlan({
+      abruptRestartRequested: true,
+      configuredReportPath: target.terminalPath,
+      abruptReportPath: target.terminalPath,
+      repositoryRoot: process.cwd(),
+      temporaryRoot: tmpdir(),
+      defaultReportPath: "docs/evidence/x.json",
+    })
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan: unauthorizedTerminal.authorized ? terminalPlan : unauthorizedTerminal,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("receipt-persistence-failed")
+    expect(existsSync(scratch)).toBe(false)
+    expect(existsSync(target.evidencePath)).toBe(true)
+    expect(readFileSync(target.terminalPath, "utf8")).toBe("sentinel-terminal\n")
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
+  })
+
+  test("externally vanished scratch is not accepted as runner cleanup", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory()
+    rmSync(scratch, { recursive: true, force: true })
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("scratch-vanished")
+    expect(result.cleanup.attempted).toBe(false)
+    expect(result.cleanup.removed).toBe(false)
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).toBe("FAIL")
+    expect(receipt.sandbox.removed).toBe(false)
+  })
+
+  test("no scratch execution does not invent removal and cannot PASS", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: { ...evidenceReportFixture(), sandbox: { isolated: false, removed: null } },
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: undefined,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: false,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("no-scratch")
+    expect(result.cleanup.attempted).toBe(false)
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.sandbox.removed).toBeNull()
+  })
+
+  test("FAIL/BLOCKED evidence preserves scratch and writes non-PASS receipts", async () => {
+    const { runner } = await r6Api()
+    for (const status of ["FAIL", "BLOCKED"] as const) {
+      const target = destinations()
+      const { evidencePlan, terminalPlan } = plans(runner, target)
+      const scratch = scratchDirectory()
+      const result = runner.executeTerminalProtocol({
+        evidencePlan,
+        terminalPlan,
+        evidenceReport: evidenceReportFixture(),
+        repositorySha: repoSha,
+        evidenceStatus: status,
+        scratchRoot: scratch,
+        temporaryRoot: tmpdir(),
+        scratchIsolated: true,
+        containmentIncident: false,
+        teardownProven: false,
+        exitCodeFor: (value: string) => value === "PASS" ? 0 : value === "BLOCKED" ? 2 : 1,
+      })
+      expect(result.finalStatus, status).toBe(status)
+      expect(existsSync(scratch), status).toBe(true)
+      const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+      expect(evidence.status, status).toBe(status)
+      expect(evidence.evidenceStatus, status).toBe(status)
+      expect(evidence.sandbox.removed, status).toBeNull()
+      const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+      expect(receipt.status, status).toBe(status)
+      expect(receipt.sandbox.attempted, status).toBe(false)
+      expect(receipt.exitCode, status).toBe(status === "BLOCKED" ? 2 : 1)
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  })
+
+  test("tampered evidence bytes, divergent SHA, and invalid receipt are rejected", async () => {
+    const { runner, contract } = await r6Api()
+    const { target } = runProtocol(runner)
+    const bytes = readFileSync(target.evidencePath)
+    const digest = createHash("sha256").update(bytes).digest("hex")
+    const evidence = JSON.parse(bytes.toString("utf8"))
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 })).toEqual([])
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, evidenceReportSha256: "b".repeat(64) }, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, repositorySha: "c".repeat(40) }, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: { ...evidence, status: "PASS" }, terminalReceipt: receipt, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, sandbox: { attempted: false, removed: false, observed: false } }, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, exitCode: 1 }, evidenceReportSha256: digest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptTerminalReceipt({ kind: "wrong", schemaVersion: 1 }).length).toBeGreaterThan(0)
+    const changed = Buffer.from(bytes)
+    changed[0] ^= 0xff
+    const changedDigest = createHash("sha256").update(changed).digest("hex")
+    expect(changedDigest).not.toBe(digest)
+  })
+
+  test("evidence and terminal destinations must be distinct and explicitly authorized", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    expect(runner.abruptReportPairAuthorized(evidencePlan, terminalPlan)).toEqual({ authorized: true, reason: null })
+    const coincident = runner.createReportPersistencePlan({
+      abruptRestartRequested: true,
+      configuredReportPath: target.evidencePath,
+      abruptReportPath: target.evidencePath,
+      repositoryRoot: process.cwd(),
+      temporaryRoot: tmpdir(),
+      defaultReportPath: "docs/evidence/x.json",
+    })
+    expect(runner.abruptReportPairAuthorized(evidencePlan, coincident).authorized).toBe(false)
+    const notRequested = runner.createAbruptTerminalReportPlan({
+      abruptRestartRequested: false,
+      repositoryRoot: process.cwd(),
+      temporaryRoot: tmpdir(),
+      defaultReportPath: "docs/evidence/x.json",
+    })
+    expect(notRequested.authorized).toBe(false)
+    expect(runner.abruptReportPairAuthorized(evidencePlan, notRequested).authorized).toBe(false)
+  })
+
+  test("aggregator preserves normal controls and never promotes an unrequested #107", async () => {
+    const { contract } = await r6Api()
+    const aggregate = contract.aggregateProfileAndAbruptStatus
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "NOT_REQUESTED" })).toBe("PASS")
+    expect(aggregate({ gateStatus: "FAIL", abruptStatus: "NOT_REQUESTED" })).toBe("FAIL")
+    expect(aggregate({ gateStatus: "BLOCKED", abruptStatus: "NOT_REQUESTED" })).toBe("BLOCKED")
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "BLOCKED" })).toBe("BLOCKED")
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "FAIL" })).toBe("FAIL")
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "PASS" })).toBe("PASS")
+    expect(aggregate({ gateStatus: "FAIL", abruptStatus: "BLOCKED" })).toBe("FAIL")
   })
 })
