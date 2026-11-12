@@ -68,6 +68,8 @@ import {
   abruptEvidenceReportKind,
   abruptTerminalReceiptKind,
   validateAbruptEvidencePair,
+  validateAbruptEvidenceForCleanupEligibility,
+  decodeAbruptEvidenceReport,
   validateSourceDriftEvidence,
   classifySourceDriftEvidenceStatus,
   validateEvidence,
@@ -272,6 +274,7 @@ const report: GateReport = {
 }
 
 let scratchRoot: string | undefined
+let scratchRootIdentity: ScratchRootIdentity | undefined
 let restartWorkspaceDirectoryFd: number | undefined
 let abruptRestartWorkspaceDirectoryFd: number | undefined
 let driftWorkspaceDirectoryFd: number | undefined
@@ -375,28 +378,89 @@ export interface ScratchCleanupOutcome {
   error: string | null
 }
 
+export interface ScratchRootIdentity {
+  canonicalPath: string
+  parentPath: string
+  basename: string
+  device: number
+  inode: number
+}
+
+/**
+ * Captures the runner-created scratch root identity at mkdtemp time. Cleanup
+ * later requires this exact identity: canonical path, direct parent, basename,
+ * device/inode, real directory (not a symlink) and the same target that was
+ * created by this execution.
+ */
+export function captureScratchRootIdentity(root: string): ScratchRootIdentity | null {
+  try {
+    const rootStat = lstatSync(root)
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return null
+    const canonicalPath = realpathSync(root)
+    const parentPath = realpathSync(dirname(canonicalPath))
+    const name = basename(canonicalPath)
+    if (!name.startsWith("dshbanca-profile-e2e-")) return null
+    const targetStat = statSync(canonicalPath)
+    return {
+      canonicalPath,
+      parentPath,
+      basename: name,
+      device: targetStat.dev,
+      inode: targetStat.ino,
+    }
+  } catch {
+    return null
+  }
+}
+
 /**
  * Executes the terminal scratch decision against the real filesystem. It only
- * removes the unique runner-owned directory under the OS temporary root, never
- * invents a directory when none was created, and reports observation separately
- * from removal intent.
+ * removes the unique runner-owned directory under the OS temporary root whose
+ * original dev/inode identity was captured when the runner created it; symlinks,
+ * external absence, renamed/replaced directories and missing identities are
+ * refused without deleting anything.
  */
 export function applyScratchCleanup(input: {
   scratchRoot: string | undefined
+  scratchIdentity: ScratchRootIdentity | undefined
   temporaryRoot: string
   decision: ScratchCleanupDecision
 }): ScratchCleanupOutcome {
   if (input.scratchRoot === undefined) return { attempted: false, removed: false, observed: false, error: null }
-  if (!existsSync(input.scratchRoot)) return { attempted: false, removed: false, observed: false, error: null }
-  if (input.decision.preserve) return { attempted: false, removed: false, observed: true, error: null }
+  if (input.decision.preserve) {
+    return { attempted: false, removed: false, observed: existsSync(input.scratchRoot), error: null }
+  }
+  const identity = input.scratchIdentity
+  if (!identity) {
+    return { attempted: false, removed: false, observed: existsSync(input.scratchRoot), error: "scratch root identity is unavailable; refusing cleanup" }
+  }
+  let currentStat
   try {
-    const resolvedScratch = realpathSync(input.scratchRoot)
+    currentStat = lstatSync(input.scratchRoot)
+  } catch {
+    return { attempted: false, removed: false, observed: false, error: "scratch root disappeared externally; runner cleanup was not observed" }
+  }
+  if (currentStat.isSymbolicLink() || !currentStat.isDirectory()) {
+    return { attempted: false, removed: false, observed: true, error: "scratch root is not the directory created by the runner; refusing cleanup of a symlink or replacement" }
+  }
+  try {
+    const canonicalPath = realpathSync(input.scratchRoot)
     const expectedParent = realpathSync(input.temporaryRoot)
-    if (!resolvedScratch.startsWith(`${expectedParent}${sep}`) || !resolvedScratch.includes("dshbanca-profile-e2e-")) {
-      return { attempted: true, removed: false, observed: true, error: "refusing cleanup because the scratch path is not the unique test directory under the OS temp root" }
+    const targetStat = statSync(canonicalPath)
+    if (
+      canonicalPath !== identity.canonicalPath ||
+      dirname(canonicalPath) !== identity.parentPath ||
+      basename(canonicalPath) !== identity.basename ||
+      expectedParent !== identity.parentPath ||
+      targetStat.dev !== identity.device ||
+      targetStat.ino !== identity.inode ||
+      !basename(canonicalPath).startsWith("dshbanca-profile-e2e-")
+    ) {
+      return { attempted: false, removed: false, observed: true, error: "scratch root identity diverged from the runner-created directory; refusing cleanup" }
     }
-    rmSync(resolvedScratch, { recursive: true, force: false })
-    return { attempted: true, removed: !existsSync(resolvedScratch), observed: true, error: null }
+    rmSync(canonicalPath, { recursive: true, force: false })
+    const removed = !existsSync(canonicalPath) && !existsSync(input.scratchRoot)
+    return { attempted: true, removed, observed: true, error: removed ? null : "scratch cleanup did not remove the runner-created directory" }
   } catch {
     return { attempted: true, removed: false, observed: true, error: "scratch cleanup failed" }
   }
@@ -1610,7 +1674,7 @@ export function evidenceReportDigest(contents: string | Uint8Array): string {
   return createHash("sha256").update(contents).digest("hex")
 }
 
-export type ReportPersistenceDigestResult = { outcome: "written"; sha256: string } | { outcome: "blocked" }
+export type ReportPersistenceDigestResult = { outcome: "written"; sha256: string; bytes: Buffer } | { outcome: "blocked" }
 
 export function persistReportWithPlanAndDigest(plan: ReportPersistencePlan, value: unknown): ReportPersistenceDigestResult {
   if (!plan.authorized || !plan.path) return { outcome: "blocked" }
@@ -1619,7 +1683,7 @@ export function persistReportWithPlanAndDigest(plan: ReportPersistencePlan, valu
   if (plan.mode === "legacy") {
     mkdirSync(dirname(plan.path), { recursive: true })
     writeFileSync(plan.path, contents, { mode: 0o600 })
-    return { outcome: "written", sha256: evidenceReportDigest(contents) }
+    return { outcome: "written", sha256: evidenceReportDigest(contents), bytes: contents }
   }
   if (!plan.canonicalParent || plan.parentDevice === undefined || plan.parentInode === undefined) {
     throw new Error("abrupt report persistence plan lacks canonical parent identity")
@@ -1645,7 +1709,7 @@ export function persistReportWithPlanAndDigest(plan: ReportPersistencePlan, valu
       const bytesRead = readSync(descriptor, readBack, 0, contents.byteLength, 0)
       if (bytesRead !== contents.byteLength) throw new Error("persisted report read-back length mismatch")
       if (!readBack.equals(contents)) throw new Error("persisted report read-back bytes differ from the written bytes")
-      return { outcome: "written", sha256: evidenceReportDigest(readBack) }
+      return { outcome: "written", sha256: evidenceReportDigest(readBack), bytes: readBack }
     } finally {
       closeSync(descriptor)
     }
@@ -5314,6 +5378,11 @@ async function main(): Promise<void> {
 
   scratchRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-"))
   chmodSync(scratchRoot, 0o700)
+  scratchRootIdentity = captureScratchRootIdentity(scratchRoot) ?? undefined
+  if (!scratchRootIdentity) {
+    fail("BLOCKED: the runner could not capture the scratch root identity required for safe cleanup", "BLOCKED")
+    return
+  }
   const scratch = realpathSync(scratchRoot)
   const dirs = {
     dshHome: join(scratch, "dsh-home"),
@@ -6644,13 +6713,14 @@ export function executeTerminalProtocol(input: {
   repositorySha: string | null
   evidenceStatus: "PASS" | "FAIL" | "BLOCKED"
   scratchRoot: string | undefined
+  scratchIdentity: ScratchRootIdentity | undefined
   temporaryRoot: string
   scratchIsolated: boolean
   containmentIncident: boolean
   teardownProven: boolean
   exitCodeFor: (status: "PASS" | "FAIL" | "BLOCKED") => number
   persist?: (plan: ReportPersistencePlan, value: unknown) => ReportPersistenceDigestResult
-  cleanup?: (input: { scratchRoot: string | undefined; temporaryRoot: string; decision: ScratchCleanupDecision }) => ScratchCleanupOutcome
+  cleanup?: (input: { scratchRoot: string | undefined; scratchIdentity: ScratchRootIdentity | undefined; temporaryRoot: string; decision: ScratchCleanupDecision }) => ScratchCleanupOutcome
   generatedAt?: () => string
 }): TerminalProtocolResult {
   const persist = input.persist ?? persistReportWithPlanAndDigest
@@ -6668,6 +6738,7 @@ export function executeTerminalProtocol(input: {
     projectedStages.gateSummary = {
       ...(projectedStages.gateSummary as Record<string, unknown>),
       overallStatus: "pending-cleanup",
+      exitCode: null,
     }
   }
   const evidenceProjection: Record<string, unknown> = {
@@ -6683,14 +6754,18 @@ export function executeTerminalProtocol(input: {
   }
   let evidenceOutcome: "written" | "blocked" | "failed" = "failed"
   let evidenceSha256: string | null = null
+  let evidenceBytes: Buffer | null = null
   try {
     const persisted = persist(input.evidencePlan, evidenceProjection)
     evidenceOutcome = persisted.outcome
-    if (persisted.outcome === "written") evidenceSha256 = persisted.sha256
+    if (persisted.outcome === "written") {
+      evidenceSha256 = persisted.sha256
+      evidenceBytes = persisted.bytes
+    }
   } catch {
     evidenceOutcome = "failed"
   }
-  if (evidenceOutcome !== "written" || evidenceSha256 === null) {
+  if (evidenceOutcome !== "written" || evidenceSha256 === null || evidenceBytes === null) {
     return {
       finalStatus: input.evidenceStatus === "PASS" ? "FAIL" : input.evidenceStatus,
       evidenceOutcome,
@@ -6730,6 +6805,40 @@ export function executeTerminalProtocol(input: {
       reason: null,
     }
   }
+  // Pre-cleanup eligibility: the persisted bytes (not the pre-persistence
+  // object) must decode to a coherent PASS projection before any destructive
+  // cleanup is attempted.
+  const eligibilityErrors = validateAbruptEvidenceForCleanupEligibility({
+    evidenceReportBytes: evidenceBytes,
+    evidenceReportSha256: evidenceSha256,
+    repositorySha: input.repositorySha,
+  })
+  if (eligibilityErrors.length > 0) {
+    const failReceipt = buildTerminalReceipt({
+      status: "FAIL",
+      evidenceSha256,
+      repositorySha: input.repositorySha ?? "unknown",
+      cleanup: emptyCleanup,
+      exitCode: input.exitCodeFor("FAIL"),
+      reason: "persisted evidence failed pre-cleanup validation",
+      generatedAt: generatedAt(),
+    })
+    let receiptOutcome: "written" | "blocked" | "failed" = "failed"
+    try {
+      receiptOutcome = persist(input.terminalPlan, failReceipt).outcome
+    } catch {
+      receiptOutcome = "failed"
+    }
+    return {
+      finalStatus: "FAIL",
+      evidenceOutcome,
+      evidenceSha256,
+      receiptOutcome,
+      cleanup: emptyCleanup,
+      terminalState: "evidence-invalid-before-cleanup",
+      reason: "persisted evidence failed pre-cleanup validation; the scratch was preserved",
+    }
+  }
   let finalStatus: "PASS" | "FAIL" | "BLOCKED" = "FAIL"
   let cleanupOutcome = emptyCleanup
   let terminalState = "cleanup-not-attempted"
@@ -6754,7 +6863,7 @@ export function executeTerminalProtocol(input: {
       terminalState = "cleanup-refused"
       failReason = decision.reason ?? "cleanup was not authorized by the terminal decision"
     } else {
-      cleanupOutcome = cleanup({ scratchRoot: input.scratchRoot, temporaryRoot: input.temporaryRoot, decision })
+      cleanupOutcome = cleanup({ scratchRoot: input.scratchRoot, scratchIdentity: input.scratchIdentity, temporaryRoot: input.temporaryRoot, decision })
       if (cleanupOutcome.error !== null || cleanupOutcome.observed !== true || cleanupOutcome.removed !== true) {
         terminalState = "cleanup-failed"
         failReason = cleanupOutcome.error ?? "cleanup success was not observed"
@@ -6776,10 +6885,12 @@ export function executeTerminalProtocol(input: {
   // Validate the candidate pair BEFORE persisting a PASS receipt; a rejection
   // must never leave a PASS/exit-0 receipt on disk while the run exits FAIL.
   if (finalStatus === "PASS") {
+    const decoded = decodeAbruptEvidenceReport(evidenceBytes)
     const pairErrors = validateAbruptEvidencePair({
-      evidenceReport: evidenceProjection,
+      evidenceReport: decoded.report,
       terminalReceipt: receipt,
       evidenceReportSha256: evidenceSha256,
+      evidenceReportBytes: evidenceBytes,
       repositorySha: input.repositorySha,
       observedExitCode: input.exitCodeFor("PASS"),
     })
@@ -6822,6 +6933,7 @@ function finalizeAbruptTerminal(): void {
     repositorySha: report.repository.revision,
     evidenceStatus,
     scratchRoot,
+    scratchIdentity: scratchRootIdentity,
     temporaryRoot: tmpdir(),
     scratchIsolated: report.sandbox.isolated,
     containmentIncident: containmentIncident !== null || preserveScratchForSafety,
@@ -6863,29 +6975,26 @@ function attemptWriteReport(): "written" | "blocked" | "failed" {
 }
 
 function finalizeLegacyTerminal(): void {
-  if (scratchRoot && existsSync(scratchRoot)) {
-    if (preserveScratchForSafety || containmentIncident !== null) {
-      report.sandbox.removed = false
-      report.limitations.push("Abrupt-restart failure or teardown uncertainty preserved the isolated scratch directory for inspection.")
-    } else {
-      try {
-        const resolvedScratch = realpathSync(scratchRoot)
-        const expectedParent = realpathSync(tmpdir())
-        if (!resolvedScratch.startsWith(`${expectedParent}${sep}`) || !resolvedScratch.includes("dshbanca-profile-e2e-")) {
-          throw new Error("refusing cleanup because the scratch path is not the unique test directory under the OS temp root")
-        }
-        rmSync(resolvedScratch, { recursive: true, force: false })
-        report.sandbox.removed = !existsSync(resolvedScratch)
-        if (!report.sandbox.removed) fail("Scratch cleanup did not remove the test-owned sandbox")
-      } catch {
-        report.sandbox.removed = false
-        fail("Scratch cleanup failed; details withheld")
-      }
+  if (scratchRoot !== undefined) {
+    const preserve = preserveScratchForSafety || containmentIncident !== null
+    const decision: ScratchCleanupDecision = {
+      preserve,
+      remove: !preserve,
+      reason: preserve ? "failure evidence must be preserved" : null,
     }
-  } else if (scratchRoot) {
-    report.sandbox.removed = true
+    const outcome = applyScratchCleanup({
+      scratchRoot,
+      scratchIdentity: scratchRootIdentity,
+      temporaryRoot: tmpdir(),
+      decision,
+    })
+    report.sandbox.removed = outcome.error === null && outcome.observed && outcome.removed ? null : false
+    report.sandbox.attempted = outcome.attempted
+    report.sandbox.observed = outcome.observed
+    if (outcome.error !== null) fail("Scratch cleanup failed; details withheld")
+    else if (outcome.attempted && outcome.removed !== true) fail("Scratch cleanup did not remove the test-owned sandbox")
   }
-  if (report.sandbox.isolated && report.sandbox.removed !== true && finalStatus === "PASS") {
+  if (report.sandbox.isolated && finalStatus === "PASS" && report.sandbox.attempted !== true) {
     fail("Sandbox cleanup was not verified")
   }
   attemptWriteReport()

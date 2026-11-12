@@ -4035,74 +4035,151 @@ export function validateAbruptTerminalReceipt(value: unknown): string[] {
   return errors
 }
 
+function evidenceDeepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((entry, index) => evidenceDeepEqual(entry, right[index]))
+  }
+  if (!isRecord(left) || !isRecord(right)) return false
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && evidenceDeepEqual(left[key], right[key]))
+}
+
+function evidenceBytesBuffer(value: unknown): Buffer | null {
+  if (typeof value === "string") return Buffer.from(value, "utf8")
+  if (value instanceof Uint8Array) return Buffer.from(value)
+  return null
+}
+
 /**
- * Validates the pair as consumed by the maintainer. `observedExitCode` is the
- * external observation of the runner exit code, never the receipt's own claim.
- * PASS is returned only when the evidence report, terminal receipt, digest,
- * repository SHA, cleanup flags, and external exit code all agree.
+ * Decodes the persisted evidence bytes. Bytes are the single source of truth for
+ * the evidence content: the digest is computed over them, the JSON object comes
+ * from parsing them, and no independent object is trusted.
+ */
+export function decodeAbruptEvidenceReport(bytes: unknown): { report: Record<string, unknown> | null; errors: string[] } {
+  const errors: string[] = []
+  const buffer = evidenceBytesBuffer(bytes)
+  if (buffer === null) return { report: null, errors: ["persisted evidence report bytes are required"] }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(buffer.toString("utf8"))
+  } catch {
+    return { report: null, errors: ["persisted evidence report bytes are not valid JSON"] }
+  }
+  if (!isRecord(parsed)) return { report: null, errors: ["persisted evidence report JSON must decode to an object"] }
+  return { report: parsed, errors }
+}
+
+function abruptEvidenceProjectionErrors(
+  report: Record<string, unknown>,
+  repositorySha: unknown,
+): string[] {
+  const errors: string[] = []
+  if (report.reportKind !== abruptEvidenceReportKind) errors.push("evidence report kind is not the canonical pre-cleanup evidence report")
+  if (report.schemaVersion !== 1) errors.push("evidence report schema version is not supported")
+  if (report.status !== "BLOCKED") errors.push("pre-cleanup evidence report status must be exactly BLOCKED, never a conclusive result")
+  if (report.evidenceStatus !== "PASS") errors.push("pre-cleanup evidence must explicitly carry evidenceStatus PASS")
+  if (report.terminalState !== "pending-cleanup") errors.push("pre-cleanup evidence must be pending-cleanup")
+  const repository = isRecord(report.repository) ? report.repository : undefined
+  if (!repository || !isRepositoryRevisionDigest(repository.revision)) {
+    errors.push("pre-cleanup evidence must carry a 40-hex checkout revision")
+  } else if (!isRepositoryRevisionDigest(repositorySha) || repository.revision !== repositorySha) {
+    errors.push("pre-cleanup evidence checkout revision diverges from the expected audited SHA")
+  }
+  if (!repository || repository.dirty !== false) errors.push("pre-cleanup evidence must record a clean checkout")
+  const sandbox = isRecord(report.sandbox) ? report.sandbox : undefined
+  if (!sandbox || sandbox.removed !== null) errors.push("pre-cleanup evidence must leave sandbox.removed unknown (null)")
+  const stages = isRecord(report.stages) ? report.stages : undefined
+  const gateSummary = stages && isRecord(stages.gateSummary) ? stages.gateSummary : undefined
+  const abruptStage = stages && isRecord(stages.abruptRestart) ? stages.abruptRestart : undefined
+  const crossProcess = stages && isRecord(stages.crossProcessBatchAudit) ? stages.crossProcessBatchAudit : undefined
+  const drift = stages && isRecord(stages.sourceDrift) ? stages.sourceDrift : undefined
+  if (!gateSummary) {
+    errors.push("pre-cleanup evidence must carry the gate summary")
+  } else {
+    if (gateSummary.overallStatus !== "pending-cleanup") errors.push("pre-cleanup gate summary must be exactly pending-cleanup")
+    if (gateSummary.exitCode !== null) errors.push("pre-cleanup gate summary must not carry a conclusive exit code")
+    for (const field of ["issue2Status", "auditorMarkdownStatus", "nativeSkillsStatus", "batchAuditStatus", "nativeQuestionsStatus", "academicDecisionStatus", "crossProcessBatchAuditStatus", "sourceDriftStatus", "abruptRestartStatus"] as const) {
+      if (gateSummary[field] !== "PASS") errors.push(`pre-cleanup gate summary requires ${field} PASS`)
+    }
+  }
+  if (!abruptStage || abruptStage.status !== "PASS") errors.push("pre-cleanup evidence must carry the validated #107 subgate PASS evidence")
+  if (!abruptStage || abruptStage.probeExecuted !== true) errors.push("pre-cleanup evidence must record that #107 actually executed")
+  if (abruptStage && (!Array.isArray(abruptStage.validationErrors) || abruptStage.validationErrors.length !== 0)) {
+    errors.push("pre-cleanup #107 evidence must carry empty validation errors")
+  }
+  if (!crossProcess || crossProcess.status !== "PASS") errors.push("pre-cleanup evidence must carry #103 recovery PASS evidence")
+  if (crossProcess && (!Array.isArray(crossProcess.validationErrors) || crossProcess.validationErrors.length !== 0)) {
+    errors.push("pre-cleanup #103 evidence must carry empty validation errors")
+  }
+  if (!drift || drift.status !== "PASS") errors.push("pre-cleanup evidence must carry #105 source-drift PASS evidence")
+  if (drift && (!Array.isArray(drift.validationErrors) || drift.validationErrors.length !== 0)) {
+    errors.push("pre-cleanup #105 evidence must carry empty validation errors")
+  }
+  return errors
+}
+
+/**
+ * Validates the bytes actually persisted (and read back from the exclusive
+ * descriptor) before any destructive cleanup is allowed. The object model is
+ * never trusted independently from these bytes.
+ */
+export function validateAbruptEvidenceForCleanupEligibility(input: {
+  evidenceReportBytes: unknown
+  evidenceReportSha256: unknown
+  repositorySha: unknown
+}): string[] {
+  const decoded = decodeAbruptEvidenceReport(input.evidenceReportBytes)
+  if (!decoded.report) return decoded.errors
+  const errors = [...decoded.errors]
+  if (!isSha256Digest(input.evidenceReportSha256)) {
+    errors.push("persisted evidence digest must be the SHA-256 of the exact bytes")
+  } else {
+    const bytesHash = createHash("sha256").update(evidenceBytesBuffer(input.evidenceReportBytes)!).digest("hex")
+    if (bytesHash !== input.evidenceReportSha256) errors.push("persisted evidence digest does not match the exact bytes")
+  }
+  errors.push(...abruptEvidenceProjectionErrors(decoded.report, input.repositorySha))
+  return errors.map((error) => `persisted evidence: ${error}`)
+}
+
+/**
+ * Validates the pair as consumed by the maintainer. The persisted bytes are the
+ * single source of truth: the object is decoded from them, the digest is
+ * recomputed over them, and any separately supplied object must be identical.
+ * `observedExitCode` is the external observation of the runner exit code, never
+ * the receipt's own claim.
  */
 export function validateAbruptEvidencePair(input: {
   evidenceReport: unknown
   terminalReceipt: unknown
   evidenceReportSha256: unknown
-  evidenceReportBytes?: unknown
+  evidenceReportBytes: unknown
   repositorySha: unknown
   observedExitCode: unknown
 }): string[] {
   const errors: string[] = []
-  const report = isRecord(input.evidenceReport) ? input.evidenceReport : undefined
-  if (!report) {
-    errors.push("pre-cleanup evidence report is missing")
+  const decoded = decodeAbruptEvidenceReport(input.evidenceReportBytes)
+  if (!decoded.report) {
+    errors.push(...decoded.errors)
   } else {
-    if (report.reportKind !== abruptEvidenceReportKind) errors.push("evidence report kind is not the canonical pre-cleanup evidence report")
-    if (report.schemaVersion !== 1) errors.push("evidence report schema version is not supported")
-    if (report.evidenceStatus !== "PASS" && report.evidenceStatus !== "FAIL" && report.evidenceStatus !== "BLOCKED") {
-      errors.push("evidence report must identify the evidence gate status separately from the terminal status")
-    }
-    if (report.status === "PASS") errors.push("pre-cleanup evidence report must never claim integral PASS")
-    if (report.evidenceStatus === "PASS" && report.terminalState !== "pending-cleanup") {
-      errors.push("valid academic evidence with an unobserved cleanup must be pending-cleanup")
-    }
-    if (report.evidenceStatus === "PASS") {
-      const stages = isRecord(report.stages) ? report.stages : undefined
-      const gateSummary = stages && isRecord(stages.gateSummary) ? stages.gateSummary : undefined
-      const abruptStage = stages && isRecord(stages.abruptRestart) ? stages.abruptRestart : undefined
-      const crossProcess = stages && isRecord(stages.crossProcessBatchAudit) ? stages.crossProcessBatchAudit : undefined
-      const drift = stages && isRecord(stages.sourceDrift) ? stages.sourceDrift : undefined
-      if (!abruptStage || abruptStage.status !== "PASS") {
-        errors.push("pre-cleanup evidence report must carry the validated #107 subgate PASS evidence")
-      }
-      if (abruptStage && (!Array.isArray(abruptStage.validationErrors) || abruptStage.validationErrors.length !== 0)) {
-        errors.push("pre-cleanup evidence report must carry empty #107 validation errors")
-      }
-      if (!crossProcess || crossProcess.status !== "PASS") errors.push("pre-cleanup evidence report must carry #103 recovery PASS evidence")
-      if (!drift || drift.status !== "PASS") errors.push("pre-cleanup evidence report must carry #105 source-drift PASS evidence")
-      if (!gateSummary || gateSummary.overallStatus === "PASS") {
-        errors.push("pre-cleanup gate summary must remain non-conclusive (never nested integral PASS)")
-      }
-    }
-    const sandbox = isRecord(report.sandbox) ? report.sandbox : undefined
-    if (!sandbox || sandbox.removed !== null) errors.push("pre-cleanup evidence report must leave sandbox.removed unknown (null)")
+    const bytes = evidenceBytesBuffer(input.evidenceReportBytes)!
     if (!isSha256Digest(input.evidenceReportSha256)) {
       errors.push("evidence report digest must be the SHA-256 of the persisted bytes")
-    } else if (input.evidenceReportBytes !== undefined) {
-      const bytes = typeof input.evidenceReportBytes === "string"
-        ? Buffer.from(input.evidenceReportBytes, "utf8")
-        : input.evidenceReportBytes instanceof Uint8Array ? Buffer.from(input.evidenceReportBytes) : null
-      if (bytes === null) {
-        errors.push("evidence report bytes must be the persisted string or byte buffer")
-      } else {
-        const bytesHash = createHash("sha256").update(bytes).digest("hex")
-        if (bytesHash !== input.evidenceReportSha256) errors.push("evidence report digest does not match the exact persisted bytes")
-      }
+    } else if (createHash("sha256").update(bytes).digest("hex") !== input.evidenceReportSha256) {
+      errors.push("evidence report digest does not match the exact persisted bytes")
     }
+    if (isRecord(input.evidenceReport) && !evidenceDeepEqual(input.evidenceReport, decoded.report)) {
+      errors.push("evidence report object diverges from the JSON decoded from the persisted bytes")
+    }
+    errors.push(...abruptEvidenceProjectionErrors(decoded.report, input.repositorySha))
   }
   const receipt = isRecord(input.terminalReceipt) ? input.terminalReceipt : undefined
   if (!receipt) {
     errors.push("terminal receipt is missing")
   } else {
     errors.push(...validateAbruptTerminalReceipt(receipt).map((error) => `terminal receipt: ${error}`))
-    if (report && receipt.evidenceReportSha256 !== input.evidenceReportSha256) {
+    if (receipt.evidenceReportSha256 !== input.evidenceReportSha256) {
       errors.push("terminal receipt digest does not match the persisted evidence report bytes")
     }
     if (!isRepositoryRevisionDigest(input.repositorySha)) {
@@ -4112,9 +4189,6 @@ export function validateAbruptEvidencePair(input: {
     }
     const sandbox = isRecord(receipt.sandbox) ? receipt.sandbox : undefined
     if (receipt.status === "PASS") {
-      if (!report || report.evidenceStatus !== "PASS" || report.terminalState !== "pending-cleanup") {
-        errors.push("terminal receipt cannot claim PASS unless the pre-cleanup evidence report passed academic/process gates")
-      }
       if (input.observedExitCode !== 0) errors.push("integral PASS requires the externally observed runner exit code to be 0")
       if (!sandbox || sandbox.attempted !== true || sandbox.removed !== true || sandbox.observed !== true) {
         errors.push("integral PASS requires the runner's own cleanup to be attempted, observed, and successful")
@@ -4128,11 +4202,13 @@ export function classifyAbruptEvidencePairStatus(input: {
   evidenceReport: unknown
   terminalReceipt: unknown
   evidenceReportSha256: unknown
+  evidenceReportBytes: unknown
   repositorySha: unknown
   observedExitCode: unknown
 }): ProfileGateStatus {
   if (!isRecord(input.terminalReceipt)) return "BLOCKED"
   if (!isRecord(input.evidenceReport)) return "BLOCKED"
+  if (evidenceBytesBuffer(input.evidenceReportBytes) === null) return "BLOCKED"
   const errors = validateAbruptEvidencePair(input)
   if (errors.length > 0) return "FAIL"
   const receipt = input.terminalReceipt as Record<string, unknown>
