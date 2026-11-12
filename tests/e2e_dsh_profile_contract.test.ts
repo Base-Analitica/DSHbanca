@@ -5606,15 +5606,15 @@ describe("R6 terminal evidence protocol", () => {
     writeFileSync(target.terminalPath, "sentinel-terminal\n", { mode: 0o600 })
     const unauthorizedTerminal = runner.createAbruptTerminalReportPlan({
       abruptRestartRequested: true,
-      configuredReportPath: target.terminalPath,
-      abruptReportPath: target.terminalPath,
+      terminalReportPath: target.terminalPath,
       repositoryRoot: process.cwd(),
       temporaryRoot: tmpdir(),
       defaultReportPath: "docs/evidence/x.json",
     })
+    expect(unauthorizedTerminal.authorized).toBe(false)
     const result = runner.executeTerminalProtocol({
       evidencePlan,
-      terminalPlan: unauthorizedTerminal.authorized ? terminalPlan : unauthorizedTerminal,
+      terminalPlan: unauthorizedTerminal,
       evidenceReport: evidenceReportFixture(),
       repositorySha: repoSha,
       evidenceStatus: "PASS",
@@ -5634,6 +5634,35 @@ describe("R6 terminal evidence protocol", () => {
     const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
     expect(evidence.status).toBe("BLOCKED")
     expect(evidence.evidenceStatus).toBe("PASS")
+  })
+
+  test("an authorized terminal plan that loses its leaf to a race cannot persist a PASS receipt", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    expect(terminalPlan.authorized).toBe(true)
+    const scratch = scratchDirectory(runner)
+    // The plan was authorized while the leaf was absent; a racing writer creates it now.
+    writeFileSync(target.terminalPath, "raced-terminal\n", { mode: 0o600 })
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("receipt-persistence-failed")
+    expect(existsSync(scratch.path)).toBe(false)
+    expect(existsSync(target.evidencePath)).toBe(true)
+    expect(readFileSync(target.terminalPath, "utf8")).toBe("raced-terminal\n")
   })
 
   test("externally vanished scratch is not accepted as runner cleanup", async () => {
@@ -6366,6 +6395,17 @@ describe("R8 terminal report planner wiring", () => {
       }, parent)
       expect(symlinked.reportPersistencePlan.mode).toBe("abrupt")
       expect(symlinked.reportPersistencePlan.authorized).toBe(false)
+
+      // Terminal-only request still selects strict policy and keeps a preexisting terminal leaf unauthorized.
+      expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: terminalPath })).toBe("strict-direct-only")
+      writeFileSync(join(parent, "existing-terminal.json"), "sentinel\n", { mode: 0o600 })
+      const preexistingTerminal = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: join(parent, "existing-terminal.json"),
+      }, parent)
+      expect(preexistingTerminal.reportPersistencePlan.authorized).toBe(true)
+      expect(preexistingTerminal.terminalReportPersistencePlan.authorized).toBe(false)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -6377,13 +6417,16 @@ describe("R8 terminal report planner wiring", () => {
     const terminalPath = join(parent, "terminal.json")
     const beforeScratch = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("dshbanca-profile-e2e-")))
     try {
-      const environment: NodeJS.ProcessEnv = { ...process.env }
-      for (const key of Object.keys(environment)) {
-        if (key.startsWith("DSHBANCA_DSH_PROFILE_")) delete environment[key]
+      const environment: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        TMPDIR: tmpdir(),
+        LANG: "C.UTF-8",
+        NO_COLOR: "1",
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: terminalPath,
       }
-      environment.DSHBANCA_DSH_PROFILE_REPORT_PATH = evidencePath
-      environment.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH = evidencePath
-      environment.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH = terminalPath
       const result = spawnSync(process.execPath, ["scripts/e2e-dsh-profile.ts"], {
         cwd: process.cwd(),
         env: environment,
@@ -6416,17 +6459,92 @@ describe("R8 terminal report planner wiring", () => {
     }
   })
 
+  test("pure early #107 preflight accepts only the fully authorized pair and exact SHA/scenario/environment", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.abruptRestartAuthorizationBlocker).toBe("function")
+    const { root, parent } = privateParent()
+    try {
+      const evidencePath = join(parent, "evidence.json")
+      const terminalPath = join(parent, "terminal.json")
+      const environment: Record<string, string> = {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: terminalPath,
+      }
+      const plans = plansFromEnvironment(runner, environment, parent)
+      expect(plans.reportPersistencePlan.authorized).toBe(true)
+      expect(plans.terminalReportPersistencePlan.authorized).toBe(true)
+      const sha = "a".repeat(40)
+      const authorization = {
+        approved: "yes",
+        sha256: sha,
+        scenario: "durable-checkpoint-2-of-5-sigkill",
+        environment: "runner-owned-scratch-only",
+        reportPath: evidencePath,
+        terminalReportPath: terminalPath,
+      }
+      const baseline = {
+        abruptRestartRequested: true,
+        reportPersistencePlan: plans.reportPersistencePlan,
+        terminalReportPersistencePlan: plans.terminalReportPersistencePlan,
+        configuredReportPath: evidencePath,
+        abruptRestartTerminalReportPath: terminalPath,
+        currentSha: sha,
+        workingTreeStatus: "",
+        authorization,
+        platform: "linux" as const,
+      }
+      // Exactly the P1 wiring scenario: both plans authorized and authorized pair -> no preflight block.
+      expect(runner.abruptRestartAuthorizationBlocker(baseline)).toBeNull()
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, sha256: "b".repeat(40) } })).toContain("authorization SHA")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, scenario: "other" } })).toContain("scenario")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, approved: "no" } })).toContain("AUTHORIZED=yes")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, reportPath: join(parent, "other.json") } })).toContain("pre-cleanup evidence report path")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, terminalReportPath: join(parent, "other-terminal.json") } })).toContain("terminal receipt path")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, workingTreeStatus: " M file" })).toContain("clean working tree")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, platform: "darwin" })).toContain("Linux procfs")
+      const missingTerminalPlans = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+      }, parent)
+      expect(runner.abruptRestartAuthorizationBlocker({
+        ...baseline,
+        terminalReportPersistencePlan: missingTerminalPlans.terminalReportPersistencePlan,
+        abruptRestartTerminalReportPath: terminalPath,
+      })).toContain("destinations were refused")
+      const coincidentPlans = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: evidencePath,
+      }, parent)
+      expect(runner.abruptRestartAuthorizationBlocker({
+        ...baseline,
+        reportPersistencePlan: coincidentPlans.reportPersistencePlan,
+        terminalReportPersistencePlan: coincidentPlans.terminalReportPersistencePlan,
+        authorization: { ...authorization, terminalReportPath: evidencePath },
+        abruptRestartTerminalReportPath: evidencePath,
+      })).toContain("destinations were refused")
+      // The lifecycle must remain unauthorized in these hermetic checks: no DSH is booted.
+      expect(process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED ?? "").not.toBe("yes")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test("real CLI blocks and writes no terminal receipt when the terminal destination variable is missing", () => {
     const { root, parent } = privateParent()
     const evidencePath = join(parent, "evidence.json")
     const terminalPath = join(parent, "terminal.json")
     try {
-      const environment: NodeJS.ProcessEnv = { ...process.env }
-      for (const key of Object.keys(environment)) {
-        if (key.startsWith("DSHBANCA_DSH_PROFILE_")) delete environment[key]
+      const environment: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        TMPDIR: tmpdir(),
+        LANG: "C.UTF-8",
+        NO_COLOR: "1",
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
       }
-      environment.DSHBANCA_DSH_PROFILE_REPORT_PATH = evidencePath
-      environment.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH = evidencePath
       const result = spawnSync(process.execPath, ["scripts/e2e-dsh-profile.ts"], {
         cwd: process.cwd(),
         env: environment,

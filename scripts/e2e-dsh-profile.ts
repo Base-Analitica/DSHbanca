@@ -88,7 +88,6 @@ import {
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH
-const abruptRestartReportPath = process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH
 const abruptRestartTerminalReportPath = process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH
 const abruptRestartRequestVariables = [
   "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED",
@@ -1864,35 +1863,74 @@ async function gitValue(args: string[], identityKey: Buffer): Promise<string | n
   return result.exitCode === 0 ? result.stdout.trim() : null
 }
 
-function abruptRestartAuthorizationBlocker(
-  currentSha: string | null,
-  workingTreeStatus: string | null,
-  authorization: { approved?: string; sha256?: string; scenario?: string; environment?: string; reportPath?: string; terminalReportPath?: string },
-): string | null {
-  const reportPair = abruptReportPairAuthorized(reportPersistencePlan, terminalReportPersistencePlan)
-  if (abruptRestartRequested && !reportPair.authorized) {
+export interface AbruptRestartAuthorizationBlockerInput {
+  abruptRestartRequested: boolean
+  reportPersistencePlan: ReportPersistencePlan
+  terminalReportPersistencePlan: ReportPersistencePlan
+  configuredReportPath: string | undefined
+  abruptRestartTerminalReportPath: string | undefined
+  currentSha: string | null
+  workingTreeStatus: string | null
+  authorization: {
+    approved?: string
+    sha256?: string
+    scenario?: string
+    environment?: string
+    reportPath?: string
+    terminalReportPath?: string
+  }
+  platform: NodeJS.Platform
+}
+
+/**
+ * Pure early #107 preflight used by the real runner (and directly by tests):
+ * checks both exclusive destinations and the exact-SHA/scenario/environment
+ * authorization BEFORE scratch creation or any DSH invocation.
+ */
+export function abruptRestartAuthorizationBlocker(input: AbruptRestartAuthorizationBlockerInput): string | null {
+  const reportPair = abruptReportPairAuthorized(input.reportPersistencePlan, input.terminalReportPersistencePlan)
+  if (input.abruptRestartRequested && !reportPair.authorized) {
     return `BLOCKED: abrupt evidence/terminal destinations were refused (${reportPair.reason ?? "destinations not authorized"})`
   }
-  if (authorization.approved !== "yes") return "NEEDS_APPROVAL: DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED=yes was not supplied"
-  if (!currentSha || authorization.sha256 !== currentSha) return "NEEDS_APPROVAL: authorization SHA does not equal the exact current runner commit"
-  if (authorization.scenario !== "durable-checkpoint-2-of-5-sigkill") return "NEEDS_APPROVAL: the exact abrupt-restart scenario was not approved"
-  if (authorization.environment !== "runner-owned-scratch-only") return "NEEDS_APPROVAL: the isolated runner-owned scratch environment was not approved"
+  if (input.authorization.approved !== "yes") return "NEEDS_APPROVAL: DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED=yes was not supplied"
+  if (!input.currentSha || input.authorization.sha256 !== input.currentSha) return "NEEDS_APPROVAL: authorization SHA does not equal the exact current runner commit"
+  if (input.authorization.scenario !== "durable-checkpoint-2-of-5-sigkill") return "NEEDS_APPROVAL: the exact abrupt-restart scenario was not approved"
+  if (input.authorization.environment !== "runner-owned-scratch-only") return "NEEDS_APPROVAL: the isolated runner-owned scratch environment was not approved"
   if (
-    !authorization.reportPath || !configuredReportPath || authorization.reportPath !== configuredReportPath ||
-    reportPersistencePlan.mode !== "abrupt" || !reportPersistencePlan.authorized || reportPersistencePlan.path !== authorization.reportPath
+    !input.authorization.reportPath || !input.configuredReportPath || input.authorization.reportPath !== input.configuredReportPath ||
+    input.reportPersistencePlan.mode !== "abrupt" || !input.reportPersistencePlan.authorized ||
+    input.reportPersistencePlan.path !== input.authorization.reportPath
   ) return "NEEDS_APPROVAL: a new isolated pre-cleanup evidence report path must be approved explicitly outside the checkout"
   if (
-    !authorization.terminalReportPath || !abruptRestartTerminalReportPath ||
-    authorization.terminalReportPath !== abruptRestartTerminalReportPath ||
-    terminalReportPersistencePlan.mode !== "abrupt" || !terminalReportPersistencePlan.authorized ||
-    terminalReportPersistencePlan.path !== authorization.terminalReportPath
+    !input.authorization.terminalReportPath || !input.abruptRestartTerminalReportPath ||
+    input.authorization.terminalReportPath !== input.abruptRestartTerminalReportPath ||
+    input.terminalReportPersistencePlan.mode !== "abrupt" || !input.terminalReportPersistencePlan.authorized ||
+    input.terminalReportPersistencePlan.path !== input.authorization.terminalReportPath
   ) return "NEEDS_APPROVAL: a new isolated terminal receipt path must be approved explicitly outside the checkout"
-  if (reportPersistencePlan.path === terminalReportPersistencePlan.path) {
+  if (input.reportPersistencePlan.path === input.terminalReportPersistencePlan.path) {
     return "NEEDS_APPROVAL: evidence report and terminal receipt destinations must be distinct"
   }
-  if (workingTreeStatus !== "") return "BLOCKED: the approved runner commit must have a clean working tree"
-  if (process.platform !== "linux") return "BLOCKED: owned-child identity verification requires Linux procfs"
+  if (input.workingTreeStatus !== "") return "BLOCKED: the approved runner commit must have a clean working tree"
+  if (input.platform !== "linux") return "BLOCKED: owned-child identity verification requires Linux procfs"
   return null
+}
+
+function abruptRestartPreflightBlocker(
+  currentSha: string | null,
+  workingTreeStatus: string | null,
+  authorization: AbruptRestartAuthorizationBlockerInput["authorization"],
+): string | null {
+  return abruptRestartAuthorizationBlocker({
+    abruptRestartRequested,
+    reportPersistencePlan,
+    terminalReportPersistencePlan,
+    configuredReportPath,
+    abruptRestartTerminalReportPath,
+    currentSha,
+    workingTreeStatus,
+    authorization,
+    platform: process.platform,
+  })
 }
 
 function ensureInside(base: string, path: string): void {
@@ -5438,7 +5476,7 @@ async function main(): Promise<void> {
       reportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH,
       terminalReportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH,
     }
-    const earlyBlocker = abruptRestartAuthorizationBlocker(
+    const earlyBlocker = abruptRestartPreflightBlocker(
       report.repository.revision, await repoStatus(processIdentityKey), earlyAuthorization,
     )
     if (earlyBlocker) {
