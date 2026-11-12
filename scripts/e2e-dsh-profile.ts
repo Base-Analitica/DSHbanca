@@ -267,6 +267,7 @@ let scratchRoot: string | undefined
 let scratchRootIdentity: ScratchRootIdentity | undefined
 let restartWorkspaceDirectoryFd: number | undefined
 let abruptRestartWorkspaceDirectoryFd: number | undefined
+let abruptFirstProcessGroupId: number | null = null
 let driftWorkspaceDirectoryFd: number | undefined
 let preserveScratchForSafety = false
 let finalStatus: GateReport["status"] = "BLOCKED"
@@ -794,33 +795,128 @@ function processTargetAbsentAfterClose(pid: number | undefined, originalIdentity
   return currentIdentity !== null && currentIdentity !== originalIdentitySha256
 }
 
+export const linuxPfKthreadFlag = 0x00200000
+
+export type LinuxProcStatGroupMembership =
+  | { kind: "positive"; pid: number; groupId: number }
+  | { kind: "kernel-thread"; pid: number }
+  | { kind: "invalid"; pid: number | null; reason: string }
+
+/**
+ * Strict parser for /proc/<pid>/stat group membership. It distinguishes a
+ * positive user process group, a legitimately zero PGID proven to belong to a
+ * kernel thread (PF_KTHREAD), and anything malformed/ambiguous. A zero PGID is
+ * never membership in a positive group, and is only skipped when the kernel
+ * thread flag is proven; otherwise the row is invalid and fails closed.
+ */
+/**
+ * Strict identity parser used for the runner-owned child: only a positive
+ * process-group id is returned. Zero (even for a proven kernel thread) is never
+ * an authorization or identity value.
+ */
 export function parseLinuxProcStatProcessGroupId(stat: string): number | null {
-  const commandEnd = stat.lastIndexOf(")")
-  if (commandEnd < 0) return null
-  const fields = stat.slice(commandEnd + 1).trim().split(/\s+/)
-  const groupId = fields[2]
-  if (!/^\d+$/.test(groupId ?? "")) return null
-  const parsed = Number(groupId)
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+  const membership = parseLinuxProcStatGroupMembership(stat)
+  return membership.kind === "positive" ? membership.groupId : null
 }
 
+export function parseLinuxProcStatGroupMembership(stat: string, expectedPid?: number): LinuxProcStatGroupMembership {
+  const commandStart = stat.indexOf("(")
+  const commandEnd = stat.lastIndexOf(")")
+  if (commandStart <= 0 || commandEnd <= commandStart) return { kind: "invalid", pid: null, reason: "proc stat row is malformed" }
+  const pidText = stat.slice(0, commandStart).trim()
+  if (!/^\d+$/.test(pidText)) return { kind: "invalid", pid: null, reason: "proc stat pid is malformed" }
+  const pid = Number(pidText)
+  if (!Number.isSafeInteger(pid) || pid <= 0) return { kind: "invalid", pid: null, reason: "proc stat pid is invalid" }
+  if (expectedPid !== undefined && pid !== expectedPid) return { kind: "invalid", pid, reason: "proc stat pid does not match the enumerated row" }
+  const fields = stat.slice(commandEnd + 1).trim().split(/\s+/)
+  // state, ppid, pgrp, session, tty_nr, tpgid, flags
+  if (fields.length < 7) return { kind: "invalid", pid, reason: "proc stat row is truncated" }
+  if (!/^[A-Za-z]$/.test(fields[0])) return { kind: "invalid", pid, reason: "proc stat state field is invalid" }
+  if (!/^\d+$/.test(fields[2])) return { kind: "invalid", pid, reason: "proc stat process-group field is invalid" }
+  const groupId = Number(fields[2])
+  if (!Number.isSafeInteger(groupId) || groupId < 0) return { kind: "invalid", pid, reason: "proc stat process-group id is invalid" }
+  if (!/^(?:0x[0-9a-f]+|\d+)$/i.test(fields[6])) return { kind: "invalid", pid, reason: "proc stat flags field is invalid" }
+  const flags = Number(fields[6])
+  if (!Number.isSafeInteger(flags) || flags < 0) return { kind: "invalid", pid, reason: "proc stat flags are invalid" }
+  if (groupId > 0) return { kind: "positive", pid, groupId }
+  if (groupId !== 0) return { kind: "invalid", pid, reason: "proc stat process-group id is invalid" }
+  if ((flags & linuxPfKthreadFlag) !== 0) return { kind: "kernel-thread", pid }
+  return { kind: "invalid", pid, reason: "zero process-group id without proven PF_KTHREAD" }
+}
+
+export type ProcessGroupAbsenceReason =
+  | "absent"
+  | "member-observed"
+  | "invalid-proc-row"
+  | "read-error"
+  | "empty-inventory"
+  | "invalid-target"
+  | "close-not-observed"
+
+export interface ProcessGroupAbsenceObservation {
+  absent: boolean
+  reason: ProcessGroupAbsenceReason
+  rowsScanned: number
+  kernelThreadRows: number
+  positiveGroupRows: number
+  targetGroupId: number | null
+}
+
+export function processGroupAbsenceObservationFromRows(
+  groupId: number,
+  rows: Array<{ pid: number; stat: string }>,
+): ProcessGroupAbsenceObservation {
+  const base = { rowsScanned: 0, kernelThreadRows: 0, positiveGroupRows: 0, targetGroupId: Number.isSafeInteger(groupId) ? groupId : null }
+  if (!Number.isSafeInteger(groupId) || groupId <= 0) return { ...base, absent: false, reason: "invalid-target" }
+  if (rows.length === 0) return { ...base, absent: false, reason: "empty-inventory" }
+  let kernelThreadRows = 0
+  let positiveGroupRows = 0
+  let rowsScanned = 0
+  for (const row of rows) {
+    if (!Number.isSafeInteger(row.pid) || row.pid <= 0) {
+      return { ...base, rowsScanned, kernelThreadRows, positiveGroupRows, absent: false, reason: "invalid-proc-row" }
+    }
+    rowsScanned += 1
+    const membership = parseLinuxProcStatGroupMembership(row.stat, row.pid)
+    if (membership.kind === "invalid") {
+      return { ...base, rowsScanned, kernelThreadRows, positiveGroupRows, absent: false, reason: "invalid-proc-row" }
+    }
+    if (membership.kind === "kernel-thread") {
+      kernelThreadRows += 1
+      continue
+    }
+    positiveGroupRows += 1
+    if (membership.groupId === groupId) {
+      return { ...base, rowsScanned, kernelThreadRows, positiveGroupRows, absent: false, reason: "member-observed" }
+    }
+  }
+  return { ...base, rowsScanned, kernelThreadRows, positiveGroupRows, absent: true, reason: "absent" }
+}
+
+/**
+ * Kept for the producer contract and existing regressions: absence is true only
+ * through the strict observation above, never for malformed/ambiguous rows.
+ */
 export function processGroupAbsentFromProcRows(
   groupId: number,
   rows: Array<{ pid: number; stat: string }>,
 ): boolean {
-  if (!Number.isSafeInteger(groupId) || groupId <= 0 || rows.length === 0) return false
-  for (const row of rows) {
-    if (!Number.isSafeInteger(row.pid) || row.pid <= 0) return false
-    const observedGroupId = parseLinuxProcStatProcessGroupId(row.stat)
-    if (observedGroupId === null || observedGroupId === groupId) return false
-  }
-  return true
+  return processGroupAbsenceObservationFromRows(groupId, rows).absent
 }
 
-function processGroupAbsentAfterClose(groupId: number | undefined): boolean {
-  if (process.platform !== "linux" || groupId === undefined || !Number.isSafeInteger(groupId) || groupId <= 1) return false
-  let entries
-  try { entries = readdirSync("/proc", { withFileTypes: true }) } catch { return false }
+export function processGroupAbsenceAfterCloseObservation(
+  groupId: number | undefined,
+): ProcessGroupAbsenceObservation {
+  const empty = { rowsScanned: 0, kernelThreadRows: 0, positiveGroupRows: 0, targetGroupId: groupId ?? null }
+  if (process.platform !== "linux" || groupId === undefined || !Number.isSafeInteger(groupId) || groupId <= 1) {
+    return { ...empty, absent: false, reason: "invalid-target" }
+  }
+  let entries: Array<{ name: string; isDirectory: () => boolean }>
+  try {
+    entries = readdirSync("/proc", { withFileTypes: true })
+  } catch {
+    return { ...empty, absent: false, reason: "read-error" }
+  }
   const rows: Array<{ pid: number; stat: string }> = []
   for (const entry of entries) {
     if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
@@ -829,11 +925,17 @@ function processGroupAbsentAfterClose(groupId: number | undefined): boolean {
       rows.push({ pid, stat: readFileSync(`/proc/${entry.name}/stat`, "utf8") })
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
+      // A row that disappeared between listdir and read is a legitimate race and
+      // not an unreadable inventory; any other read failure is ambiguous.
       if (code === "ENOENT" || code === "ESRCH") continue
-      return false
+      return { ...empty, absent: false, reason: "read-error" }
     }
   }
-  return processGroupAbsentFromProcRows(groupId, rows)
+  return processGroupAbsenceObservationFromRows(groupId, rows)
+}
+
+function processGroupAbsentAfterClose(groupId: number | undefined): boolean {
+  return processGroupAbsenceAfterCloseObservation(groupId).absent
 }
 
 // Read-only observation of the child's own process group before it is reaped.
@@ -1009,6 +1111,70 @@ export function mayStartAbruptPhaseTwo(input: {
     input.firstKillRequested && input.exitCode === null && input.signal === "SIGKILL" && !input.timedOut &&
     input.exitObserved && input.closeObserved && input.targetAbsentAfterClose && input.processGroupAbsentAfterClose &&
     !input.nativeTeardownMarkerObserved
+}
+
+export type AbruptPhaseOneTransitionBlockReason =
+  | "control-not-completed"
+  | "control-failed"
+  | "kill-not-requested"
+  | "exit-not-observed"
+  | "close-not-observed"
+  | "unexpected-exit-code"
+  | "unexpected-signal"
+  | "timeout"
+  | "target-present-after-close"
+  | "private-process-group-identity-unproven"
+  | "process-group-member-observed"
+  | "process-group-invalid-entry"
+  | "process-group-read-error"
+  | "process-group-empty-inventory"
+  | "process-group-absence-unproven"
+  | "native-teardown-marker-observed"
+  | "parent-barrier-not-armed"
+  | "persistence-not-parent-verified"
+
+/**
+ * Sanitized reason for phase A not transitioning to phase B. Enum-only: it never
+ * exposes PIDs, comm names, paths or external process data.
+ */
+export function classifyAbruptPhaseOneTransitionBlock(input: {
+  parentBarrierArmed: boolean
+  parentVerifiedPersistence: boolean
+  controlCompleted: boolean
+  controlFailed: boolean
+  firstKillRequested: boolean
+  exitCode: number | null
+  signal: string | null
+  timedOut: boolean
+  exitObserved: boolean
+  closeObserved: boolean
+  targetAbsentAfterClose: boolean
+  processGroupIdObserved: boolean
+  processGroupAbsentAfterClose: boolean
+  processGroupAbsenceReason: ProcessGroupAbsenceReason
+  nativeTeardownMarkerObserved: boolean
+}): AbruptPhaseOneTransitionBlockReason | null {
+  if (!input.controlCompleted) return "control-not-completed"
+  if (input.controlFailed) return "control-failed"
+  if (!input.firstKillRequested) return "kill-not-requested"
+  if (!input.exitObserved) return "exit-not-observed"
+  if (!input.closeObserved) return "close-not-observed"
+  if (input.exitCode !== null) return "unexpected-exit-code"
+  if (input.signal !== "SIGKILL") return "unexpected-signal"
+  if (input.timedOut) return "timeout"
+  if (!input.targetAbsentAfterClose) return "target-present-after-close"
+  if (!input.processGroupIdObserved) return "private-process-group-identity-unproven"
+  if (!input.processGroupAbsentAfterClose) {
+    if (input.processGroupAbsenceReason === "member-observed") return "process-group-member-observed"
+    if (input.processGroupAbsenceReason === "invalid-proc-row") return "process-group-invalid-entry"
+    if (input.processGroupAbsenceReason === "read-error") return "process-group-read-error"
+    if (input.processGroupAbsenceReason === "empty-inventory") return "process-group-empty-inventory"
+    return "process-group-absence-unproven"
+  }
+  if (input.nativeTeardownMarkerObserved) return "native-teardown-marker-observed"
+  if (!input.parentBarrierArmed) return "parent-barrier-not-armed"
+  if (!input.parentVerifiedPersistence) return "persistence-not-parent-verified"
+  return null
 }
 
 export function run(
@@ -6346,6 +6512,13 @@ async function main(): Promise<void> {
           if (!hostIdentity || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
             throw new Error("runner could not identify its exact DSH child before readiness")
           }
+          // Capture phase A's private process group from the child's own procfs
+          // entry while it is alive, symmetrically to phase B, and require it to
+          // be exactly the direct child PID before any experimental signal.
+          abruptFirstProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)
+          if (!abruptPrivateProcessGroupIdMatchesChildPid(child.pid, abruptFirstProcessGroupId)) {
+            throw new Error("phase A private process group identity did not match the direct child")
+          }
           const sidecar = await waitForObserverJson(abruptObserverResultOne, child, signal, bootTimeoutMs)
           if (!mayContinue()) throw new Error("phase-one control expired before parent validation")
           abruptPhaseOne = sidecar?.crossProcessPhaseOne
@@ -6387,6 +6560,13 @@ async function main(): Promise<void> {
           if (signal.aborted || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
             throw new Error("owned DSH child identity changed before direct termination")
           }
+          const preSignalProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)
+          if (
+            !abruptPrivateProcessGroupIdMatchesChildPid(child.pid, preSignalProcessGroupId) ||
+            preSignalProcessGroupId !== abruptFirstProcessGroupId
+          ) {
+            throw new Error("phase A private process group identity changed before the experimental signal")
+          }
           firstIdentityRevalidatedBeforeSignal = true
           if (!terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGKILL", mayContinue)) {
             throw new Error("runner refused to signal an unverified DSH child")
@@ -6403,12 +6583,23 @@ async function main(): Promise<void> {
           terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGKILL", maySignal)
             ? "SIGKILL" : null,
       })
+      const firstProcessGroupIdObserved = abruptPrivateProcessGroupIdMatchesChildPid(abruptFirstChild?.pid, abruptFirstProcessGroupId)
+      const firstGroupObservation = abruptFirstBoot.closeObserved === true
+        ? processGroupAbsenceAfterCloseObservation(abruptFirstProcessGroupId ?? undefined)
+        : {
+            absent: false,
+            reason: "close-not-observed" as const,
+            rowsScanned: 0,
+            kernelThreadRows: 0,
+            positiveGroupRows: 0,
+            targetGroupId: abruptFirstProcessGroupId,
+          }
       const firstTargetAbsentAfterClose = abruptFirstBoot.closeObserved === true && processTargetAbsentAfterClose(
         abruptFirstChild?.pid,
         abruptFirstBoot.hostProcessIdentitySha256 ?? null,
         processIdentityKey,
       )
-      const firstProcessGroupAbsentAfterClose = abruptFirstBoot.closeObserved === true && processGroupAbsentAfterClose(abruptFirstChild?.pid)
+      const firstProcessGroupAbsentAfterClose = firstProcessGroupIdObserved && firstGroupObservation.absent
       if (!firstTargetAbsentAfterClose || !firstProcessGroupAbsentAfterClose) preserveScratchForSafety = true
       const firstProcessObservation = {
         dshExecutableSha256,
@@ -6429,6 +6620,14 @@ async function main(): Promise<void> {
         killRequestedByParent: firstKillRequested,
         killSignalRequested: firstKillRequested ? "SIGKILL" : null,
         timeoutContainmentSignalsRequested: abruptFirstBoot.timeoutContainmentSignalsRequested ?? [],
+        closeObserved: abruptFirstBoot.closeObserved === true,
+        controlCompleted: abruptFirstBoot.controlCompleted === true,
+        controlFailed: abruptFirstBoot.controlFailed === true,
+        processGroupIdObserved: firstProcessGroupIdObserved,
+        processGroupAbsenceReason: firstGroupObservation.reason,
+        processGroupRowsScanned: firstGroupObservation.rowsScanned,
+        processGroupKernelThreadRows: firstGroupObservation.kernelThreadRows,
+        processGroupPositiveRows: firstGroupObservation.positiveGroupRows,
         targetAbsentAfterClose: firstTargetAbsentAfterClose,
         processGroupAbsentAfterClose: firstProcessGroupAbsentAfterClose,
       }
@@ -6456,8 +6655,32 @@ async function main(): Promise<void> {
         nativeTeardownMarkerObserved: existsSync(abruptTeardownMarkerOne),
       })) {
         preserveScratchForSafety = true
-        report.stages.abruptRestart = { status: "FAIL", probeExecuted: true, phaseOne: abruptPhaseOne, parentVerifiedPersistence, firstProcess: firstAbruptProof, phaseTwoStarted: false }
-        fail("Issue #107 stopped before phase B because phase A did not close from the requested owned-child SIGKILL", "FAIL")
+        const transitionBlockReason = classifyAbruptPhaseOneTransitionBlock({
+          parentBarrierArmed: firstParentBarrierArmed,
+          parentVerifiedPersistence: parentVerifiedPersistence !== null,
+          controlCompleted: abruptFirstBoot.controlCompleted === true,
+          controlFailed: abruptFirstBoot.controlFailed === true,
+          firstKillRequested,
+          exitCode: abruptFirstBoot.exitCode,
+          signal: abruptFirstBoot.signal,
+          timedOut: abruptFirstBoot.timedOut,
+          exitObserved: abruptFirstBoot.exitObserved === true,
+          closeObserved: abruptFirstBoot.closeObserved === true,
+          targetAbsentAfterClose: firstTargetAbsentAfterClose,
+          processGroupIdObserved: firstProcessGroupIdObserved,
+          processGroupAbsentAfterClose: firstProcessGroupAbsentAfterClose,
+          processGroupAbsenceReason: firstGroupObservation.reason,
+          nativeTeardownMarkerObserved: existsSync(abruptTeardownMarkerOne),
+        }) ?? "phase-a-not-approved"
+        report.stages.abruptRestart = {
+          status: "FAIL",
+          probeExecuted: true,
+          phaseOne: abruptPhaseOne,
+          parentVerifiedPersistence,
+          firstProcess: { ...firstAbruptProof, transitionBlockReason },
+          phaseTwoStarted: false,
+        }
+        fail(`Issue #107 stopped before phase B: phase A termination proof failed (${transitionBlockReason})`, "FAIL")
         return
       }
       const firstProcessEndFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
@@ -6519,6 +6742,16 @@ async function main(): Promise<void> {
       const secondProcessGroupIdObserved = abruptPrivateProcessGroupIdMatchesChildPid(
         abruptSecondChild?.pid, abruptSecondProcessGroupId,
       )
+      const secondGroupObservation = secondProcessGroupIdObserved
+        ? processGroupAbsenceAfterCloseObservation(abruptSecondProcessGroupId ?? undefined)
+        : {
+            absent: false,
+            reason: "invalid-target" as const,
+            rowsScanned: 0,
+            kernelThreadRows: 0,
+            positiveGroupRows: 0,
+            targetGroupId: abruptSecondProcessGroupId,
+          }
       const secondAbsenceDecision = abruptSecondProcessAbsenceDecision({
         closeObserved: abruptSecondBoot.closeObserved === true,
         controlCompleted: abruptSecondBoot.controlCompleted === true,
@@ -6527,8 +6760,7 @@ async function main(): Promise<void> {
         targetAbsentAfterClose: processTargetAbsentAfterClose(
           abruptSecondChild?.pid, abruptSecondBoot.hostProcessIdentitySha256 ?? null, processIdentityKey,
         ),
-        processGroupAbsentAfterClose: secondProcessGroupIdObserved &&
-          processGroupAbsentAfterClose(abruptSecondProcessGroupId ?? undefined),
+        processGroupAbsentAfterClose: secondProcessGroupIdObserved && secondGroupObservation.absent,
       })
       if (secondAbsenceDecision.preserveScratch) preserveScratchForSafety = true
       const abruptSecondProof = {
@@ -6540,6 +6772,10 @@ async function main(): Promise<void> {
         controlFailed: abruptSecondBoot.controlFailed === true,
         closeObserved: abruptSecondBoot.closeObserved === true,
         processGroupIdObserved: secondAbsenceDecision.processGroupIdObserved,
+        processGroupAbsenceReason: secondGroupObservation.reason,
+        processGroupRowsScanned: secondGroupObservation.rowsScanned,
+        processGroupKernelThreadRows: secondGroupObservation.kernelThreadRows,
+        processGroupPositiveRows: secondGroupObservation.positiveGroupRows,
         targetAbsentAfterClose: secondAbsenceDecision.targetAbsentAfterClose,
         processGroupAbsentAfterClose: secondAbsenceDecision.processGroupAbsentAfterClose,
       }

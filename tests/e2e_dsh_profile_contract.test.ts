@@ -6562,3 +6562,176 @@ describe("R8 terminal report planner wiring", () => {
     }
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R9: legitimate zero-PGID kernel threads in /proc must not turn a
+// positive process-group absence observation into a false negative, while every
+// invalid/ambiguous/unreadable row must still fail closed and no signal is sent.
+// ---------------------------------------------------------------------------
+
+describe("R9 procfs process-group interpretation", () => {
+  const pfKthread = 0x00200000
+
+  function procStat(
+    pid: number,
+    processGroupId: number | string,
+    flags: number | string = 4194304,
+    state = "S",
+    ppid = 1,
+    session = 1,
+    tty = 0,
+    tpgid = -1,
+  ): string {
+    return `${pid} (sanitized-worker ${pid}) ${state} ${ppid} ${processGroupId} ${session} ${tty} ${tpgid} ${flags} 4194304 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+  }
+
+  async function r9Api(): Promise<any> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    for (const name of [
+      "parseLinuxProcStatGroupMembership",
+      "parseLinuxProcStatProcessGroupId",
+      "processGroupAbsenceObservationFromRows",
+      "processGroupAbsenceAfterCloseObservation",
+      "classifyAbruptPhaseOneTransitionBlock",
+      "abruptPrivateProcessGroupIdMatchesChildPid",
+    ]) expect(typeof runner[name], name).toBe("function")
+    return runner
+  }
+
+  test("legitimate zero-PGID kernel threads are non-members and never block a positive-group absence", async () => {
+    const runner = await r9Api()
+    const target = 8101
+    const kernelRow = { pid: 7201, stat: procStat(7201, 0, pfKthread) }
+    expect(runner.parseLinuxProcStatGroupMembership(kernelRow.stat, 7201)).toMatchObject({ kind: "kernel-thread", pid: 7201 })
+    // Identity/PGID authority remains strictly positive: zero never authorizes.
+    expect(runner.parseLinuxProcStatProcessGroupId(kernelRow.stat)).toBeNull()
+
+    const otherPositive = { pid: 8202, stat: procStat(8202, 8203) }
+    expect(runner.processGroupAbsenceObservationFromRows(target, [otherPositive])).toMatchObject({ absent: true, reason: "absent" })
+    // The original defect: one legitimate kernel thread row made the scan false.
+    expect(runner.processGroupAbsenceObservationFromRows(target, [otherPositive, kernelRow])).toMatchObject({ absent: true, reason: "absent", kernelThreadRows: 1 })
+    const mixed = runner.processGroupAbsenceObservationFromRows(target, [
+      kernelRow,
+      otherPositive,
+      { pid: 7202, stat: procStat(7202, 0, pfKthread) },
+    ])
+    expect(mixed.absent).toBe(true)
+    expect(mixed.kernelThreadRows).toBe(2)
+    expect(mixed.positiveGroupRows).toBe(1)
+    // The previous pure scanner returned true for the same rows without kernel entries.
+    expect(runner.processGroupAbsentFromProcRows(target, [otherPositive])).toBe(true)
+  })
+
+  test("real member rows, including zombies, are never hidden by kernel-thread skipping", async () => {
+    const runner = await r9Api()
+    const target = 8101
+    const member = { pid: 8301, stat: procStat(8301, target) }
+    expect(runner.processGroupAbsenceObservationFromRows(target, [member])).toMatchObject({ absent: false, reason: "member-observed" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8302, stat: procStat(8302, target, 4194304, "Z") }]))
+      .toMatchObject({ absent: false, reason: "member-observed" })
+    // A kernel row does not mask a real member.
+    expect(runner.processGroupAbsenceObservationFromRows(target, [
+      { pid: 7201, stat: procStat(7201, 0, pfKthread) },
+      member,
+    ])).toMatchObject({ absent: false, reason: "member-observed" })
+    expect(runner.processGroupAbsentFromProcRows(target, [member])).toBe(false)
+  })
+
+  test("zero PGID without proven PF_KTHREAD and every ambiguous row fail closed", async () => {
+    const runner = await r9Api()
+    const target = 8101
+    const zeroWithoutKernel = { pid: 8401, stat: procStat(8401, 0, 4194304) }
+    expect(runner.parseLinuxProcStatGroupMembership(zeroWithoutKernel.stat, 8401)).toMatchObject({ kind: "invalid" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [zeroWithoutKernel])).toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8402, stat: "malformed" }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8403, stat: procStat(8403, 8101, "not-a-flag") }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8404, stat: procStat(8404, 8101).replace(/\) \S+ 1 8101 /, ") ") }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    // Row identity mismatch is ambiguous, never absence.
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8405, stat: procStat(9999, 8102) }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(0, [{ pid: 8406, stat: procStat(8406, 8102) }]))
+      .toMatchObject({ absent: false, reason: "invalid-target" })
+    expect(runner.processGroupAbsenceObservationFromRows(-1, [])).toMatchObject({ absent: false, reason: "invalid-target" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [])).toMatchObject({ absent: false, reason: "empty-inventory" })
+    expect(runner.processGroupAbsentFromProcRows(target, [zeroWithoutKernel])).toBe(false)
+  })
+
+  test("private PGID identity stays positive and the phase A/B transition depends on every proof", async () => {
+    const runner = await r9Api()
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, 8101)).toBe(true)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, 0)).toBe(false)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, null)).toBe(false)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, 8102)).toBe(false)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(0, 0)).toBe(false)
+
+    const healthy = {
+      parentBarrierArmed: true,
+      parentVerifiedPersistence: true,
+      controlCompleted: true,
+      controlFailed: false,
+      firstKillRequested: true,
+      exitCode: null,
+      signal: "SIGKILL",
+      timedOut: false,
+      exitObserved: true,
+      closeObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupIdObserved: true,
+      processGroupAbsentAfterClose: true,
+      processGroupAbsenceReason: "absent",
+      nativeTeardownMarkerObserved: false,
+    }
+    expect(runner.classifyAbruptPhaseOneTransitionBlock(healthy)).toBeNull()
+    const blocks: Array<[string, Record<string, unknown>, string]> = [
+      ["close not observed", { closeObserved: false }, "close-not-observed"],
+      ["exit not observed", { exitObserved: false }, "exit-not-observed"],
+      ["control incomplete", { controlCompleted: false }, "control-not-completed"],
+      ["control failed", { controlFailed: true }, "control-failed"],
+      ["kill not requested", { firstKillRequested: false }, "kill-not-requested"],
+      ["unexpected exit", { exitCode: 0 }, "unexpected-exit-code"],
+      ["unexpected signal", { signal: null }, "unexpected-signal"],
+      ["timeout", { timedOut: true }, "timeout"],
+      ["target survives", { targetAbsentAfterClose: false }, "target-present-after-close"],
+      ["PGID identity missing", { processGroupIdObserved: false }, "private-process-group-identity-unproven"],
+      ["group member observed", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "member-observed" }, "process-group-member-observed"],
+      ["invalid proc row", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "invalid-proc-row" }, "process-group-invalid-entry"],
+      ["read error", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "read-error" }, "process-group-read-error"],
+      ["empty inventory", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "empty-inventory" }, "process-group-empty-inventory"],
+      ["native marker present", { nativeTeardownMarkerObserved: true }, "native-teardown-marker-observed"],
+      ["barrier missing", { parentBarrierArmed: false }, "parent-barrier-not-armed"],
+      ["persistence not parent verified", { parentVerifiedPersistence: false }, "persistence-not-parent-verified"],
+    ]
+    for (const [label, change, expected] of blocks) {
+      expect(runner.classifyAbruptPhaseOneTransitionBlock({ ...healthy, ...change }), label).toBe(expected)
+    }
+  })
+
+  test("hermetic real /proc observation: absence of an impossible positive group, member of own group, no signals", async () => {
+    if (process.platform !== "linux") return
+    const runner = await r9Api()
+    // Impossible positive group: legitimate zero-PGID kernel threads must not
+    // make the absence observation false.
+    const impossible = runner.processGroupAbsenceAfterCloseObservation(2147483647)
+    expect(impossible.absent).toBe(true)
+    expect(impossible.reason).toBe("absent")
+    expect(impossible.rowsScanned).toBeGreaterThan(0)
+    expect(JSON.stringify(impossible)).not.toMatch(/sanitized-worker|comm|\|"/)
+    // The runner's own process is a real member of its own positive group, so the
+    // same reader must refuse absence instead of hiding it.
+    const selfStat = readFileSync("/proc/self/stat", "utf8")
+    const selfMembership = runner.parseLinuxProcStatGroupMembership(selfStat, process.pid)
+    if (selfMembership.kind === "positive") {
+      const ownGroup = runner.processGroupAbsenceAfterCloseObservation(selfMembership.groupId)
+      expect(ownGroup.absent).toBe(false)
+      expect(ownGroup.reason).toBe("member-observed")
+    }
+    // A vanishing row (read error ENOENT) is handled inside the reader; invalid
+    // targets fail closed.
+    expect(runner.processGroupAbsenceAfterCloseObservation(0)).toMatchObject({ absent: false, reason: "invalid-target" })
+    expect(runner.processGroupAbsenceAfterCloseObservation(-1)).toMatchObject({ absent: false, reason: "invalid-target" })
+  })
+})

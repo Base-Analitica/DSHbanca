@@ -1220,3 +1220,64 @@ test("R8 real module initialization derives both persistence plans from the envi
   expect(terminalPlanner).toContain("abruptReportPath: options.terminalReportPath")
   expect(terminalPlanner).not.toContain("...options")
 })
+
+
+test("R9 procfs group interpretation and phase A/B PGID proofs are wired into the real runner", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  // Kernel threads with a proven PF_KTHREAD flag are skipped; invalid rows and
+  // unproven zero PGIDs are never absence.
+  expect(source).toContain("PF_KTHREAD")
+  expect(source).toContain("linuxPfKthreadFlag = 0x00200000")
+  const membershipStart = source.indexOf("export function parseLinuxProcStatGroupMembership(")
+  const membershipEnd = source.indexOf("export type ProcessGroupAbsenceReason", membershipStart)
+  const membership = source.slice(membershipStart, membershipEnd)
+  expect(membership).toContain("kind: \"kernel-thread\"")
+  expect(membership).toContain("zero process-group id without proven PF_KTHREAD")
+  expect(membership).toContain("proc stat flags field is invalid")
+  expect(membership).toContain("proc stat pid does not match the enumerated row")
+  const scanStart = source.indexOf("export function processGroupAbsenceObservationFromRows(")
+  const scanEnd = source.indexOf("export function processGroupAbsentFromProcRows(", scanStart)
+  const scan = source.slice(scanStart, scanEnd)
+  expect(scan).toContain("membership.kind === \"invalid\"")
+  expect(scan).toContain("membership.kind === \"kernel-thread\"")
+  expect(scan).toContain("membership.groupId === groupId")
+  expect(scan).not.toContain("observedGroupId === null")
+  // Strict identity parser stays positive-only.
+  const strictParser = source.slice(
+    source.indexOf("export function parseLinuxProcStatProcessGroupId("),
+    source.indexOf("export function parseLinuxProcStatGroupMembership(", source.indexOf("export function parseLinuxProcStatProcessGroupId(")),
+  )
+  expect(strictParser).toContain('membership.kind === "positive"')
+  // Phase A captures its private PGID from the live child and revalidates it
+  // before the experimental SIGKILL; post-close absence uses that observed PGID.
+  const phaseAStart = source.indexOf("containmentStage: \"abrupt-phase-a\"")
+  const phaseAEnd = source.indexOf("const firstTargetAbsentAfterClose", phaseAStart)
+  const phaseA = source.slice(phaseAStart, phaseAEnd)
+  expect(phaseA).toContain("abruptFirstProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)")
+  expect(phaseA).toContain("abruptPrivateProcessGroupIdMatchesChildPid(child.pid, abruptFirstProcessGroupId)")
+  expect(phaseA).toContain("preSignalProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)")
+  expect(phaseA).toContain("preSignalProcessGroupId !== abruptFirstProcessGroupId")
+  const phaseAProofStart = source.indexOf("const firstProcessGroupIdObserved", phaseAStart)
+  const phaseAProof = source.slice(phaseAProofStart, source.indexOf("const firstProcessEndFilesystemIdentitySha256", phaseAProofStart))
+  expect(phaseAProof).toContain("processGroupAbsenceAfterCloseObservation(abruptFirstProcessGroupId ?? undefined)")
+  expect(phaseAProof).toContain("processGroupIdObserved: firstProcessGroupIdObserved")
+  expect(phaseAProof).toContain("processGroupAbsenceReason: firstGroupObservation.reason")
+  expect(phaseAProof).toContain("closeObserved: abruptFirstBoot.closeObserved === true")
+  expect(phaseAProof).toContain("controlCompleted: abruptFirstBoot.controlCompleted === true")
+  expect(phaseAProof).toContain("controlFailed: abruptFirstBoot.controlFailed === true")
+  expect(source).toContain("classifyAbruptPhaseOneTransitionBlock({")
+  expect(source).toContain("phase A termination proof failed (${transitionBlockReason})")
+  // Phase B uses the same strict observation of its observed private PGID.
+  const phaseBStart = source.indexOf("containmentStage: \"abrupt-phase-b\"")
+  const phaseBEnd = source.indexOf("const phaseTwo = abruptSecondSidecar?.crossProcessPhaseTwo", phaseBStart)
+  const phaseB = source.slice(phaseBStart, phaseBEnd)
+  expect(phaseB).toContain("abruptSecondProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)")
+  expect(phaseB).toContain("processGroupAbsenceAfterCloseObservation(abruptSecondProcessGroupId ?? undefined)")
+  expect(phaseB).toContain("processGroupAbsenceReason: secondGroupObservation.reason")
+  // No group-query, kill(0), negative-PID or tree signal was introduced in the
+  // #107 phase A/B path (the pre-existing generic run containment is untouched).
+  const abruptPath = phaseA + phaseAProof + phaseB
+  expect(abruptPath).not.toContain("kill(-")
+  expect(abruptPath).not.toContain("process.kill(0")
+  expect(abruptPath).not.toContain("killProcessTree(")
+})
