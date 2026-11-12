@@ -4037,8 +4037,8 @@ describe("DSH E2E diagnostic redaction", () => {
     const writeReportSource = runnerSource.slice(writeReportStart, failFunctionStart)
     expect(writeReportSource).toContain("sanitizeReport(value)")
     expect(writeReportSource).toContain("persistReportWithPlan(reportPersistencePlan, report)")
-    expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable")
-    expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable")
+    expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(await commandVersion(nodeExecutable")
+    expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(await commandVersion(bunExecutable")
     expect(runnerSource).toContain("const reportedVersion = safeRuntimeVersion(pnpmCheck.stdout")
     expect(runnerSource).toContain("const safeVersions = (sanitizeReport({ versions: report.versions }) as { versions: GateReport[\"versions\"] }).versions")
     expect(runnerSource).not.toContain("sanitizeReport(report.versions)")
@@ -4292,6 +4292,17 @@ class ManualClock {
       if (++count > 20) throw new Error("manual clock exceeded bounded timeout schedule")
       this.runNext()
     }
+  }
+  // Fire the most recently scheduled callback even if it was cancelled, to prove
+  // late timers/callbacks cannot signal after the terminal state.
+  runLastScheduled(): void {
+    const timer = this.timers[this.timers.length - 1]
+    if (!timer) throw new Error("manual clock has no scheduled timeout")
+    timer.fired = true
+    timer.callback()
+  }
+  pendingCount(): number {
+    return this.timers.filter((candidate) => !candidate.cancelled && !candidate.fired).length
   }
 }
 
@@ -4989,5 +5000,200 @@ describe("Abrupt producer → validator integration (#107 R3)", () => {
     evidence.processBoundary.first.identityMatched = false
     expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
     expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #107 R4: the whole runner must obey the verified-direct-child
+// containment authority whenever #107 is requested. These tests execute the
+// real `run()` containment path with fake ChildProcess objects, fake
+// process.kill, a manual clock, and simulated procfs identity observations.
+// Every test first asserts the R4 API exists, so the suite never reaches the
+// legacy group-signaling path on an old HEAD.
+// ---------------------------------------------------------------------------
+
+describe("R4 containment authority for the whole #107 runner", () => {
+  async function strictRunner(): Promise<any> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.runWithContainmentPolicy).toBe("function")
+    expect(typeof runner.containmentIncidentSnapshot).toBe("function")
+    expect(typeof runner.containmentRequiresScratchPreservation).toBe("function")
+    return runner
+  }
+
+  function startStrictRun(runner: any, options: Record<string, unknown> = {}) {
+    const child = new MockControlledChild()
+    const clock = new ManualClock()
+    const signals: Array<[number, string]> = []
+    const identity: { value: string | null; executableMatches: boolean; executableChecks: number } = {
+      value: "identity-a",
+      executableMatches: true,
+      executableChecks: 0,
+    }
+    const promise = runner.run("mock-command", [], {
+      cwd: tmpdir(),
+      env: {},
+      timeoutMs: 10,
+      processIdentityKey: Buffer.alloc(32),
+      containment: "strict-direct-only",
+      containmentStage: "strict-test-stage",
+      strictContainmentGraceMs: 5,
+      controlledCloseGraceMs: 3,
+      ...options,
+    }, {
+      spawn: (() => child) as any,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      kill: (pid: number, signal: "SIGTERM" | "SIGKILL") => { signals.push([pid, signal]) },
+      processIdentity: () => identity.value,
+      verifyExecutable: () => {
+        identity.executableChecks++
+        return identity.executableMatches
+      },
+    })
+    child.emit("spawn")
+    return { child, clock, signals, identity, promise }
+  }
+
+  test("strict timeout signals only the verified direct child, never a group", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise, child } = startStrictRun(runner)
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]])
+    clock.runNext()
+    const result = await promise
+    expect(result.timedOut).toBe(true)
+    expect(result.closeObserved).toBe(false)
+    expect(typeof result.containmentIncident).toBe("string")
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
+    expect(child.unrefCalls).toBeGreaterThan(0)
+  })
+
+  test("missing identity forbids every signal and fails the bounded run closed", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, identity, promise } = startStrictRun(runner)
+    identity.value = null
+    clock.runNext()
+    clock.runNext()
+    const result = await promise
+    expect(signals).toEqual([])
+    expect(result.timedOut).toBe(true)
+    expect(String(result.containmentIncident)).toContain("identity")
+  })
+
+  test("identity changed before timeout forbids every signal", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, identity, promise } = startStrictRun(runner)
+    identity.value = "identity-reused"
+    clock.runNext()
+    clock.runNext()
+    await promise
+    expect(signals).toEqual([])
+  })
+
+  test("identity change between SIGTERM and the deferred attempt blocks SIGKILL", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, identity, promise } = startStrictRun(runner)
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    identity.value = "identity-changed"
+    clock.runNext()
+    clock.runNext()
+    const result = await promise
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    expect(String(result.containmentIncident).length).toBeGreaterThan(0)
+  })
+
+  test("missing process-identity key or an unexpected executable forbids signals", async () => {
+    const runner = await strictRunner()
+    const withoutKey = startStrictRun(runner, { processIdentityKey: undefined })
+    withoutKey.clock.runNext()
+    withoutKey.clock.runNext()
+    expect(withoutKey.signals).toEqual([])
+    await withoutKey.promise
+    const unexpectedExecutable = startStrictRun(runner)
+    unexpectedExecutable.identity.executableMatches = false
+    unexpectedExecutable.clock.runNext()
+    unexpectedExecutable.clock.runNext()
+    expect(unexpectedExecutable.signals).toEqual([])
+    await unexpectedExecutable.promise
+  })
+
+  test("wrapper targets are never signaled and the wait stays bounded", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise } = startStrictRun(runner, { containmentTarget: "wrapper-unverifiable" })
+    clock.runNext()
+    clock.runNext()
+    const result = await promise
+    expect(signals).toEqual([])
+    expect(result.closeObserved).toBe(false)
+    expect(String(result.containmentIncident)).toContain("wrapper")
+  })
+
+  test("exit without close stays bounded, reports uncertainty, and sends no signal", async () => {
+    const runner = await strictRunner()
+    const { child, clock, signals, promise } = startStrictRun(runner)
+    child.observeExit(0, null)
+    clock.runLastScheduled()
+    const result = await promise
+    expect(result.closeObserved).toBe(false)
+    expect(result.timedOut).toBe(false)
+    expect(signals).toEqual([])
+    expect(String(result.containmentIncident)).toContain("close")
+  })
+
+  test("child error after spawn never signals and reports the containment uncertainty", async () => {
+    const runner = await strictRunner()
+    const { child, signals, promise } = startStrictRun(runner)
+    child.emit("error", new Error("synthetic child failure"))
+    const result = await promise
+    expect(signals).toEqual([])
+    expect(String(result.containmentIncident)).toContain("error")
+  })
+
+  test("confirmed close cancels timers and late callbacks cannot signal", async () => {
+    const runner = await strictRunner()
+    const { child, clock, signals, promise } = startStrictRun(runner)
+    child.observeClose(0, null)
+    const result = await promise
+    expect(result.closeObserved).toBe(true)
+    expect(clock.pendingCount()).toBe(0)
+    clock.runLastScheduled()
+    expect(signals).toEqual([])
+  })
+
+  test("the restricted wrapper aborts on uncertain containment and exposes the incident", async () => {
+    const runner = await strictRunner()
+    const child = new MockControlledChild()
+    const clock = new ManualClock()
+    const signals: Array<[number, string]> = []
+    const promise = runner.runWithContainmentPolicy("strict-direct-only", "wrapper-stage", "mock-command", [], {
+      cwd: tmpdir(),
+      env: {},
+      timeoutMs: 10,
+      processIdentityKey: Buffer.alloc(32),
+      strictContainmentGraceMs: 5,
+      controlledCloseGraceMs: 3,
+    }, {
+      spawn: (() => child) as any,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      kill: (pid: number, signal: "SIGTERM" | "SIGKILL") => { signals.push([pid, signal]) },
+      processIdentity: () => null,
+      verifyExecutable: () => false,
+    })
+    child.emit("spawn")
+    clock.runNext()
+    clock.runNext()
+    await expect(promise).rejects.toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(signals).toEqual([])
+    const incident = runner.containmentIncidentSnapshot()
+    expect(incident?.stage).toBe("wrapper-stage")
+    expect(String(incident?.reason).length).toBeGreaterThan(0)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: incident })).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: true, containmentIncident: null })).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: null })).toBe(false)
   })
 })

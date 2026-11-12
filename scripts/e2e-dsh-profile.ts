@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import {
   chmodSync,
   closeSync,
@@ -90,6 +90,12 @@ const abruptRestartRequestVariables = [
   "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH",
 ] as const
 const abruptRestartRequested = abruptRestartRequestVariables.some((key) => (process.env[key] ?? "").trim() !== "")
+// #107 requests the strict containment authority for the WHOLE run: only a
+// directly spawned child with revalidated kernel identity may ever be signaled.
+// Legacy tree/group termination is confined to runs that do not request #107.
+type ContainmentPolicy = "legacy" | "strict-direct-only"
+type ContainmentTarget = "direct-child" | "wrapper-unverifiable"
+const runnerContainmentPolicy: ContainmentPolicy = abruptRestartRequested ? "strict-direct-only" : "legacy"
 const reportPersistencePlan = createReportPersistencePlan({
   abruptRestartRequested,
   configuredReportPath,
@@ -105,6 +111,7 @@ const timeoutMs = 120_000
 const bootTimeoutMs = 30_000
 const controlledTeardownGraceMs = 5_000
 const controlledCloseGraceMs = 5_000
+const strictContainmentGraceMs = 1_500
 const maxOutputBytes = 8_000_000
 const defaultRunDependencies: RunDependencies = { spawn, setTimeout, clearTimeout }
 const profileName = `dshbanca-e2e-${process.pid}-${Date.now()}`
@@ -123,6 +130,8 @@ interface CommandResult {
   controlCompleted?: boolean
   controlFailed?: boolean
   timeoutContainmentSignalsRequested?: Array<"SIGTERM" | "SIGKILL">
+  containmentIncident?: string | null
+  containmentDirectSignals?: Array<"SIGTERM" | "SIGKILL">
 }
 
 type ControlledProcessStart = (
@@ -150,6 +159,10 @@ interface RunOptions {
   processIdentityKey?: Buffer
   controlledTeardownGraceMs?: number
   controlledCloseGraceMs?: number
+  containment?: ContainmentPolicy
+  containmentStage?: string
+  containmentTarget?: ContainmentTarget
+  strictContainmentGraceMs?: number
   onSpawn?: ControlledProcessStart
   onControlTimeout?: ControlTimeoutHandler
   onControlHardTimeout?: ControlHardTimeoutHandler
@@ -159,6 +172,9 @@ interface RunDependencies {
   spawn: typeof spawn
   setTimeout: typeof setTimeout
   clearTimeout: typeof clearTimeout
+  kill?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void
+  processIdentity?: (pid: number, key: Buffer) => string | null
+  verifyExecutable?: (pid: number, command: string, args: string[]) => boolean
 }
 
 export interface ReportPersistencePlan {
@@ -238,10 +254,46 @@ let abruptRestartWorkspaceDirectoryFd: number | undefined
 let driftWorkspaceDirectoryFd: number | undefined
 let preserveScratchForSafety = false
 let finalStatus: GateReport["status"] = "BLOCKED"
+let containmentIncident: { stage: string; reason: string } | null = null
 
-function commandVersion(command: string, args: string[], env?: NodeJS.ProcessEnv): string | null {
-  const result = spawnSync(command, args, { cwd: repositoryRoot, encoding: "utf8", timeout: 10_000, env })
-  if (result.status !== 0) return null
+// A containment-authority incident means the runner could not prove that it
+// restricted signals to a verified direct child. It can never be promoted to
+// PASS, must stop later stages, and keeps the scratch for inspection.
+export class ContainmentAuthorityAbort extends Error {
+  constructor(readonly stage: string) {
+    super(`containment authority was not proven for stage ${stage}`)
+    this.name = "ContainmentAuthorityAbort"
+  }
+}
+
+function recordContainmentIncident(stage: string, reason: string): void {
+  preserveScratchForSafety = true
+  if (containmentIncident !== null) return
+  containmentIncident = { stage, reason }
+  report.stages.containmentAuthority = { status: "FAIL", stage, reason }
+  fail(`Containment authority was not proven for stage ${stage}: ${reason}; no later stage was started and scratch is preserved.`, "FAIL")
+}
+
+export function containmentIncidentSnapshot(): { stage: string; reason: string } | null {
+  return containmentIncident === null ? null : { ...containmentIncident }
+}
+
+export function containmentRequiresScratchPreservation(input: {
+  preserveForSafety: boolean
+  containmentIncident: { stage: string; reason: string } | null
+}): boolean {
+  return input.preserveForSafety || input.containmentIncident !== null
+}
+
+async function commandVersion(command: string, args: string[], identityKey: Buffer, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  const result = await run(command, args, {
+    cwd: repositoryRoot,
+    env,
+    timeoutMs: 10_000,
+    processIdentityKey: identityKey,
+    containmentStage: "runtime-version",
+  })
+  if (result.exitCode !== 0 || result.timedOut || result.closeObserved !== true) return null
   return `${result.stdout ?? ""}`.trim().split(/\r?\n/)[0] || null
 }
 
@@ -423,6 +475,20 @@ function verifyOwnedDshChild(
     const argv = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean)
     const expectedArgv = [realpathSync(nodeExecutable), realpathSync(dshExecutable), ...args]
     return executable === expectedExecutable && JSON.stringify(argv) === JSON.stringify(expectedArgv)
+  } catch {
+    return false
+  }
+}
+
+// Generic read-only identity corroboration for directly spawned runner children:
+// executable image and argv must match the invocation the runner issued.
+function verifyProcessExecutableIdentity(pid: number, command: string, args: string[]): boolean {
+  if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 1) return false
+  try {
+    const executable = realpathSync(`/proc/${pid}/exe`)
+    const expectedExecutable = realpathSync(command)
+    const argv = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean)
+    return executable === expectedExecutable && JSON.stringify(argv) === JSON.stringify([command, ...args])
   } catch {
     return false
   }
@@ -685,7 +751,7 @@ export function run(
   options: RunOptions,
   dependencies: RunDependencies = defaultRunDependencies,
 ): Promise<CommandResult> {
-  return new Promise((resolveResult) => {
+  return new Promise((resolveResult, rejectResult) => {
     const child = dependencies.spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
@@ -711,6 +777,10 @@ export function run(
     let controlErrorMessage: string | null = null
     let hostProcessIdentitySha256: string | null = null
     const timeoutContainmentSignalsRequested: Array<"SIGTERM" | "SIGKILL"> = []
+    const strictContainment = (options.containment ?? runnerContainmentPolicy) === "strict-direct-only"
+    const strictContainmentSignals: Array<"SIGTERM" | "SIGKILL"> = []
+    let strictForceTimer: ReturnType<typeof setTimeout> | undefined
+    let containmentIncidentReason: string | null = null
     const controlAbort = new AbortController()
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     let teardownTimer: ReturnType<typeof setTimeout> | undefined
@@ -719,9 +789,80 @@ export function run(
       if (timeoutTimer !== undefined) dependencies.clearTimeout(timeoutTimer)
       if (teardownTimer !== undefined) dependencies.clearTimeout(teardownTimer)
       if (closeDeadlineTimer !== undefined) dependencies.clearTimeout(closeDeadlineTimer)
+      if (strictForceTimer !== undefined) dependencies.clearTimeout(strictForceTimer)
       timeoutTimer = undefined
       teardownTimer = undefined
       closeDeadlineTimer = undefined
+      strictForceTimer = undefined
+    }
+    const recordStrictIncident = (reason: string) => {
+      containmentIncidentReason ??= reason
+    }
+    const strictKill = dependencies.kill ?? ((pid: number, signal: "SIGTERM" | "SIGKILL") => process.kill(pid, signal))
+    const strictIdentity = dependencies.processIdentity ?? ((pid: number, key: Buffer) => linuxProcessIdentitySha256(pid, key))
+    const strictExecutable = dependencies.verifyExecutable ??
+      ((pid: number, invokedCommand: string, invokedArgs: string[]) => verifyProcessExecutableIdentity(pid, invokedCommand, invokedArgs))
+    const scheduleStrictCloseDeadline = (reason: string) => {
+      if (settled || closeDeadlineTimer !== undefined) return
+      closeDeadlineTimer = dependencies.setTimeout(() => {
+        closeDeadlineTimer = undefined
+        if (settled) return
+        recordStrictIncident(reason)
+        finishWithoutClose()
+      }, options.controlledCloseGraceMs ?? controlledCloseGraceMs)
+    }
+    const beginStrictTimeoutContainment = () => {
+      if (settled) return
+      const pid = child.pid
+      const key = options.processIdentityKey
+      if (options.containmentTarget === "wrapper-unverifiable") {
+        recordStrictIncident("containment target is a wrapper whose process identity cannot be verified; no signal was sent")
+        scheduleStrictCloseDeadline("wrapper target did not close within the bounded containment window; survivor absence is unproven")
+        return
+      }
+      if (
+        pid === undefined || !Number.isSafeInteger(pid) || pid <= 1 || key === undefined ||
+        !hostProcessIdentitySha256 || !spawnObserved || child.exitCode !== null || child.signalCode !== null ||
+        !strictExecutable(pid, command, args)
+      ) {
+        recordStrictIncident("direct child identity is unavailable or ambiguous; no signal was sent")
+        scheduleStrictCloseDeadline("unverified direct child did not close within the bounded window; survivor absence is unproven")
+        return
+      }
+      const originalIdentity = hostProcessIdentitySha256
+      const stillOwned = () => {
+        if (settled || exitObserved || child.exitCode !== null || child.signalCode !== null) return false
+        const current = strictIdentity(pid, key)
+        return current !== null && current === originalIdentity && strictExecutable(pid, command, args)
+      }
+      if (!stillOwned()) {
+        recordStrictIncident("direct child identity changed before containment; no signal was sent")
+        scheduleStrictCloseDeadline("changed direct child identity forbids further signals; survivor absence is unproven")
+        return
+      }
+      recordStrictIncident("timeout containment can only signal the verified direct child; absence of its descendants is unproven")
+      try {
+        strictKill(pid, "SIGTERM")
+        strictContainmentSignals.push("SIGTERM")
+      } catch {
+        recordStrictIncident("verified direct child SIGTERM could not be delivered; containment is unproven")
+      }
+      strictForceTimer = dependencies.setTimeout(() => {
+        strictForceTimer = undefined
+        if (settled) return
+        if (!stillOwned()) {
+          recordStrictIncident("direct child identity changed before the deferred containment attempt; no further signal was sent")
+          scheduleStrictCloseDeadline("deferred containment was refused; survivor absence is unproven")
+          return
+        }
+        try {
+          strictKill(pid, "SIGKILL")
+          strictContainmentSignals.push("SIGKILL")
+        } catch {
+          recordStrictIncident("verified direct child SIGKILL could not be delivered; containment is unproven")
+        }
+        scheduleStrictCloseDeadline("direct child did not close after verified containment; survivor absence is unproven")
+      }, options.strictContainmentGraceMs ?? strictContainmentGraceMs)
     }
     const mayContinue = () => !settled && !timedOut && !controlAbort.signal.aborted
     const mayContain = () => !settled
@@ -737,11 +878,19 @@ export function run(
       }
       settled = true
       clearTimers()
+      if (strictContainment && options.onSpawn === undefined && options.containment === undefined && containmentIncidentReason !== null) {
+        const stage = options.containmentStage ?? "unnamed-stage"
+        recordContainmentIncident(stage, containmentIncidentReason)
+        rejectResult(new ContainmentAuthorityAbort(stage))
+        return
+      }
       resolveResult({
         ...result,
         controlCompleted,
         controlFailed,
         timeoutContainmentSignalsRequested: [...timeoutContainmentSignalsRequested],
+        containmentIncident: containmentIncidentReason,
+        containmentDirectSignals: [...strictContainmentSignals],
       })
     }
     const finishWithoutClose = () => {
@@ -807,7 +956,7 @@ export function run(
       spawnObserved = true
       const pid = child.pid
       if (options.processIdentityKey && pid !== undefined) {
-        hostProcessIdentitySha256 = linuxProcessIdentitySha256(pid, options.processIdentityKey)
+        hostProcessIdentitySha256 = strictIdentity(pid, options.processIdentityKey)
       }
       if (options.onSpawn) {
         controlStarted = true
@@ -832,6 +981,11 @@ export function run(
       if (options.onSpawn && !controlCompleted) {
         controlFailed = true
         controlAbort.abort()
+      }
+      if (!options.onSpawn && strictContainment && !settled) {
+        // Exit without close is not proof of termination: bound the wait,
+        // record the uncertainty, and never signal from this path.
+        scheduleStrictCloseDeadline("direct child exited without an observed close; termination is unproven")
       }
     })
     const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
@@ -858,11 +1012,20 @@ export function run(
     child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk))
     child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk))
     timeoutTimer = dependencies.setTimeout(() => {
-      if (options.onSpawn) onControlledTimeout()
-      else {
-        timedOut = true
-        terminateProcessTree(child)
+      if (settled) return
+      if (options.onSpawn) {
+        onControlledTimeout()
+        return
       }
+      timedOut = true
+      if (!strictContainment) {
+        terminateProcessTree(child)
+        // Bound the legacy wait too; a terminal without close must not hang the
+        // runner even when #107 is not requested.
+        scheduleCloseDeadline()
+        return
+      }
+      beginStrictTimeoutContainment()
     }, options.timeoutMs)
     child.once("error", (error) => {
       if (options.onSpawn && spawnObserved) {
@@ -872,6 +1035,9 @@ export function run(
       }
       controlAbort.abort()
       if (options.onSpawn && !controlStarted) controlFailed = true
+      if (!options.onSpawn && strictContainment && spawnObserved) {
+        recordStrictIncident("child process error left termination unproven; no signal was sent")
+      }
       finish({
         exitCode: null,
         signal: null,
@@ -906,12 +1072,39 @@ function runDsh(nodeExecutable: string, dshExecutable: string, args: string[], o
   return run(nodeExecutable, [dshExecutable, ...args], options)
 }
 
-function runDshWithPty(scriptExecutable: string, nodeExecutable: string, dshExecutable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<CommandResult> {
+function runDshWithPty(scriptExecutable: string, nodeExecutable: string, dshExecutable: string, args: string[], options: RunOptions): Promise<CommandResult> {
   const command = [nodeExecutable, dshExecutable, ...args].map(shellQuote).join(" ")
   return run(scriptExecutable, ["-q", "-e", "-c", command, "/dev/null"], options)
 }
 
+/**
+ * Test/diagnostic helper: force an explicit containment policy and surface an
+ * unproven containment as a rejection. The real runner leaves the policy
+ * implicit so `run()` itself records the incident and aborts the command.
+ */
+export async function runWithContainmentPolicy(
+  policy: ContainmentPolicy,
+  stage: string,
+  command: string,
+  args: string[],
+  options: RunOptions,
+  dependencies: RunDependencies = defaultRunDependencies,
+): Promise<CommandResult> {
+  const result = await run(command, args, { ...options, containment: policy, containmentStage: stage }, dependencies)
+  if (policy === "strict-direct-only" && result.containmentIncident) {
+    recordContainmentIncident(stage, result.containmentIncident)
+    throw new ContainmentAuthorityAbort(stage)
+  }
+  return result
+}
+
 function terminateProcessTree(child: ReturnType<typeof spawn>): void {
+  // Legacy containment must be unreachable while #107 requests the strict
+  // verified-direct-child authority. Failing here is preferable to signaling a
+  // process group or tree without authorization.
+  if (runnerContainmentPolicy === "strict-direct-only") {
+    throw new Error("legacy process-tree containment is unavailable while #107 is requested")
+  }
   if (child.pid === undefined) return
   try {
     if (process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
@@ -1188,9 +1381,15 @@ async function waitForObserverJson(
   throw new Error("controlled DSH child did not publish readiness evidence before timeout")
 }
 
-function repoStatus(): string | null {
-  const result = spawnSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: repositoryRoot, encoding: "utf8", timeout: 10_000 })
-  return result.status === 0 ? result.stdout : null
+async function repoStatus(identityKey: Buffer): Promise<string | null> {
+  const result = await run("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+    cwd: repositoryRoot,
+    env: process.env,
+    timeoutMs: 10_000,
+    processIdentityKey: identityKey,
+    containmentStage: "git-status",
+  })
+  return result.exitCode === 0 ? result.stdout : null
 }
 
 export function createReportPersistencePlan(options: ReportPersistenceOptions): ReportPersistencePlan {
@@ -1305,9 +1504,15 @@ function fail(message: string, status: "FAIL" | "BLOCKED" = "FAIL"): void {
   finalStatus = status
 }
 
-function gitValue(args: string[]): string | null {
-  const result = spawnSync("git", args, { cwd: repositoryRoot, encoding: "utf8", timeout: 10_000 })
-  return result.status === 0 ? result.stdout.trim() : null
+async function gitValue(args: string[], identityKey: Buffer): Promise<string | null> {
+  const result = await run("git", args, {
+    cwd: repositoryRoot,
+    env: process.env,
+    timeoutMs: 10_000,
+    processIdentityKey: identityKey,
+    containmentStage: "git-command",
+  })
+  return result.exitCode === 0 ? result.stdout.trim() : null
 }
 
 function abruptRestartAuthorizationBlocker(
@@ -4839,8 +5044,12 @@ export default { name, inject, apply };
 }
 
 async function main(): Promise<void> {
-  const initialRepoStatus = repoStatus()
-  report.repository.revision = gitValue(["rev-parse", "HEAD"]) ?? "unknown"
+  // Created before any subprocess so every #107 stage can corroborate the
+  // kernel-start identity of the direct child it may need to contain.
+  const processIdentityKey = randomBytes(32)
+  const processIdentityKeyHex = processIdentityKey.toString("hex")
+  const initialRepoStatus = await repoStatus(processIdentityKey)
+  report.repository.revision = await gitValue(["rev-parse", "HEAD"], processIdentityKey) ?? "unknown"
   report.repository.dirty = initialRepoStatus === null || initialRepoStatus.trim().length > 0
   if (process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED !== "yes") {
     report.stages.profileBoot = {
@@ -4880,8 +5089,8 @@ async function main(): Promise<void> {
     LANG: "C.UTF-8",
     NO_COLOR: "1",
   }
-  const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable, ["--version"], versionEnv))
-  const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable, ["--version"], versionEnv))
+  const nodeVersion = safeRuntimeVersion(await commandVersion(nodeExecutable, ["--version"], processIdentityKey, versionEnv))
+  const bunVersion = safeRuntimeVersion(await commandVersion(bunExecutable, ["--version"], processIdentityKey, versionEnv))
   report.versions.node = nodeVersion
   report.versions.bun = bunVersion
   if (!nodeVersion || !bunVersion) {
@@ -5001,7 +5210,13 @@ async function main(): Promise<void> {
     return
   }
   const pnpmCmd = buildPnpmCommand(pnpmResolution, nodeExecutable, ["--version"])
-  const pnpmCheck = await run(pnpmCmd.command, pnpmCmd.args, { cwd: repositoryRoot, env, timeoutMs: 10_000 })
+  const pnpmCheck = await run(pnpmCmd.command, pnpmCmd.args, {
+    cwd: repositoryRoot,
+    env,
+    timeoutMs: 10_000,
+    processIdentityKey,
+    containmentStage: "pnpm-preflight",
+  })
   report.stages.pnpmVersionExitCode = pnpmCheck.exitCode
   if (pnpmCheck.exitCode !== 0) {
     fail(formatCommandFailure("offline pnpm preflight", "cached pnpm could not execute offline", pnpmCheck), "BLOCKED")
@@ -5016,7 +5231,7 @@ async function main(): Promise<void> {
 
   const dshHomeFromContract = join(dirs.dshHome, "profiles")
   ensureInside(scratch, dshHomeFromContract)
-  const sandboxBeforeStatus = repoStatus()
+  const sandboxBeforeStatus = await repoStatus(processIdentityKey)
   report.stages.profileName = "unique isolated SDK profile"
   report.stages.defaultProfile = "sdk"
   report.stages.installMode = "DSH native plugin command, local checkout, pnpm --offline and isolated store"
@@ -5029,7 +5244,13 @@ async function main(): Promise<void> {
     sdkJsonRpcRequestsSent: 0,
   }
 
-  const setup = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--from-default-profile", "sdk", "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
+  const setup = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--from-default-profile", "sdk", "--dump-config"], {
+    cwd: repositoryRoot,
+    env,
+    timeoutMs,
+    processIdentityKey,
+    containmentStage: "profile-setup",
+  })
   report.stages.profileInitialization = { exitCode: setup.exitCode, timedOut: setup.timedOut }
   if (setup.exitCode !== 0 || setup.timedOut) {
     fail(formatCommandFailure("isolated SDK profile setup", "the real DSH profile could not be created", setup))
@@ -5045,7 +5266,13 @@ async function main(): Promise<void> {
   const bundlesBefore = beforeManifest.dsh?.profile?.bundles ?? []
   report.stages.bundlesBeforeInstall = bundlesBefore
 
-  const build = await run(bunExecutable, ["run", "build"], { cwd: repositoryRoot, env, timeoutMs })
+  const build = await run(bunExecutable, ["run", "build"], {
+    cwd: repositoryRoot,
+    env,
+    timeoutMs,
+    processIdentityKey,
+    containmentStage: "repository-build",
+  })
   report.stages.build = { exitCode: build.exitCode, timedOut: build.timedOut }
   if (build.exitCode !== 0 || build.timedOut) {
     fail(formatCommandFailure("repository bundle build", "the exported DSH entrypoint build failed", build))
@@ -5069,8 +5296,6 @@ async function main(): Promise<void> {
   const abruptParentAwaitingSignalPath = abruptTeardownMarkerOne + ".awaiting-parent-signal"
   const abruptParentSignalPath = abruptTeardownMarkerOne + ".parent-signal"
   const abruptParentDecisionToken = randomBytes(32).toString("hex")
-  const processIdentityKey = randomBytes(32)
-  const processIdentityKeyHex = processIdentityKey.toString("hex")
   const auditorMarkdownSourcePath = join(repositoryRoot, "assets", "dsh", "agents", "banca-auditor.md")
   const auditorMarkdownSourceSha256 = existsSync(auditorMarkdownSourcePath) ? hashFile(auditorMarkdownSourcePath) : null
   const auditorMarkdownSourceSha1 = existsSync(auditorMarkdownSourcePath)
@@ -5131,7 +5356,13 @@ async function main(): Promise<void> {
     fail("DSH native bundle install environment did not satisfy scratch/offline isolation", "BLOCKED")
     return
   }
-  const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], { cwd: repositoryRoot, env: bundleInstallEnv, timeoutMs })
+  const add = await runDsh(nodeExecutable, dshExecutable, ["plugin", "--profile", profileName, "add", "--offline", "--store-dir", dirs.pnpmStore, repositoryRoot, observerRoot], {
+    cwd: repositoryRoot,
+    env: bundleInstallEnv,
+    timeoutMs,
+    processIdentityKey,
+    containmentStage: "native-bundle-install",
+  })
   report.stages.nativeBundleInstall = { exitCode: add.exitCode, timedOut: add.timedOut }
   if (add.exitCode !== 0 || add.timedOut) {
     const offlineMissing = isOfflineMissingPnpmError(`${add.stderr}\n${add.stdout}`)
@@ -5162,7 +5393,14 @@ async function main(): Promise<void> {
     fail("BLOCKED: a POSIX pseudo-terminal is required to capture the installed DSH --dump-config output", "BLOCKED")
     return
   }
-  const dump = await runDshWithPty(scriptExecutable, nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath, "--dump-config"], { cwd: repositoryRoot, env, timeoutMs })
+  const dump = await runDshWithPty(scriptExecutable, nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath, "--dump-config"], {
+    cwd: repositoryRoot,
+    env,
+    timeoutMs,
+    processIdentityKey,
+    containmentStage: "pty-dump-config",
+    containmentTarget: "wrapper-unverifiable",
+  })
   const presetRegistryEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset-registry") && dump.stdout.includes(`default: ${e2eControlPresetId}`)
   const auditorPresetEntry = dump.stdout.includes("@deepseek-ai/dsh-agent-preset") &&
     dump.stdout.includes("id: banca-auditor") &&
@@ -5316,7 +5554,7 @@ async function main(): Promise<void> {
   }
 
   const projectBeforeBoot = inventoryTree(workspace)
-  const statusBeforeBoot = repoStatus()
+  const statusBeforeBoot = await repoStatus(processIdentityKey)
   const dshExecutableSha256 = hashFile(dshExecutable)
   const firstProcessEnv: NodeJS.ProcessEnv = {
     ...env,
@@ -5329,6 +5567,7 @@ async function main(): Promise<void> {
     env: firstProcessEnv,
     timeoutMs: bootTimeoutMs,
     processIdentityKey,
+    containmentStage: "cross-process-first",
   })
   report.stages.profileBoot = {
     exitCode: boot.exitCode,
@@ -5420,6 +5659,7 @@ async function main(): Promise<void> {
     env: secondProcessEnv,
     timeoutMs: bootTimeoutMs,
     processIdentityKey,
+    containmentStage: "cross-process-second",
   })
   const secondDshExecutableAfterSha256 = hashFile(dshExecutable)
   const secondProcessEndFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(restartWorkspace, scratch, processIdentityKey, retainedWorkspaceDirectoryFd)
@@ -5558,6 +5798,7 @@ async function main(): Promise<void> {
   }
   const driftFirstBoot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], {
     cwd: scratch, env: driftInitialEnv, timeoutMs: bootTimeoutMs, processIdentityKey,
+    containmentStage: "source-drift-first",
   })
   const driftFirstSidecar = existsSync(restartObserverResultOne + ".drift")
     ? JSON.parse(readFileSync(restartObserverResultOne + ".drift", "utf8")) : null
@@ -5597,6 +5838,7 @@ async function main(): Promise<void> {
   }
   const driftSecondBoot = await runDsh(nodeExecutable, dshExecutable, ["--profile", profileName, "--patch", overlayPath], {
     cwd: scratch, env: driftResumeEnv, timeoutMs: bootTimeoutMs, processIdentityKey,
+    containmentStage: "source-drift-second",
   })
   const driftSecondSidecar = existsSync(restartObserverResultTwo + ".drift")
     ? JSON.parse(readFileSync(restartObserverResultTwo + ".drift", "utf8")) : null
@@ -5632,7 +5874,7 @@ async function main(): Promise<void> {
     reportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH,
   }
   const abruptAuthorizationBlocker = abruptRestartAuthorizationBlocker(
-    report.repository.revision, repoStatus(), abruptRestartAuthorization,
+    report.repository.revision, await repoStatus(processIdentityKey), abruptRestartAuthorization,
   )
   let abruptRestartStatus: "PASS" | "FAIL" | "BLOCKED" = "BLOCKED"
   if (abruptAuthorizationBlocker) {
@@ -5678,6 +5920,7 @@ async function main(): Promise<void> {
         timeoutMs: bootTimeoutMs * 2,
         stdin: "pipe",
         processIdentityKey,
+        containmentStage: "abrupt-phase-a",
         onSpawn: async (child, hostIdentity, signal, mayContinue) => {
           abruptFirstChild = child
           if (!hostIdentity || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
@@ -5831,6 +6074,7 @@ async function main(): Promise<void> {
         env: abruptResumeEnv,
         timeoutMs: bootTimeoutMs,
         processIdentityKey,
+        containmentStage: "abrupt-phase-b",
         onSpawn: (child, hostIdentity, signal, mayContinue) => {
           abruptSecondChild = child
           if (signal.aborted || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
@@ -6146,7 +6390,7 @@ async function main(): Promise<void> {
     fail("Expected status/denial integrity or native initialization effects were not observed")
     return
   }
-  if (statusBeforeBoot !== null && repoStatus() !== statusBeforeBoot) {
+  if (statusBeforeBoot !== null && await repoStatus(processIdentityKey) !== statusBeforeBoot) {
     fail("DSH profile run changed the checkout's Git working-tree status outside the sandbox")
     return
   }
@@ -6160,10 +6404,16 @@ async function main(): Promise<void> {
 async function runCli(): Promise<void> {
   try {
     await main()
-  } catch {
-  fail("Runner orchestration: unexpected exception; details withheld")
-} finally {
-  if (abruptRestartWorkspaceDirectoryFd !== undefined) {
+  } catch (error) {
+    // A containment-authority abort already recorded a sanitized stage/reason.
+    if (!(error instanceof ContainmentAuthorityAbort)) {
+      fail("Runner orchestration: unexpected exception; details withheld")
+    }
+  } finally {
+    // An unproven containment can never allow the scratch to be removed.
+    preserveScratchForSafety = containmentRequiresScratchPreservation({ preserveForSafety: preserveScratchForSafety, containmentIncident })
+    if (containmentIncident !== null && finalStatus !== "FAIL") finalStatus = "FAIL"
+    if (abruptRestartWorkspaceDirectoryFd !== undefined) {
     try {
       closeSync(abruptRestartWorkspaceDirectoryFd)
       abruptRestartWorkspaceDirectoryFd = undefined

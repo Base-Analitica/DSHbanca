@@ -965,3 +965,69 @@ test("abrupt restart is SHA-bound and terminates only the verified owned child a
   expect(killHelper).not.toContain("process.kill(-")
   expect(killHelper).not.toContain("terminateProcessTree")
 })
+
+test("every #107 subprocess class is wired to the verified-direct-child containment authority", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const mainStart = source.indexOf("async function main(): Promise<void>")
+  const runCliStart = source.indexOf("async function runCli(): Promise<void>")
+  expect(mainStart).toBeGreaterThanOrEqual(0)
+  expect(runCliStart).toBeGreaterThan(mainStart)
+  const mainSource = source.slice(mainStart, runCliStart)
+  // Every launch in main() must carry the strict policy stage label AND the
+  // parent-owned identity key; there is no raw launch without policy options.
+  const rawRunCalls = [...mainSource.matchAll(/await run\(/g)]
+  const rawDshCalls = [...mainSource.matchAll(/await runDsh\(/g)]
+  const rawPtyCalls = [...mainSource.matchAll(/await runDshWithPty\(/g)]
+  expect(rawRunCalls.length).toBe(2)
+  expect(rawDshCalls.length).toBe(8)
+  expect(rawPtyCalls.length).toBe(1)
+  const launchSlices = [...rawRunCalls, ...rawDshCalls, ...rawPtyCalls]
+    .map((match) => mainSource.slice(match.index!, match.index! + 900))
+  for (const launch of launchSlices) {
+    expect(launch).toContain("containmentStage:")
+    expect(launch).toContain("processIdentityKey")
+  }
+  const stagedClasses = [
+    "pnpm-preflight",
+    "profile-setup",
+    "repository-build",
+    "native-bundle-install",
+    "pty-dump-config",
+    "cross-process-first",
+    "cross-process-second",
+    "source-drift-first",
+    "source-drift-second",
+    "abrupt-phase-a",
+    "abrupt-phase-b",
+  ]
+  for (const stage of stagedClasses) {
+    const index = mainSource.indexOf(`"${stage}"`)
+    expect(index, stage).toBeGreaterThanOrEqual(0)
+    const launch = mainSource.slice(Math.max(0, index - 700), index + 200)
+    expect(launch, stage).toContain("processIdentityKey")
+  }
+  // Abrupt A/B keep the controlled onSpawn path with parent-owned identity.
+  const abruptCalls = rawDshCalls
+    .map((match) => mainSource.slice(match.index!, match.index! + 1200))
+    .filter((call) => call.includes("onSpawn:"))
+  expect(abruptCalls.length).toBe(2)
+  expect(abruptCalls.every((call) => call.includes("containmentStage: \"abrupt-phase-"))).toBe(true)
+  // Implicit spawnSync timeouts were replaced by the bounded policy-aware runner.
+  expect(source).not.toContain("spawnSync")
+  for (const helper of ["async function commandVersion(", "async function gitValue(", "async function repoStatus("]) {
+    expect(source).toContain(helper)
+  }
+  // Group/tree containment is explicitly legacy-only and unreachable under #107.
+  const legacyStart = source.indexOf("function terminateProcessTree(")
+  const legacyEnd = source.indexOf("\nfunction hashFile(", legacyStart)
+  const legacy = source.slice(legacyStart, legacyEnd)
+  expect(legacyStart).toBeGreaterThanOrEqual(0)
+  expect(legacy).toContain('runnerContainmentPolicy === "strict-direct-only"')
+  expect((source.match(/terminateProcessTree\(/g) ?? []).length).toBe(2)
+  expect(source).toContain("if (!strictContainment)")
+  expect(source).toContain("beginStrictTimeoutContainment")
+  expect(source).toContain("options.containment === undefined")
+  expect(source).toContain("export async function runWithContainmentPolicy(")
+  expect(source).toContain("export class ContainmentAuthorityAbort")
+  expect(source).toContain("containmentRequiresScratchPreservation(")
+})
