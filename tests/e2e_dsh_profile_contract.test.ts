@@ -5015,19 +5015,27 @@ describe("Abrupt producer → validator integration (#107 R3)", () => {
 describe("R4 containment authority for the whole #107 runner", () => {
   async function strictRunner(): Promise<any> {
     const runner = await import("../scripts/e2e-dsh-profile.js") as any
-    expect(typeof runner.runWithContainmentPolicy).toBe("function")
+    expect(typeof runner.ContainmentAuthorityAbort).toBe("function")
     expect(typeof runner.containmentIncidentSnapshot).toBe("function")
+    expect(typeof runner.containmentAuthorityReportSnapshot).toBe("function")
+    expect(typeof runner.scratchPreservationForSafetySnapshot).toBe("function")
     expect(typeof runner.containmentRequiresScratchPreservation).toBe("function")
+    expect(typeof runner.selectContainmentPolicy).toBe("function")
+    expect(typeof runner.resolveCommandExecutableForIdentity).toBe("function")
     return runner
   }
 
-  function startStrictRun(runner: any, options: Record<string, unknown> = {}) {
+  function startStrictRun(
+    runner: any,
+    options: Record<string, unknown> = {},
+    identityState: { value?: string | null; executableMatches?: boolean } = {},
+  ) {
     const child = new MockControlledChild()
     const clock = new ManualClock()
     const signals: Array<[number, string]> = []
     const identity: { value: string | null; executableMatches: boolean; executableChecks: number } = {
-      value: "identity-a",
-      executableMatches: true,
+      value: identityState.value === undefined ? "identity-a" : identityState.value,
+      executableMatches: identityState.executableMatches ?? true,
       executableChecks: 0,
     }
     const promise = runner.run("mock-command", [], {
@@ -5055,6 +5063,42 @@ describe("R4 containment authority for the whole #107 runner", () => {
     return { child, clock, signals, identity, promise }
   }
 
+  async function outcome(promise: Promise<any>): Promise<{ result?: any; error?: any }> {
+    try {
+      return { result: await promise }
+    } catch (error) {
+      return { error }
+    }
+  }
+
+  test("production strict matrix records the incident, rejects, and preserves the scratch", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise } = startStrictRun(
+      runner,
+      { containmentStage: "production-strict-stage" },
+      { value: null },
+    )
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(error.stage).toBe("production-strict-stage")
+    expect(error.result?.timedOut).toBe(true)
+    expect(String(error.result?.containmentIncident)).toContain("identity")
+    expect(signals).toEqual([])
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
+    const incident = runner.containmentIncidentSnapshot()
+    expect(incident?.stage).toBe("production-strict-stage")
+    expect(String(incident?.reason).length).toBeGreaterThan(0)
+    const reportStage = runner.containmentAuthorityReportSnapshot() as any
+    expect(reportStage?.status).toBe("FAIL")
+    expect(reportStage?.stage).toBe("production-strict-stage")
+    expect(runner.scratchPreservationForSafetySnapshot()).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: incident })).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: true, containmentIncident: null })).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: null })).toBe(false)
+  })
+
   test("strict timeout signals only the verified direct child, never a group", async () => {
     const runner = await strictRunner()
     const { clock, signals, promise, child } = startStrictRun(runner)
@@ -5063,7 +5107,9 @@ describe("R4 containment authority for the whole #107 runner", () => {
     clock.runNext()
     expect(signals).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]])
     clock.runNext()
-    const result = await promise
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    const result = error.result
     expect(result.timedOut).toBe(true)
     expect(result.closeObserved).toBe(false)
     expect(typeof result.containmentIncident).toBe("string")
@@ -5071,25 +5117,27 @@ describe("R4 containment authority for the whole #107 runner", () => {
     expect(child.unrefCalls).toBeGreaterThan(0)
   })
 
-  test("missing identity forbids every signal and fails the bounded run closed", async () => {
+  test("missing identity forbids every signal and rejects the bounded run closed", async () => {
     const runner = await strictRunner()
     const { clock, signals, identity, promise } = startStrictRun(runner)
     identity.value = null
     clock.runNext()
     clock.runNext()
-    const result = await promise
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
     expect(signals).toEqual([])
-    expect(result.timedOut).toBe(true)
-    expect(String(result.containmentIncident)).toContain("identity")
+    expect(error.result.timedOut).toBe(true)
+    expect(String(error.result.containmentIncident)).toContain("identity")
   })
 
-  test("identity changed before timeout forbids every signal", async () => {
+  test("PID reuse or a changed identity before timeout forbids every signal", async () => {
     const runner = await strictRunner()
     const { clock, signals, identity, promise } = startStrictRun(runner)
-    identity.value = "identity-reused"
+    identity.value = "identity-from-reused-pid"
     clock.runNext()
     clock.runNext()
-    await promise
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
     expect(signals).toEqual([])
   })
 
@@ -5101,9 +5149,10 @@ describe("R4 containment authority for the whole #107 runner", () => {
     identity.value = "identity-changed"
     clock.runNext()
     clock.runNext()
-    const result = await promise
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
     expect(signals).toEqual([[4242, "SIGTERM"]])
-    expect(String(result.containmentIncident).length).toBeGreaterThan(0)
+    expect(String(error.result.containmentIncident).length).toBeGreaterThan(0)
   })
 
   test("missing process-identity key or an unexpected executable forbids signals", async () => {
@@ -5112,13 +5161,13 @@ describe("R4 containment authority for the whole #107 runner", () => {
     withoutKey.clock.runNext()
     withoutKey.clock.runNext()
     expect(withoutKey.signals).toEqual([])
-    await withoutKey.promise
+    expect((await outcome(withoutKey.promise)).error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
     const unexpectedExecutable = startStrictRun(runner)
     unexpectedExecutable.identity.executableMatches = false
     unexpectedExecutable.clock.runNext()
     unexpectedExecutable.clock.runNext()
     expect(unexpectedExecutable.signals).toEqual([])
-    await unexpectedExecutable.promise
+    expect((await outcome(unexpectedExecutable.promise)).error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
   })
 
   test("wrapper targets are never signaled and the wait stays bounded", async () => {
@@ -5126,10 +5175,11 @@ describe("R4 containment authority for the whole #107 runner", () => {
     const { clock, signals, promise } = startStrictRun(runner, { containmentTarget: "wrapper-unverifiable" })
     clock.runNext()
     clock.runNext()
-    const result = await promise
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
     expect(signals).toEqual([])
-    expect(result.closeObserved).toBe(false)
-    expect(String(result.containmentIncident)).toContain("wrapper")
+    expect(error.result.closeObserved).toBe(false)
+    expect(String(error.result.containmentIncident)).toContain("wrapper")
   })
 
   test("exit without close stays bounded, reports uncertainty, and sends no signal", async () => {
@@ -5137,63 +5187,56 @@ describe("R4 containment authority for the whole #107 runner", () => {
     const { child, clock, signals, promise } = startStrictRun(runner)
     child.observeExit(0, null)
     clock.runLastScheduled()
-    const result = await promise
-    expect(result.closeObserved).toBe(false)
-    expect(result.timedOut).toBe(false)
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(error.result.closeObserved).toBe(false)
+    expect(error.result.timedOut).toBe(false)
     expect(signals).toEqual([])
-    expect(String(result.containmentIncident)).toContain("close")
+    expect(String(error.result.containmentIncident)).toContain("close")
   })
 
   test("child error after spawn never signals and reports the containment uncertainty", async () => {
     const runner = await strictRunner()
     const { child, signals, promise } = startStrictRun(runner)
     child.emit("error", new Error("synthetic child failure"))
-    const result = await promise
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
     expect(signals).toEqual([])
-    expect(String(result.containmentIncident)).toContain("error")
+    expect(String(error.result.containmentIncident)).toContain("error")
   })
 
   test("confirmed close cancels timers and late callbacks cannot signal", async () => {
     const runner = await strictRunner()
     const { child, clock, signals, promise } = startStrictRun(runner)
     child.observeClose(0, null)
-    const result = await promise
+    const { result, error } = await outcome(promise)
+    expect(error).toBeUndefined()
     expect(result.closeObserved).toBe(true)
     expect(clock.pendingCount()).toBe(0)
     clock.runLastScheduled()
     expect(signals).toEqual([])
   })
 
-  test("the restricted wrapper aborts on uncertain containment and exposes the incident", async () => {
+  test("selects the strict policy only for non-empty #107 request variables", async () => {
     const runner = await strictRunner()
-    const child = new MockControlledChild()
-    const clock = new ManualClock()
-    const signals: Array<[number, string]> = []
-    const promise = runner.runWithContainmentPolicy("strict-direct-only", "wrapper-stage", "mock-command", [], {
-      cwd: tmpdir(),
-      env: {},
-      timeoutMs: 10,
-      processIdentityKey: Buffer.alloc(32),
-      strictContainmentGraceMs: 5,
-      controlledCloseGraceMs: 3,
-    }, {
-      spawn: (() => child) as any,
-      setTimeout: clock.setTimeout,
-      clearTimeout: clock.clearTimeout,
-      kill: (pid: number, signal: "SIGTERM" | "SIGKILL") => { signals.push([pid, signal]) },
-      processIdentity: () => null,
-      verifyExecutable: () => false,
-    })
-    child.emit("spawn")
-    clock.runNext()
-    clock.runNext()
-    await expect(promise).rejects.toBeInstanceOf(runner.ContainmentAuthorityAbort)
-    expect(signals).toEqual([])
-    const incident = runner.containmentIncidentSnapshot()
-    expect(incident?.stage).toBe("wrapper-stage")
-    expect(String(incident?.reason).length).toBeGreaterThan(0)
-    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: incident })).toBe(true)
-    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: true, containmentIncident: null })).toBe(true)
-    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: null })).toBe(false)
+    expect(runner.selectContainmentPolicy({})).toBe("legacy")
+    expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED: "yes" })).toBe("strict-direct-only")
+    expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256: "   " })).toBe("legacy")
+    expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: "/tmp/report.json" })).toBe("strict-direct-only")
+  })
+
+  test("resolves relative command names through PATH for identity comparison", async () => {
+    const runner = await strictRunner()
+    const git = runner.resolveCommandExecutableForIdentity("git")
+    expect(typeof git).toBe("string")
+    expect(git.length).toBeGreaterThan(0)
+    expect(runner.resolveCommandExecutableForIdentity("dshbanca-definitely-missing-command")).toBeNull()
+  })
+
+  test("the real executable verifier fails closed for invalid or unknown identities", async () => {
+    const runner = await strictRunner()
+    expect(runner.verifyProcessExecutableIdentity(0, "git", [])).toBe(false)
+    expect(runner.verifyProcessExecutableIdentity(1, "git", [])).toBe(false)
+    expect(runner.verifyProcessExecutableIdentity(process.pid, "dshbanca-definitely-missing-command", [])).toBe(false)
   })
 })

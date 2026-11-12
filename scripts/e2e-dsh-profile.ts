@@ -95,7 +95,12 @@ const abruptRestartRequested = abruptRestartRequestVariables.some((key) => (proc
 // Legacy tree/group termination is confined to runs that do not request #107.
 type ContainmentPolicy = "legacy" | "strict-direct-only"
 type ContainmentTarget = "direct-child" | "wrapper-unverifiable"
-const runnerContainmentPolicy: ContainmentPolicy = abruptRestartRequested ? "strict-direct-only" : "legacy"
+export function selectContainmentPolicy(environment: NodeJS.ProcessEnv): ContainmentPolicy {
+  return abruptRestartRequestVariables.some((key) => (environment[key] ?? "").trim() !== "")
+    ? "strict-direct-only"
+    : "legacy"
+}
+const runnerContainmentPolicy: ContainmentPolicy = selectContainmentPolicy(process.env)
 const reportPersistencePlan = createReportPersistencePlan({
   abruptRestartRequested,
   configuredReportPath,
@@ -260,7 +265,7 @@ let containmentIncident: { stage: string; reason: string } | null = null
 // restricted signals to a verified direct child. It can never be promoted to
 // PASS, must stop later stages, and keeps the scratch for inspection.
 export class ContainmentAuthorityAbort extends Error {
-  constructor(readonly stage: string) {
+  constructor(readonly stage: string, readonly result?: CommandResult) {
     super(`containment authority was not proven for stage ${stage}`)
     this.name = "ContainmentAuthorityAbort"
   }
@@ -276,6 +281,14 @@ function recordContainmentIncident(stage: string, reason: string): void {
 
 export function containmentIncidentSnapshot(): { stage: string; reason: string } | null {
   return containmentIncident === null ? null : { ...containmentIncident }
+}
+
+export function containmentAuthorityReportSnapshot(): unknown {
+  return report.stages.containmentAuthority ?? null
+}
+
+export function scratchPreservationForSafetySnapshot(): boolean {
+  return preserveScratchForSafety
 }
 
 export function containmentRequiresScratchPreservation(input: {
@@ -480,13 +493,25 @@ function verifyOwnedDshChild(
   }
 }
 
+// Resolves the executable image an invocation should map to, including relative
+// command names that are located through PATH (for example "git").
+export function resolveCommandExecutableForIdentity(command: string): string | null {
+  try {
+    const candidate = isAbsolute(command) ? command : findExecutable(command)
+    return candidate === undefined ? null : realpathSync(candidate)
+  } catch {
+    return null
+  }
+}
+
 // Generic read-only identity corroboration for directly spawned runner children:
 // executable image and argv must match the invocation the runner issued.
-function verifyProcessExecutableIdentity(pid: number, command: string, args: string[]): boolean {
+export function verifyProcessExecutableIdentity(pid: number, command: string, args: string[]): boolean {
   if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 1) return false
   try {
     const executable = realpathSync(`/proc/${pid}/exe`)
-    const expectedExecutable = realpathSync(command)
+    const expectedExecutable = resolveCommandExecutableForIdentity(command)
+    if (expectedExecutable === null) return false
     const argv = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean)
     return executable === expectedExecutable && JSON.stringify(argv) === JSON.stringify([command, ...args])
   } catch {
@@ -512,7 +537,7 @@ export function terminateOwnedDshChild(
   sendSignal: (pid: number, signal: "SIGKILL" | "SIGTERM") => void = (pid, requested) => process.kill(pid, requested),
 ): boolean {
   const pid = child.pid
-  if (pid === undefined || !maySignal() || !verifyIdentity(child, expectedHostIdentitySha256) || !maySignal()) return false
+  if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 1 || !maySignal() || !verifyIdentity(child, expectedHostIdentitySha256) || !maySignal()) return false
   try {
     sendSignal(pid, signal)
     return true
@@ -878,20 +903,21 @@ export function run(
       }
       settled = true
       clearTimers()
-      if (strictContainment && options.onSpawn === undefined && options.containment === undefined && containmentIncidentReason !== null) {
-        const stage = options.containmentStage ?? "unnamed-stage"
-        recordContainmentIncident(stage, containmentIncidentReason)
-        rejectResult(new ContainmentAuthorityAbort(stage))
-        return
-      }
-      resolveResult({
+      const settledResult: CommandResult = {
         ...result,
         controlCompleted,
         controlFailed,
         timeoutContainmentSignalsRequested: [...timeoutContainmentSignalsRequested],
         containmentIncident: containmentIncidentReason,
         containmentDirectSignals: [...strictContainmentSignals],
-      })
+      }
+      if (strictContainment && options.onSpawn === undefined && containmentIncidentReason !== null) {
+        const stage = options.containmentStage ?? "unnamed-stage"
+        recordContainmentIncident(stage, containmentIncidentReason)
+        rejectResult(new ContainmentAuthorityAbort(stage, settledResult))
+        return
+      }
+      resolveResult(settledResult)
     }
     const finishWithoutClose = () => {
       if (settled) return
@@ -1019,7 +1045,10 @@ export function run(
       }
       timedOut = true
       if (!strictContainment) {
-        terminateProcessTree(child)
+        terminateProcessTree(child, {
+          kill: dependencies.kill ?? ((pid, signal) => process.kill(pid, signal)),
+          setTimeout: dependencies.setTimeout,
+        })
         // Bound the legacy wait too; a terminal without close must not hang the
         // runner even when #107 is not requested.
         scheduleCloseDeadline()
@@ -1077,28 +1106,16 @@ function runDshWithPty(scriptExecutable: string, nodeExecutable: string, dshExec
   return run(scriptExecutable, ["-q", "-e", "-c", command, "/dev/null"], options)
 }
 
-/**
- * Test/diagnostic helper: force an explicit containment policy and surface an
- * unproven containment as a rejection. The real runner leaves the policy
- * implicit so `run()` itself records the incident and aborts the command.
- */
-export async function runWithContainmentPolicy(
-  policy: ContainmentPolicy,
-  stage: string,
-  command: string,
-  args: string[],
-  options: RunOptions,
-  dependencies: RunDependencies = defaultRunDependencies,
-): Promise<CommandResult> {
-  const result = await run(command, args, { ...options, containment: policy, containmentStage: stage }, dependencies)
-  if (policy === "strict-direct-only" && result.containmentIncident) {
-    recordContainmentIncident(stage, result.containmentIncident)
-    throw new ContainmentAuthorityAbort(stage)
-  }
-  return result
-}
-
-function terminateProcessTree(child: ReturnType<typeof spawn>): void {
+function terminateProcessTree(
+  child: ReturnType<typeof spawn>,
+  dependencies: {
+    kill: (pid: number, signal: "SIGTERM" | "SIGKILL") => void
+    setTimeout: typeof setTimeout
+  } = {
+    kill: (pid, signal) => process.kill(pid, signal),
+    setTimeout,
+  },
+): void {
   // Legacy containment must be unreachable while #107 requests the strict
   // verified-direct-child authority. Failing here is preferable to signaling a
   // process group or tree without authorization.
@@ -1107,20 +1124,20 @@ function terminateProcessTree(child: ReturnType<typeof spawn>): void {
   }
   if (child.pid === undefined) return
   try {
-    if (process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
+    if (process.platform !== "win32") dependencies.kill(-child.pid, "SIGTERM")
     else child.kill("SIGTERM")
   } catch {
     // It may have exited between timeout and signal delivery.
   }
-  const forceTimer = setTimeout(() => {
+  const forceTimer = dependencies.setTimeout(() => {
     try {
-      if (process.platform !== "win32") process.kill(-child.pid!, "SIGKILL")
+      if (process.platform !== "win32") dependencies.kill(-child.pid!, "SIGKILL")
       else child.kill("SIGKILL")
     } catch {
       // Already exited.
     }
   }, 1_500)
-  forceTimer.unref()
+  forceTimer.unref?.()
 }
 
 function hashFile(path: string): string {

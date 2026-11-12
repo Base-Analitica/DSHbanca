@@ -1017,17 +1017,25 @@ test("every #107 subprocess class is wired to the verified-direct-child containm
   for (const helper of ["async function commandVersion(", "async function gitValue(", "async function repoStatus("]) {
     expect(source).toContain(helper)
   }
-  // Group/tree containment is explicitly legacy-only and unreachable under #107.
+  // Group/tree containment is legacy-only and its dependencies are injectable so
+  // a regression cannot emit a real negative-PID signal from the tests.
   const legacyStart = source.indexOf("function terminateProcessTree(")
   const legacyEnd = source.indexOf("\nfunction hashFile(", legacyStart)
   const legacy = source.slice(legacyStart, legacyEnd)
   expect(legacyStart).toBeGreaterThanOrEqual(0)
   expect(legacy).toContain('runnerContainmentPolicy === "strict-direct-only"')
+  expect(legacy).toContain("dependencies.kill(-child.pid")
+  expect(legacy).toContain("dependencies.setTimeout(")
   expect((source.match(/terminateProcessTree\(/g) ?? []).length).toBe(2)
+  expect(source).toContain("terminateProcessTree(child, {")
   expect(source).toContain("if (!strictContainment)")
   expect(source).toContain("beginStrictTimeoutContainment")
-  expect(source).toContain("options.containment === undefined")
-  expect(source).toContain("export async function runWithContainmentPolicy(")
+  expect(source).toContain("const runnerContainmentPolicy: ContainmentPolicy = selectContainmentPolicy(process.env)")
+  expect(source).toContain("export function selectContainmentPolicy(")
+  expect(source).toContain("export function resolveCommandExecutableForIdentity(")
+  expect(source).toContain("export function verifyProcessExecutableIdentity(")
+  expect(source).toContain("error instanceof ContainmentAuthorityAbort")
   expect(source).toContain("export class ContainmentAuthorityAbort")
   expect(source).toContain("containmentRequiresScratchPreservation(")
+  expect(source).toContain("containmentAuthorityReportSnapshot()")
 })
