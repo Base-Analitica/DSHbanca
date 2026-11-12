@@ -298,6 +298,92 @@ export function containmentRequiresScratchPreservation(input: {
   return input.preserveForSafety || input.containmentIncident !== null
 }
 
+export interface ScratchCleanupDecision {
+  preserve: boolean
+  remove: boolean
+  reason: string | null
+}
+
+/**
+ * Terminal decision for the isolated scratch directory. In #107 mode a
+ * non-PASS status, unproven teardown, containment incident or report
+ * persistence failure must keep the diagnostic evidence; only a fully PASSed
+ * run whose exclusive report is durable may remove the scratch.
+ */
+export function decideScratchCleanup(input: {
+  abruptMode: boolean
+  scratchExists: boolean
+  finalStatus: "PASS" | "FAIL" | "BLOCKED"
+  containmentIncident: boolean
+  reportPersistenceFailed: boolean
+  reportPersistenceBlocked: boolean
+  teardownProven: boolean
+}): ScratchCleanupDecision {
+  if (!input.scratchExists) {
+    return { preserve: false, remove: false, reason: null }
+  }
+  if (!input.abruptMode) {
+    const preserve = input.containmentIncident || input.reportPersistenceFailed
+    return {
+      preserve,
+      remove: !preserve,
+      reason: preserve ? "failure evidence must be preserved" : null,
+    }
+  }
+  const preserveReason = input.containmentIncident
+    ? "containment authority was not proven"
+    : input.finalStatus === "FAIL"
+      ? "terminal FAIL preserves the diagnostic scratch"
+      : input.finalStatus === "BLOCKED"
+        ? "terminal BLOCKED preserves the diagnostic scratch"
+        : !input.teardownProven
+          ? "teardown was not proven"
+          : input.reportPersistenceFailed
+            ? "exclusive report persistence failed"
+            : input.reportPersistenceBlocked
+              ? "exclusive report persistence was blocked"
+              : null
+  return {
+    preserve: preserveReason !== null,
+    remove: preserveReason === null,
+    reason: preserveReason,
+  }
+}
+
+export interface ScratchCleanupOutcome {
+  attempted: boolean
+  removed: boolean
+  observed: boolean
+  error: string | null
+}
+
+/**
+ * Executes the terminal scratch decision against the real filesystem. It only
+ * removes the unique runner-owned directory under the OS temporary root, never
+ * invents a directory when none was created, and reports observation separately
+ * from removal intent.
+ */
+export function applyScratchCleanup(input: {
+  scratchRoot: string | undefined
+  temporaryRoot: string
+  decision: ScratchCleanupDecision
+}): ScratchCleanupOutcome {
+  if (input.scratchRoot === undefined) return { attempted: false, removed: false, observed: false, error: null }
+  if (!existsSync(input.scratchRoot)) return { attempted: false, removed: false, observed: false, error: null }
+  if (input.decision.preserve) return { attempted: false, removed: false, observed: true, error: null }
+  try {
+    const resolvedScratch = realpathSync(input.scratchRoot)
+    const expectedParent = realpathSync(input.temporaryRoot)
+    if (!resolvedScratch.startsWith(`${expectedParent}${sep}`) || !resolvedScratch.includes("dshbanca-profile-e2e-")) {
+      return { attempted: true, removed: false, observed: true, error: "refusing cleanup because the scratch path is not the unique test directory under the OS temp root" }
+    }
+    rmSync(resolvedScratch, { recursive: true, force: false })
+    return { attempted: true, removed: !existsSync(resolvedScratch), observed: true, error: null }
+  } catch {
+    return { attempted: true, removed: false, observed: true, error: "scratch cleanup failed" }
+  }
+}
+
 async function commandVersion(command: string, args: string[], identityKey: Buffer, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   const result = await run(command, args, {
     cwd: repositoryRoot,
@@ -1066,6 +1152,13 @@ export function run(
       if (options.onSpawn && !controlStarted) controlFailed = true
       if (!options.onSpawn && strictContainment && spawnObserved) {
         recordStrictIncident("child process error left termination unproven; no signal was sent")
+      }
+      if (!options.onSpawn) {
+        // A post-spawn (or pre-spawn) error is a terminal-without-close state:
+        // release runner-owned streams/handles, fence timers, then reject with
+        // the incident. unref()/stream destruction never prove child absence.
+        finishWithoutClose()
+        return
       }
       finish({
         exitCode: null,
@@ -6418,6 +6511,102 @@ async function main(): Promise<void> {
   finalStatus = overallStatus
 }
 
+
+function attemptWriteReport(): "written" | "blocked" | "failed" {
+  try {
+    const persistence = writeReport()
+    if (persistence === "blocked" && reportPersistencePlan.mode === "abrupt") {
+      process.stderr.write("BLOCKED: abrupt report persistence was refused; no report file was written\n")
+    }
+    return persistence
+  } catch {
+    finalStatus = "FAIL"
+    report.status = finalStatus
+    report.failures.push("Report persistence failed; details withheld")
+    process.stderr.write(`FAIL: report persistence failed (${reportPathLabel})\n`)
+    return "failed"
+  }
+}
+
+function abruptScratchDecision(teardownProven: boolean, persistence?: { failed: boolean; blocked: boolean }) {
+  return decideScratchCleanup({
+    abruptMode: true,
+    scratchExists: Boolean(scratchRoot && existsSync(scratchRoot)),
+    finalStatus,
+    containmentIncident: containmentIncident !== null || preserveScratchForSafety,
+    reportPersistenceFailed: persistence?.failed ?? false,
+    reportPersistenceBlocked: persistence?.blocked ?? false,
+    teardownProven,
+  })
+}
+
+function finalizeAbruptTerminal(): void {
+  if (!reportPersistencePlan.authorized && finalStatus === "PASS") {
+    fail("Abrupt report persistence was not authorized; no report file was written", "BLOCKED")
+  }
+  const scratchExists = Boolean(scratchRoot && existsSync(scratchRoot))
+  const teardownProven = finalStatus === "PASS"
+  let decision = abruptScratchDecision(teardownProven)
+  if (scratchRoot === undefined) report.sandbox.removed = null
+  else if (!scratchExists) report.sandbox.removed = true
+  else report.sandbox.removed = decision.remove ? null : false
+  if (decision.preserve && decision.reason !== null) {
+    report.limitations.push(`Scratch preserved before report persistence: ${decision.reason}.`)
+  }
+  // Evidence is persisted exclusively BEFORE any destructive cleanup.
+  const persistence = attemptWriteReport()
+  decision = abruptScratchDecision(finalStatus === "PASS", {
+    failed: persistence === "failed",
+    blocked: persistence === "blocked",
+  })
+  if (decision.preserve) {
+    preserveScratchForSafety = true
+    report.sandbox.removed = false
+    if (persistence === "failed") {
+      report.limitations.push("Exclusive report persistence failed; the scratch was preserved for diagnosis.")
+    }
+    return
+  }
+  const outcome = applyScratchCleanup({ scratchRoot, temporaryRoot: tmpdir(), decision })
+  if (outcome.error !== null || (outcome.observed && outcome.removed !== true)) {
+    report.sandbox.removed = false
+    fail("Scratch cleanup failed after evidence persistence; details withheld")
+    return
+  }
+  // The exclusive report was frozen before cleanup by design; it deliberately
+  // does not claim sandbox.removed=true (no post-cleanup rewrite exists).
+  report.sandbox.removed = null
+}
+
+function finalizeLegacyTerminal(): void {
+  if (scratchRoot && existsSync(scratchRoot)) {
+    if (preserveScratchForSafety || containmentIncident !== null) {
+      report.sandbox.removed = false
+      report.limitations.push("Abrupt-restart failure or teardown uncertainty preserved the isolated scratch directory for inspection.")
+    } else {
+      try {
+        const resolvedScratch = realpathSync(scratchRoot)
+        const expectedParent = realpathSync(tmpdir())
+        if (!resolvedScratch.startsWith(`${expectedParent}${sep}`) || !resolvedScratch.includes("dshbanca-profile-e2e-")) {
+          throw new Error("refusing cleanup because the scratch path is not the unique test directory under the OS temp root")
+        }
+        rmSync(resolvedScratch, { recursive: true, force: false })
+        report.sandbox.removed = !existsSync(resolvedScratch)
+        if (!report.sandbox.removed) fail("Scratch cleanup did not remove the test-owned sandbox")
+      } catch {
+        report.sandbox.removed = false
+        fail("Scratch cleanup failed; details withheld")
+      }
+    }
+  } else if (scratchRoot) {
+    report.sandbox.removed = true
+  }
+  if (report.sandbox.isolated && report.sandbox.removed !== true && finalStatus === "PASS") {
+    fail("Sandbox cleanup was not verified")
+  }
+  attemptWriteReport()
+}
+
 async function runCli(): Promise<void> {
   try {
     await main()
@@ -6455,45 +6644,8 @@ async function runCli(): Promise<void> {
       fail("Synthetic workspace identity handle teardown failed; details withheld")
     }
   }
-  if (scratchRoot && existsSync(scratchRoot)) {
-    if (preserveScratchForSafety) {
-      report.sandbox.removed = false
-      report.limitations.push("Abrupt-restart failure or teardown uncertainty preserved the isolated scratch directory for inspection.")
-    } else {
-      try {
-        const resolvedScratch = realpathSync(scratchRoot)
-        const expectedParent = realpathSync(tmpdir())
-        if (!resolvedScratch.startsWith(`${expectedParent}${sep}`) || !resolvedScratch.includes("dshbanca-profile-e2e-")) {
-          throw new Error("refusing cleanup because the scratch path is not the unique test directory under the OS temp root")
-        }
-        rmSync(resolvedScratch, { recursive: true, force: false })
-        report.sandbox.removed = !existsSync(resolvedScratch)
-        if (!report.sandbox.removed) fail("Scratch cleanup did not remove the test-owned sandbox")
-      } catch {
-        report.sandbox.removed = false
-        fail("Scratch cleanup failed; details withheld")
-      }
-    }
-  } else if (scratchRoot) {
-    report.sandbox.removed = true
-  }
-  if (report.sandbox.isolated && report.sandbox.removed !== true && finalStatus === "PASS") {
-    fail("Sandbox cleanup was not verified")
-  }
-  if (reportPersistencePlan.mode === "abrupt" && !reportPersistencePlan.authorized && finalStatus === "PASS") {
-    fail("Abrupt report persistence was not authorized; no report file was written", "BLOCKED")
-  }
-  try {
-    const persistence = writeReport()
-    if (persistence === "blocked" && reportPersistencePlan.mode === "abrupt") {
-      process.stderr.write("BLOCKED: abrupt report persistence was refused; no report file was written\n")
-    }
-  } catch {
-    finalStatus = "FAIL"
-    report.status = finalStatus
-    report.failures.push("Report persistence failed; details withheld")
-    process.stderr.write(`FAIL: report persistence failed (${reportPathLabel})\n`)
-  }
+  if (reportPersistencePlan.mode === "abrupt") finalizeAbruptTerminal()
+  else finalizeLegacyTerminal()
 }
 
 const auditorMarkdownStatus = typeof report.stages.auditorMarkdown === "object" && report.stages.auditorMarkdown !== null

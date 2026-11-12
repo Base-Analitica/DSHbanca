@@ -1039,3 +1039,46 @@ test("every #107 subprocess class is wired to the verified-direct-child containm
   expect(source).toContain("containmentRequiresScratchPreservation(")
   expect(source).toContain("containmentAuthorityReportSnapshot()")
 })
+
+
+test("R5 terminal handling releases handles and preserves evidence before cleanup", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const errorStart = source.indexOf('child.once("error", (error) => {')
+  const errorEnd = source.indexOf('child.once("close", (code, signal) => {', errorStart)
+  const errorHandler = source.slice(errorStart, errorEnd)
+  expect(errorStart).toBeGreaterThanOrEqual(0)
+  // Generic post-spawn error uses the unified terminal-without-close path and
+  // never calls finish() directly (which would skip stream/unref release).
+  expect(errorHandler).toContain("if (!options.onSpawn) {")
+  const genericStart = errorHandler.indexOf("if (!options.onSpawn) {")
+  const genericBranch = errorHandler.slice(genericStart, errorHandler.indexOf("finish({", genericStart))
+  expect(genericBranch).toContain("finishWithoutClose()")
+  expect(genericBranch).not.toContain("finish({")
+  // The error branch records the sanitized incident before the terminal path.
+  expect(errorHandler.indexOf("recordStrictIncident(")).toBeLessThan(errorHandler.indexOf("finishWithoutClose()"))
+
+  const abruptStart = source.indexOf("function finalizeAbruptTerminal(): void {")
+  const legacyStart = source.indexOf("function finalizeLegacyTerminal(): void {", abruptStart)
+  const abruptFinalize = source.slice(abruptStart, legacyStart)
+  expect(abruptStart).toBeGreaterThanOrEqual(0)
+  expect(abruptFinalize).toContain("abruptScratchDecision(")
+  expect(abruptFinalize).toContain("attemptWriteReport()")
+  expect(abruptFinalize).toContain("applyScratchCleanup(")
+  // Evidence persistence must precede destructive cleanup; the frozen report
+  // must not claim removal without observation.
+  expect(abruptFinalize.indexOf("attemptWriteReport()")).toBeLessThan(abruptFinalize.indexOf("applyScratchCleanup("))
+  expect(abruptFinalize).toContain("report.sandbox.removed = null")
+  const afterCleanup = abruptFinalize.slice(abruptFinalize.indexOf("applyScratchCleanup("))
+  expect(afterCleanup).not.toContain("report.sandbox.removed = true")
+  expect(abruptFinalize).toContain('fail("Scratch cleanup failed after evidence persistence; details withheld")')
+  const runCliStart = source.indexOf("async function runCli(): Promise<void> {")
+  const runCliEnd = source.indexOf("\n}\n\nconst auditorMarkdownStatus", runCliStart)
+  const runCliFinally = source.slice(runCliStart, runCliEnd)
+  expect(runCliFinally).toContain('if (reportPersistencePlan.mode === "abrupt") finalizeAbruptTerminal()')
+  expect(runCliFinally).toContain("else finalizeLegacyTerminal()")
+  const decisionHelperStart = source.indexOf("function abruptScratchDecision(")
+  const decisionHelperEnd = source.indexOf("function finalizeAbruptTerminal(): void {", decisionHelperStart)
+  expect(source.slice(decisionHelperStart, decisionHelperEnd)).toContain("decideScratchCleanup(")
+  expect(source).toContain("export function decideScratchCleanup(")
+  expect(source).toContain("export function applyScratchCleanup(")
+})

@@ -5028,7 +5028,7 @@ describe("R4 containment authority for the whole #107 runner", () => {
   function startStrictRun(
     runner: any,
     options: Record<string, unknown> = {},
-    identityState: { value?: string | null; executableMatches?: boolean } = {},
+    identityState: { value?: string | null; executableMatches?: boolean; emitSpawn?: boolean } = {},
   ) {
     const child = new MockControlledChild()
     const clock = new ManualClock()
@@ -5059,7 +5059,7 @@ describe("R4 containment authority for the whole #107 runner", () => {
         return identity.executableMatches
       },
     })
-    child.emit("spawn")
+    if (identityState.emitSpawn !== false) child.emit("spawn")
     return { child, clock, signals, identity, promise }
   }
 
@@ -5195,14 +5195,54 @@ describe("R4 containment authority for the whole #107 runner", () => {
     expect(String(error.result.containmentIncident)).toContain("close")
   })
 
-  test("child error after spawn never signals and reports the containment uncertainty", async () => {
+  test("post-spawn error releases runner handles, fences timers, signals nothing, and rejects", async () => {
     const runner = await strictRunner()
-    const { child, signals, promise } = startStrictRun(runner)
+    const { child, clock, signals, promise } = startStrictRun(runner)
     child.emit("error", new Error("synthetic child failure"))
     const { error } = await outcome(promise)
     expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
-    expect(signals).toEqual([])
     expect(String(error.result.containmentIncident)).toContain("error")
+    expect(error.result.closeObserved).toBe(false)
+    expect(signals).toEqual([])
+    expect(child.stdin.destroyCalls).toBeGreaterThan(0)
+    expect(child.stdout.destroyCalls).toBeGreaterThan(0)
+    expect(child.stderr.destroyCalls).toBeGreaterThan(0)
+    expect(child.unrefCalls).toBeGreaterThan(0)
+    expect(clock.pendingCount()).toBe(0)
+    // A late close/timer after the terminal state must stay inert.
+    child.observeClose(0, null)
+    clock.runLastScheduled()
+    expect(signals).toEqual([])
+  })
+
+  test("error before spawn releases runner handles without inventing a containment incident", async () => {
+    const runner = await strictRunner()
+    const { child, clock, signals, promise } = startStrictRun(runner, {}, { emitSpawn: false })
+    child.emit("error", new Error("synthetic spawn failure"))
+    const { result, error } = await outcome(promise)
+    expect(error).toBeUndefined()
+    expect(result.closeObserved).toBe(false)
+    expect(signals).toEqual([])
+    expect(child.stdin.destroyCalls).toBeGreaterThan(0)
+    expect(child.stdout.destroyCalls).toBeGreaterThan(0)
+    expect(child.stderr.destroyCalls).toBeGreaterThan(0)
+    expect(child.unrefCalls).toBeGreaterThan(0)
+    expect(clock.pendingCount()).toBe(0)
+  })
+
+  test("a timer delayed past a rejected terminal cannot signal", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise } = startStrictRun(runner)
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    const before = signals.length
+    clock.runLastScheduled()
+    expect(signals.length).toBe(before)
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
   })
 
   test("confirmed close cancels timers and late callbacks cannot signal", async () => {
@@ -5238,5 +5278,110 @@ describe("R4 containment authority for the whole #107 runner", () => {
     expect(runner.verifyProcessExecutableIdentity(0, "git", [])).toBe(false)
     expect(runner.verifyProcessExecutableIdentity(1, "git", [])).toBe(false)
     expect(runner.verifyProcessExecutableIdentity(process.pid, "dshbanca-definitely-missing-command", [])).toBe(false)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R5: terminal scratch/evidence preservation. The real decision used
+// by runCli() is exercised with filesystem fixtures; FAIL/BLOCKED can never
+// destroy the only diagnostic evidence, and cleanup only follows durable
+// exclusive report persistence with proven teardown.
+// ---------------------------------------------------------------------------
+
+describe("R5 terminal scratch and evidence preservation", () => {
+  async function runnerApi(): Promise<any> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.decideScratchCleanup).toBe("function")
+    expect(typeof runner.applyScratchCleanup).toBe("function")
+    return runner
+  }
+
+  function decisionInput(overrides: Record<string, unknown> = {}) {
+    return {
+      abruptMode: true,
+      scratchExists: true,
+      finalStatus: "PASS",
+      containmentIncident: false,
+      reportPersistenceFailed: false,
+      reportPersistenceBlocked: false,
+      teardownProven: true,
+      ...overrides,
+    }
+  }
+
+  test("FAIL, BLOCKED, incidents, unproven teardown, and persistence failures preserve the scratch", async () => {
+    const runner = await runnerApi()
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["conventional FAIL without containment incident", { finalStatus: "FAIL" }],
+      ["conventional BLOCKED without containment incident", { finalStatus: "BLOCKED" }],
+      ["offline plugin-add failure (BLOCKED)", { finalStatus: "BLOCKED" }],
+      ["conventional setup/build failure (FAIL)", { finalStatus: "FAIL" }],
+      ["timeout or post-spawn error incident", { finalStatus: "FAIL", containmentIncident: true }],
+      ["invalid final evidence (FAIL)", { finalStatus: "FAIL" }],
+      ["teardown uncertain while status is PASS", { teardownProven: false }],
+      ["report persistence failed", { reportPersistenceFailed: true }],
+      ["report persistence blocked", { reportPersistenceBlocked: true }],
+    ]
+    for (const [label, overrides] of cases) {
+      const decision = runner.decideScratchCleanup(decisionInput(overrides))
+      expect(decision.preserve, label).toBe(true)
+      expect(decision.remove, label).toBe(false)
+      expect(typeof decision.reason, label).toBe("string")
+    }
+  })
+
+  test("PASS with proven teardown and durable report removes; missing scratch never invents cleanup", async () => {
+    const runner = await runnerApi()
+    const remove = runner.decideScratchCleanup(decisionInput())
+    expect(remove).toEqual({ preserve: false, remove: true, reason: null })
+    const noScratch = runner.decideScratchCleanup(decisionInput({ scratchExists: false }))
+    expect(noScratch).toEqual({ preserve: false, remove: false, reason: null })
+    const legacyBlocked = runner.decideScratchCleanup(decisionInput({ abruptMode: false, finalStatus: "FAIL" }))
+    expect(legacyBlocked.remove).toBe(true)
+    const legacyReportFailure = runner.decideScratchCleanup(decisionInput({ abruptMode: false, reportPersistenceFailed: true }))
+    expect(legacyReportFailure.preserve).toBe(true)
+  })
+
+  test("filesystem cleanup preserves the directory on failure and removes it only for PASS", async () => {
+    const runner = await runnerApi()
+    const preservedRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-preserve-"))
+    const removedRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-remove-"))
+    try {
+      const failDecision = runner.decideScratchCleanup(decisionInput({ finalStatus: "FAIL" }))
+      const preserved = runner.applyScratchCleanup({ scratchRoot: preservedRoot, temporaryRoot: tmpdir(), decision: failDecision })
+      expect(preserved.observed).toBe(true)
+      expect(preserved.removed).toBe(false)
+      expect(preserved.error).toBeNull()
+      expect(existsSync(preservedRoot)).toBe(true)
+
+      const passDecision = runner.decideScratchCleanup(decisionInput())
+      const removed = runner.applyScratchCleanup({ scratchRoot: removedRoot, temporaryRoot: tmpdir(), decision: passDecision })
+      expect(removed.attempted).toBe(true)
+      expect(removed.removed).toBe(true)
+      expect(removed.error).toBeNull()
+      expect(existsSync(removedRoot)).toBe(false)
+
+      const noScratch = runner.applyScratchCleanup({ scratchRoot: undefined, temporaryRoot: tmpdir(), decision: passDecision })
+      expect(noScratch).toEqual({ attempted: false, removed: false, observed: false, error: null })
+      const missingScratch = runner.applyScratchCleanup({ scratchRoot: removedRoot, temporaryRoot: tmpdir(), decision: passDecision })
+      expect(missingScratch.attempted).toBe(false)
+      expect(missingScratch.removed).toBe(false)
+      expect(missingScratch.observed).toBe(false)
+    } finally {
+      rmSync(preservedRoot, { recursive: true, force: true })
+      rmSync(removedRoot, { recursive: true, force: true })
+    }
+  })
+
+  test("a cleanup that cannot remove or resolve the runner directory fails closed", async () => {
+    const runner = await runnerApi()
+    const notRunnerOwned = tmpdir()
+    const decision = runner.decideScratchCleanup(decisionInput())
+    const outcome = runner.applyScratchCleanup({ scratchRoot: notRunnerOwned, temporaryRoot: tmpdir(), decision })
+    expect(outcome.attempted).toBe(true)
+    expect(outcome.removed).toBe(false)
+    expect(typeof outcome.error).toBe("string")
+    expect(existsSync(notRunnerOwned)).toBe(true)
   })
 })
