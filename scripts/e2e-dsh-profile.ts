@@ -110,25 +110,16 @@ export function selectContainmentPolicy(environment: NodeJS.ProcessEnv): Contain
     : "legacy"
 }
 const runnerContainmentPolicy: ContainmentPolicy = selectContainmentPolicy(process.env)
-const reportPersistencePlan = createReportPersistencePlan({
-  abruptRestartRequested,
-  configuredReportPath,
-  abruptReportPath: abruptRestartReportPath,
+const {
+  reportPersistencePlan,
+  terminalReportPersistencePlan,
+  reportPathLabel,
+} = createAbruptPersistencePlansFromEnvironment({
+  environment: process.env,
   repositoryRoot,
   temporaryRoot: tmpdir(),
   defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
 })
-const terminalReportPersistencePlan = createAbruptTerminalReportPlan({
-  abruptRestartRequested,
-  configuredReportPath: abruptRestartTerminalReportPath,
-  abruptReportPath: abruptRestartTerminalReportPath,
-  repositoryRoot,
-  temporaryRoot: tmpdir(),
-  defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
-})
-const reportPathLabel = reportPersistencePlan.mode === "abrupt"
-  ? "<approved isolated report path>"
-  : configuredReportPath?.trim() ? "<configured report path>" : "docs/evidence/dsh-profile-e2e.latest.json"
 const timeoutMs = 120_000
 const bootTimeoutMs = 30_000
 const controlledTeardownGraceMs = 5_000
@@ -1726,14 +1717,60 @@ export function createReportPersistencePlan(options: ReportPersistenceOptions): 
   }
 }
 
-export function createAbruptTerminalReportPlan(options: ReportPersistenceOptions & { terminalReportPath?: string }): ReportPersistencePlan {
+export interface AbruptPersistencePlans {
+  reportPersistencePlan: ReportPersistencePlan
+  terminalReportPersistencePlan: ReportPersistencePlan
+  reportPathLabel: string
+}
+
+/**
+ * Single real entry point used by the runner module initialization (and by the
+ * wiring tests): derives both #107 persistence plans directly from the
+ * environment. The terminal plan receives the explicit terminalReportPath, so
+ * the environment variable can never be silently overwritten with undefined.
+ */
+export function createAbruptPersistencePlansFromEnvironment(options: {
+  environment: NodeJS.ProcessEnv
+  repositoryRoot: string
+  temporaryRoot: string
+  defaultReportPath: string
+}): AbruptPersistencePlans {
+  const configuredReportPath = options.environment.DSHBANCA_DSH_PROFILE_REPORT_PATH
+  const abruptReportPath = options.environment.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH
+  const terminalReportPath = options.environment.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH
+  const abruptRestartRequested = abruptRestartRequestVariables.some((key) => (options.environment[key] ?? "").trim() !== "")
+  const reportPersistencePlan = createReportPersistencePlan({
+    abruptRestartRequested,
+    configuredReportPath,
+    abruptReportPath,
+    repositoryRoot: options.repositoryRoot,
+    temporaryRoot: options.temporaryRoot,
+    defaultReportPath: options.defaultReportPath,
+  })
+  const terminalReportPersistencePlan = createAbruptTerminalReportPlan({
+    abruptRestartRequested,
+    terminalReportPath,
+    repositoryRoot: options.repositoryRoot,
+    temporaryRoot: options.temporaryRoot,
+    defaultReportPath: options.defaultReportPath,
+  })
+  const reportPathLabel = reportPersistencePlan.mode === "abrupt"
+    ? "<approved isolated report path>"
+    : configuredReportPath?.trim() ? "<configured report path>" : options.defaultReportPath
+  return { reportPersistencePlan, terminalReportPersistencePlan, reportPathLabel }
+}
+
+export function createAbruptTerminalReportPlan(options: ReportPersistenceOptions & { terminalReportPath: string | undefined }): ReportPersistencePlan {
   if (!options.abruptRestartRequested) {
     return Object.freeze({ mode: "abrupt" as const, authorized: false, reason: "terminal receipt is only used for requested #107 evidence" })
   }
   return createReportPersistencePlan({
-    ...options,
+    abruptRestartRequested: options.abruptRestartRequested,
     configuredReportPath: options.terminalReportPath,
     abruptReportPath: options.terminalReportPath,
+    repositoryRoot: options.repositoryRoot,
+    temporaryRoot: options.temporaryRoot,
+    defaultReportPath: options.defaultReportPath,
   })
 }
 

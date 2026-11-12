@@ -1188,3 +1188,27 @@ test("R7 scratch identity and persisted-bytes binding are wired into the real fi
   expect(contract).toContain("pre-cleanup evidence must be pending-cleanup")
   expect(contract).toContain("pre-cleanup gate summary must be exactly pending-cleanup")
 })
+
+
+test("R8 real module initialization derives both persistence plans from the environment", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  expect(source).toContain("createAbruptPersistencePlansFromEnvironment({")
+  const initStart = source.indexOf("createAbruptPersistencePlansFromEnvironment({")
+  expect(initStart).toBeGreaterThanOrEqual(0)
+  const initEnd = source.indexOf("})", initStart)
+  const init = source.slice(initStart, initEnd)
+  expect(init).toContain("createAbruptPersistencePlansFromEnvironment({")
+  expect(init).toContain("environment: process.env")
+  const planningStart = source.indexOf("export function createAbruptPersistencePlansFromEnvironment(")
+  const planningEnd = source.indexOf("export function createAbruptTerminalReportPlan(", planningStart)
+  const planning = source.slice(planningStart, planningEnd)
+  expect(planning).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH")
+  expect(planning).toContain("terminalReportPath,")
+  const terminalPlannerStart = planningEnd
+  const terminalPlannerEnd = source.indexOf("export function abruptReportPairAuthorized(", terminalPlannerStart)
+  const terminalPlanner = source.slice(terminalPlannerStart, terminalPlannerEnd)
+  expect(terminalPlanner).toContain("terminalReportPath: string | undefined")
+  expect(terminalPlanner).toContain("configuredReportPath: options.terminalReportPath")
+  expect(terminalPlanner).toContain("abruptReportPath: options.terminalReportPath")
+  expect(terminalPlanner).not.toContain("...options")
+})
