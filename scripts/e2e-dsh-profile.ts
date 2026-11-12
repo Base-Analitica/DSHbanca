@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process"
 import {
   chmodSync,
   closeSync,
+  constants as fsConstants,
   existsSync,
   fstatSync,
   mkdirSync,
@@ -14,11 +15,12 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  fsyncSync,
   writeFileSync,
 } from "node:fs"
 import { createHash, createHmac, randomBytes } from "node:crypto"
 import { tmpdir } from "node:os"
-import { dirname, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { parse as parseYaml } from "yaml"
 import { loadConfig } from "../src/lib/config.js"
@@ -78,16 +80,33 @@ import {
 } from "./lib/dsh-profile-e2e-pnpm.js"
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
-const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH?.trim()
-const reportPath = configuredReportPath
-  ? resolve(repositoryRoot, configuredReportPath)
-  : resolve(repositoryRoot, "docs/evidence/dsh-profile-e2e.latest.json")
-const reportPathLabel = configuredReportPath
-  ? "<configured report path>"
-  : "docs/evidence/dsh-profile-e2e.latest.json"
+const configuredReportPath = process.env.DSHBANCA_DSH_PROFILE_REPORT_PATH
+const abruptRestartReportPath = process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH
+const abruptRestartRequestVariables = [
+  "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED",
+  "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256",
+  "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO",
+  "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_ENVIRONMENT",
+  "DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH",
+] as const
+const abruptRestartRequested = abruptRestartRequestVariables.some((key) => (process.env[key] ?? "").trim() !== "")
+const reportPersistencePlan = createReportPersistencePlan({
+  abruptRestartRequested,
+  configuredReportPath,
+  abruptReportPath: abruptRestartReportPath,
+  repositoryRoot,
+  temporaryRoot: tmpdir(),
+  defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
+})
+const reportPathLabel = reportPersistencePlan.mode === "abrupt"
+  ? "<approved isolated report path>"
+  : configuredReportPath?.trim() ? "<configured report path>" : "docs/evidence/dsh-profile-e2e.latest.json"
 const timeoutMs = 120_000
 const bootTimeoutMs = 30_000
+const controlledTeardownGraceMs = 5_000
+const controlledCloseGraceMs = 5_000
 const maxOutputBytes = 8_000_000
+const defaultRunDependencies: RunDependencies = { spawn, setTimeout, clearTimeout }
 const profileName = `dshbanca-e2e-${process.pid}-${Date.now()}`
 const observerName = "dshbanca-e2e-observer"
 
@@ -103,13 +122,25 @@ interface CommandResult {
   hostProcessIdentitySha256?: string | null
   controlCompleted?: boolean
   controlFailed?: boolean
+  timeoutContainmentSignalsRequested?: Array<"SIGTERM" | "SIGKILL">
 }
 
 type ControlledProcessStart = (
   child: ReturnType<typeof spawn>,
   hostProcessIdentitySha256: string | null,
   signal: AbortSignal,
+  mayContinue: () => boolean,
 ) => Promise<void>
+type ControlTimeoutHandler = (
+  child: ReturnType<typeof spawn>,
+  hostProcessIdentitySha256: string | null,
+  maySignal: () => boolean,
+) => "SIGTERM" | null
+type ControlHardTimeoutHandler = (
+  child: ReturnType<typeof spawn>,
+  hostProcessIdentitySha256: string | null,
+  maySignal: () => boolean,
+) => "SIGKILL" | null
 
 interface RunOptions {
   cwd: string
@@ -117,8 +148,36 @@ interface RunOptions {
   timeoutMs: number
   stdin?: "ignore" | "pipe"
   processIdentityKey?: Buffer
+  controlledTeardownGraceMs?: number
+  controlledCloseGraceMs?: number
   onSpawn?: ControlledProcessStart
-  onControlTimeout?: (child: ReturnType<typeof spawn>, hostProcessIdentitySha256: string | null) => void
+  onControlTimeout?: ControlTimeoutHandler
+  onControlHardTimeout?: ControlHardTimeoutHandler
+}
+
+interface RunDependencies {
+  spawn: typeof spawn
+  setTimeout: typeof setTimeout
+  clearTimeout: typeof clearTimeout
+}
+
+export interface ReportPersistencePlan {
+  readonly mode: "legacy" | "abrupt"
+  readonly authorized: boolean
+  readonly path?: string
+  readonly reason?: string
+  readonly canonicalParent?: string
+  readonly parentDevice?: number
+  readonly parentInode?: number
+}
+
+export interface ReportPersistenceOptions {
+  abruptRestartRequested: boolean
+  configuredReportPath?: string
+  abruptReportPath?: string
+  repositoryRoot: string
+  temporaryRoot: string
+  defaultReportPath: string
 }
 
 interface GateReport {
@@ -369,7 +428,7 @@ function verifyOwnedDshChild(
   }
 }
 
-function terminateOwnedDshChild(
+export function terminateOwnedDshChild(
   child: ReturnType<typeof spawn>,
   nodeExecutable: string,
   dshExecutable: string,
@@ -377,16 +436,19 @@ function terminateOwnedDshChild(
   expectedHostIdentitySha256: string | null,
   key: Buffer,
   signal: "SIGKILL" | "SIGTERM",
+  maySignal: () => boolean = () => true,
+  verifyIdentity: (
+    child: ReturnType<typeof spawn>,
+    expectedHostIdentitySha256: string | null,
+  ) => boolean = (target, expected) => target.pid !== undefined &&
+    linuxProcessIdentitySha256(target.pid, key) === expected &&
+    verifyOwnedDshChild(target, nodeExecutable, dshExecutable, args, expected, key),
+  sendSignal: (pid: number, signal: "SIGKILL" | "SIGTERM") => void = (pid, requested) => process.kill(pid, requested),
 ): boolean {
   const pid = child.pid
-  if (
-    pid === undefined ||
-    linuxProcessIdentitySha256(pid, key) !== expectedHostIdentitySha256 ||
-    !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, args, expectedHostIdentitySha256, key)
-  ) return false
+  if (pid === undefined || !maySignal() || !verifyIdentity(child, expectedHostIdentitySha256) || !maySignal()) return false
   try {
-    if (signal === "SIGKILL") process.kill(pid, "SIGKILL")
-    else process.kill(pid, "SIGTERM")
+    sendSignal(pid, signal)
     return true
   } catch {
     return false
@@ -400,9 +462,77 @@ function processTargetAbsentAfterClose(pid: number | undefined, originalIdentity
   return currentIdentity !== null && currentIdentity !== originalIdentitySha256
 }
 
-function run(command: string, args: string[], options: RunOptions): Promise<CommandResult> {
+export function parseLinuxProcStatProcessGroupId(stat: string): number | null {
+  const commandEnd = stat.lastIndexOf(")")
+  if (commandEnd < 0) return null
+  const fields = stat.slice(commandEnd + 1).trim().split(/\s+/)
+  const groupId = fields[2]
+  if (!/^\d+$/.test(groupId ?? "")) return null
+  const parsed = Number(groupId)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+export function processGroupAbsentFromProcRows(
+  groupId: number,
+  rows: Array<{ pid: number; stat: string }>,
+): boolean {
+  if (!Number.isSafeInteger(groupId) || groupId <= 0 || rows.length === 0) return false
+  for (const row of rows) {
+    if (!Number.isSafeInteger(row.pid) || row.pid <= 0) return false
+    const observedGroupId = parseLinuxProcStatProcessGroupId(row.stat)
+    if (observedGroupId === null || observedGroupId === groupId) return false
+  }
+  return true
+}
+
+function processGroupAbsentAfterClose(groupId: number | undefined): boolean {
+  if (process.platform !== "linux" || groupId === undefined || !Number.isSafeInteger(groupId) || groupId <= 1) return false
+  let entries
+  try { entries = readdirSync("/proc", { withFileTypes: true }) } catch { return false }
+  const rows: Array<{ pid: number; stat: string }> = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
+    const pid = Number(entry.name)
+    try {
+      rows.push({ pid, stat: readFileSync(`/proc/${entry.name}/stat`, "utf8") })
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "ENOENT" || code === "ESRCH") continue
+      return false
+    }
+  }
+  return processGroupAbsentFromProcRows(groupId, rows)
+}
+
+export function mayStartAbruptPhaseTwo(input: {
+  parentBarrierArmed: boolean
+  parentVerifiedPersistence: boolean
+  controlCompleted: boolean
+  controlFailed: boolean
+  firstKillRequested: boolean
+  exitCode: number | null
+  signal: string | null
+  timedOut: boolean
+  exitObserved: boolean
+  closeObserved: boolean
+  targetAbsentAfterClose: boolean
+  processGroupAbsentAfterClose: boolean
+  nativeTeardownMarkerObserved: boolean
+}): boolean {
+  return input.parentBarrierArmed && input.parentVerifiedPersistence && input.controlCompleted && !input.controlFailed &&
+    input.firstKillRequested && input.exitCode === null && input.signal === "SIGKILL" && !input.timedOut &&
+    input.exitObserved && input.closeObserved && input.targetAbsentAfterClose && input.processGroupAbsentAfterClose &&
+    !input.nativeTeardownMarkerObserved
+}
+
+export function run(
+  command: string,
+  args: string[],
+  options: RunOptions,
+  dependencies: RunDependencies = defaultRunDependencies,
+): Promise<CommandResult> {
   return new Promise((resolveResult) => {
-    const child = spawn(command, args, {
+    const child = dependencies.spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
       detached: process.platform !== "win32",
@@ -417,16 +547,107 @@ function run(command: string, args: string[], options: RunOptions): Promise<Comm
     let timedOut = false
     let spawnObserved = false
     let exitObserved = false
+    let observedExitCode: number | null = null
+    let observedExitSignal: string | null = null
     let controlCompleted = options.onSpawn === undefined
     let controlFailed = false
     let controlStarted = false
     let settled = false
+    let controlledTimeoutStarted = false
+    let controlErrorMessage: string | null = null
     let hostProcessIdentitySha256: string | null = null
+    const timeoutContainmentSignalsRequested: Array<"SIGTERM" | "SIGKILL"> = []
     const controlAbort = new AbortController()
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    let teardownTimer: ReturnType<typeof setTimeout> | undefined
+    let closeDeadlineTimer: ReturnType<typeof setTimeout> | undefined
+    const clearTimers = () => {
+      if (timeoutTimer !== undefined) dependencies.clearTimeout(timeoutTimer)
+      if (teardownTimer !== undefined) dependencies.clearTimeout(teardownTimer)
+      if (closeDeadlineTimer !== undefined) dependencies.clearTimeout(closeDeadlineTimer)
+      timeoutTimer = undefined
+      teardownTimer = undefined
+      closeDeadlineTimer = undefined
+    }
+    const mayContinue = () => !settled && !timedOut && !controlAbort.signal.aborted
+    const mayContain = () => !settled
+    const currentOutput = () => ({
+      stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout,
+      stderr: `${stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr}${controlErrorMessage ? `\n${controlErrorMessage}` : ""}`,
+    })
     const finish = (result: CommandResult) => {
       if (settled) return
+      if (options.onSpawn && !controlCompleted) {
+        controlFailed = true
+        controlAbort.abort()
+      }
       settled = true
-      resolveResult(result)
+      clearTimers()
+      resolveResult({
+        ...result,
+        controlCompleted,
+        controlFailed,
+        timeoutContainmentSignalsRequested: [...timeoutContainmentSignalsRequested],
+      })
+    }
+    const finishWithoutClose = () => {
+      if (settled) return
+      controlFailed = true
+      controlAbort.abort()
+      try { child.stdin?.destroy() } catch { /* the terminal state must remain bounded */ }
+      try { child.stdout.destroy() } catch { /* the terminal state must remain bounded */ }
+      try { child.stderr.destroy() } catch { /* the terminal state must remain bounded */ }
+      try { child.unref() } catch { /* do not let an unconfirmed child hold the runner open */ }
+      finish({
+        exitCode: child.exitCode ?? observedExitCode,
+        signal: child.signalCode ?? observedExitSignal,
+        timedOut,
+        ...currentOutput(),
+        spawnObserved,
+        exitObserved,
+        closeObserved: false,
+        hostProcessIdentitySha256,
+      })
+    }
+    const scheduleCloseDeadline = () => {
+      closeDeadlineTimer = dependencies.setTimeout(
+        finishWithoutClose,
+        options.controlledCloseGraceMs ?? controlledCloseGraceMs,
+      )
+    }
+    const onControlledTimeout = () => {
+      if (settled || controlledTimeoutStarted) return
+      controlledTimeoutStarted = true
+      if (timeoutTimer !== undefined) dependencies.clearTimeout(timeoutTimer)
+      timeoutTimer = undefined
+      timedOut = true
+      controlFailed = true
+      controlAbort.abort()
+      try { child.stdin?.end() } catch { controlFailed = true }
+      try {
+        const requested = options.onControlTimeout?.(child, hostProcessIdentitySha256, mayContain()) ?? null
+        if (requested === "SIGTERM") timeoutContainmentSignalsRequested.push(requested)
+      } catch {
+        controlFailed = true
+      }
+      if (exitObserved || child.exitCode !== null || child.signalCode !== null) {
+        scheduleCloseDeadline()
+        return
+      }
+      teardownTimer = dependencies.setTimeout(() => {
+        if (settled) return
+        if (exitObserved || child.exitCode !== null || child.signalCode !== null) {
+          scheduleCloseDeadline()
+          return
+        }
+        try {
+          const requested = options.onControlHardTimeout?.(child, hostProcessIdentitySha256, mayContain()) ?? null
+          if (requested === "SIGKILL") timeoutContainmentSignalsRequested.push(requested)
+        } catch {
+          controlFailed = true
+        }
+        scheduleCloseDeadline()
+      }, options.controlledTeardownGraceMs ?? controlledTeardownGraceMs)
     }
     child.once("spawn", () => {
       spawnObserved = true
@@ -437,17 +658,23 @@ function run(command: string, args: string[], options: RunOptions): Promise<Comm
       if (options.onSpawn) {
         controlStarted = true
         void Promise.resolve()
-          .then(() => options.onSpawn!(child, hostProcessIdentitySha256, controlAbort.signal))
-          .then(() => { controlCompleted = true })
+          .then(() => mayContinue() ? options.onSpawn!(child, hostProcessIdentitySha256, controlAbort.signal, mayContinue) : undefined)
+          .then(() => {
+            if (!settled && mayContinue()) controlCompleted = true
+            else if (!controlCompleted) controlFailed = true
+          })
           .catch(() => {
+            if (settled) return
             controlFailed = true
             controlAbort.abort()
-            child.stdin?.end()
+            try { child.stdin?.end() } catch { /* timeout containment remains armed */ }
           })
       }
     })
-    child.once("exit", () => {
+    child.once("exit", (code, signal) => {
       exitObserved = true
+      observedExitCode = code
+      observedExitSignal = signal
       if (options.onSpawn && !controlCompleted) {
         controlFailed = true
         controlAbort.abort()
@@ -476,53 +703,43 @@ function run(command: string, args: string[], options: RunOptions): Promise<Comm
     }
     child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk))
     child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk))
-    const timer = setTimeout(() => {
-      timedOut = true
-      if (options.onSpawn) {
-        controlFailed = true
-        controlAbort.abort()
-        child.stdin?.end()
-        try {
-          options.onControlTimeout?.(child, hostProcessIdentitySha256)
-        } catch {
-          controlFailed = true
-        }
-      } else {
+    timeoutTimer = dependencies.setTimeout(() => {
+      if (options.onSpawn) onControlledTimeout()
+      else {
+        timedOut = true
         terminateProcessTree(child)
       }
     }, options.timeoutMs)
     child.once("error", (error) => {
-      clearTimeout(timer)
+      if (options.onSpawn && spawnObserved) {
+        controlErrorMessage = error.message
+        onControlledTimeout()
+        return
+      }
       controlAbort.abort()
       if (options.onSpawn && !controlStarted) controlFailed = true
       finish({
         exitCode: null,
         signal: null,
         timedOut,
-        stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout,
-        stderr: `${stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr}\n${error.message}`,
+        stdout: currentOutput().stdout,
+        stderr: `${currentOutput().stderr}\n${error.message}`,
         spawnObserved,
         exitObserved,
         closeObserved: false,
         hostProcessIdentitySha256,
-        controlCompleted,
-        controlFailed,
       })
     })
     child.once("close", (code, signal) => {
-      clearTimeout(timer)
       finish({
         exitCode: code,
         signal,
         timedOut,
-        stdout: stdoutTruncated ? `${stdout}\n<output truncated>\n${stdoutTail}` : stdout,
-        stderr: stderrTruncated ? `${stderr}\n<output truncated>\n${stderrTail}` : stderr,
+        ...currentOutput(),
         spawnObserved,
         exitObserved,
         closeObserved: true,
         hostProcessIdentitySha256,
-        controlCompleted,
-        controlFailed,
       })
     })
   })
@@ -822,12 +1039,110 @@ function repoStatus(): string | null {
   return result.status === 0 ? result.stdout : null
 }
 
-function writeReport(): void {
+export function createReportPersistencePlan(options: ReportPersistenceOptions): ReportPersistencePlan {
+  if (!options.abruptRestartRequested) {
+    const configured = options.configuredReportPath?.trim()
+    return Object.freeze({
+      mode: "legacy" as const,
+      authorized: true,
+      path: configured ? resolve(options.repositoryRoot, configured) : resolve(options.repositoryRoot, options.defaultReportPath),
+    })
+  }
+  const blocked = (reason: string): ReportPersistencePlan => Object.freeze({ mode: "abrupt" as const, authorized: false, reason })
+  const configured = options.configuredReportPath
+  const approved = options.abruptReportPath
+  if (!configured || !approved || configured !== configured.trim() || approved !== approved.trim() || configured !== approved) {
+    return blocked("the abrupt report target must be explicitly approved and identically configured")
+  }
+  if (!isAbsolute(approved) || approved.includes("\0") || resolve(approved) !== approved || basename(approved) === "" || basename(approved) === "." || basename(approved) === "..") {
+    return blocked("the abrupt report target must be an unambiguous normalized absolute file path")
+  }
+  try {
+    const target = approved
+    const targetParent = dirname(target)
+    const canonicalRepository = realpathSync(options.repositoryRoot)
+    const canonicalTemp = realpathSync(options.temporaryRoot)
+    const canonicalParent = realpathSync(targetParent)
+    if (canonicalParent !== targetParent) return blocked("the abrupt report parent must not contain symlink aliases")
+    const relativeToTemp = relative(canonicalTemp, canonicalParent)
+    if (relativeToTemp === ".." || relativeToTemp.startsWith(`..${sep}`) || isAbsolute(relativeToTemp)) {
+      return blocked("the abrupt report parent must remain under the canonical OS temporary root")
+    }
+    const relativeToRepository = relative(canonicalRepository, target)
+    if (relativeToRepository === "" || (relativeToRepository !== ".." && !relativeToRepository.startsWith(`..${sep}`)) || isAbsolute(relativeToRepository)) {
+      return blocked("abrupt reports must remain outside the checkout")
+    }
+    const parentStat = statSync(canonicalParent)
+    if (!parentStat.isDirectory()) return blocked("the abrupt report parent must already be an existing directory")
+    const sticky = (parentStat.mode & 0o1000) !== 0
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : null
+    const privateOwner = currentUid !== null && parentStat.uid === currentUid && (parentStat.mode & 0o022) === 0
+    const safeStickyRoot = parentStat.uid === 0 && sticky
+    if (!privateOwner && !safeStickyRoot) return blocked("the abrupt report parent must be private to this user or a sticky OS temp root")
+    try {
+      lstatSync(target)
+      return blocked("the abrupt report target already exists and will not be overwritten")
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return blocked("the abrupt report target could not be verified as new")
+    }
+    return Object.freeze({
+      mode: "abrupt" as const,
+      authorized: true,
+      path: target,
+      canonicalParent,
+      parentDevice: parentStat.dev,
+      parentInode: parentStat.ino,
+    })
+  } catch {
+    return blocked("the abrupt report parent must already exist and be canonically resolvable under OS temp")
+  }
+}
+
+export function persistReportWithPlan(plan: ReportPersistencePlan, value: unknown): "written" | "blocked" {
+  if (!plan.authorized || !plan.path) return "blocked"
+  const safeReport = sanitizeReport(value)
+  const contents = `${JSON.stringify(safeReport, null, 2)}\n`
+  if (plan.mode === "legacy") {
+    mkdirSync(dirname(plan.path), { recursive: true })
+    writeFileSync(plan.path, contents, { mode: 0o600 })
+    return "written"
+  }
+  if (!plan.canonicalParent || plan.parentDevice === undefined || plan.parentInode === undefined) {
+    throw new Error("abrupt report persistence plan lacks canonical parent identity")
+  }
+  const currentParent = realpathSync(dirname(plan.path))
+  if (currentParent !== plan.canonicalParent) throw new Error("abrupt report parent path changed after authorization")
+  // Bind the exclusive leaf creation to this validated directory descriptor, not a second path lookup.
+  const parentDescriptor = openSync(
+    currentParent,
+    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+  )
+  try {
+    const parentStat = fstatSync(parentDescriptor)
+    if (parentStat.dev !== plan.parentDevice || parentStat.ino !== plan.parentInode) {
+      throw new Error("abrupt report parent identity changed after authorization")
+    }
+    const descriptor = openSync(
+      `/proc/self/fd/${parentDescriptor}/${basename(plan.path)}`,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    )
+    try {
+      writeFileSync(descriptor, contents)
+      fsyncSync(descriptor)
+    } finally {
+      closeSync(descriptor)
+    }
+  } finally {
+    closeSync(parentDescriptor)
+  }
+  return "written"
+}
+
+function writeReport(): "written" | "blocked" {
   report.finishedAt = new Date().toISOString()
   report.status = finalStatus
-  mkdirSync(dirname(reportPath), { recursive: true })
-  const safeReport = sanitizeReport(report) as GateReport
-  writeFileSync(reportPath, `${JSON.stringify(safeReport, null, 2)}\n`, { mode: 0o600 })
+  return persistReportWithPlan(reportPersistencePlan, report)
 }
 
 function fail(message: string, status: "FAIL" | "BLOCKED" = "FAIL"): void {
@@ -846,35 +1161,19 @@ function abruptRestartAuthorizationBlocker(
   workingTreeStatus: string | null,
   authorization: { approved?: string; sha256?: string; scenario?: string; environment?: string; reportPath?: string },
 ): string | null {
+  if (abruptRestartRequested && (!reportPersistencePlan.authorized || reportPersistencePlan.mode !== "abrupt")) {
+    return `BLOCKED: abrupt report persistence was refused (${reportPersistencePlan.reason ?? "destination not authorized"})`
+  }
   if (authorization.approved !== "yes") return "NEEDS_APPROVAL: DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED=yes was not supplied"
   if (!currentSha || authorization.sha256 !== currentSha) return "NEEDS_APPROVAL: authorization SHA does not equal the exact current runner commit"
   if (authorization.scenario !== "durable-checkpoint-2-of-5-sigkill") return "NEEDS_APPROVAL: the exact abrupt-restart scenario was not approved"
   if (authorization.environment !== "runner-owned-scratch-only") return "NEEDS_APPROVAL: the isolated runner-owned scratch environment was not approved"
-  if (!authorization.reportPath || !configuredReportPath || authorization.reportPath !== configuredReportPath || !configuredReportPath.startsWith(sep)) {
-    return "NEEDS_APPROVAL: a new isolated report path must be approved explicitly outside the checkout"
-  }
+  if (
+    !authorization.reportPath || !configuredReportPath || authorization.reportPath !== configuredReportPath ||
+    reportPersistencePlan.mode !== "abrupt" || !reportPersistencePlan.authorized || reportPersistencePlan.path !== authorization.reportPath
+  ) return "NEEDS_APPROVAL: a new isolated report path must be approved explicitly outside the checkout"
   if (workingTreeStatus !== "") return "BLOCKED: the approved runner commit must have a clean working tree"
   if (process.platform !== "linux") return "BLOCKED: owned-child identity verification requires Linux procfs"
-  const reportRelativeToRepo = relative(repositoryRoot, reportPath)
-  if (reportRelativeToRepo === "" || (reportRelativeToRepo !== ".." && !reportRelativeToRepo.startsWith(`..${sep}`))) {
-    return "BLOCKED: abrupt-restart reports must not modify the checkout"
-  }
-  try {
-    const tempRoot = realpathSync(tmpdir())
-    const reportParent = realpathSync(dirname(reportPath))
-    const reportRelativeToTemp = relative(tempRoot, reportParent)
-    if (reportRelativeToTemp === ".." || reportRelativeToTemp.startsWith(`..${sep}`)) {
-      return "BLOCKED: the sanitized report parent must remain under the OS temporary root"
-    }
-  } catch {
-    return "BLOCKED: the approved report parent must already exist under the OS temporary root"
-  }
-  try {
-    lstatSync(reportPath)
-    return "BLOCKED: the approved report target already exists and will not be overwritten"
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "BLOCKED: report target could not be verified as a new file"
-  }
   return null
 }
 
@@ -899,6 +1198,7 @@ function createObserverPackage(
   abruptObserverResultTwo: string,
   abruptTeardownMarkerOne: string,
   abruptTeardownMarkerTwo: string,
+  abruptParentDecisionToken: string,
   auditorMarkdownSourceSha256: string | null,
   auditorMarkdownSourceSha1: string | null,
 ): void {
@@ -997,6 +1297,16 @@ const inventory = async (root, prefix = "") => {
   return result;
 };
 const fail = (message) => { throw new Error("DSHbanca profile E2E observer: " + message); };
+const waitForParentAcknowledgement = (path, expectedContents) => new Promise((resolve) => {
+  const interval = setInterval(() => {
+    readFile(path, "utf8").then((contents) => {
+      if (contents === expectedContents) {
+        clearInterval(interval);
+        resolve();
+      }
+    }).catch(() => {});
+  }, 25);
+});
 const resultMessage = (result) => {
   if (typeof result?.error?.message === "string") return result.error.message;
   const content = Array.isArray(result?.content)
@@ -3597,6 +3907,10 @@ export async function apply(ctx) {
   const abruptObserverResultTwo = ${JSON.stringify(abruptObserverResultTwo)};
   const abruptTeardownMarkerOne = ${JSON.stringify(abruptTeardownMarkerOne)};
   const abruptTeardownMarkerTwo = ${JSON.stringify(abruptTeardownMarkerTwo)};
+  const abruptParentAcknowledgementPath = abruptTeardownMarkerOne + ".parent-ack";
+  const abruptParentAwaitingSignalPath = abruptTeardownMarkerOne + ".awaiting-parent-signal";
+  const abruptParentSignalPath = abruptTeardownMarkerOne + ".parent-signal";
+  const abruptParentDecisionToken = ${JSON.stringify(abruptParentDecisionToken)};
   const restartObserverResultOne = abruptRestartMode ? abruptObserverResultOne : ${JSON.stringify(restartObserverResultOne)} + (driftMode ? ".drift" : "");
   const restartObserverResultTwo = abruptRestartMode ? abruptObserverResultTwo : ${JSON.stringify(restartObserverResultTwo)} + (driftMode ? ".drift" : "");
   const restartTeardownMarkerOne = abruptRestartMode ? abruptTeardownMarkerOne : ${JSON.stringify(restartTeardownMarkerOne)} + (driftMode ? ".drift" : "");
@@ -3637,7 +3951,29 @@ export async function apply(ctx) {
     ctx.on("agent/request", () => fail("abrupt restart forbids model requests"));
     ctx.on("agent/pre-step", () => ({ kind: "reject", reason: "abrupt restart has no model turns" }));
     const crossProcessPhaseOne = await runCrossProcessInitialProbe(ctx, abruptRestartWorkspace);
-    await writeFile(abruptObserverResultOne, JSON.stringify({ observerProcessIdentitySha256, crossProcessPhaseOne }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+    // The native Agent/Session probe has disposed its handle; this barrier holds only the DSH child.
+    // Arm the parent-validation poll before publishing readiness; after validation, arm a second
+    // wait and publish that state before the parent can send the experimental signal.
+    const parentValidationAcknowledgement = waitForParentAcknowledgement(
+      abruptParentAcknowledgementPath,
+      abruptParentDecisionToken + ":validated",
+    );
+    await writeFile(abruptObserverResultOne, JSON.stringify({
+      observerProcessIdentitySha256,
+      crossProcessPhaseOne,
+      parentBarrierArmed: true,
+    }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+    await parentValidationAcknowledgement;
+    const parentSignalAcknowledgement = waitForParentAcknowledgement(
+      abruptParentSignalPath,
+      abruptParentDecisionToken + ":signal",
+    );
+    writeFileSync(abruptParentAwaitingSignalPath, JSON.stringify({
+      event: "awaiting-parent-signal",
+      observerProcessIdentitySha256,
+      parentValidationAcknowledged: true,
+    }) + "\\n", { mode: 0o600, flag: "wx" });
+    await parentSignalAcknowledgement;
     return;
   }
   if (restartPhase === "abrupt-resume") {
@@ -4575,6 +4911,10 @@ async function main(): Promise<void> {
   const abruptObserverResultTwo = join(scratch, "abrupt-process-b-observer-result.json")
   const abruptTeardownMarkerOne = join(scratch, "abrupt-process-a-natural-shutdown.json")
   const abruptTeardownMarkerTwo = join(scratch, "abrupt-process-b-natural-shutdown.json")
+  const abruptParentAcknowledgementPath = abruptTeardownMarkerOne + ".parent-ack"
+  const abruptParentAwaitingSignalPath = abruptTeardownMarkerOne + ".awaiting-parent-signal"
+  const abruptParentSignalPath = abruptTeardownMarkerOne + ".parent-signal"
+  const abruptParentDecisionToken = randomBytes(32).toString("hex")
   const processIdentityKey = randomBytes(32)
   const processIdentityKeyHex = processIdentityKey.toString("hex")
   const auditorMarkdownSourcePath = join(repositoryRoot, "assets", "dsh", "agents", "banca-auditor.md")
@@ -4616,7 +4956,7 @@ async function main(): Promise<void> {
   createObserverPackage(observerRoot, workspace, observerResult,
     restartWorkspace, restartObserverResultOne, restartObserverResultTwo, restartTeardownMarkerOne, restartTeardownMarkerTwo,
     abruptRestartWorkspace, abruptObserverResultOne, abruptObserverResultTwo, abruptTeardownMarkerOne, abruptTeardownMarkerTwo,
-    auditorMarkdownSourceSha256, auditorMarkdownSourceSha1,
+    abruptParentDecisionToken, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1,
   )
   const overlayPath = join(scratch, "observer.patch.yml")
   writeFileSync(overlayPath, buildSdkPresetOverlayPatch(observerName), { mode: 0o600 })
@@ -5155,6 +5495,7 @@ async function main(): Promise<void> {
     let parentVerifiedPersistence: Record<string, unknown> | null = null
     let abruptFirstChild: ReturnType<typeof spawn> | undefined
     let firstIdentityRevalidatedBeforeSignal = false
+    let firstParentBarrierArmed = false
     let firstKillRequested = false
     let abruptPhaseTwoStarted = false
     const abruptArgs = ["--profile", profileName, "--patch", overlayPath]
@@ -5181,24 +5522,34 @@ async function main(): Promise<void> {
         timeoutMs: bootTimeoutMs * 2,
         stdin: "pipe",
         processIdentityKey,
-        onSpawn: async (child, hostIdentity, signal) => {
+        onSpawn: async (child, hostIdentity, signal, mayContinue) => {
           abruptFirstChild = child
-          if (!hostIdentity || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
+          if (!hostIdentity || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
             throw new Error("runner could not identify its exact DSH child before readiness")
           }
           const sidecar = await waitForObserverJson(abruptObserverResultOne, child, signal, bootTimeoutMs)
+          if (!mayContinue()) throw new Error("phase-one control expired before parent validation")
           abruptPhaseOne = sidecar?.crossProcessPhaseOne
           const phaseOneErrors = validateCrossProcessPhaseOneEvidence(abruptPhaseOne)
           if (
             phaseOneErrors.length > 0 ||
             sidecar?.observerProcessIdentitySha256 !== hostIdentity ||
+            sidecar?.parentBarrierArmed !== true ||
             abruptPhaseOne?.workspaceIdentitySha256 !== abruptWorkspaceIdentitySha256
-          ) throw new Error("phase-one readiness did not prove the native durable checkpoint and matching child identity")
+          ) throw new Error("phase-one readiness did not prove durable state, a waiting parent barrier, and matching child identity")
           const parentValidation = verifyParentAbruptRestartPersistence(abruptRestartWorkspace, abruptPhaseOne)
           if (parentValidation.errors.length > 0 || !parentValidation.evidence) {
             throw new Error("parent failed raw persisted checkpoint, receipt, finding, hash, or inventory validation")
           }
           parentVerifiedPersistence = parentValidation.evidence
+          writeFileSync(abruptParentAcknowledgementPath, abruptParentDecisionToken + ":validated", { mode: 0o600, flag: "wx" })
+          const parentBarrier = await waitForObserverJson(abruptParentAwaitingSignalPath, child, signal, bootTimeoutMs)
+          if (
+            !mayContinue() || parentBarrier?.event !== "awaiting-parent-signal" ||
+            parentBarrier?.observerProcessIdentitySha256 !== hostIdentity ||
+            parentBarrier?.parentValidationAcknowledged !== true
+          ) throw new Error("phase-A child did not enter the post-validation parent-signal barrier")
+          firstParentBarrierArmed = true
           const preSignalWorkspaceIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
             abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
           )
@@ -5207,27 +5558,32 @@ async function main(): Promise<void> {
             preSignalWorkspaceIdentitySha256 !== abruptWorkspaceIdentitySha256 ||
             preSignalWorkspaceInventorySha256 !== parentVerifiedPersistence.workspaceInventorySha256
           ) throw new Error("parent observed a changed workspace identity or inventory before signaling")
-          if (signal.aborted || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
+          if (signal.aborted || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
             throw new Error("owned DSH child identity changed before direct termination")
           }
           firstIdentityRevalidatedBeforeSignal = true
-          if (!terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGKILL")) {
+          if (!terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGKILL", mayContinue)) {
             throw new Error("runner refused to signal an unverified DSH child")
           }
           firstKillRequested = true
         },
-        onControlTimeout: (child, hostIdentity) => {
-          if (parentVerifiedPersistence && firstIdentityRevalidatedBeforeSignal) {
-            terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGTERM")
-          }
-        },
+        // Deadline containment may clean up a stalled child before readiness, but only after exact
+        // runner-child identity revalidation. It is recorded separately and never satisfies the
+        // experimental parent-validated SIGKILL gate; timeout/control failure keeps phase B closed.
+        onControlTimeout: (child, hostIdentity, maySignal) =>
+          terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGTERM", maySignal)
+            ? "SIGTERM" : null,
+        onControlHardTimeout: (child, hostIdentity, maySignal) =>
+          terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGKILL", maySignal)
+            ? "SIGKILL" : null,
       })
-      const firstTargetAbsentAfterClose = processTargetAbsentAfterClose(
+      const firstTargetAbsentAfterClose = abruptFirstBoot.closeObserved === true && processTargetAbsentAfterClose(
         abruptFirstChild?.pid,
         abruptFirstBoot.hostProcessIdentitySha256 ?? null,
         processIdentityKey,
       )
-      if (!firstTargetAbsentAfterClose) preserveScratchForSafety = true
+      const firstProcessGroupAbsentAfterClose = abruptFirstBoot.closeObserved === true && processGroupAbsentAfterClose(abruptFirstChild?.pid)
+      if (!firstTargetAbsentAfterClose || !firstProcessGroupAbsentAfterClose) preserveScratchForSafety = true
       const firstAbruptProof = {
         dshExecutableSha256,
         profileIdentitySha256,
@@ -5241,22 +5597,33 @@ async function main(): Promise<void> {
         exitCode: abruptFirstBoot.exitCode,
         signal: abruptFirstBoot.signal,
         timedOut: abruptFirstBoot.timedOut,
-        forcedTermination: true,
+        forcedTermination: firstKillRequested,
         naturalBeforeExitObserved: false,
         nativeTeardownMarkerObserved: existsSync(abruptTeardownMarkerOne),
         runnerOwnedChild: abruptFirstChild?.pid !== undefined,
         childIdentityRevalidatedBeforeSignal: firstIdentityRevalidatedBeforeSignal,
+        parentBarrierArmed: firstParentBarrierArmed,
         killRequestedByParent: firstKillRequested,
-        killSignalRequested: "SIGKILL",
+        killSignalRequested: firstKillRequested ? "SIGKILL" : null,
+        timeoutContainmentSignalsRequested: abruptFirstBoot.timeoutContainmentSignalsRequested ?? [],
         targetAbsentAfterClose: firstTargetAbsentAfterClose,
+        processGroupAbsentAfterClose: firstProcessGroupAbsentAfterClose,
       }
-      if (
-        !parentVerifiedPersistence ||
-        abruptFirstBoot.controlCompleted !== true || abruptFirstBoot.controlFailed === true ||
-        !firstKillRequested || abruptFirstBoot.exitCode !== null || abruptFirstBoot.signal !== "SIGKILL" ||
-        abruptFirstBoot.timedOut || abruptFirstBoot.exitObserved !== true || abruptFirstBoot.closeObserved !== true ||
-        !firstTargetAbsentAfterClose || existsSync(abruptTeardownMarkerOne)
-      ) {
+      if (!mayStartAbruptPhaseTwo({
+        parentBarrierArmed: firstParentBarrierArmed,
+        parentVerifiedPersistence: parentVerifiedPersistence !== null,
+        controlCompleted: abruptFirstBoot.controlCompleted === true,
+        controlFailed: abruptFirstBoot.controlFailed === true,
+        firstKillRequested,
+        exitCode: abruptFirstBoot.exitCode,
+        signal: abruptFirstBoot.signal,
+        timedOut: abruptFirstBoot.timedOut,
+        exitObserved: abruptFirstBoot.exitObserved === true,
+        closeObserved: abruptFirstBoot.closeObserved === true,
+        targetAbsentAfterClose: firstTargetAbsentAfterClose,
+        processGroupAbsentAfterClose: firstProcessGroupAbsentAfterClose,
+        nativeTeardownMarkerObserved: existsSync(abruptTeardownMarkerOne),
+      })) {
         preserveScratchForSafety = true
         report.stages.abruptRestart = { status: "FAIL", probeExecuted: true, phaseOne: abruptPhaseOne, parentVerifiedPersistence, firstProcess: firstAbruptProof, phaseTwoStarted: false }
         fail("Issue #107 stopped before phase B because phase A did not close from the requested owned-child SIGKILL", "FAIL")
@@ -5295,15 +5662,18 @@ async function main(): Promise<void> {
         env: abruptResumeEnv,
         timeoutMs: bootTimeoutMs,
         processIdentityKey,
-        onSpawn: (child, hostIdentity, signal) => {
+        onSpawn: (child, hostIdentity, signal, mayContinue) => {
           abruptSecondChild = child
-          if (signal.aborted || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
+          if (signal.aborted || !mayContinue() || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
             throw new Error("recovery phase DSH child identity did not match the runner-owned invocation")
           }
         },
-        onControlTimeout: (child, hostIdentity) => {
-          terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGTERM")
-        },
+        onControlTimeout: (child, hostIdentity, maySignal) =>
+          terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGTERM", maySignal)
+            ? "SIGTERM" : null,
+        onControlHardTimeout: (child, hostIdentity, maySignal) =>
+          terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGKILL", maySignal)
+            ? "SIGKILL" : null,
       })
       const abruptSecondSidecar = existsSync(abruptObserverResultTwo)
         ? JSON.parse(readFileSync(abruptObserverResultTwo, "utf8")) : null
@@ -5349,6 +5719,7 @@ async function main(): Promise<void> {
           firstExitObserved: abruptFirstBoot.exitObserved === true,
           firstCloseObserved: abruptFirstBoot.closeObserved === true,
           firstTargetAbsentAfterClose,
+          firstProcessGroupAbsentAfterClose,
           secondExitObserved: abruptSecondBoot.exitObserved === true,
           secondCloseObserved: abruptSecondBoot.closeObserved === true,
           secondAgentSessionDisposed: phaseTwo?.teardown?.disposeCalled === true &&
@@ -5590,9 +5961,10 @@ async function main(): Promise<void> {
   finalStatus = overallStatus
 }
 
-try {
-  await main()
-} catch {
+async function runCli(): Promise<void> {
+  try {
+    await main()
+  } catch {
   fail("Runner orchestration: unexpected exception; details withheld")
 } finally {
   if (abruptRestartWorkspaceDirectoryFd !== undefined) {
@@ -5645,8 +6017,14 @@ try {
   if (report.sandbox.isolated && report.sandbox.removed !== true && finalStatus === "PASS") {
     fail("Sandbox cleanup was not verified")
   }
+  if (reportPersistencePlan.mode === "abrupt" && !reportPersistencePlan.authorized && finalStatus === "PASS") {
+    fail("Abrupt report persistence was not authorized; no report file was written", "BLOCKED")
+  }
   try {
-    writeReport()
+    const persistence = writeReport()
+    if (persistence === "blocked" && reportPersistencePlan.mode === "abrupt") {
+      process.stderr.write("BLOCKED: abrupt report persistence was refused; no report file was written\n")
+    }
   } catch {
     finalStatus = "FAIL"
     report.status = finalStatus
@@ -5685,3 +6063,15 @@ const safeVersions = (sanitizeReport({ versions: report.versions }) as { version
 if (safeVersions.dsh) process.stdout.write(`DSH ${safeVersions.dsh}; Cordis ${safeVersions.cordis ?? "unknown"}; loader ${safeVersions.cordisPluginLoader ?? "unknown"}; Skill ${safeVersions.dshSkill ?? "unknown"}; Agent ${safeVersions.dshAgent ?? "unknown"}; AgentLoop ${safeVersions.dshAgentLoop ?? "unknown"}; Tools ${safeVersions.dshTools ?? "unknown"}; AgentPreset ${safeVersions.dshAgentPreset ?? "unknown"}; PresetRegistry ${safeVersions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${safeVersions.dshApiSessionController ?? "unknown"}; Bun ${safeVersions.bun ?? "unknown"}; Node ${safeVersions.node ?? "unknown"}; pnpm ${safeVersions.pnpm ?? "unknown"}\n`)
 for (const failure of report.failures) process.stderr.write(`${finalStatus}: ${failure}\n`)
 process.exitCode = finalStatus === "PASS" ? passExitCode() : finalStatus === "BLOCKED" ? missingHostExitCode() : failureExitCode()
+}
+
+function isDirectExecution(): boolean {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (isDirectExecution()) await runCli()

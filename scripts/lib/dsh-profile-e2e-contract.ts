@@ -2469,13 +2469,15 @@ function validateCrossProcessBatchAuditEvidenceCore(value: unknown, firstProcess
         row.nativeTeardownMarkerObserved !== false ||
         row.runnerOwnedChild !== true ||
         row.childIdentityRevalidatedBeforeSignal !== true ||
+        row.parentBarrierArmed !== true ||
         row.killRequestedByParent !== true ||
         row.killSignalRequested !== "SIGKILL" ||
         row.targetAbsentAfterClose !== true ||
+        row.processGroupAbsentAfterClose !== true ||
         Object.prototype.hasOwnProperty.call(row, "pid") ||
         Object.prototype.hasOwnProperty.call(row, "processId")
       ) {
-        errors.push("first DSH process must be the owned child directly SIGKILLed after identity revalidation, with no surviving target")
+        errors.push("first DSH process must wait behind the parent barrier and be directly SIGKILLed after identity revalidation, with no surviving target or runner-owned process group")
       }
     } else if (firstProcessAbrupt && index === 1) {
       if (
@@ -2942,11 +2944,12 @@ export function validateAbruptRestartEvidence(value: unknown): string[] {
     teardown?.firstExitObserved === true &&
       teardown.firstCloseObserved === true &&
       teardown.firstTargetAbsentAfterClose === true &&
+      teardown.firstProcessGroupAbsentAfterClose === true &&
       teardown.secondExitObserved === true &&
       teardown.secondCloseObserved === true &&
       teardown.secondAgentSessionDisposed === true &&
       teardown.teardownFailed === false,
-    "abrupt DSH child, independent recovery child, Agent/Session, and teardown must all be observed without survivors",
+    "abrupt DSH child and runner-owned process group, independent recovery child, Agent/Session, and teardown must all be observed without survivors",
   )
   return errors
 }

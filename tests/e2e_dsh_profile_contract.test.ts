@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { EventEmitter } from "node:events"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -36,6 +37,15 @@ import {
   validateComposedProfilePlugins,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
 import * as profileEvidenceContract from "../scripts/lib/dsh-profile-e2e-contract.js"
+import {
+  createReportPersistencePlan,
+  mayStartAbruptPhaseTwo,
+  parseLinuxProcStatProcessGroupId,
+  processGroupAbsentFromProcRows,
+  persistReportWithPlan,
+  run as runControlledProcess,
+  terminateOwnedDshChild,
+} from "../scripts/e2e-dsh-profile.js"
 
 const completeAuditorMarkdownEvidence = {
   sourcePath: "assets/dsh/agents/banca-auditor.md",
@@ -679,7 +689,8 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
       "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
       "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
       "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
-      "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+      "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "abruptParentDecisionToken",
+      "renderControlPresetSelector", "e2eControlPresetId",
       `return \`${template}\`;`,
     ) as (...args: unknown[]) => string
     const generatedModuleSource = renderObserver(
@@ -687,7 +698,7 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
       "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
       "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
       "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
-      "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json",
+      "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json", "test-parent-decision-token",
       renderControlPresetSelector, e2eControlPresetId,
     )
 
@@ -4021,10 +4032,11 @@ describe("DSH E2E diagnostic redaction", () => {
 
   test("runner sanitizes the complete report and withholds raw exception and child output", () => {
     const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
-    const writeReportStart = runnerSource.indexOf("function writeReport(): void")
+    const writeReportStart = runnerSource.indexOf("export function persistReportWithPlan(")
     const failFunctionStart = runnerSource.indexOf("function fail(message:", writeReportStart)
     const writeReportSource = runnerSource.slice(writeReportStart, failFunctionStart)
-    expect(writeReportSource).toContain("sanitizeReport(report)")
+    expect(writeReportSource).toContain("sanitizeReport(value)")
+    expect(writeReportSource).toContain("persistReportWithPlan(reportPersistencePlan, report)")
     expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable")
     expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable")
     expect(runnerSource).toContain("const reportedVersion = safeRuntimeVersion(pnpmCheck.stdout")
@@ -4035,7 +4047,7 @@ describe("DSH E2E diagnostic redaction", () => {
     expect(runnerSource).toContain('fail("Runner orchestration: unexpected exception; details withheld")')
     expect(runnerSource).toContain('report.failures.push("Report persistence failed; details withheld")')
     expect(runnerSource).toContain('formatCommandFailure("native DSH profile boot"')
-    expect(runnerSource).toContain('const reportPathLabel = configuredReportPath')
+    expect(runnerSource).toContain('const reportPathLabel = reportPersistencePlan.mode === "abrupt"')
     expect(runnerSource).not.toContain("error.message.replaceAll(scratchRoot")
     expect(runnerSource).not.toContain("Could not preserve sanitized report at ${reportPathLabel}: ${error.message")
   })
@@ -4060,9 +4072,11 @@ function abruptRestartEvidenceFixture(): any {
     nativeTeardownMarkerObserved: false,
     runnerOwnedChild: true,
     childIdentityRevalidatedBeforeSignal: true,
+    parentBarrierArmed: true,
     killRequestedByParent: true,
     killSignalRequested: "SIGKILL",
     targetAbsentAfterClose: true,
+    processGroupAbsentAfterClose: true,
   }
   evidence.parentVerifiedPersistence = {
     source: "parent-read-persisted-files",
@@ -4082,6 +4096,7 @@ function abruptRestartEvidenceFixture(): any {
     firstExitObserved: true,
     firstCloseObserved: true,
     firstTargetAbsentAfterClose: true,
+    firstProcessGroupAbsentAfterClose: true,
     secondExitObserved: true,
     secondCloseObserved: true,
     secondAgentSessionDisposed: true,
@@ -4123,6 +4138,7 @@ describe("DSH abrupt process-restart evidence gate (#107)", () => {
     ["wrong termination signal", (e: any) => { e.processBoundary.first.signal = "SIGTERM" }],
     ["child ownership not proved", (e: any) => { e.processBoundary.first.runnerOwnedChild = false }],
     ["identity not revalidated before signal", (e: any) => { e.processBoundary.first.childIdentityRevalidatedBeforeSignal = false }],
+    ["parent barrier not armed before signal", (e: any) => { e.processBoundary.first.parentBarrierArmed = false }],
     ["process identity changed", (e: any) => { e.processBoundary.first.hostIdentitySha256 = "4".repeat(64) }],
     ["B started before A closed", (e: any) => { e.processBoundary.secondStartedAfterFirstExit = false }],
     ["recovery child startup control failed", (e: any) => { e.processBoundary.second.controlFailed = true }],
@@ -4134,6 +4150,7 @@ describe("DSH abrupt process-restart evidence gate (#107)", () => {
     ["finding changed at synthesis", (e: any) => { e.phaseTwo.synthesis.finding.findingId = "6".repeat(64) }],
     ["cleanup or teardown failed", (e: any) => { e.teardown.teardownFailed = true }],
     ["target process survived close", (e: any) => { e.teardown.firstTargetAbsentAfterClose = false }],
+    ["runner-owned process group has survivor", (e: any) => { e.teardown.firstProcessGroupAbsentAfterClose = false }],
   ])("fails closed for %s", (_label, mutate) => {
     const evidence = abruptRestartEvidenceFixture()
     mutate(evidence)
@@ -4147,5 +4164,455 @@ describe("DSH abrupt process-restart evidence gate (#107)", () => {
       delete evidence.parentVerifiedPersistence[key]
       expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
     }
+  })
+})
+
+class MockWritable extends EventEmitter {
+  endCalls = 0
+  destroyCalls = 0
+  end(): this { this.endCalls++; return this }
+  destroy(): this { this.destroyCalls++; return this }
+}
+
+class MockReadable extends EventEmitter {
+  destroyCalls = 0
+  destroy(): this { this.destroyCalls++; return this }
+}
+
+class MockControlledChild extends EventEmitter {
+  pid: number | undefined = 4242
+  exitCode: number | null = null
+  signalCode: string | null = null
+  stdin = new MockWritable()
+  stdout = new MockReadable()
+  stderr = new MockReadable()
+  unrefCalls = 0
+  unref(): this { this.unrefCalls++; return this }
+  observeExit(code: number | null, signal: string | null): void {
+    this.exitCode = code
+    this.signalCode = signal
+    this.emit("exit", code, signal)
+  }
+  observeClose(code: number | null, signal: string | null): void {
+    this.emit("close", code, signal)
+  }
+}
+
+class ManualClock {
+  private readonly timers: Array<{ callback: () => void; delay: number; cancelled: boolean; fired: boolean }> = []
+  readonly delays: number[] = []
+  readonly setTimeout: typeof setTimeout = ((callback: () => void, delay = 0) => {
+    const timer = { callback, delay, cancelled: false, fired: false }
+    this.timers.push(timer)
+    this.delays.push(delay)
+    return timer as unknown as ReturnType<typeof setTimeout>
+  }) as typeof setTimeout
+  readonly clearTimeout: typeof clearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
+    const timer = handle as unknown as { cancelled: boolean }
+    timer.cancelled = true
+  }) as typeof clearTimeout
+  runNext(): void {
+    const timer = this.timers.find((candidate) => !candidate.cancelled && !candidate.fired)
+    if (!timer) throw new Error("manual clock has no pending timeout")
+    timer.fired = true
+    timer.callback()
+  }
+  runAll(): void {
+    let count = 0
+    while (this.timers.some((candidate) => !candidate.cancelled && !candidate.fired)) {
+      if (++count > 20) throw new Error("manual clock exceeded bounded timeout schedule")
+      this.runNext()
+    }
+  }
+}
+
+function startMockControlledRun(options: Record<string, unknown> = {}) {
+  const child = new MockControlledChild()
+  const clock = new ManualClock()
+  const result = runControlledProcess("mock-dsh", [], {
+    cwd: tmpdir(),
+    env: {},
+    timeoutMs: 10,
+    controlledTeardownGraceMs: 5,
+    controlledCloseGraceMs: 3,
+    ...options,
+  } as any, {
+    spawn: (() => child) as any,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+  })
+  child.emit("spawn")
+  return { child, clock, result }
+}
+
+function createAbruptReportPlan(root: string, repo: string, path: string, overrides: Record<string, unknown> = {}) {
+  const configured = overrides.configuredReportPath ?? path
+  const abruptPath = overrides.abruptReportPath ?? path
+  return createReportPersistencePlan({
+    abruptRestartRequested: true,
+    configuredReportPath: configured as string,
+    abruptReportPath: abruptPath as string,
+    repositoryRoot: repo,
+    temporaryRoot: root,
+    defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
+  })
+}
+
+describe("P1 report-writer and controlled-process regressions", () => {
+  test("blocked #107 finally write leaves an existing sentinel unchanged", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-blocked-"))
+    try {
+      const repo = join(root, "checkout")
+      const privateParent = join(root, "reports")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(privateParent, { mode: 0o700 })
+      const sentinel = join(privateParent, "existing.json")
+      const bytes = Buffer.from("DO-NOT-OVERWRITE\n")
+      writeFileSync(sentinel, bytes, { mode: 0o600 })
+      const plan = createAbruptReportPlan(root, repo, sentinel)
+      expect(plan.mode).toBe("abrupt")
+      expect(plan.authorized).toBe(false)
+      let reportResult: string | undefined
+      let dshBoots = 0
+      const earlyBlockedReturn = () => {
+        try {
+          return
+        } finally {
+          reportResult = persistReportWithPlan(plan, { status: "BLOCKED", dshBoots })
+        }
+      }
+      earlyBlockedReturn()
+      expect(dshBoots).toBe(0)
+      expect(reportResult).toBe("blocked")
+      expect(readFileSync(sentinel)).toEqual(bytes)
+      const missingApprovedTarget = createReportPersistencePlan({
+        abruptRestartRequested: true,
+        configuredReportPath: undefined,
+        abruptReportPath: undefined,
+        repositoryRoot: repo,
+        temporaryRoot: root,
+        defaultReportPath: "docs/evidence/fallback.json",
+      })
+      expect(missingApprovedTarget.mode).toBe("abrupt")
+      expect(missingApprovedTarget.authorized).toBe(false)
+      expect(persistReportWithPlan(missingApprovedTarget, { status: "BLOCKED" })).toBe("blocked")
+      expect(existsSync(join(repo, "docs/evidence/fallback.json"))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("refuses checkout, outside-temp, missing-parent, and symlink report paths without creating them", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-guards-"))
+    const outside = mkdtempSync(join(tmpdir(), "dshbanca-report-outside-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      const insideCheckout = join(repo, "report.json")
+      const missingParent = join(root, "absent", "report.json")
+      const outsideTemp = join(outside, "report.json")
+      const symlinkParent = join(root, "redirect")
+      symlinkSync(outside, symlinkParent, "dir")
+      const symlinkEscape = join(symlinkParent, "report.json")
+      for (const target of [insideCheckout, missingParent, outsideTemp, symlinkEscape]) {
+        const plan = createAbruptReportPlan(root, repo, target)
+        expect(plan.authorized).toBe(false)
+        expect(persistReportWithPlan(plan, { status: "BLOCKED" })).toBe("blocked")
+      }
+      expect(existsSync(join(root, "absent"))).toBe(false)
+      expect(existsSync(insideCheckout)).toBe(false)
+      expect(existsSync(outsideTemp)).toBe(false)
+      expect(existsSync(join(outside, "report.json"))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects final symlink and a target created after preflight without changing sentinel bytes", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-race-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      const sentinel = join(parent, "sentinel.json")
+      const sentinelBytes = Buffer.from("sentinel bytes\n")
+      writeFileSync(sentinel, sentinelBytes, { mode: 0o600 })
+      const link = join(parent, "link.json")
+      symlinkSync(sentinel, link)
+      const linkPlan = createAbruptReportPlan(root, repo, link)
+      expect(linkPlan.authorized).toBe(false)
+      expect(persistReportWithPlan(linkPlan, { status: "FAIL" })).toBe("blocked")
+      expect(readFileSync(sentinel)).toEqual(sentinelBytes)
+
+      const racedTarget = join(parent, "raced.json")
+      const preflight = createAbruptReportPlan(root, repo, racedTarget)
+      expect(preflight.authorized).toBe(true)
+      writeFileSync(racedTarget, sentinelBytes, { mode: 0o600, flag: "wx" })
+      expect(() => persistReportWithPlan(preflight, { status: "FAIL" })).toThrow()
+      expect(readFileSync(racedTarget)).toEqual(sentinelBytes)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("parent replacement between preflight and persist is refused without writing through a symlink", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-parent-race-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      const movedParent = join(root, "private-moved")
+      const escape = join(root, "escape")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      mkdirSync(escape, { mode: 0o700 })
+      const target = join(parent, "report.json")
+      const plan = createAbruptReportPlan(root, repo, target)
+      expect(plan.authorized).toBe(true)
+      renameSync(parent, movedParent)
+      symlinkSync(escape, parent, "dir")
+      expect(() => persistReportWithPlan(plan, { status: "FAIL" })).toThrow()
+      expect(existsSync(join(escape, "report.json"))).toBe(false)
+      expect(existsSync(join(movedParent, "report.json"))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("writes one new abrupt report exclusively and preserves legacy report semantics", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-valid-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      const target = join(parent, "report.json")
+      const plan = createAbruptReportPlan(root, repo, target)
+      expect(plan.authorized).toBe(true)
+      expect(persistReportWithPlan(plan, { status: "BLOCKED", message: "safe report" })).toBe("written")
+      const firstBytes = readFileSync(target)
+      expect(statSync(target).mode & 0o777).toBe(0o600)
+      expect(JSON.parse(firstBytes.toString("utf8")).status).toBe("BLOCKED")
+      expect(() => persistReportWithPlan(plan, { status: "FAIL" })).toThrow()
+      expect(readFileSync(target)).toEqual(firstBytes)
+
+      const legacyParent = join(repo, "legacy")
+      mkdirSync(legacyParent, { mode: 0o700 })
+      const legacyTarget = join(legacyParent, "latest.json")
+      writeFileSync(legacyTarget, "legacy sentinel\n", { mode: 0o600 })
+      const legacyPlan = createReportPersistencePlan({
+        abruptRestartRequested: false,
+        configuredReportPath: "legacy/latest.json",
+        repositoryRoot: repo,
+        temporaryRoot: root,
+        defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
+      })
+      expect(legacyPlan.mode).toBe("legacy")
+      expect(persistReportWithPlan(legacyPlan, { status: "PASS" })).toBe("written")
+      expect(JSON.parse(readFileSync(legacyTarget, "utf8")).status).toBe("PASS")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("controlled timeout is bounded when readiness never completes and no close/error arrives", async () => {
+    const requested: string[] = []
+    const { child, clock, result } = startMockControlledRun({
+      onSpawn: async () => await new Promise<void>(() => {}),
+      onControlTimeout: () => { requested.push("SIGTERM"); return "SIGTERM" },
+      onControlHardTimeout: () => { requested.push("SIGKILL"); return "SIGKILL" },
+    })
+    await Promise.resolve()
+    clock.runNext()
+    expect(child.stdin.endCalls).toBe(1)
+    clock.runAll()
+    const completed = await result
+    expect(completed.timedOut).toBe(true)
+    expect(completed.controlFailed).toBe(true)
+    expect(completed.exitObserved).toBe(false)
+    expect(completed.closeObserved).toBe(false)
+    expect(completed.timeoutContainmentSignalsRequested).toEqual(["SIGTERM", "SIGKILL"])
+    expect(child.unrefCalls).toBe(1)
+    expect(child.stdout.destroyCalls).toBe(1)
+    expect(clock.delays).toEqual([10, 5, 3])
+  })
+
+  test("SIGTERM without close settles as uncertain and cannot release phase B", async () => {
+    const { child, clock, result } = startMockControlledRun({
+      onSpawn: async () => await new Promise<void>(() => {}),
+      onControlTimeout: () => "SIGTERM",
+      onControlHardTimeout: () => null,
+    })
+    await Promise.resolve()
+    clock.runAll()
+    const completed = await result
+    expect(completed.timeoutContainmentSignalsRequested).toEqual(["SIGTERM"])
+    expect(completed.closeObserved).toBe(false)
+    expect(child.unrefCalls).toBe(1)
+    expect(mayStartAbruptPhaseTwo({
+      parentBarrierArmed: true,
+      parentVerifiedPersistence: true,
+      controlCompleted: completed.controlCompleted === true,
+      controlFailed: completed.controlFailed === true,
+      firstKillRequested: false,
+      exitCode: completed.exitCode,
+      signal: completed.signal,
+      timedOut: completed.timedOut,
+      exitObserved: completed.exitObserved === true,
+      closeObserved: completed.closeObserved === true,
+      targetAbsentAfterClose: false,
+      processGroupAbsentAfterClose: false,
+      nativeTeardownMarkerObserved: false,
+    })).toBe(false)
+  })
+
+  test("unverified child identity prevents every timeout signal", async () => {
+    const requested: string[] = []
+    const { clock, result } = startMockControlledRun({
+      onSpawn: async (_child: unknown, identity: string | null) => {
+        if (!identity) throw new Error("child identity unavailable")
+      },
+      onControlTimeout: (_child: unknown, identity: string | null) => {
+        if (!identity) return null
+        requested.push("SIGTERM")
+        return "SIGTERM"
+      },
+      onControlHardTimeout: (_child: unknown, identity: string | null) => {
+        if (!identity) return null
+        requested.push("SIGKILL")
+        return "SIGKILL"
+      },
+    })
+    await Promise.resolve()
+    clock.runAll()
+    const completed = await result
+    expect(requested).toEqual([])
+    expect(completed.timeoutContainmentSignalsRequested).toEqual([])
+    expect(completed.controlFailed).toBe(true)
+    expect(completed.closeObserved).toBe(false)
+  })
+
+  test("late onSpawn callback cannot signal after timeout terminal state", async () => {
+    let releaseCallback: (() => void) | undefined
+    let signalAttempts = 0
+    const { clock, result } = startMockControlledRun({
+      onSpawn: async (_child: unknown, _identity: string | null, _signal: AbortSignal, mayContinue: () => boolean) => {
+        await new Promise<void>((resolve) => { releaseCallback = resolve })
+        if (mayContinue()) signalAttempts++
+      },
+      onControlTimeout: () => null,
+      onControlHardTimeout: () => null,
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    clock.runAll()
+    const completed = await result
+    expect(completed.closeObserved).toBe(false)
+    releaseCallback?.()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(signalAttempts).toBe(0)
+    expect(completed.timedOut).toBe(true)
+    expect(completed.controlFailed).toBe(true)
+  })
+
+  test("exit is not close and a delayed control callback cannot signal afterward", async () => {
+    let releaseCallback: (() => void) | undefined
+    let experimentalSignals = 0
+    const { child, result } = startMockControlledRun({
+      onSpawn: async (_child: unknown, _identity: string | null, _signal: AbortSignal, mayContinue: () => boolean) => {
+        await new Promise<void>((resolve) => { releaseCallback = resolve })
+        if (mayContinue()) experimentalSignals++
+      },
+      onControlTimeout: () => null,
+      onControlHardTimeout: () => null,
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    child.observeExit(0, null)
+    expect(child.exitCode).toBe(0)
+    expect(child.listenerCount("close")).toBeGreaterThan(0)
+    releaseCallback?.()
+    await Promise.resolve()
+    expect(experimentalSignals).toBe(0)
+    child.observeClose(0, null)
+    const completed = await result
+    expect(completed.exitObserved).toBe(true)
+    expect(completed.closeObserved).toBe(true)
+    expect(completed.controlFailed).toBe(true)
+    expect(completed.signal).toBe(null)
+  })
+
+  test("owned-child signaling revalidates and targets only the positive direct PID", () => {
+    const child = new MockControlledChild() as any
+    const signals: Array<[number, string]> = []
+    const args: string[] = []
+    const key = Buffer.alloc(32)
+    expect(terminateOwnedDshChild(
+      child, "node", "dsh", args, "identity", key, "SIGTERM", () => true,
+      (_target, identity) => identity === "identity",
+      (pid, signal) => { signals.push([pid, signal]) },
+    )).toBe(true)
+    expect(terminateOwnedDshChild(
+      child, "node", "dsh", args, "identity", key, "SIGKILL", () => true,
+      () => false,
+      (pid, signal) => { signals.push([pid, signal]) },
+    )).toBe(false)
+    expect(terminateOwnedDshChild(
+      child, "node", "dsh", args, "identity", key, "SIGKILL", () => false,
+      () => true,
+      (pid, signal) => { signals.push([pid, signal]) },
+    )).toBe(false)
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
+  })
+
+  test("process-group absence inspection is fail-closed and never signals a group", () => {
+    const stat = (pid: number, groupId: number, command = "worker") => `${pid} (${command}) S 1 ${groupId} ${groupId} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+    expect(parseLinuxProcStatProcessGroupId(stat(110, 101, "worker ) helper"))).toBe(101)
+    expect(processGroupAbsentFromProcRows(101, [
+      { pid: 201, stat: stat(201, 202) },
+      { pid: 301, stat: stat(301, 302) },
+    ])).toBe(true)
+    expect(processGroupAbsentFromProcRows(101, [{ pid: 201, stat: stat(201, 101) }])).toBe(false)
+    expect(processGroupAbsentFromProcRows(101, [{ pid: 201, stat: "malformed" }])).toBe(false)
+    expect(processGroupAbsentFromProcRows(101, [{ pid: 0, stat: stat(201, 202) }])).toBe(false)
+    expect(processGroupAbsentFromProcRows(101, [])).toBe(false)
+    expect(processGroupAbsentFromProcRows(0, [])).toBe(false)
+  })
+
+  test("phase B requires completed parent barrier, experimental kill, close, and absence proof", () => {
+    const ready = {
+      parentBarrierArmed: true,
+      parentVerifiedPersistence: true,
+      controlCompleted: true,
+      controlFailed: false,
+      firstKillRequested: true,
+      exitCode: null,
+      signal: "SIGKILL",
+      timedOut: false,
+      exitObserved: true,
+      closeObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+      nativeTeardownMarkerObserved: false,
+    }
+    expect(mayStartAbruptPhaseTwo(ready)).toBe(true)
+    for (const change of [
+      { parentBarrierArmed: false },
+      { parentVerifiedPersistence: false },
+      { controlCompleted: false },
+      { controlFailed: true },
+      { firstKillRequested: false },
+      { timedOut: true },
+      { exitObserved: false },
+      { closeObserved: false },
+      { targetAbsentAfterClose: false },
+      { processGroupAbsentAfterClose: false },
+      { nativeTeardownMarkerObserved: true },
+    ]) expect(mayStartAbruptPhaseTwo({ ...ready, ...change })).toBe(false)
   })
 })
