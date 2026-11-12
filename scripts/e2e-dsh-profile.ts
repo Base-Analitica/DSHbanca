@@ -384,15 +384,15 @@ export interface ScratchRootIdentity {
   basename: string
   device: number
   inode: number
+  tokenBasename: string
+  tokenDevice: number
+  tokenInode: number
+  tokenSha256: string
 }
 
-/**
- * Captures the runner-created scratch root identity at mkdtemp time. Cleanup
- * later requires this exact identity: canonical path, direct parent, basename,
- * device/inode, real directory (not a symlink) and the same target that was
- * created by this execution.
- */
-export function captureScratchRootIdentity(root: string): ScratchRootIdentity | null {
+const scratchIdentityTokenBasename = ".dshbanca-runner-scratch-token-v1"
+
+function buildScratchRootIdentity(root: string): ScratchRootIdentity | null {
   try {
     const rootStat = lstatSync(root)
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return null
@@ -401,12 +401,27 @@ export function captureScratchRootIdentity(root: string): ScratchRootIdentity | 
     const name = basename(canonicalPath)
     if (!name.startsWith("dshbanca-profile-e2e-")) return null
     const targetStat = statSync(canonicalPath)
+    const tokenPath = join(canonicalPath, scratchIdentityTokenBasename)
+    const tokenStat = lstatSync(tokenPath)
+    if (!tokenStat.isFile() || tokenStat.isSymbolicLink()) return null
+    const descriptor = openSync(tokenPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    let tokenBytes: Buffer
+    try {
+      tokenBytes = readFileSync(descriptor)
+    } finally {
+      closeSync(descriptor)
+    }
+    if (tokenBytes.byteLength === 0) return null
     return {
       canonicalPath,
       parentPath,
       basename: name,
       device: targetStat.dev,
       inode: targetStat.ino,
+      tokenBasename: scratchIdentityTokenBasename,
+      tokenDevice: tokenStat.dev,
+      tokenInode: tokenStat.ino,
+      tokenSha256: evidenceReportDigest(tokenBytes),
     }
   } catch {
     return null
@@ -414,11 +429,91 @@ export function captureScratchRootIdentity(root: string): ScratchRootIdentity | 
 }
 
 /**
+ * Creates the random creation token inside the runner-created scratch root and
+ * captures the identity used later to prove the directory being removed is the
+ * same one this execution created. dev/inode alone is insufficient because a
+ * filesystem can reuse an inode after delete/recreate.
+ */
+export function initializeScratchRootIdentity(root: string): ScratchRootIdentity | null {
+  try {
+    const rootStat = lstatSync(root)
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return null
+    const canonicalPath = realpathSync(root)
+    if (!basename(canonicalPath).startsWith("dshbanca-profile-e2e-")) return null
+    const tokenPath = join(canonicalPath, scratchIdentityTokenBasename)
+    if (existsSync(tokenPath)) return null
+    writeFileSync(tokenPath, randomBytes(32).toString("hex"), { mode: 0o600, flag: "wx" })
+    return buildScratchRootIdentity(canonicalPath)
+  } catch {
+    return null
+  }
+}
+
+export function captureScratchRootIdentity(root: string): ScratchRootIdentity | null {
+  return buildScratchRootIdentity(root)
+}
+
+function verifyScratchRootIdentity(input: {
+  scratchRoot: string
+  identity: ScratchRootIdentity
+  temporaryRoot: string
+}): { ok: boolean; error: string | null; observed: boolean } {
+  let currentStat
+  try {
+    currentStat = lstatSync(input.scratchRoot)
+  } catch {
+    return { ok: false, error: "scratch root disappeared externally; runner cleanup was not observed", observed: false }
+  }
+  if (currentStat.isSymbolicLink() || !currentStat.isDirectory()) {
+    return { ok: false, error: "scratch root is not the directory created by the runner; refusing cleanup of a symlink or replacement", observed: true }
+  }
+  try {
+    const canonicalPath = realpathSync(input.scratchRoot)
+    const expectedParent = realpathSync(input.temporaryRoot)
+    const targetStat = statSync(canonicalPath)
+    if (
+      canonicalPath !== input.identity.canonicalPath ||
+      dirname(canonicalPath) !== input.identity.parentPath ||
+      basename(canonicalPath) !== input.identity.basename ||
+      expectedParent !== input.identity.parentPath ||
+      targetStat.dev !== input.identity.device ||
+      targetStat.ino !== input.identity.inode ||
+      !basename(canonicalPath).startsWith("dshbanca-profile-e2e-")
+    ) {
+      return { ok: false, error: "scratch root identity diverged from the runner-created directory; refusing cleanup", observed: true }
+    }
+    // The random creation token defeats delete+recreate replacement even when the
+    // filesystem reuses the same dev/inode for a new directory at the same path.
+    const tokenPath = join(canonicalPath, input.identity.tokenBasename)
+    const tokenStat = lstatSync(tokenPath)
+    if (!tokenStat.isFile() || tokenStat.isSymbolicLink()) {
+      return { ok: false, error: "scratch creation token is missing or not a regular file; refusing cleanup", observed: true }
+    }
+    if (tokenStat.dev !== input.identity.tokenDevice || tokenStat.ino !== input.identity.tokenInode) {
+      return { ok: false, error: "scratch creation token identity diverged; refusing cleanup", observed: true }
+    }
+    const descriptor = openSync(tokenPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    let tokenBytes: Buffer
+    try {
+      tokenBytes = readFileSync(descriptor)
+    } finally {
+      closeSync(descriptor)
+    }
+    if (evidenceReportDigest(tokenBytes) !== input.identity.tokenSha256) {
+      return { ok: false, error: "scratch creation token content diverged; refusing cleanup", observed: true }
+    }
+    return { ok: true, error: null, observed: true }
+  } catch {
+    return { ok: false, error: "scratch root identity verification failed", observed: true }
+  }
+}
+
+/**
  * Executes the terminal scratch decision against the real filesystem. It only
- * removes the unique runner-owned directory under the OS temporary root whose
- * original dev/inode identity was captured when the runner created it; symlinks,
- * external absence, renamed/replaced directories and missing identities are
- * refused without deleting anything.
+ * removes the unique runner-owned directory whose original identity (including a
+ * random creation token) was captured when the runner created it; symlinks,
+ * external absence, renamed/replaced directories, recreated paths with reused
+ * inodes, and missing/divergent identities are refused without deleting anything.
  */
 export function applyScratchCleanup(input: {
   scratchRoot: string | undefined
@@ -430,36 +525,24 @@ export function applyScratchCleanup(input: {
   if (input.decision.preserve) {
     return { attempted: false, removed: false, observed: existsSync(input.scratchRoot), error: null }
   }
+  if (input.decision.remove !== true) {
+    return { attempted: false, removed: false, observed: existsSync(input.scratchRoot), error: "cleanup decision did not authorize removal" }
+  }
   const identity = input.scratchIdentity
   if (!identity) {
     return { attempted: false, removed: false, observed: existsSync(input.scratchRoot), error: "scratch root identity is unavailable; refusing cleanup" }
   }
-  let currentStat
-  try {
-    currentStat = lstatSync(input.scratchRoot)
-  } catch {
-    return { attempted: false, removed: false, observed: false, error: "scratch root disappeared externally; runner cleanup was not observed" }
+  const verification = verifyScratchRootIdentity({
+    scratchRoot: input.scratchRoot,
+    identity,
+    temporaryRoot: input.temporaryRoot,
+  })
+  if (!verification.ok) {
+    return { attempted: false, removed: false, observed: verification.observed, error: verification.error }
   }
-  if (currentStat.isSymbolicLink() || !currentStat.isDirectory()) {
-    return { attempted: false, removed: false, observed: true, error: "scratch root is not the directory created by the runner; refusing cleanup of a symlink or replacement" }
-  }
   try {
-    const canonicalPath = realpathSync(input.scratchRoot)
-    const expectedParent = realpathSync(input.temporaryRoot)
-    const targetStat = statSync(canonicalPath)
-    if (
-      canonicalPath !== identity.canonicalPath ||
-      dirname(canonicalPath) !== identity.parentPath ||
-      basename(canonicalPath) !== identity.basename ||
-      expectedParent !== identity.parentPath ||
-      targetStat.dev !== identity.device ||
-      targetStat.ino !== identity.inode ||
-      !basename(canonicalPath).startsWith("dshbanca-profile-e2e-")
-    ) {
-      return { attempted: false, removed: false, observed: true, error: "scratch root identity diverged from the runner-created directory; refusing cleanup" }
-    }
-    rmSync(canonicalPath, { recursive: true, force: false })
-    const removed = !existsSync(canonicalPath) && !existsSync(input.scratchRoot)
+    rmSync(identity.canonicalPath, { recursive: true, force: false })
+    const removed = !existsSync(identity.canonicalPath) && !existsSync(input.scratchRoot)
     return { attempted: true, removed, observed: true, error: removed ? null : "scratch cleanup did not remove the runner-created directory" }
   } catch {
     return { attempted: true, removed: false, observed: true, error: "scratch cleanup failed" }
@@ -5378,7 +5461,7 @@ async function main(): Promise<void> {
 
   scratchRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-"))
   chmodSync(scratchRoot, 0o700)
-  scratchRootIdentity = captureScratchRootIdentity(scratchRoot) ?? undefined
+  scratchRootIdentity = initializeScratchRootIdentity(scratchRoot) ?? undefined
   if (!scratchRootIdentity) {
     fail("BLOCKED: the runner could not capture the scratch root identity required for safe cleanup", "BLOCKED")
     return
@@ -6988,10 +7071,12 @@ function finalizeLegacyTerminal(): void {
       temporaryRoot: tmpdir(),
       decision,
     })
-    report.sandbox.removed = outcome.error === null && outcome.observed && outcome.removed ? null : false
+    report.sandbox.removed = outcome.error === null && outcome.observed && outcome.removed ? true : false
     report.sandbox.attempted = outcome.attempted
     report.sandbox.observed = outcome.observed
-    if (outcome.error !== null) fail("Scratch cleanup failed; details withheld")
+    if (outcome.error !== null) {
+      fail("Scratch cleanup failed; details withheld", finalStatus === "BLOCKED" ? "BLOCKED" : "FAIL")
+    }
     else if (outcome.attempted && outcome.removed !== true) fail("Scratch cleanup did not remove the test-owned sandbox")
   }
   if (report.sandbox.isolated && finalStatus === "PASS" && report.sandbox.attempted !== true) {

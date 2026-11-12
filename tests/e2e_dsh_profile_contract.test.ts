@@ -5348,8 +5348,8 @@ describe("R5 terminal scratch and evidence preservation", () => {
     const preservedRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-preserve-"))
     const removedRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-remove-"))
     try {
-      const preservedIdentity = runner.captureScratchRootIdentity(preservedRoot)
-      const removedIdentity = runner.captureScratchRootIdentity(removedRoot)
+      const preservedIdentity = runner.initializeScratchRootIdentity(preservedRoot)
+      const removedIdentity = runner.initializeScratchRootIdentity(removedRoot)
       const failDecision = runner.decideScratchCleanup(decisionInput({ finalStatus: "FAIL" }))
       const preserved = runner.applyScratchCleanup({ scratchRoot: preservedRoot, scratchIdentity: preservedIdentity, temporaryRoot: tmpdir(), decision: failDecision })
       expect(preserved.observed).toBe(true)
@@ -5381,7 +5381,7 @@ describe("R5 terminal scratch and evidence preservation", () => {
     const notRunnerOwned = tmpdir()
     const decision = runner.decideScratchCleanup(decisionInput())
     const fixture = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-fixture-"))
-    const fixtureIdentity = runner.captureScratchRootIdentity(fixture)
+    const fixtureIdentity = runner.initializeScratchRootIdentity(fixture)
     const outcome = runner.applyScratchCleanup({ scratchRoot: notRunnerOwned, scratchIdentity: fixtureIdentity, temporaryRoot: tmpdir(), decision })
     rmSync(fixture, { recursive: true, force: true })
     expect(outcome.attempted).toBe(false)
@@ -5467,7 +5467,7 @@ describe("R6 terminal evidence protocol", () => {
   function scratchDirectory(runner: any): { path: string; identity: any } {
     const scratchPath = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r6-"))
     writeFileSync(join(scratchPath, "diagnostic.txt"), "diagnostic evidence\n", { mode: 0o600 })
-    const identity = runner.captureScratchRootIdentity(scratchPath)
+    const identity = runner.initializeScratchRootIdentity(scratchPath)
     expect(identity).not.toBeNull()
     return { path: scratchPath, identity }
   }
@@ -5800,6 +5800,7 @@ describe("R6 terminal evidence protocol", () => {
     const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
     expect(evidence.status).toBe("BLOCKED")
     expect(evidence.evidenceStatus).toBe("PASS")
+    rmSync(scratch.path, { recursive: true, force: true })
   })
 
   test("aggregator preserves normal controls and never promotes an unrequested #107", async () => {
@@ -5824,11 +5825,15 @@ describe("R6 terminal evidence protocol", () => {
 
 describe("R7 scratch identity and persisted-bytes binding", () => {
   const repoSha = "a".repeat(40)
+  const r7Roots: string[] = []
+  afterEach(() => {
+    for (const root of r7Roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
 
   async function r7Api(): Promise<{ runner: any; contract: any }> {
     const runner = await import("../scripts/e2e-dsh-profile.js") as any
     const contract = await import("../scripts/lib/dsh-profile-e2e-contract.js") as any
-    for (const name of ["captureScratchRootIdentity", "applyScratchCleanup", "executeTerminalProtocol", "decideScratchCleanup", "createReportPersistencePlan", "createAbruptTerminalReportPlan"]) {
+    for (const name of ["initializeScratchRootIdentity", "captureScratchRootIdentity", "applyScratchCleanup", "executeTerminalProtocol", "decideScratchCleanup", "createReportPersistencePlan", "createAbruptTerminalReportPlan"]) {
       expect(typeof runner[name], name).toBe("function")
     }
     for (const name of ["validateAbruptEvidencePair", "classifyAbruptEvidencePairStatus", "validateAbruptEvidenceForCleanupEligibility", "decodeAbruptEvidenceReport"]) {
@@ -5840,7 +5845,7 @@ describe("R7 scratch identity and persisted-bytes binding", () => {
   function scratchFixture(runner: any, marker = "sentinel"): { path: string; identity: any } {
     const path = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r7-"))
     writeFileSync(join(path, "sentinel.txt"), `${marker}\n`, { mode: 0o600 })
-    const identity = runner.captureScratchRootIdentity(path)
+    const identity = runner.initializeScratchRootIdentity(path)
     expect(identity).not.toBeNull()
     return { path, identity }
   }
@@ -5922,6 +5927,70 @@ describe("R7 scratch identity and persisted-bytes binding", () => {
     }
   })
 
+  test("cleanup refuses a path deleted and recreated with a reused dev/inode and no creation token", async () => {
+    const { runner } = await r7Api()
+    const original = scratchFixture(runner, "original")
+    rmSync(original.path, { recursive: true, force: true })
+    mkdirSync(original.path, { mode: 0o700 })
+    writeFileSync(join(original.path, "sentinel.txt"), "recreated\n", { mode: 0o600 })
+    try {
+      const outcome = runner.applyScratchCleanup({
+        scratchRoot: original.path,
+        scratchIdentity: original.identity,
+        temporaryRoot: tmpdir(),
+        decision: removeDecision(runner),
+      })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(typeof outcome.error).toBe("string")
+      expect(existsSync(original.path)).toBe(true)
+      expect(readFileSync(join(original.path, "sentinel.txt"), "utf8")).toBe("recreated\n")
+    } finally {
+      rmSync(original.path, { recursive: true, force: true })
+    }
+  })
+
+  test("cleanup refuses a decision that does not authorize removal", async () => {
+    const { runner } = await r7Api()
+    const scratch = scratchFixture(runner)
+    try {
+      const outcome = runner.applyScratchCleanup({
+        scratchRoot: scratch.path,
+        scratchIdentity: scratch.identity,
+        temporaryRoot: tmpdir(),
+        decision: { preserve: false, remove: false, reason: "not authorized" },
+      })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(typeof outcome.error).toBe("string")
+      expect(existsSync(scratch.path)).toBe(true)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
+  test("BLOCKED decisions never perform destructive cleanup", async () => {
+    const { runner } = await r7Api()
+    const scratch = scratchFixture(runner)
+    try {
+      const decision = runner.decideScratchCleanup({
+        abruptMode: true,
+        scratchExists: true,
+        finalStatus: "BLOCKED",
+        containmentIncident: false,
+        reportPersistenceFailed: false,
+        reportPersistenceBlocked: false,
+        teardownProven: false,
+      })
+      const outcome = runner.applyScratchCleanup({ scratchRoot: scratch.path, scratchIdentity: scratch.identity, temporaryRoot: tmpdir(), decision })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(existsSync(scratch.path)).toBe(true)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
   test("cleanup refuses missing identity, vanished scratch, and divergent parent identity", async () => {
     const { runner } = await r7Api()
     const scratch = scratchFixture(runner)
@@ -5987,6 +6056,7 @@ describe("R7 scratch identity and persisted-bytes binding", () => {
 
   function protocolTargets(): { evidencePath: string; terminalPath: string; root: string } {
     const root = mkdtempSync(join(tmpdir(), "dshbanca-r7-protocol-"))
+    r7Roots.push(root)
     const parent = join(root, "reports")
     mkdirSync(parent, { mode: 0o700 })
     return { evidencePath: join(parent, "evidence.json"), terminalPath: join(parent, "terminal.json"), root }
@@ -6096,6 +6166,41 @@ describe("R7 scratch identity and persisted-bytes binding", () => {
     }
   })
 
+  test("terminal protocol refuses cleanup when the scratch path was deleted and recreated", async () => {
+    const { runner } = await r7Api()
+    const target = protocolTargets()
+    const { evidencePlan, terminalPlan } = protocolPlans(runner, target)
+    const scratch = scratchFixture(runner, "original")
+    rmSync(scratch.path, { recursive: true, force: true })
+    mkdirSync(scratch.path, { mode: 0o700 })
+    writeFileSync(join(scratch.path, "sentinel.txt"), "recreated\n", { mode: 0o600 })
+    try {
+      const result = runner.executeTerminalProtocol({
+        evidencePlan,
+        terminalPlan,
+        evidenceReport: evidenceFixture(),
+        repositorySha: repoSha,
+        evidenceStatus: "PASS",
+        scratchRoot: scratch.path,
+        scratchIdentity: scratch.identity,
+        temporaryRoot: tmpdir(),
+        scratchIsolated: true,
+        containmentIncident: false,
+        teardownProven: true,
+        exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+      })
+      expect(result.finalStatus).toBe("FAIL")
+      expect(result.terminalState).toBe("cleanup-failed")
+      expect(existsSync(scratch.path)).toBe(true)
+      expect(readFileSync(join(scratch.path, "sentinel.txt"), "utf8")).toBe("recreated\n")
+      const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+      expect(receipt.status).toBe("FAIL")
+      expect(receipt.sandbox.removed).toBe(false)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
   test("pair validation derives everything from the persisted bytes", async () => {
     const { runner, contract } = await r7Api()
     const goodReport = evidenceFixture()
@@ -6145,6 +6250,9 @@ describe("R7 scratch identity and persisted-bytes binding", () => {
     // Bytes are mandatory for PASS.
     expect(contract.classifyAbruptEvidencePairStatus({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: goodDigest, repositorySha: repoSha, observedExitCode: 0 })).toBe("BLOCKED")
     expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: goodDigest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    // A separately supplied object is mandatory and must be a record/equal.
+    expect(contract.validateAbruptEvidencePair({ terminalReceipt: receipt, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: [], terminalReceipt: receipt, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
     // Invalid JSON and wrong hash are rejected.
     const notJson = Buffer.from("not-json", "utf8")
     expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: { ...receipt, evidenceReportSha256: createHash("sha256").update(notJson).digest("hex") }, evidenceReportSha256: createHash("sha256").update(notJson).digest("hex"), evidenceReportBytes: notJson, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)

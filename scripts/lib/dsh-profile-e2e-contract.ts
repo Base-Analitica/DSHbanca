@@ -4169,7 +4169,9 @@ export function validateAbruptEvidencePair(input: {
     } else if (createHash("sha256").update(bytes).digest("hex") !== input.evidenceReportSha256) {
       errors.push("evidence report digest does not match the exact persisted bytes")
     }
-    if (isRecord(input.evidenceReport) && !evidenceDeepEqual(input.evidenceReport, decoded.report)) {
+    if (!isRecord(input.evidenceReport)) {
+      errors.push("supplied evidence report object is missing or not an object; bytes-only pair validation is not accepted")
+    } else if (!evidenceDeepEqual(input.evidenceReport, decoded.report)) {
       errors.push("evidence report object diverges from the JSON decoded from the persisted bytes")
     }
     errors.push(...abruptEvidenceProjectionErrors(decoded.report, input.repositorySha))
