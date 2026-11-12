@@ -516,6 +516,17 @@ function linuxProcessGroupIdOfProcess(pid: number | undefined): number | null {
   }
 }
 
+// Pure predicate shared by the producer and its regressions: a non-null group is
+// not enough; the observed PGID must be exactly the direct child PID.
+export function abruptPrivateProcessGroupIdMatchesChildPid(
+  childPid: number | undefined,
+  observedProcessGroupId: number | null,
+): boolean {
+  return childPid !== undefined && Number.isSafeInteger(childPid) && childPid > 1 &&
+    observedProcessGroupId !== null && Number.isSafeInteger(observedProcessGroupId) &&
+    observedProcessGroupId === childPid
+}
+
 export function abruptSecondProcessAbsenceDecision(input: {
   closeObserved: boolean
   controlCompleted: boolean
@@ -5723,8 +5734,9 @@ async function main(): Promise<void> {
       // gone. The private PGID is read from the child's own procfs entry while
       // it is alive; an unreadable or non-private group fails closed and keeps
       // the scratch directory for inspection.
-      const secondProcessGroupIdObserved = abruptSecondChild?.pid !== undefined &&
-        abruptSecondProcessGroupId !== null && abruptSecondProcessGroupId === abruptSecondChild.pid
+      const secondProcessGroupIdObserved = abruptPrivateProcessGroupIdMatchesChildPid(
+        abruptSecondChild?.pid, abruptSecondProcessGroupId,
+      )
       const secondAbsenceDecision = abruptSecondProcessAbsenceDecision({
         closeObserved: abruptSecondBoot.closeObserved === true,
         controlCompleted: abruptSecondBoot.controlCompleted === true,

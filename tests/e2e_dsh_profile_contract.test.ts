@@ -4720,6 +4720,36 @@ describe("Runner phase-B absence gate decision (#107 R2)", () => {
     }
   })
 
+  test("binds phase B's observed PGID to the direct child PID instead of any non-null group", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.abruptPrivateProcessGroupIdMatchesChildPid).toBe("function")
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(7301, 7301)).toBe(true)
+    for (const [childPid, observed] of [
+      [7301, 7302],
+      [7301, null],
+      [undefined, 7301],
+      [0, 0],
+      [-1, -1],
+      [1, 1],
+      [7301.5, 7301.5],
+      [7301, undefined],
+    ] as Array<[number | undefined | null, number | null | undefined]>) {
+      expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(childPid, observed), `${childPid}/${observed}`).toBe(false)
+    }
+    const ready = {
+      closeObserved: true,
+      controlCompleted: true,
+      runnerOwnedChild: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    }
+    const mismatched = runner.abruptPrivateProcessGroupIdMatchesChildPid(7301, 7302)
+    expect(mismatched).toBe(false)
+    const decision = runner.abruptSecondProcessAbsenceDecision({ ...ready, processGroupIdObserved: mismatched })
+    expect(decision.preserveScratch).toBe(true)
+  })
+
   test("ties the read-only procfs survivor and scan-failure observations to scratch preservation", async () => {
     const runner = await import("../scripts/e2e-dsh-profile.js") as any
     const stat = (pid: number, groupId: number) => `${pid} (dsh-child) S 1 ${groupId} ${groupId} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`

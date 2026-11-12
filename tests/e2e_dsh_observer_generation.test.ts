@@ -917,6 +917,7 @@ test("abrupt restart is SHA-bound and terminates only the verified owned child a
   expect(secondAbsenceStart).toBeLessThan(secondProofStart)
   expect(secondSpawnToProof).toContain("preserveScratchForSafety = true")
   expect(secondSpawnToProof).toContain("linuxProcessGroupIdOfProcess(")
+  expect(secondSpawnToProof).toContain("abruptPrivateProcessGroupIdMatchesChildPid(")
   for (const field of ["closeObserved", "processGroupIdObserved", "targetAbsentAfterClose", "processGroupAbsentAfterClose"]) {
     expect(secondProof).toContain(`${field}:`)
   }
