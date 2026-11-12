@@ -4613,8 +4613,7 @@ async function main(): Promise<void> {
       writeFileSync(join(restartWorkspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
     }
   }
-  createObserverPackage(
-    observerRoot, workspace, observerResult,
+  createObserverPackage(observerRoot, workspace, observerResult,
     restartWorkspace, restartObserverResultOne, restartObserverResultTwo, restartTeardownMarkerOne, restartTeardownMarkerTwo,
     abruptRestartWorkspace, abruptObserverResultOne, abruptObserverResultTwo, abruptTeardownMarkerOne, abruptTeardownMarkerTwo,
     auditorMarkdownSourceSha256, auditorMarkdownSourceSha1,
