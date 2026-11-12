@@ -161,13 +161,16 @@ test("actual generated observer module binds the control preset ID without runne
   const renderObserver = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
     "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+    "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${template}\`;`,
   ) as (...args: unknown[]) => string
   const generatedModuleSource = renderObserver(
     "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
     "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
-    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
+    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+    "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
+    "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
   )
   expect(generatedModuleSource).toContain('const e2eControlPresetId = "dshbanca-e2e-control-neutral";')
 
@@ -304,6 +307,9 @@ test("actual generated observer module binds the control preset ID without runne
     expect(generatedModuleSource).toContain('readFile("/proc/" + process.pid + "/stat"')
     expect(generatedModuleSource).toContain("analysis-audit-confirmations-store-v1")
     expect(generatedModuleSource).toContain("DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE")
+    expect(generatedModuleSource).toContain('restartPhase === "abrupt-initial"')
+    expect(generatedModuleSource).toContain('restartPhase === "abrupt-resume"')
+    expect(generatedModuleSource).toContain("abruptRestartWorkspace")
     expect(generatedModuleSource).toContain('process.once("beforeExit"')
     expect(generatedModuleSource).toContain("process.exitCode = 86")
     expect(generatedModuleSource).toContain("nativeShutdownCompleted: process.exitCode === 0")
@@ -414,14 +420,17 @@ test("generated auditor evidence uses the strict session projection contract", a
   const renderObserver = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
     "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+    "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${template}\`;`,
   ) as (...args: unknown[]) => string
   const generatedModuleSource = renderObserver(
     "dshbanca-e2e-observer", expectedTools,
     canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
     "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
-    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
+    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+    "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
+    "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
   )
 
   // Evaluate the exact object literal embedded in the generated observer module.
@@ -498,7 +507,8 @@ test("generated drift probe matches real local academic tools without loading th
   const render = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
     "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+    "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${runnerSource.slice(templateStart, templateEnd)}\`;`,
   )
   const directory = mkdtempSync(join(tmpdir(), "dshbanca-hermetic-drift-"))
@@ -511,7 +521,7 @@ test("generated drift probe matches real local academic tools without loading th
   for (let i = 1; i <= 5; i++) writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), i === 2
     ? "\\section{Delineamento Amostral e Metodologia}\nA amostragem foi definida por conveniência em 30 participantes, com omissão de justificativa do critério amostral e confronto bibliográfico com synthetic2026.\nCapitulo sintetico 2 para analise academica exaustiva e2e.\n"
     : `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`)
-  const source = render("fixture-observer", expectedTools, "fixture-sha256", "fixture-sha1", workspace, "unused", workspace, "unused-a", "unused-b", "unused-c", "unused-d", renderControlPresetSelector, e2eControlPresetId)
+  const source = render("fixture-observer", expectedTools, "fixture-sha256", "fixture-sha1", workspace, "unused", workspace, "unused-a", "unused-b", "unused-c", "unused-d", workspace, "unused-abrupt-a", "unused-abrupt-b", "unused-abrupt-c", "unused-abrupt-d", renderControlPresetSelector, e2eControlPresetId)
   const modulePath = join(directory, "observer.mjs")
   writeFileSync(modulePath, source)
   const oldKey = process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
@@ -806,4 +816,60 @@ test("selected DSH package dependency resolution supports both layouts without a
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test("abrupt restart is SHA-bound and terminates only the verified owned child after parent persistence checks", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const mainStart = source.indexOf("async function main(): Promise<void>")
+  const shaAuthorization = source.indexOf("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256", mainStart)
+  const scenarioAuthorization = source.indexOf("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO", mainStart)
+  const firstSpawn = source.indexOf("const abruptFirstBoot = await runDsh", mainStart)
+  const persistenceCheck = source.indexOf("verifyParentAbruptRestartPersistence(", firstSpawn)
+  const ownershipCheck = source.indexOf("verifyOwnedDshChild(", persistenceCheck)
+  const kill = source.indexOf("terminateOwnedDshChild(", ownershipCheck)
+  const preSignalInventoryCheck = source.indexOf("preSignalWorkspaceInventorySha256", persistenceCheck)
+  const timeoutSignalGuard = source.indexOf("if (parentVerifiedPersistence && firstIdentityRevalidatedBeforeSignal)", kill)
+  const firstCloseCheck = source.indexOf("abruptFirstBoot.closeObserved !== true", kill)
+  const secondSpawn = source.indexOf("const abruptSecondBoot = await runDsh", firstCloseCheck)
+  const secondOptionsEnd = source.indexOf("const abruptSecondSidecar", secondSpawn)
+  const secondOptions = source.slice(secondSpawn, secondOptionsEnd)
+  const parentHelperStart = source.indexOf("function verifyParentAbruptRestartPersistence(")
+  const parentHelperEnd = source.indexOf("\nasync function waitForObserverJson", parentHelperStart)
+  const parentHelper = source.slice(parentHelperStart, parentHelperEnd)
+
+  expect(mainStart).toBeGreaterThanOrEqual(0)
+  expect(shaAuthorization).toBeGreaterThan(mainStart)
+  expect(scenarioAuthorization).toBeGreaterThan(shaAuthorization)
+  expect(firstSpawn).toBeGreaterThan(scenarioAuthorization)
+  expect(persistenceCheck).toBeGreaterThan(firstSpawn)
+  expect(ownershipCheck).toBeGreaterThan(persistenceCheck)
+  expect(preSignalInventoryCheck).toBeGreaterThan(persistenceCheck)
+  expect(preSignalInventoryCheck).toBeLessThan(kill)
+  expect(parentHelperStart).toBeGreaterThanOrEqual(0)
+  expect(parentHelper).toContain("computeBatchFindingsDigest")
+  expect(parentHelper).toContain("computeAuditSubmissionId")
+  expect(parentHelper).toContain("canonicalPlan?.batchIds[2]")
+  expect(parentHelper).toContain("canonicalPlan?.batchIds.slice(0, 2)")
+  expect(kill).toBeGreaterThan(ownershipCheck)
+  expect(timeoutSignalGuard).toBeGreaterThan(kill)
+  expect(firstCloseCheck).toBeGreaterThan(kill)
+  expect(secondSpawn).toBeGreaterThan(firstCloseCheck)
+  expect(secondOptionsEnd).toBeGreaterThan(secondSpawn)
+  expect(secondOptions).toContain("onSpawn:")
+  expect(secondOptions).toContain("verifyOwnedDshChild")
+  expect(secondOptions).toContain("terminateOwnedDshChild")
+  expect(secondOptions).not.toContain("terminateProcessTree")
+  expect(source).toContain('process.kill(pid, "SIGKILL")')
+  expect(source).toContain('report.stages.abruptRestart = {\n      status: "BLOCKED"')
+  expect(source).toContain("targetAbsentAfterClose")
+  expect(source).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED")
+  expect(source).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH")
+  expect(source).toContain("lstatSync(reportPath)")
+  const killHelperStart = source.indexOf("function terminateOwnedDshChild(")
+  const killHelperEnd = source.indexOf("\nfunction ", killHelperStart + 1)
+  const killHelper = source.slice(killHelperStart, killHelperEnd)
+  expect(killHelper).toContain("child.pid")
+  expect(killHelper).toContain("linuxProcessIdentitySha256")
+  expect(killHelper).not.toContain("process.kill(-")
+  expect(killHelper).not.toContain("terminateProcessTree")
 })

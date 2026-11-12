@@ -678,13 +678,16 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
     const renderObserver = new Function(
       "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
       "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-      "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+      "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+      "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
       `return \`${template}\`;`,
     ) as (...args: unknown[]) => string
     const generatedModuleSource = renderObserver(
       "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
       "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
       "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+      "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
+      "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json",
       renderControlPresetSelector, e2eControlPresetId,
     )
 
@@ -4035,5 +4038,114 @@ describe("DSH E2E diagnostic redaction", () => {
     expect(runnerSource).toContain('const reportPathLabel = configuredReportPath')
     expect(runnerSource).not.toContain("error.message.replaceAll(scratchRoot")
     expect(runnerSource).not.toContain("Could not preserve sanitized report at ${reportPathLabel}: ${error.message")
+  })
+})
+
+function abruptRestartEvidenceFixture(): any {
+  const evidence: any = structuredClone(completeCrossProcessBatchAuditEvidence)
+  evidence.executionMode = "abrupt-restart-native-dsh"
+  evidence.processBoundary.second = {
+    ...evidence.processBoundary.second,
+    runnerOwnedChild: true,
+    controlCompleted: true,
+    controlFailed: false,
+  }
+  evidence.processBoundary.first = {
+    ...evidence.processBoundary.first,
+    exitCode: null,
+    signal: "SIGKILL",
+    timedOut: false,
+    forcedTermination: true,
+    naturalBeforeExitObserved: false,
+    nativeTeardownMarkerObserved: false,
+    runnerOwnedChild: true,
+    childIdentityRevalidatedBeforeSignal: true,
+    killRequestedByParent: true,
+    killSignalRequested: "SIGKILL",
+    targetAbsentAfterClose: true,
+  }
+  evidence.parentVerifiedPersistence = {
+    source: "parent-read-persisted-files",
+    verifiedBeforeSignal: true,
+    checkpointFileParsed: true,
+    receiptFileParsed: true,
+    findingFileParsed: true,
+    workspaceInventorySha256: evidence.phaseOne.workspaceInventorySha256,
+    persistence: { ...evidence.phaseOne.persistence },
+    checkpoint: { ...evidence.phaseOne.checkpoint },
+    receiptCount: 2,
+    receiptBatchIds: [...evidence.phaseOne.persistedBatchIds],
+    findingsCount: 1,
+    finding: { ...evidence.phaseOne.finding },
+  }
+  evidence.teardown = {
+    firstExitObserved: true,
+    firstCloseObserved: true,
+    firstTargetAbsentAfterClose: true,
+    secondExitObserved: true,
+    secondCloseObserved: true,
+    secondAgentSessionDisposed: true,
+    teardownFailed: false,
+  }
+  return evidence
+}
+
+const abruptRestartEvidenceContract = profileEvidenceContract as unknown as {
+  validateAbruptRestartEvidence(value: unknown): string[]
+  classifyAbruptRestartEvidenceStatus(value: unknown): string
+}
+
+describe("DSH abrupt process-restart evidence gate (#107)", () => {
+  test("exports a strict validator and leaves unexecuted evidence BLOCKED", () => {
+    expect(typeof abruptRestartEvidenceContract.validateAbruptRestartEvidence).toBe("function")
+    expect(typeof abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus).toBe("function")
+    for (const value of [undefined, null, {}, { probeExecuted: undefined }, { probeExecuted: false }]) {
+      expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(value)).toBe("BLOCKED")
+    }
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus({ probeExecuted: true })).toBe("FAIL")
+  })
+
+  test("accepts only parent-verified durable phase A followed by owned SIGKILL and independent recovery", () => {
+    const evidence = abruptRestartEvidenceFixture()
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence)).toEqual([])
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("PASS")
+  })
+
+  test.each([
+    ["missing parent readiness", (e: any) => { e.parentVerifiedPersistence.verifiedBeforeSignal = false }],
+    ["missing persisted receipt proof", (e: any) => { delete e.parentVerifiedPersistence.receiptBatchIds }],
+    ["falsified persistence hash", (e: any) => { e.parentVerifiedPersistence.persistence.findingsSha256 = "0".repeat(64) }],
+    ["one-of-five checkpoint", (e: any) => { e.phaseOne.checkpoint.completedBatches = 1 }],
+    ["three-of-five checkpoint", (e: any) => { e.phaseOne.checkpoint.completedBatches = 3 }],
+    ["duplicate receipts", (e: any) => { e.parentVerifiedPersistence.receiptBatchIds[1] = e.parentVerifiedPersistence.receiptBatchIds[0] }],
+    ["finding duplicated", (e: any) => { e.parentVerifiedPersistence.findingsCount = 2 }],
+    ["first process exited normally without signal", (e: any) => { e.processBoundary.first.exitCode = 0; e.processBoundary.first.signal = null }],
+    ["wrong termination signal", (e: any) => { e.processBoundary.first.signal = "SIGTERM" }],
+    ["child ownership not proved", (e: any) => { e.processBoundary.first.runnerOwnedChild = false }],
+    ["identity not revalidated before signal", (e: any) => { e.processBoundary.first.childIdentityRevalidatedBeforeSignal = false }],
+    ["process identity changed", (e: any) => { e.processBoundary.first.hostIdentitySha256 = "4".repeat(64) }],
+    ["B started before A closed", (e: any) => { e.processBoundary.secondStartedAfterFirstExit = false }],
+    ["recovery child startup control failed", (e: any) => { e.processBoundary.second.controlFailed = true }],
+    ["recovery child is not runner-owned", (e: any) => { e.processBoundary.second.runnerOwnedChild = false }],
+    ["same process reused", (e: any) => { e.processBoundary.second.hostIdentitySha256 = e.processBoundary.first.hostIdentitySha256 }],
+    ["second Agent/Session reused", (e: any) => { e.phaseTwo.agentIdentity.agentId = e.phaseOne.agentIdentity.agentId }],
+    ["changed workspace inventory", (e: any) => { e.parentVerifiedPersistence.workspaceInventorySha256 = "5".repeat(64) }],
+    ["partial synthesis", (e: any) => { e.phaseTwo.synthesis.completedBatches = 4 }],
+    ["finding changed at synthesis", (e: any) => { e.phaseTwo.synthesis.finding.findingId = "6".repeat(64) }],
+    ["cleanup or teardown failed", (e: any) => { e.teardown.teardownFailed = true }],
+    ["target process survived close", (e: any) => { e.teardown.firstTargetAbsentAfterClose = false }],
+  ])("fails closed for %s", (_label, mutate) => {
+    const evidence = abruptRestartEvidenceFixture()
+    mutate(evidence)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("requires every parent persistence receipt and finding field", () => {
+    for (const key of Object.keys(abruptRestartEvidenceFixture().parentVerifiedPersistence)) {
+      const evidence = abruptRestartEvidenceFixture()
+      delete evidence.parentVerifiedPersistence[key]
+      expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    }
   })
 })

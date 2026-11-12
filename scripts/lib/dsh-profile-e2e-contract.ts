@@ -2405,11 +2405,14 @@ export function validateCrossProcessPhaseOneEvidence(value: unknown): string[] {
  * digests computed from child_process.spawn PID plus Linux procfs start identity;
  * fixture values are never host observations.
  */
-export function validateCrossProcessBatchAuditEvidence(value: unknown): string[] {
+function validateCrossProcessBatchAuditEvidenceCore(value: unknown, firstProcessAbrupt = false): string[] {
   const errors: string[] = []
   if (!isRecord(value)) return ["cross-process batch audit evidence is missing"]
-  if (value.probeExecuted !== true || value.executionMode !== "cross-process-native-dsh") {
-    errors.push("cross-process batch audit probe must execute through two native DSH processes")
+  const expectedExecutionMode = firstProcessAbrupt ? "abrupt-restart-native-dsh" : "cross-process-native-dsh"
+  if (value.probeExecuted !== true || value.executionMode !== expectedExecutionMode) {
+    errors.push(firstProcessAbrupt
+      ? "abrupt restart must use the native DSH durable-checkpoint probe"
+      : "cross-process batch audit probe must execute through two native DSH processes")
   }
   if (value.syntheticProcessFixture !== false) {
     errors.push("synthetic process fixtures are not sufficient host process evidence")
@@ -2454,7 +2457,43 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
     ) {
       errors.push(`${label} DSH process identity is not corroborated by host spawn and kernel observations`)
     }
-    if (
+    if (firstProcessAbrupt && index === 0) {
+      if (
+        !isRecord(row) ||
+        row.exitObserved !== true ||
+        row.exitCode !== null ||
+        row.signal !== "SIGKILL" ||
+        row.timedOut !== false ||
+        row.forcedTermination !== true ||
+        row.naturalBeforeExitObserved !== false ||
+        row.nativeTeardownMarkerObserved !== false ||
+        row.runnerOwnedChild !== true ||
+        row.childIdentityRevalidatedBeforeSignal !== true ||
+        row.killRequestedByParent !== true ||
+        row.killSignalRequested !== "SIGKILL" ||
+        row.targetAbsentAfterClose !== true ||
+        Object.prototype.hasOwnProperty.call(row, "pid") ||
+        Object.prototype.hasOwnProperty.call(row, "processId")
+      ) {
+        errors.push("first DSH process must be the owned child directly SIGKILLed after identity revalidation, with no surviving target")
+      }
+    } else if (firstProcessAbrupt && index === 1) {
+      if (
+        !isRecord(row) ||
+        row.runnerOwnedChild !== true ||
+        row.controlCompleted !== true ||
+        row.controlFailed !== false ||
+        row.exitObserved !== true ||
+        row.exitCode !== 0 ||
+        row.signal !== null ||
+        row.timedOut !== false ||
+        row.forcedTermination !== false ||
+        row.naturalBeforeExitObserved !== true ||
+        row.nativeTeardownMarkerObserved !== true
+      ) {
+        errors.push("recovery DSH process must be an independently owned child with validated startup and timeout control")
+      }
+    } else if (
       !isRecord(row) ||
       row.exitObserved !== true ||
       row.exitCode !== 0 ||
@@ -2841,9 +2880,80 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
   return errors
 }
 
+export function validateCrossProcessBatchAuditEvidence(value: unknown): string[] {
+  return validateCrossProcessBatchAuditEvidenceCore(value)
+}
+
 export function classifyCrossProcessBatchAuditEvidenceStatus(value: unknown): ProfileGateStatus {
   if (!isRecord(value) || value.probeExecuted === undefined) return "BLOCKED"
   return validateCrossProcessBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
+/** Validate the distinct #107 abrupt-child boundary plus the full #103 recovery payload. */
+export function validateAbruptRestartEvidence(value: unknown): string[] {
+  const errors = validateCrossProcessBatchAuditEvidenceCore(value, true)
+  if (!isRecord(value)) return errors
+  const require = (condition: boolean, message: string) => { if (!condition) errors.push(message) }
+  const phaseOne = isRecord(value.phaseOne) ? value.phaseOne : undefined
+  const parent = isRecord(value.parentVerifiedPersistence) ? value.parentVerifiedPersistence : undefined
+  const parentHashes = parent?.persistence
+  require(
+    parent?.source === "parent-read-persisted-files" &&
+      parent.verifiedBeforeSignal === true &&
+      parent.checkpointFileParsed === true &&
+      parent.receiptFileParsed === true &&
+      parent.findingFileParsed === true,
+    "the parent must independently read and validate the persisted checkpoint, receipt, and finding files before signaling",
+  )
+  require(
+    isSha256Digest(parent?.workspaceInventorySha256) &&
+      parent.workspaceInventorySha256 === phaseOne?.workspaceInventorySha256 &&
+      parent.workspaceInventorySha256 === (isRecord(value.workspace) ? value.workspace.firstProcessEndInventorySha256 : undefined),
+    "parent-verified workspace inventory must match the durable phase-one boundary",
+  )
+  require(
+    restartPersistenceMatches(parentHashes, phaseOne?.persistence),
+    "parent-read checkpoint, receipt, finding, and analysis hashes must match phase one",
+  )
+  require(
+    restartCheckpointEvidenceEqual(parent?.checkpoint, phaseOne?.checkpoint),
+    "parent-parsed checkpoint must equal the exact phase-one 2/5 projection",
+  )
+  const receiptBatchIds = Array.isArray(parent?.receiptBatchIds) ? parent.receiptBatchIds : []
+  require(
+    parent?.receiptCount === 2 &&
+      receiptBatchIds.length === 2 &&
+      receiptBatchIds.every((batchId) => typeof batchId === "string" && batchId.length > 0) &&
+      new Set(receiptBatchIds).size === 2 &&
+      JSON.stringify(receiptBatchIds) === JSON.stringify(phaseOne?.persistedBatchIds),
+    "parent-parsed receipts must contain exactly the two unique ordered phase-one batch IDs",
+  )
+  const parentFinding = parent?.finding
+  const phaseOneFinding = phaseOne?.finding
+  require(
+    parent?.findingsCount === 1 &&
+      isBatchAuditFindingProjection(parentFinding) &&
+      isBatchAuditFindingProjection(phaseOneFinding) &&
+      batchAuditFindingProjectionsEqual(parentFinding, phaseOneFinding),
+    "parent-parsed findings must contain the original valid finding exactly once",
+  )
+  const teardown = isRecord(value.teardown) ? value.teardown : undefined
+  require(
+    teardown?.firstExitObserved === true &&
+      teardown.firstCloseObserved === true &&
+      teardown.firstTargetAbsentAfterClose === true &&
+      teardown.secondExitObserved === true &&
+      teardown.secondCloseObserved === true &&
+      teardown.secondAgentSessionDisposed === true &&
+      teardown.teardownFailed === false,
+    "abrupt DSH child, independent recovery child, Agent/Session, and teardown must all be observed without survivors",
+  )
+  return errors
+}
+
+export function classifyAbruptRestartEvidenceStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.probeExecuted !== true) return "BLOCKED"
+  return validateAbruptRestartEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
 export interface QuestionBehaviorEvidence {

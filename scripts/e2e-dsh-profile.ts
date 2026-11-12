@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  lstatSync,
   readFileSync,
   readlinkSync,
   readdirSync,
@@ -24,6 +25,7 @@ import { loadConfig } from "../src/lib/config.js"
 import { loadCanonicalLatexManuscript } from "../src/lib/latex_loader.js"
 import { planExhaustiveAnalysisBatches } from "../src/lib/analysis_coverage.js"
 import { computePlanIdentity } from "../src/lib/analysis_checkpoint.js"
+import { computeAuditSubmissionId, computeBatchFindingsDigest } from "../src/lib/analysis_audit_confirmation.js"
 import { buildSdkPresetOverlayPatch, e2eControlPresetId } from "./lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "./lib/dsh-profile-e2e-observer-control.js"
 import { copyRequiredAcademicDecisionModule } from "./lib/dsh-profile-observer-package.js"
@@ -57,6 +59,8 @@ import {
   validateAcademicDecisionEvidence,
   validateCrossProcessPhaseOneEvidence,
   validateCrossProcessBatchAuditEvidence,
+  validateAbruptRestartEvidence,
+  classifyAbruptRestartEvidenceStatus,
   validateSourceDriftEvidence,
   classifySourceDriftEvidenceStatus,
   validateEvidence,
@@ -97,6 +101,24 @@ interface CommandResult {
   exitObserved?: boolean
   closeObserved?: boolean
   hostProcessIdentitySha256?: string | null
+  controlCompleted?: boolean
+  controlFailed?: boolean
+}
+
+type ControlledProcessStart = (
+  child: ReturnType<typeof spawn>,
+  hostProcessIdentitySha256: string | null,
+  signal: AbortSignal,
+) => Promise<void>
+
+interface RunOptions {
+  cwd: string
+  env: NodeJS.ProcessEnv
+  timeoutMs: number
+  stdin?: "ignore" | "pipe"
+  processIdentityKey?: Buffer
+  onSpawn?: ControlledProcessStart
+  onControlTimeout?: (child: ReturnType<typeof spawn>, hostProcessIdentitySha256: string | null) => void
 }
 
 interface GateReport {
@@ -137,19 +159,25 @@ const report: GateReport = {
     pnpm: null,
   },
   sandbox: { isolated: false, removed: null },
-  stages: { sourceDrift: { status: "BLOCKED", processLaunches: 0, reason: "Issue #105 native source-drift evidence has not executed." } },
+  stages: {
+    sourceDrift: { status: "BLOCKED", processLaunches: 0, reason: "Issue #105 native source-drift evidence has not executed." },
+    abruptRestart: { status: "BLOCKED", probeExecuted: false, processLaunches: 0, reason: "NEEDS_APPROVAL: exact final SHA, durable-checkpoint-2-of-5-sigkill scenario, and runner-owned scratch-only environment were not approved." },
+  },
   failures: [],
   limitations: [
     "O E2E ativo cria Agents/Sessions nativos do DSH, mas não inicia turnos de modelo; respostas acadêmicas humanas e qualidade de inferência não são cobertas.",
     "Identidade/guard (#2), instruções Markdown (#3), skills nativas (#38), auditoria por lote (#44), perguntas estruturadas/aprovação (#46), decisão acadêmica (#48) e recuperação entre processos (#103) são gates separados.",
     "A execução ativa requer DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes de invocar o CLI DSH, criar Agent/Session ou inicializar o projeto sintético.",
+    "Issue #107 abruptRestart exige autorização independente para o SHA exato, cenário durable-checkpoint-2-of-5-sigkill e ambiente runner-owned-scratch-only; sem isso permanece BLOCKED / NEEDS_APPROVAL.",
     "O gate de identidade de processo usa child_process.spawn observado pelo pai e Linux procfs; plataformas sem essa evidência ficam BLOCKED, sem fallback baseado em texto de PID.",
   ],
 }
 
 let scratchRoot: string | undefined
 let restartWorkspaceDirectoryFd: number | undefined
+let abruptRestartWorkspaceDirectoryFd: number | undefined
 let driftWorkspaceDirectoryFd: number | undefined
+let preserveScratchForSafety = false
 let finalStatus: GateReport["status"] = "BLOCKED"
 
 function commandVersion(command: string, args: string[], env?: NodeJS.ProcessEnv): string | null {
@@ -311,7 +339,68 @@ function linuxProcessIdentitySha256(pid: number, key: Buffer): string | null {
   }
 }
 
-function run(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe"; processIdentityKey?: Buffer } ): Promise<CommandResult> {
+function verifyOwnedDshChild(
+  child: ReturnType<typeof spawn>,
+  nodeExecutable: string,
+  dshExecutable: string,
+  args: string[],
+  expectedHostIdentitySha256: string | null,
+  key: Buffer,
+): boolean {
+  const pid = child.pid
+  if (
+    process.platform !== "linux" ||
+    !Number.isSafeInteger(pid) ||
+    pid === undefined ||
+    pid <= 1 ||
+    child.exitCode !== null ||
+    child.signalCode !== null ||
+    !expectedHostIdentitySha256 ||
+    linuxProcessIdentitySha256(pid, key) !== expectedHostIdentitySha256
+  ) return false
+  try {
+    const executable = realpathSync(`/proc/${pid}/exe`)
+    const expectedExecutable = realpathSync(nodeExecutable)
+    const argv = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean)
+    const expectedArgv = [realpathSync(nodeExecutable), realpathSync(dshExecutable), ...args]
+    return executable === expectedExecutable && JSON.stringify(argv) === JSON.stringify(expectedArgv)
+  } catch {
+    return false
+  }
+}
+
+function terminateOwnedDshChild(
+  child: ReturnType<typeof spawn>,
+  nodeExecutable: string,
+  dshExecutable: string,
+  args: string[],
+  expectedHostIdentitySha256: string | null,
+  key: Buffer,
+  signal: "SIGKILL" | "SIGTERM",
+): boolean {
+  const pid = child.pid
+  if (
+    pid === undefined ||
+    linuxProcessIdentitySha256(pid, key) !== expectedHostIdentitySha256 ||
+    !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, args, expectedHostIdentitySha256, key)
+  ) return false
+  try {
+    if (signal === "SIGKILL") process.kill(pid, "SIGKILL")
+    else process.kill(pid, "SIGTERM")
+    return true
+  } catch {
+    return false
+  }
+}
+
+function processTargetAbsentAfterClose(pid: number | undefined, originalIdentitySha256: string | null, key: Buffer): boolean {
+  if (process.platform !== "linux" || pid === undefined || !originalIdentitySha256) return false
+  if (!existsSync(`/proc/${pid}`)) return true
+  const currentIdentity = linuxProcessIdentitySha256(pid, key)
+  return currentIdentity !== null && currentIdentity !== originalIdentitySha256
+}
+
+function run(command: string, args: string[], options: RunOptions): Promise<CommandResult> {
   return new Promise((resolveResult) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -328,15 +417,42 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
     let timedOut = false
     let spawnObserved = false
     let exitObserved = false
+    let controlCompleted = options.onSpawn === undefined
+    let controlFailed = false
+    let controlStarted = false
+    let settled = false
     let hostProcessIdentitySha256: string | null = null
+    const controlAbort = new AbortController()
+    const finish = (result: CommandResult) => {
+      if (settled) return
+      settled = true
+      resolveResult(result)
+    }
     child.once("spawn", () => {
       spawnObserved = true
       const pid = child.pid
       if (options.processIdentityKey && pid !== undefined) {
         hostProcessIdentitySha256 = linuxProcessIdentitySha256(pid, options.processIdentityKey)
       }
+      if (options.onSpawn) {
+        controlStarted = true
+        void Promise.resolve()
+          .then(() => options.onSpawn!(child, hostProcessIdentitySha256, controlAbort.signal))
+          .then(() => { controlCompleted = true })
+          .catch(() => {
+            controlFailed = true
+            controlAbort.abort()
+            child.stdin?.end()
+          })
+      }
     })
-    child.once("exit", () => { exitObserved = true })
+    child.once("exit", () => {
+      exitObserved = true
+      if (options.onSpawn && !controlCompleted) {
+        controlFailed = true
+        controlAbort.abort()
+      }
+    })
     const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const text = chunk.toString("utf8")
       let current = stream === "stdout" ? stdout : stderr
@@ -362,11 +478,24 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
     child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk))
     const timer = setTimeout(() => {
       timedOut = true
-      terminateProcessTree(child)
+      if (options.onSpawn) {
+        controlFailed = true
+        controlAbort.abort()
+        child.stdin?.end()
+        try {
+          options.onControlTimeout?.(child, hostProcessIdentitySha256)
+        } catch {
+          controlFailed = true
+        }
+      } else {
+        terminateProcessTree(child)
+      }
     }, options.timeoutMs)
     child.once("error", (error) => {
       clearTimeout(timer)
-      resolveResult({
+      controlAbort.abort()
+      if (options.onSpawn && !controlStarted) controlFailed = true
+      finish({
         exitCode: null,
         signal: null,
         timedOut,
@@ -376,11 +505,13 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
         exitObserved,
         closeObserved: false,
         hostProcessIdentitySha256,
+        controlCompleted,
+        controlFailed,
       })
     })
     child.once("close", (code, signal) => {
       clearTimeout(timer)
-      resolveResult({
+      finish({
         exitCode: code,
         signal,
         timedOut,
@@ -390,12 +521,14 @@ function run(command: string, args: string[], options: { cwd: string; env: NodeJ
         exitObserved,
         closeObserved: true,
         hostProcessIdentitySha256,
+        controlCompleted,
+        controlFailed,
       })
     })
   })
 }
 
-function runDsh(nodeExecutable: string, dshExecutable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; stdin?: "ignore" | "pipe"; processIdentityKey?: Buffer }): Promise<CommandResult> {
+function runDsh(nodeExecutable: string, dshExecutable: string, args: string[], options: RunOptions): Promise<CommandResult> {
   // findExecutable resolves symlinks, so the DSH bin becomes lib/bin.js.
   // Invoke that script with the selected Node binary instead of relying on the
   // parent runtime's shebang handling for a directly spawned JavaScript file.
@@ -498,6 +631,7 @@ function canonicalSyntheticPlan(workspace: string) {
     planId: computePlanIdentity(plan), manuscriptFingerprint: plan.fingerprint,
     totalBatches: plan.coverage.batchCount, totalCharacters: plan.coverage.totalCharacters,
     firstBatchId: plan.batches[0].batchId,
+    batchIds: plan.batches.map((batch) => batch.batchId),
   }
 }
 
@@ -514,6 +648,173 @@ function sourceDriftProcessProof(result: CommandResult, sidecar: any, markerPath
     exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
     forcedTermination: false, naturalBeforeExitObserved: true, nativeTeardownMarkerObserved: true,
   }
+}
+
+function parentAbruptFindingProjection(finding: any): Record<string, unknown> | null {
+  if (!finding || typeof finding !== "object" || Array.isArray(finding)) return null
+  const keys = Object.keys(finding).sort()
+  const expectedKeys = [
+    "batchId", "category", "claim", "endLine", "evidence", "file", "findingId",
+    "manuscriptFingerprint", "planId", "sectionId", "severity", "startLine", "version",
+  ].sort()
+  if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) return null
+  const digestText = (text: unknown) => typeof text === "string" ? createHash("sha256").update(text, "utf8").digest("hex") : null
+  const provenance = [finding.category, finding.severity, finding.file, finding.startLine, finding.endLine, finding.sectionId]
+  return {
+    version: finding.version,
+    findingId: finding.findingId,
+    planId: finding.planId,
+    batchId: finding.batchId,
+    manuscriptFingerprint: finding.manuscriptFingerprint,
+    provenanceSha256: createHash("sha256").update(JSON.stringify(provenance), "utf8").digest("hex"),
+    claimSha256: digestText(finding.claim),
+    evidenceSha256: digestText(finding.evidence),
+  }
+}
+
+function verifyParentAbruptRestartPersistence(workspace: string, phaseOne: any): { evidence: Record<string, unknown> | null; errors: string[] } {
+  const errors: string[] = []
+  const require = (condition: boolean, message: string) => { if (!condition) errors.push(message) }
+  const planId = typeof phaseOne?.planId === "string" ? phaseOne.planId : ""
+  const fingerprint = typeof phaseOne?.manuscriptFingerprint === "string" ? phaseOne.manuscriptFingerprint : ""
+  if (!/^[a-f0-9]{64}$/.test(planId) || !/^[a-f0-9]{64}$/.test(fingerprint)) {
+    return { evidence: null, errors: ["parent cannot derive safe plan-bound persisted-file paths"] }
+  }
+  let beforeInventory: Record<string, string> = {}
+  try { beforeInventory = inventoryTree(workspace) } catch { errors.push("parent could not inventory the durable workspace before parsing") }
+  let checkpoint: any
+  let confirmations: any
+  let findings: any
+  let checkpointFileParsed = false
+  let receiptFileParsed = false
+  let findingFileParsed = false
+  try {
+    checkpoint = JSON.parse(readFileSync(join(workspace, ".banca", "analysis", "checkpoints", `${planId}.json`), "utf8"))
+    checkpointFileParsed = true
+  } catch { errors.push("parent could not parse the durable checkpoint file") }
+  try {
+    confirmations = JSON.parse(readFileSync(join(workspace, ".banca", "analysis", "audit-confirmations", `${planId}.json`), "utf8"))
+    receiptFileParsed = true
+  } catch { errors.push("parent could not parse the durable receipt file") }
+  try {
+    findings = JSON.parse(readFileSync(join(workspace, ".banca", "analysis", "findings", `${planId}.json`), "utf8"))
+    findingFileParsed = true
+  } catch { errors.push("parent could not parse the durable finding file") }
+
+  let afterInventory: Record<string, string> = {}
+  try { afterInventory = inventoryTree(workspace) } catch { errors.push("parent could not inventory the durable workspace after parsing") }
+  const workspaceInventorySha256 = jsonSha256(afterInventory)
+  const analysisFiles = Object.fromEntries(Object.entries(afterInventory).filter(([path]) => path.startsWith(".banca/analysis/")))
+  const persistence = {
+    analysisInventorySha256: jsonSha256(analysisFiles),
+    checkpointSha256: analysisFiles[`.banca/analysis/checkpoints/${planId}.json`] ?? null,
+    auditConfirmationsSha256: analysisFiles[`.banca/analysis/audit-confirmations/${planId}.json`] ?? null,
+    findingsSha256: analysisFiles[`.banca/analysis/findings/${planId}.json`] ?? null,
+  }
+  require(JSON.stringify(beforeInventory) === JSON.stringify(afterInventory), "parent observed workspace mutation while validating durable files")
+  require(workspaceInventorySha256 === phaseOne?.workspaceInventorySha256, "parent inventory differs from phase-one readiness evidence")
+  require(persistence.checkpointSha256 === phaseOne?.persistence?.checkpointSha256, "parent checkpoint hash differs from phase-one readiness evidence")
+  require(persistence.auditConfirmationsSha256 === phaseOne?.persistence?.auditConfirmationsSha256, "parent receipt hash differs from phase-one readiness evidence")
+  require(persistence.findingsSha256 === phaseOne?.persistence?.findingsSha256, "parent finding hash differs from phase-one readiness evidence")
+  require(persistence.analysisInventorySha256 === phaseOne?.persistence?.analysisInventorySha256, "parent analysis inventory hash differs from phase-one readiness evidence")
+
+  let canonicalPlan: ReturnType<typeof canonicalSyntheticPlan> | null = null
+  try { canonicalPlan = canonicalSyntheticPlan(workspace) } catch { errors.push("parent could not recompute the canonical plan from the durable synthetic manuscript") }
+  const checkpointProjection = checkpoint && {
+    planId: checkpoint.planId,
+    manuscriptFingerprint: checkpoint.fingerprint,
+    totalBatches: checkpoint.totalBatches,
+    completedBatches: checkpoint.completedBatches,
+    completedCharacters: checkpoint.completedCharacters,
+    totalCharacters: checkpoint.totalCharacters,
+    coveragePercent: checkpoint.coveragePercent,
+    state: checkpoint.state,
+    nextBatchId: canonicalPlan?.batchIds[2] ?? null,
+    nextBatchIndex: checkpoint.completedBatches,
+  }
+  require(
+    canonicalPlan !== null && canonicalPlan.planId === planId && canonicalPlan.manuscriptFingerprint === fingerprint &&
+      canonicalPlan.totalBatches === 5 && canonicalPlan.totalCharacters === 595 && canonicalPlan.batchIds.length === 5 &&
+      checkpointFileParsed && checkpoint?.version === "analysis-checkpoint-v2" &&
+      checkpoint.planId === planId && checkpoint.fingerprint === fingerprint &&
+      checkpoint.strategy === "ordered-source-spans-exhaustive-v1" &&
+      checkpoint.totalBatches === 5 && checkpoint.completedBatches === 2 &&
+      checkpoint.totalCharacters === 595 && checkpoint.completedCharacters === phaseOne?.checkpoint?.completedCharacters &&
+      checkpoint.coveragePercent === phaseOne?.checkpoint?.coveragePercent && checkpoint.state === "running" &&
+      JSON.stringify(checkpointProjection) === JSON.stringify(phaseOne?.checkpoint),
+    "parent-parsed checkpoint is not the exact durable 2/5 phase-one projection",
+  )
+  const findingRows = Array.isArray(findings?.findings) ? findings.findings : []
+  const persistedFindingId = typeof findingRows[0]?.findingId === "string" ? findingRows[0].findingId : ""
+  const receiptRows = Array.isArray(confirmations?.confirmations) ? confirmations.confirmations : []
+  const receiptBatchIds = receiptRows.map((receipt: any) => receipt?.batchId)
+  const firstTwoBatchIds = Array.isArray(phaseOne?.persistedBatchIds) ? phaseOne.persistedBatchIds : []
+  require(
+    receiptFileParsed && confirmations?.version === "analysis-audit-confirmations-store-v1" &&
+      confirmations.planId === planId && confirmations.manuscriptFingerprint === fingerprint &&
+      receiptRows.length === 2 && JSON.stringify(receiptBatchIds) === JSON.stringify(firstTwoBatchIds) &&
+       JSON.stringify(firstTwoBatchIds) === JSON.stringify(canonicalPlan?.batchIds.slice(0, 2)) &&
+      firstTwoBatchIds.length === 2 && new Set(receiptBatchIds).size === 2 &&
+      receiptRows.every((receipt: any, index: number) => {
+        const expectedFindingIds = index === 0 ? [] : (persistedFindingId ? [persistedFindingId] : [])
+        const expectedFindingsDigest = computeBatchFindingsDigest(expectedFindingIds)
+        const expectedSubmissionId = computeAuditSubmissionId({
+          planId, manuscriptFingerprint: fingerprint, batchId: typeof receipt?.batchId === "string" ? receipt.batchId : "",
+          batchIndex: index, acceptedCount: index === 0 ? 0 : 1, findingsDigest: expectedFindingsDigest,
+        })
+        return receipt?.version === "batch-audit-confirmation-v1" && receipt.planId === planId &&
+          receipt.manuscriptFingerprint === fingerprint && receipt.batchIndex === index &&
+          receipt.acceptedCount === (index === 0 ? 0 : 1) && typeof receipt.disclaimer === "string" && receipt.disclaimer.length > 0 &&
+          Array.isArray(receipt.findingIds) && JSON.stringify(receipt.findingIds) === JSON.stringify(expectedFindingIds) &&
+          receipt.findingsDigest === expectedFindingsDigest && receipt.submissionId === expectedSubmissionId
+      }),
+    "parent-parsed receipt file does not contain exactly two ordered phase-one confirmations",
+  )
+  const finding = findingRows.length === 1 ? parentAbruptFindingProjection(findingRows[0]) : null
+  require(
+    findingFileParsed && findings?.version === "analysis-findings-store-v1" &&
+      findings.planId === planId && findings.manuscriptFingerprint === fingerprint &&
+      findingRows.length === 1 && finding !== null &&
+      JSON.stringify(finding) === JSON.stringify(phaseOne?.finding),
+    "parent-parsed finding file does not contain the original valid finding exactly once",
+  )
+  if (errors.length > 0 || !checkpointProjection || !finding) return { evidence: null, errors }
+  return {
+    evidence: {
+      source: "parent-read-persisted-files",
+      verifiedBeforeSignal: true,
+      checkpointFileParsed,
+      receiptFileParsed,
+      findingFileParsed,
+      workspaceInventorySha256,
+      persistence,
+      checkpoint: checkpointProjection,
+      receiptCount: receiptRows.length,
+      receiptBatchIds,
+      findingsCount: findingRows.length,
+      finding,
+    },
+    errors,
+  }
+}
+
+async function waitForObserverJson(
+  path: string,
+  child: ReturnType<typeof spawn>,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (signal.aborted || child.exitCode !== null || child.signalCode !== null) {
+      throw new Error("controlled DSH child stopped before publishing its readiness evidence")
+    }
+    if (existsSync(path)) {
+      try { return JSON.parse(readFileSync(path, "utf8")) } catch { /* wait for the exclusive write to finish */ }
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25))
+  }
+  throw new Error("controlled DSH child did not publish readiness evidence before timeout")
 }
 
 function repoStatus(): string | null {
@@ -540,6 +841,43 @@ function gitValue(args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null
 }
 
+function abruptRestartAuthorizationBlocker(
+  currentSha: string | null,
+  workingTreeStatus: string | null,
+  authorization: { approved?: string; sha256?: string; scenario?: string; environment?: string; reportPath?: string },
+): string | null {
+  if (authorization.approved !== "yes") return "NEEDS_APPROVAL: DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED=yes was not supplied"
+  if (!currentSha || authorization.sha256 !== currentSha) return "NEEDS_APPROVAL: authorization SHA does not equal the exact current runner commit"
+  if (authorization.scenario !== "durable-checkpoint-2-of-5-sigkill") return "NEEDS_APPROVAL: the exact abrupt-restart scenario was not approved"
+  if (authorization.environment !== "runner-owned-scratch-only") return "NEEDS_APPROVAL: the isolated runner-owned scratch environment was not approved"
+  if (!authorization.reportPath || !configuredReportPath || authorization.reportPath !== configuredReportPath || !configuredReportPath.startsWith(sep)) {
+    return "NEEDS_APPROVAL: a new isolated report path must be approved explicitly outside the checkout"
+  }
+  if (workingTreeStatus !== "") return "BLOCKED: the approved runner commit must have a clean working tree"
+  if (process.platform !== "linux") return "BLOCKED: owned-child identity verification requires Linux procfs"
+  const reportRelativeToRepo = relative(repositoryRoot, reportPath)
+  if (reportRelativeToRepo === "" || (reportRelativeToRepo !== ".." && !reportRelativeToRepo.startsWith(`..${sep}`))) {
+    return "BLOCKED: abrupt-restart reports must not modify the checkout"
+  }
+  try {
+    const tempRoot = realpathSync(tmpdir())
+    const reportParent = realpathSync(dirname(reportPath))
+    const reportRelativeToTemp = relative(tempRoot, reportParent)
+    if (reportRelativeToTemp === ".." || reportRelativeToTemp.startsWith(`..${sep}`)) {
+      return "BLOCKED: the sanitized report parent must remain under the OS temporary root"
+    }
+  } catch {
+    return "BLOCKED: the approved report parent must already exist under the OS temporary root"
+  }
+  try {
+    lstatSync(reportPath)
+    return "BLOCKED: the approved report target already exists and will not be overwritten"
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "BLOCKED: report target could not be verified as a new file"
+  }
+  return null
+}
+
 function ensureInside(base: string, path: string): void {
   const relativePath = relative(base, path)
   if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || resolve(path) === resolve(base)) {
@@ -556,6 +894,11 @@ function createObserverPackage(
   restartObserverResultTwo: string,
   restartTeardownMarkerOne: string,
   restartTeardownMarkerTwo: string,
+  abruptRestartWorkspace: string,
+  abruptObserverResultOne: string,
+  abruptObserverResultTwo: string,
+  abruptTeardownMarkerOne: string,
+  abruptTeardownMarkerTwo: string,
   auditorMarkdownSourceSha256: string | null,
   auditorMarkdownSourceSha1: string | null,
 ): void {
@@ -3246,14 +3589,20 @@ export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
   const reportPath = ${JSON.stringify(observerResult)};
   const restartPhase = process.env.DSHBANCA_DSH_PROFILE_PHASE ?? "first";
+  const abruptRestartMode = restartPhase === "abrupt-initial" || restartPhase === "abrupt-resume";
   const driftMode = restartPhase === "drift-initial" || restartPhase === "drift-resume";
-  const restartWorkspace = driftMode ? join(${JSON.stringify(restartWorkspace)}, "..", "source-drift-project") : ${JSON.stringify(restartWorkspace)};
-  const restartObserverResultOne = ${JSON.stringify(restartObserverResultOne)} + (driftMode ? ".drift" : "");
-  const restartObserverResultTwo = ${JSON.stringify(restartObserverResultTwo)} + (driftMode ? ".drift" : "");
-  const restartTeardownMarkerOne = ${JSON.stringify(restartTeardownMarkerOne)} + (driftMode ? ".drift" : "");
-  const restartTeardownMarkerTwo = ${JSON.stringify(restartTeardownMarkerTwo)} + (driftMode ? ".drift" : "");
+  const abruptRestartWorkspace = ${JSON.stringify(abruptRestartWorkspace)};
+  const restartWorkspace = abruptRestartMode ? abruptRestartWorkspace : driftMode ? join(${JSON.stringify(restartWorkspace)}, "..", "source-drift-project") : ${JSON.stringify(restartWorkspace)};
+  const abruptObserverResultOne = ${JSON.stringify(abruptObserverResultOne)};
+  const abruptObserverResultTwo = ${JSON.stringify(abruptObserverResultTwo)};
+  const abruptTeardownMarkerOne = ${JSON.stringify(abruptTeardownMarkerOne)};
+  const abruptTeardownMarkerTwo = ${JSON.stringify(abruptTeardownMarkerTwo)};
+  const restartObserverResultOne = abruptRestartMode ? abruptObserverResultOne : ${JSON.stringify(restartObserverResultOne)} + (driftMode ? ".drift" : "");
+  const restartObserverResultTwo = abruptRestartMode ? abruptObserverResultTwo : ${JSON.stringify(restartObserverResultTwo)} + (driftMode ? ".drift" : "");
+  const restartTeardownMarkerOne = abruptRestartMode ? abruptTeardownMarkerOne : ${JSON.stringify(restartTeardownMarkerOne)} + (driftMode ? ".drift" : "");
+  const restartTeardownMarkerTwo = abruptRestartMode ? abruptTeardownMarkerTwo : ${JSON.stringify(restartTeardownMarkerTwo)} + (driftMode ? ".drift" : "");
   const observerProcessIdentitySha256 = await crossProcessProcessIdentitySha256();
-  const teardownMarkerPath = restartPhase === "resume" || restartPhase === "drift-resume" ? restartTeardownMarkerTwo : restartTeardownMarkerOne;
+  const teardownMarkerPath = restartPhase === "resume" || restartPhase === "drift-resume" || restartPhase === "abrupt-resume" ? restartTeardownMarkerTwo : restartTeardownMarkerOne;
   // DSH's native ProcessShutdown sets process.exitCode only after the entire profile fiber disposes.
   // A nonzero sentinel makes natural exit without that completion signal fail closed.
   process.exitCode = 86;
@@ -3282,6 +3631,22 @@ export async function apply(ctx) {
       const sourceDriftPhaseTwo = await runSourceDriftProbe(ctx, restartWorkspace, expectation);
       await writeFile(restartObserverResultTwo, JSON.stringify({ observerProcessIdentitySha256, sourceDriftPhaseTwo }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
     }
+    return;
+  }
+  if (restartPhase === "abrupt-initial") {
+    ctx.on("agent/request", () => fail("abrupt restart forbids model requests"));
+    ctx.on("agent/pre-step", () => ({ kind: "reject", reason: "abrupt restart has no model turns" }));
+    const crossProcessPhaseOne = await runCrossProcessInitialProbe(ctx, abruptRestartWorkspace);
+    await writeFile(abruptObserverResultOne, JSON.stringify({ observerProcessIdentitySha256, crossProcessPhaseOne }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
+    return;
+  }
+  if (restartPhase === "abrupt-resume") {
+    ctx.on("agent/request", () => fail("abrupt restart forbids model requests"));
+    ctx.on("agent/pre-step", () => ({ kind: "reject", reason: "abrupt restart has no model turns" }));
+    const expectation = JSON.parse(process.env.DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE ?? "null");
+    if (!expectation || expectation.probeExecuted !== true) fail("abrupt restart second phase did not receive parent-validated phase-one evidence");
+    const crossProcessPhaseTwo = await runCrossProcessResumeProbe(ctx, abruptRestartWorkspace, expectation);
+    await writeFile(abruptObserverResultTwo, JSON.stringify({ observerProcessIdentitySha256, crossProcessPhaseTwo }, null, 2) + "\\n", { mode: 0o600, flag: "wx" });
     return;
   }
   if (restartPhase === "resume") {
@@ -4205,6 +4570,11 @@ async function main(): Promise<void> {
   const restartObserverResultTwo = join(scratch, "process-b-observer-result.json")
   const restartTeardownMarkerOne = join(scratch, "process-a-natural-shutdown.json")
   const restartTeardownMarkerTwo = join(scratch, "process-b-natural-shutdown.json")
+  const abruptRestartWorkspace = join(scratch, "abrupt-process-restart-project")
+  const abruptObserverResultOne = join(scratch, "abrupt-process-a-observer-result.json")
+  const abruptObserverResultTwo = join(scratch, "abrupt-process-b-observer-result.json")
+  const abruptTeardownMarkerOne = join(scratch, "abrupt-process-a-natural-shutdown.json")
+  const abruptTeardownMarkerTwo = join(scratch, "abrupt-process-b-natural-shutdown.json")
   const processIdentityKey = randomBytes(32)
   const processIdentityKeyHex = processIdentityKey.toString("hex")
   const auditorMarkdownSourcePath = join(repositoryRoot, "assets", "dsh", "agents", "banca-auditor.md")
@@ -4243,7 +4613,12 @@ async function main(): Promise<void> {
       writeFileSync(join(restartWorkspace, "capitulos", `lote${i}.tex`), `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`, { mode: 0o600 })
     }
   }
-  createObserverPackage(observerRoot, workspace, observerResult, restartWorkspace, restartObserverResultOne, restartObserverResultTwo, restartTeardownMarkerOne, restartTeardownMarkerTwo, auditorMarkdownSourceSha256, auditorMarkdownSourceSha1)
+  createObserverPackage(
+    observerRoot, workspace, observerResult,
+    restartWorkspace, restartObserverResultOne, restartObserverResultTwo, restartTeardownMarkerOne, restartTeardownMarkerTwo,
+    abruptRestartWorkspace, abruptObserverResultOne, abruptObserverResultTwo, abruptTeardownMarkerOne, abruptTeardownMarkerTwo,
+    auditorMarkdownSourceSha256, auditorMarkdownSourceSha1,
+  )
   const overlayPath = join(scratch, "observer.patch.yml")
   writeFileSync(overlayPath, buildSdkPresetOverlayPatch(observerName), { mode: 0o600 })
 
@@ -4755,6 +5130,263 @@ async function main(): Promise<void> {
     fail(`Issue #105 source drift evidence failed: ${sourceDriftErrors.join("; ")}`, sourceDriftStatus === "BLOCKED" ? "BLOCKED" : "FAIL")
     return
   }
+
+  const abruptRestartAuthorization = {
+    approved: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED,
+    sha256: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256,
+    scenario: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO,
+    environment: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_ENVIRONMENT,
+    reportPath: process.env.DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH,
+  }
+  const abruptAuthorizationBlocker = abruptRestartAuthorizationBlocker(
+    report.repository.revision, repoStatus(), abruptRestartAuthorization,
+  )
+  let abruptRestartStatus: "PASS" | "FAIL" | "BLOCKED" = "BLOCKED"
+  if (abruptAuthorizationBlocker) {
+    report.stages.abruptRestart = {
+      status: "BLOCKED",
+      probeExecuted: false,
+      processLaunches: 0,
+      reason: abruptAuthorizationBlocker,
+      authorization: "NEEDS_APPROVAL for exact SHA, scenario, and scratch-only environment",
+    }
+    report.limitations.push("Issue #107 abruptRestart remains BLOCKED / NEEDS_APPROVAL; no abrupt-restart DSH process was launched.")
+  } else {
+    let abruptPhaseOne: any = null
+    let parentVerifiedPersistence: Record<string, unknown> | null = null
+    let abruptFirstChild: ReturnType<typeof spawn> | undefined
+    let firstIdentityRevalidatedBeforeSignal = false
+    let firstKillRequested = false
+    let abruptPhaseTwoStarted = false
+    const abruptArgs = ["--profile", profileName, "--patch", overlayPath]
+    try {
+      ensureInside(scratch, abruptRestartWorkspace)
+      mkdirSync(abruptRestartWorkspace, { mode: 0o700 })
+      abruptRestartWorkspaceDirectoryFd = openSync(abruptRestartWorkspace, "r")
+      const abruptWorkspaceIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
+        abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
+      )
+      mkdirSync(join(abruptRestartWorkspace, ".git"), { mode: 0o700 })
+      mkdirSync(join(abruptRestartWorkspace, "capitulos"), { mode: 0o700 })
+      for (const file of ["main.tex", "referencias.bib", ...[1, 2, 3, 4, 5].map((index) => `capitulos/lote${index}.tex`)]) {
+        writeFileSync(join(abruptRestartWorkspace, file), readFileSync(join(restartWorkspace, file)), { mode: 0o600, flag: "wx" })
+      }
+      const abruptInitialEnv: NodeJS.ProcessEnv = {
+        ...firstProcessEnv,
+        DSHBANCA_DSH_PROFILE_PHASE: "abrupt-initial",
+        DSHBANCA_DSH_PROFILE_WORKSPACE_IDENTITY_SHA256: abruptWorkspaceIdentitySha256,
+      }
+      const abruptFirstBoot = await runDsh(nodeExecutable, dshExecutable, abruptArgs, {
+        cwd: scratch,
+        env: abruptInitialEnv,
+        timeoutMs: bootTimeoutMs * 2,
+        stdin: "pipe",
+        processIdentityKey,
+        onSpawn: async (child, hostIdentity, signal) => {
+          abruptFirstChild = child
+          if (!hostIdentity || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
+            throw new Error("runner could not identify its exact DSH child before readiness")
+          }
+          const sidecar = await waitForObserverJson(abruptObserverResultOne, child, signal, bootTimeoutMs)
+          abruptPhaseOne = sidecar?.crossProcessPhaseOne
+          const phaseOneErrors = validateCrossProcessPhaseOneEvidence(abruptPhaseOne)
+          if (
+            phaseOneErrors.length > 0 ||
+            sidecar?.observerProcessIdentitySha256 !== hostIdentity ||
+            abruptPhaseOne?.workspaceIdentitySha256 !== abruptWorkspaceIdentitySha256
+          ) throw new Error("phase-one readiness did not prove the native durable checkpoint and matching child identity")
+          const parentValidation = verifyParentAbruptRestartPersistence(abruptRestartWorkspace, abruptPhaseOne)
+          if (parentValidation.errors.length > 0 || !parentValidation.evidence) {
+            throw new Error("parent failed raw persisted checkpoint, receipt, finding, hash, or inventory validation")
+          }
+          parentVerifiedPersistence = parentValidation.evidence
+          const preSignalWorkspaceIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
+            abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
+          )
+          const preSignalWorkspaceInventorySha256 = jsonSha256(inventoryTree(abruptRestartWorkspace))
+          if (
+            preSignalWorkspaceIdentitySha256 !== abruptWorkspaceIdentitySha256 ||
+            preSignalWorkspaceInventorySha256 !== parentVerifiedPersistence.workspaceInventorySha256
+          ) throw new Error("parent observed a changed workspace identity or inventory before signaling")
+          if (signal.aborted || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
+            throw new Error("owned DSH child identity changed before direct termination")
+          }
+          firstIdentityRevalidatedBeforeSignal = true
+          if (!terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGKILL")) {
+            throw new Error("runner refused to signal an unverified DSH child")
+          }
+          firstKillRequested = true
+        },
+        onControlTimeout: (child, hostIdentity) => {
+          if (parentVerifiedPersistence && firstIdentityRevalidatedBeforeSignal) {
+            terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGTERM")
+          }
+        },
+      })
+      const firstTargetAbsentAfterClose = processTargetAbsentAfterClose(
+        abruptFirstChild?.pid,
+        abruptFirstBoot.hostProcessIdentitySha256 ?? null,
+        processIdentityKey,
+      )
+      if (!firstTargetAbsentAfterClose) preserveScratchForSafety = true
+      const firstAbruptProof = {
+        dshExecutableSha256,
+        profileIdentitySha256,
+        hostIdentitySha256: abruptFirstBoot.hostProcessIdentitySha256 ?? null,
+        observerIdentitySha256: abruptPhaseOne?.observerProcessIdentitySha256 ?? null,
+        identityMatched: abruptFirstBoot.hostProcessIdentitySha256 !== null &&
+          abruptFirstBoot.hostProcessIdentitySha256 === abruptPhaseOne?.observerProcessIdentitySha256,
+        spawnObserved: abruptFirstBoot.spawnObserved === true,
+        kernelStartIdentityObserved: Boolean(abruptFirstBoot.hostProcessIdentitySha256),
+        exitObserved: abruptFirstBoot.exitObserved === true,
+        exitCode: abruptFirstBoot.exitCode,
+        signal: abruptFirstBoot.signal,
+        timedOut: abruptFirstBoot.timedOut,
+        forcedTermination: true,
+        naturalBeforeExitObserved: false,
+        nativeTeardownMarkerObserved: existsSync(abruptTeardownMarkerOne),
+        runnerOwnedChild: abruptFirstChild?.pid !== undefined,
+        childIdentityRevalidatedBeforeSignal: firstIdentityRevalidatedBeforeSignal,
+        killRequestedByParent: firstKillRequested,
+        killSignalRequested: "SIGKILL",
+        targetAbsentAfterClose: firstTargetAbsentAfterClose,
+      }
+      if (
+        !parentVerifiedPersistence ||
+        abruptFirstBoot.controlCompleted !== true || abruptFirstBoot.controlFailed === true ||
+        !firstKillRequested || abruptFirstBoot.exitCode !== null || abruptFirstBoot.signal !== "SIGKILL" ||
+        abruptFirstBoot.timedOut || abruptFirstBoot.exitObserved !== true || abruptFirstBoot.closeObserved !== true ||
+        !firstTargetAbsentAfterClose || existsSync(abruptTeardownMarkerOne)
+      ) {
+        preserveScratchForSafety = true
+        report.stages.abruptRestart = { status: "FAIL", probeExecuted: true, phaseOne: abruptPhaseOne, parentVerifiedPersistence, firstProcess: firstAbruptProof, phaseTwoStarted: false }
+        fail("Issue #107 stopped before phase B because phase A did not close from the requested owned-child SIGKILL", "FAIL")
+        return
+      }
+      const firstProcessEndFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
+        abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
+      )
+      const secondProcessStartFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
+        abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
+      )
+      const secondProcessStartInventorySha256 = jsonSha256(inventoryTree(abruptRestartWorkspace))
+      if (
+        firstProcessEndFilesystemIdentitySha256 !== abruptWorkspaceIdentitySha256 ||
+        secondProcessStartFilesystemIdentitySha256 !== abruptWorkspaceIdentitySha256 ||
+        secondProcessStartInventorySha256 !== parentVerifiedPersistence.workspaceInventorySha256
+      ) {
+        preserveScratchForSafety = true
+        report.stages.abruptRestart = { status: "FAIL", probeExecuted: true, phaseOne: abruptPhaseOne, parentVerifiedPersistence, firstProcess: firstAbruptProof, phaseTwoStarted: false }
+        fail("Issue #107 stopped before phase B because the durable workspace identity or inventory changed", "FAIL")
+        return
+      }
+      const abruptResumeEnv: NodeJS.ProcessEnv = {
+        ...abruptInitialEnv,
+        DSHBANCA_DSH_PROFILE_PHASE: "abrupt-resume",
+        DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE: JSON.stringify({
+          probeExecuted: true,
+          phaseOne: abruptPhaseOne,
+          parentVerifiedPersistence,
+        }),
+      }
+      let abruptSecondChild: ReturnType<typeof spawn> | undefined
+      abruptPhaseTwoStarted = true
+      const abruptSecondBoot = await runDsh(nodeExecutable, dshExecutable, abruptArgs, {
+        cwd: scratch,
+        env: abruptResumeEnv,
+        timeoutMs: bootTimeoutMs,
+        processIdentityKey,
+        onSpawn: (child, hostIdentity, signal) => {
+          abruptSecondChild = child
+          if (signal.aborted || !verifyOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey)) {
+            throw new Error("recovery phase DSH child identity did not match the runner-owned invocation")
+          }
+        },
+        onControlTimeout: (child, hostIdentity) => {
+          terminateOwnedDshChild(child, nodeExecutable, dshExecutable, abruptArgs, hostIdentity, processIdentityKey, "SIGTERM")
+        },
+      })
+      const abruptSecondSidecar = existsSync(abruptObserverResultTwo)
+        ? JSON.parse(readFileSync(abruptObserverResultTwo, "utf8")) : null
+      const abruptSecondProof = {
+        ...sourceDriftProcessProof(
+          abruptSecondBoot, abruptSecondSidecar, abruptTeardownMarkerTwo, dshExecutableSha256, profileIdentitySha256,
+        ),
+        runnerOwnedChild: abruptSecondChild?.pid !== undefined,
+        controlCompleted: abruptSecondBoot.controlCompleted === true,
+        controlFailed: abruptSecondBoot.controlFailed === true,
+      }
+      const phaseTwo = abruptSecondSidecar?.crossProcessPhaseTwo
+      const secondProcessEndFilesystemIdentitySha256 = crossProcessWorkspaceFilesystemIdentitySha256(
+        abruptRestartWorkspace, scratch, processIdentityKey, abruptRestartWorkspaceDirectoryFd,
+      )
+      const abruptEvidence = {
+        probeExecuted: true,
+        executionMode: "abrupt-restart-native-dsh",
+        syntheticProcessFixture: false,
+        phaseOne: abruptPhaseOne,
+        phaseTwo,
+        parentVerifiedPersistence,
+        processBoundary: {
+          observationSource: "child_process.spawn+linux-procfs",
+          first: firstAbruptProof,
+          second: abruptSecondProof,
+          secondStartedAfterFirstExit: abruptFirstBoot.exitObserved === true && abruptFirstBoot.closeObserved === true,
+          processesDidNotOverlap: abruptFirstBoot.exitObserved === true && abruptFirstBoot.closeObserved === true,
+        },
+        workspace: {
+          sameWorkspace: true,
+          preservedBetweenProcesses: true,
+          resetBetweenProcesses: false,
+          identitySha256: abruptWorkspaceIdentitySha256,
+          firstProcessEndFilesystemIdentitySha256,
+          secondProcessStartFilesystemIdentitySha256,
+          secondProcessEndFilesystemIdentitySha256,
+          firstProcessEndInventorySha256: parentVerifiedPersistence.workspaceInventorySha256,
+          secondProcessStartInventorySha256,
+          secondProcessEndInventorySha256: jsonSha256(inventoryTree(abruptRestartWorkspace)),
+        },
+        teardown: {
+          firstExitObserved: abruptFirstBoot.exitObserved === true,
+          firstCloseObserved: abruptFirstBoot.closeObserved === true,
+          firstTargetAbsentAfterClose,
+          secondExitObserved: abruptSecondBoot.exitObserved === true,
+          secondCloseObserved: abruptSecondBoot.closeObserved === true,
+          secondAgentSessionDisposed: phaseTwo?.teardown?.disposeCalled === true &&
+            phaseTwo?.teardown?.agentUnregistered === true && phaseTwo?.teardown?.sessionUnregistered === true &&
+            phaseTwo?.teardown?.teardownFailed === false,
+          teardownFailed: phaseTwo?.teardown?.teardownFailed === true,
+        },
+      }
+      const abruptErrors = validateAbruptRestartEvidence(abruptEvidence)
+      abruptRestartStatus = classifyAbruptRestartEvidenceStatus(abruptEvidence)
+      report.stages.abruptRestart = {
+        status: abruptRestartStatus,
+        probeExecuted: true,
+        authorization: { exactShaMatched: true, scenario: "durable-checkpoint-2-of-5-sigkill", environment: "runner-owned-scratch-only" },
+        evidence: abruptEvidence,
+        validationErrors: abruptErrors,
+      }
+      if (abruptRestartStatus !== "PASS") {
+        preserveScratchForSafety = true
+        fail(`Issue #107 abrupt restart evidence failed closed: ${abruptErrors.join("; ")}`, abruptRestartStatus === "BLOCKED" ? "BLOCKED" : "FAIL")
+        return
+      }
+    } catch {
+      if (abruptFirstChild !== undefined) preserveScratchForSafety = true
+      report.stages.abruptRestart = {
+        status: "FAIL",
+        probeExecuted: abruptFirstChild !== undefined,
+        phaseOne: abruptPhaseOne,
+        parentVerifiedPersistence,
+        phaseTwoStarted: abruptPhaseTwoStarted,
+        validationErrors: ["parent readiness, process ownership, raw persistence, direct signal, or teardown proof failed"],
+      }
+      fail("Issue #107 abrupt restart probe failed closed; no phase-B recovery result was accepted", "FAIL")
+      return
+    }
+  }
+
   const errors = validateEvidence(observed)
   const auditorMarkdownEvidence = observed.auditorMarkdownEvidence
   const auditorMarkdownErrors = validateAuditorMarkdownEvidence(auditorMarkdownEvidence)
@@ -4774,7 +5406,10 @@ async function main(): Promise<void> {
   const issue2Status = errors.length === 0 ? "PASS" : "FAIL"
   report.stages.issue2IdentityReadOnly = { status: issue2Status, validationErrors: errors }
   const gateStatuses = classifyProfileGateStatuses(issue2Status, auditorMarkdownStatus, nativeSkillsStatus, batchAuditStatus, nativeQuestionsStatus, academicDecisionStatus, crossProcessStatus)
-  report.stages.gateSummary = { ...gateStatuses, sourceDriftStatus }
+  const overallStatus: GateReport["status"] =
+    gateStatuses.overallStatus === "FAIL" || abruptRestartStatus === "FAIL" ? "FAIL" :
+      gateStatuses.overallStatus === "BLOCKED" || abruptRestartStatus === "BLOCKED" ? "BLOCKED" : "PASS"
+  report.stages.gateSummary = { ...gateStatuses, sourceDriftStatus, abruptRestartStatus, overallStatus }
   report.stages.observedRuntime = {
     lifecycle: observed.lifecycle,
     toolNames: observed.toolNames,
@@ -4953,7 +5588,7 @@ async function main(): Promise<void> {
     fail("A prerequisite step unexpectedly changed the checkout before profile boot")
     return
   }
-  finalStatus = gateStatuses.overallStatus
+  finalStatus = overallStatus
 }
 
 try {
@@ -4961,6 +5596,15 @@ try {
 } catch {
   fail("Runner orchestration: unexpected exception; details withheld")
 } finally {
+  if (abruptRestartWorkspaceDirectoryFd !== undefined) {
+    try {
+      closeSync(abruptRestartWorkspaceDirectoryFd)
+      abruptRestartWorkspaceDirectoryFd = undefined
+    } catch {
+      preserveScratchForSafety = true
+      fail("Abrupt-restart workspace identity handle teardown failed; details withheld")
+    }
+  }
   if (driftWorkspaceDirectoryFd !== undefined) {
     try {
       closeSync(driftWorkspaceDirectoryFd)
@@ -4978,18 +5622,23 @@ try {
     }
   }
   if (scratchRoot && existsSync(scratchRoot)) {
-    try {
-      const resolvedScratch = realpathSync(scratchRoot)
-      const expectedParent = realpathSync(tmpdir())
-      if (!resolvedScratch.startsWith(`${expectedParent}${sep}`) || !resolvedScratch.includes("dshbanca-profile-e2e-")) {
-        throw new Error("refusing cleanup because the scratch path is not the unique test directory under the OS temp root")
-      }
-      rmSync(resolvedScratch, { recursive: true, force: false })
-      report.sandbox.removed = !existsSync(resolvedScratch)
-      if (!report.sandbox.removed) fail("Scratch cleanup did not remove the test-owned sandbox")
-    } catch {
+    if (preserveScratchForSafety) {
       report.sandbox.removed = false
-      fail("Scratch cleanup failed; details withheld")
+      report.limitations.push("Abrupt-restart failure or teardown uncertainty preserved the isolated scratch directory for inspection.")
+    } else {
+      try {
+        const resolvedScratch = realpathSync(scratchRoot)
+        const expectedParent = realpathSync(tmpdir())
+        if (!resolvedScratch.startsWith(`${expectedParent}${sep}`) || !resolvedScratch.includes("dshbanca-profile-e2e-")) {
+          throw new Error("refusing cleanup because the scratch path is not the unique test directory under the OS temp root")
+        }
+        rmSync(resolvedScratch, { recursive: true, force: false })
+        report.sandbox.removed = !existsSync(resolvedScratch)
+        if (!report.sandbox.removed) fail("Scratch cleanup did not remove the test-owned sandbox")
+      } catch {
+        report.sandbox.removed = false
+        fail("Scratch cleanup failed; details withheld")
+      }
     }
   } else if (scratchRoot) {
     report.sandbox.removed = true
@@ -5028,7 +5677,10 @@ const crossProcessBatchAuditStatus = typeof report.stages.crossProcessBatchAudit
 const sourceDriftStatus = typeof report.stages.sourceDrift === "object" && report.stages.sourceDrift !== null
   ? (report.stages.sourceDrift as { status?: string }).status ?? "NOT_EVALUATED"
   : "NOT_EVALUATED"
-process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}; sequential process-restart recovery (#103): ${crossProcessBatchAuditStatus}; source drift between processes (#105): ${sourceDriftStatus}\n`)
+const abruptRestartStatusOutput = typeof report.stages.abruptRestart === "object" && report.stages.abruptRestart !== null
+  ? (report.stages.abruptRestart as { status?: string }).status ?? "NOT_EVALUATED"
+  : "NOT_EVALUATED"
+process.stdout.write(`${finalStatus}: DSH native identity/read-only profile gate (#2); auditor Markdown loading (#3): ${auditorMarkdownStatus}; native skills discovery/loading (#38): ${nativeSkillsStatus}; batch audit evidence gate (#44): ${batchAuditStatus}; native questions/approval contract (#46): ${nativeQuestionsStatus}; academic decision E2E (#48): ${academicDecisionStatus}; sequential process-restart recovery (#103): ${crossProcessBatchAuditStatus}; source drift between processes (#105): ${sourceDriftStatus}; abrupt restart (#107): ${abruptRestartStatusOutput}\n`)
 process.stdout.write(`Report: ${reportPathLabel}\n`)
 const safeVersions = (sanitizeReport({ versions: report.versions }) as { versions: GateReport["versions"] }).versions
 if (safeVersions.dsh) process.stdout.write(`DSH ${safeVersions.dsh}; Cordis ${safeVersions.cordis ?? "unknown"}; loader ${safeVersions.cordisPluginLoader ?? "unknown"}; Skill ${safeVersions.dshSkill ?? "unknown"}; Agent ${safeVersions.dshAgent ?? "unknown"}; AgentLoop ${safeVersions.dshAgentLoop ?? "unknown"}; Tools ${safeVersions.dshTools ?? "unknown"}; AgentPreset ${safeVersions.dshAgentPreset ?? "unknown"}; PresetRegistry ${safeVersions.dshAgentPresetRegistry ?? "unknown"}; SessionController ${safeVersions.dshApiSessionController ?? "unknown"}; Bun ${safeVersions.bun ?? "unknown"}; Node ${safeVersions.node ?? "unknown"}; pnpm ${safeVersions.pnpm ?? "unknown"}\n`)
