@@ -10,8 +10,9 @@
  *   shell stub written inside the temporary base directory. The real
  *   `pt_ai_detector` package is never imported, no network is used and no
  *   external manuscript is touched;
- * - `process.env.PATH`, the stub env vars and the `bancaIaInternals` seam are
- *   captured once at module scope and fully restored in `afterEach`;
+ * - `process.env.PATH` and the `bancaIaInternals` seam are captured once at
+ *   module scope and fully restored in `afterEach`; the stub control/marker
+ *   paths are baked into the stub script (no env dependence);
  * - the timeout scenario only mutates `bancaIaInternals.analysisTimeoutMs` to
  *   300ms and the seam is restored afterwards.
  *
@@ -35,6 +36,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
+import { spawnSync } from "node:child_process"
 import { dirname, join } from "node:path"
 
 // ---------------------------------------------------------------------------
@@ -85,21 +87,21 @@ function requireInternals(mod: any): { probeTimeoutMs: number; analysisTimeoutMs
 // Hermetic `python3` stub. Invocation shapes (contract §2):
 //   probe   → 2 arguments after the binary ("-c", <code>)
 //   analysis→ 4 arguments after the binary ("-c", <script>, <moduleDir>, <filePath>)
-// Behaviour is driven by files inside $BANCA_IA_STUB_CONTROL. Invocations are
-// recorded in $BANCA_IA_STUB_MARKER so tests can prove when no subprocess ran.
+// Behaviour is driven by control files whose paths are baked into the script;
+// invocations are recorded in a baked marker file so tests can prove when no
+// subprocess ran.
 // The stub never reads the analysis script, the module dir or the detector.
 // ---------------------------------------------------------------------------
 const STUB_STDERR_SECRET = "stub-stderr-must-not-be-echoed"
 
-const PYTHON_STUB_SCRIPT = `#!/bin/sh
+const PYTHON_STUB_TEMPLATE = `#!/bin/sh
 # Hermetic python3 stub for tests/banca_ia_method_coverage.test.ts (issue #113).
-# Never imports pt_ai_detector, never uses the network.
-CONTROL="$BANCA_IA_STUB_CONTROL"
-MARKER="$BANCA_IA_STUB_MARKER"
-if [ -z "$CONTROL" ]; then
-  printf 'stub: missing BANCA_IA_STUB_CONTROL\\n' >&2
-  exit 97
-fi
+# Never imports pt_ai_detector, never uses the network. Control and marker
+# paths are baked into the script instead of inherited through the environment
+# so the stub works even when the runtime does not propagate mutated env vars
+# to the child process (observed on Bun 1.3.9 in CI).
+CONTROL=__CONTROL__
+MARKER=__MARKER__
 
 record() {
   if [ -n "$MARKER" ]; then
@@ -185,12 +187,22 @@ printf 'stub: unexpected invocation shape\\n' >&2
 exit 64
 `
 
+/** Quote a value for POSIX shell and bake it into the stub script. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+function buildPythonStub(controlDir: string, markerPath: string): string {
+  return PYTHON_STUB_TEMPLATE.replaceAll("__CONTROL__", shellQuote(controlDir)).replaceAll(
+    "__MARKER__",
+    shellQuote(markerPath),
+  )
+}
+
 // Environment captured once at module scope and restored in afterEach.
 const FALLBACK_SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 const ORIGINAL_ENV: Record<string, string | undefined> = {
   PATH: process.env.PATH,
-  BANCA_IA_STUB_CONTROL: process.env.BANCA_IA_STUB_CONTROL,
-  BANCA_IA_STUB_MARKER: process.env.BANCA_IA_STUB_MARKER,
 }
 
 const symlinksSupported = (() => {
@@ -230,12 +242,10 @@ beforeEach(async () => {
   mkdirSync(join(project, ".banca"), { recursive: true })
   mkdirSync(stubDir, { recursive: true })
   mkdirSync(controlDir, { recursive: true })
-  writeFileSync(join(stubDir, "python3"), PYTHON_STUB_SCRIPT, "utf-8")
+  writeFileSync(join(stubDir, "python3"), buildPythonStub(controlDir, markerPath), "utf-8")
   chmodSync(join(stubDir, "python3"), 0o755)
   const systemPath = ORIGINAL_ENV.PATH ?? FALLBACK_SYSTEM_PATH
   process.env.PATH = `${stubDir}:${systemPath}`
-  process.env.BANCA_IA_STUB_CONTROL = controlDir
-  process.env.BANCA_IA_STUB_MARKER = markerPath
   // O seam absoluto evita depender da semântica de resolução de PATH do
   // runtime (Bun 1.3.9 no CI não resolve o stub só pela mutação de PATH).
   const mod: any = await importBancaIa()
@@ -262,6 +272,25 @@ afterEach(() => {
     }
   }
   if (base) rmSync(base, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
+// Infrastructure self-check: prove the hermetic stub itself is executable in
+// the current runner before attributing any scenario failure to the tool.
+// ---------------------------------------------------------------------------
+describe("banca_ia — stub hermético", () => {
+  test("stub python3 responde à sonda e registra a invocação", () => {
+    const stubPath = join(stubDir, "python3")
+    const result = spawnSync(stubPath, ["-c", "probe"], { encoding: "utf-8", timeout: 5000 })
+    if (result.status !== 0) {
+      const code = (result.error as NodeJS.ErrnoException | undefined)?.code ?? "none"
+      throw new Error(
+        `stub executável não pôde ser executado neste runner (status=${String(result.status)}, signal=${String(result.signal)}, error_code=${code})`,
+      )
+    }
+    expect(String(result.stdout).trim()).toBe("ok")
+    expect(stubInvocations()).toContain("probe")
+  })
 })
 
 // ---------------------------------------------------------------------------
