@@ -362,6 +362,27 @@ describe("Integration — loop circuit breaker", () => {
     const result = await bancaLoop.execute({ projectRoot: testRoot }, {} as any)
     expect(result).toContain("circuit breaker")
   })
+
+  test("citation form ignored by the historical regex moves the heuristic score (issue #112)", async () => {
+    mockProjectJson()
+    // 5 meaningful paragraphs, 4 cited with forms the old regex did not
+    // recognize: 1/5 without citation = 20% → score 8.0 (0/5 → 4.0 before).
+    writeFileSync(join(testRoot, "main.tex"), [
+      "Primeiro parágrafo do capítulo com \\parencite[p.~12]{autor2020} na fundamentação.",
+      "Segundo parágrafo com \\textcite{autor2020} revisando a literatura recente.",
+      "Terceiro parágrafo com \\apud{orig2020}{cons2020} articulando as tradições.",
+      "Quarto parágrafo com \\citeauthor{autor2020} atribuindo a tese central.",
+      "Quinto parágrafo de síntese final sem nenhuma chamada bibliográfica neste trecho.",
+    ].join("\n\n") + "\n")
+    writeFileSync(join(testRoot, "refs.bib"), "@article{autor2020, author={A}, title={T}, year={2020}}")
+    const { bancaLoop } = await import("../src/tools/banca_loop")
+    const result = await bancaLoop.execute({ projectRoot: testRoot }, {} as any)
+    expect(result).toContain("Citations: 4/5 (80.0%)")
+    const { loadState } = await import("../src/lib/state")
+    const loopIterations = loadState(testRoot).iterations.filter((iteration) => iteration.action === "loop")
+    expect(loopIterations).toHaveLength(1)
+    expect(loopIterations[0].scoreAfter).toBe(8.0)
+  })
 })
 
 describe("Integration — path traversal safety", () => {
