@@ -211,9 +211,14 @@ export function parseBibtex(content: string): BibEntry[] {
  * The scan follows the protected contexts of the supported grammar so that the
  * directive's external delimiter is only honored when it is structural:
  * escapes consume the next character; braced literals and quoted literals may
- * contain the external delimiter, and quotes inside braces (or unmatched
- * closing braces inside quotes) are literal content. This prevents references
- * written inside a directive body from leaking into the entry list.
+ * contain the external delimiter, and quotes inside braces are literal content.
+ * This prevents references written inside a directive body from leaking into
+ * the entry list.
+ *
+ * `@preamble` follows the same brace-balanced fail-closed contract as field
+ * values: a closing brace without a matching opening brace (inside a quoted
+ * literal or at the top level of a parenthesized body) is malformed. `@comment`
+ * stays deliberately opaque, so its discarded text is not syntax-checked.
  */
 function skipBalancedDirective(
   scanner: Scanner,
@@ -222,12 +227,14 @@ function skipBalancedDirective(
   close: string,
   directiveOffset: number,
 ): void {
+  const preamble = type === "preamble"
   let externalDepth = 1
   let braceDepth = 0
   let inQuote = false
 
   while (!scanner.eof()) {
     const ch = scanner.advance()
+    const chOffset = scanner.offset - 1
 
     // Escapes are preserved by the supported grammar; the escaped character is
     // literal and never changes a structural depth.
@@ -241,8 +248,11 @@ function skipBalancedDirective(
         braceDepth++
       } else if (ch === "}") {
         if (braceDepth > 0) braceDepth--
-        // An unmatched closing brace inside a quoted literal is literal text
-        // for the purpose of finding the directive end.
+        else if (preamble) {
+          scanner.fail("malformed", "unexpected '}' in @preamble directive without a matching '{'", chOffset)
+        }
+        // For @comment an unmatched closing brace inside the quoted text is
+        // discarded literal content.
       } else if (ch === '"' && braceDepth === 0) {
         inQuote = false
       }
@@ -271,6 +281,8 @@ function skipBalancedDirective(
       } else if (ch === ")") {
         externalDepth--
         if (externalDepth === 0) return
+      } else if (ch === "}" && preamble) {
+        scanner.fail("malformed", "unexpected '}' in @preamble directive without a matching '{'", chOffset)
       }
       continue
     }

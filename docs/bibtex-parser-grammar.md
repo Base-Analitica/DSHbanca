@@ -31,7 +31,11 @@ ocorrência de `date`/`year` para o ano e divisão de autores por `and`.
   corpo é saltado acompanhando os contextos protegidos da gramática (escapes,
   chaves balanceadas e aspas): delimitadores externos dentro de um literal
   protegido não encerram nem abrem a diretiva, e o conteúdo interno nunca é
-  interpretado como entrada bibliográfica.
+  interpretado como entrada bibliográfica. `@preamble` segue o mesmo contrato
+  de chaves balanceadas dos valores de campo: um `}` sem `{` correspondente —
+  inclusive dentro de aspas ou no nível superior de um corpo parentetizado —
+  é erro malformado. `@comment` permanece deliberadamente opaco: o conteúdo
+  descartado não é validado como valor.
 - Texto fora de entradas é ignorado, como no BibTeX. Exceção: todo `@` fora de
   uma entrada precisa iniciar um item bem formado; um `@` solto (por exemplo
   um endereço de e-mail fora de uma entrada) gera erro em vez de ser ignorado
@@ -109,6 +113,9 @@ arquivos que dependam delas.
   gramática (escapes, chaves balanceadas e aspas). Aspas ou literais abertos e
   delimitadores externos sem fechamento falham com erro; não há tentativa de
   interpretar o conteúdo como a gramática completa de valores do BibTeX.
+- Em `@preamble`, um `}` sem `{` correspondente é malformado, tanto dentro de
+  aspas quanto no nível superior do corpo parentetizado. `@comment` continua
+  opaco e não valida o texto descartado.
 - Erros em entrada não terminada no fim do arquivo apontam para o início da
   entrada (e não para o EOF), preservando a linha/coluna onde ela começa.
 
@@ -152,5 +159,9 @@ continua sujeita ao contrato de provedores do DSH.
   vazavam referência fantasma, diretivas com literais protegidos (aspas,
   chaves, escapes), diretiva desbalanceada entre entradas e validação lexical
   de chaves nas duas formas de abertura de entrada.
+- Revisão R2 da PR #116: `@preamble("}")`, `@preamble{"}"}` e `@preamble(})`
+  rejeitados como malformados, com controles de literais balanceados, escapes,
+  parênteses protegidos e `@comment` opaco; regressão hermética do consumidor
+  sem cache, relatório ou rede para preâmbulo inválido entre referências.
 
 Nenhum teste desta issue executa rede, MCP, REST, LLM ou LaTeX/BibTeX real.

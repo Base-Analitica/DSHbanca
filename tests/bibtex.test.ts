@@ -474,3 +474,67 @@ describe("parseBibtex — citation key lexical validation (R1)", () => {
     expect(entries.map((entry) => entry.key)).toEqual(["chave2020", "outra2021"])
   })
 })
+
+// ---------------------------------------------------------------------------
+// R2 remediation (maintainer re-review of PR #116): @preamble follows the same
+// brace-balanced fail-closed contract as field values. A closing brace without
+// a matching opening brace is malformed; @comment remains deliberately opaque.
+// ---------------------------------------------------------------------------
+
+describe("parseBibtex — @preamble rejects unmatched closing braces (R2)", () => {
+  test("rejects a closing brace inside a quoted preamble literal without an opening brace", () => {
+    expectParseFailure(`@preamble("}")
+@article{real,title={Real}}
+`, "malformed", /unexpected '}'|@preamble/i)
+  })
+
+  test("rejects a closing brace inside a quoted brace-delimited preamble literal", () => {
+    expectParseFailure(`@preamble{"}"}
+@article{real,title={Real}}
+`, "malformed", /unexpected '}'|@preamble/i)
+  })
+
+  test("rejects a bare closing brace at the top level of a parenthesized preamble", () => {
+    expectParseFailure(`@preamble(})
+@article{real,title={Real}}
+`, "malformed", /unexpected '}'|@preamble/i)
+  })
+
+  test("does not return partial entries when the invalid preamble sits between valid entries", () => {
+    expectParseFailure(`@article{ok1, title={A}}
+@preamble("}")
+@article{ok2, title={B}}
+`, "malformed", /unexpected '}'|@preamble/i)
+  })
+
+  test("keeps balanced braced literals valid inside either preamble form", () => {
+    const quoted = parseBibtex(`@preamble("a {b} c")
+@article{real,title={Real}}
+`)
+    expect(quoted.map((entry) => entry.key)).toEqual(["real"])
+
+    const braced = parseBibtex(`@preamble({a {b} c})
+@article{real,title={Real}}
+`)
+    expect(braced.map((entry) => entry.key)).toEqual(["real"])
+
+    const nested = parseBibtex(`@preamble("a {b {c}} d")
+@article{real,title={Real}}
+`)
+    expect(nested.map((entry) => entry.key)).toEqual(["real"])
+  })
+
+  test("keeps escaped closing braces valid inside preamble literals", () => {
+    const entries = parseBibtex(`@preamble("a \\} b")
+@article{real,title={Real}}
+`)
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+  })
+
+  test("@comment remains deliberately opaque to unmatched closing braces", () => {
+    const entries = parseBibtex(`@comment{"}"}
+@article{real,title={Real}}
+`)
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+  })
+})

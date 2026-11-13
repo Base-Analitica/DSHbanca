@@ -352,4 +352,36 @@ describe("banca_refs — BibTeX consumer regression (Issue #111)", () => {
       getSpy.mockRestore()
     }
   })
+
+  test("fails closed on an invalid preamble between valid references (R2)", async () => {
+    const root = makeProject(`@article{ok2026,
+  title = {Válida},
+}
+@preamble("}")
+@article{real2026,
+  title = {Referência real},
+}
+`)
+    const bibPath = join(root, BIB_FILE)
+    const bibHash = sha256(bibPath)
+    let cacheGets = 0
+    const getSpy = spyOn(RefCache.prototype, "get").mockImplementation(() => {
+      cacheGets++
+      return null
+    })
+
+    try {
+      const text = await runRefs(root)
+
+      expect(text.startsWith("bib parse error:")).toBe(true)
+      expect(text).toMatch(/unexpected '}'|@preamble/i)
+      expect(cacheGets).toBe(0)
+      expect(reports(root)).toEqual([])
+      expect(sha256(bibPath)).toBe(bibHash)
+      expect(fetchCalls).toHaveLength(0)
+      expect(mcpStartSpy).not.toHaveBeenCalled()
+    } finally {
+      getSpy.mockRestore()
+    }
+  })
 })
