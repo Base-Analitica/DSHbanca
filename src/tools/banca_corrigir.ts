@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs"
+import { lstatSync, readFileSync, writeFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
@@ -15,6 +15,7 @@ import {
   destinationIdentityConflict,
   lexicalProjectPath,
   logicalProjectRel,
+  sha256Of,
   SnapshotCaptureError,
   SnapshotConflictError,
 } from "../lib/snapshot"
@@ -26,14 +27,98 @@ const CorrectionSchema = z.object({
   file: z.string(),
   oldText: z.string(),
   newText: z.string(),
-  /** Number of occurrences the caller expects to replace. If provided and the
-   * actual count differs, a warning is emitted so silent partial replacements
-   * are surfaced. */
-  expectedOccurrences: z.number().optional(),
+  /**
+   * Exact number of literal, non-overlapping occurrences of `oldText` the
+   * caller authorizes replacing. When provided, it must be a positive safe
+   * integer and match the real count exactly; otherwise the whole batch is
+   * refused. When omitted, only a single occurrence is admissible — several
+   * matches are ambiguous and are refused instead of silently replaced.
+   */
+  expectedOccurrences: z.number().int().positive().optional(),
 })
 
+/**
+ * Literal, non-overlapping occurrence replacement.
+ *
+ * Counting and replacement share the same `indexOf` walk so the authorized
+ * count can never diverge from what is actually written. `replacement` is
+ * inserted verbatim: JavaScript replacement templates (`$&`, `$$`, `$'`,
+ * backtick-dollar), regex syntax and LaTeX commands are not interpreted.
+ */
+export function literalReplaceAll(
+  haystack: string,
+  needle: string,
+  replacement: string,
+): { count: number; updated: string } {
+  let count = 0
+  let cursor = 0
+  let updated = ""
+  for (;;) {
+    const index = haystack.indexOf(needle, cursor)
+    if (index === -1) break
+    updated += haystack.slice(cursor, index) + replacement
+    cursor = index + needle.length
+    count += 1
+  }
+  if (count === 0) return { count: 0, updated: haystack }
+  return { count, updated: updated + haystack.slice(cursor) }
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+}
+
+/**
+ * Strict UTF-8 decode: a file is only rewritten textually when the decoded
+ * string re-encodes to the exact original bytes. Invalid sequences would be
+ * silently replaced with U+FFFD by a lossy round-trip, so they are refused
+ * instead of corrupting unselected bytes. A leading BOM is preserved.
+ */
+function decodeUtf8Strict(bytes: Buffer): string | null {
+  const content = bytes.toString("utf-8")
+  return Buffer.from(content, "utf-8").equals(bytes) ? content : null
+}
+
+interface PlannedCorrection {
+  file: string
+  /** Canonical destination resolved at preflight time. */
+  abs: string
+  /** Canonical project-relative POSIX path used by the existing guards. */
+  relPath: string
+  /** Project-declared logical identity used by the snapshot vault. */
+  logical: string
+  /** Bytes decoded from the destination at preflight time. */
+  content: string
+  count: number
+  /** Fully materialized replacement: what the apply phase will write. */
+  updated: string
+}
+
+function recoveryNote(label: string): string {
+  return `pre-correction snapshot ${label} (partial) remains registered and can be inspected with banca_restore`
+}
+
+/**
+ * Record a post-snapshot failure as `failed` in the academic state. Returns a
+ * short note only when the state itself cannot be written: the caller must
+ * never claim success or rollback it did not perform.
+ */
+function addFailedIteration(root: string, previousScore: number | null | undefined): string {
+  try {
+    addIteration(root, "correction", previousScore ?? null, null, "failed")
+    return ""
+  } catch {
+    return " (the failure could not be recorded in state.json)"
+  }
+}
+
 export const bancaCorrigir = defineBancaTool({
-  description: "Apply corrections with snapshot + immutableFacts guard + regression check + state tracking.",
+  description:
+    "Apply corrections with snapshot + immutableFacts guard + regression check + state tracking. " +
+    "The whole batch is validated in memory before snapshot or write: literal non-overlapping " +
+    "occurrences are counted, expectedOccurrences (when given) must be a positive safe integer and " +
+    "match exactly, an omitted count admits only a single occurrence, and any invalid correction " +
+    "blocks the entire batch.",
   args: {
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
     corrections: z.array(CorrectionSchema).describe("Corrections array"),
@@ -46,55 +131,59 @@ export const bancaCorrigir = defineBancaTool({
     const paths = resolveManuscriptPaths(root, config)
     const corrections = args.corrections || []
 
-    if (corrections.length === 0) return "no corrections provided"
+    if (!Array.isArray(corrections) || corrections.length === 0) return "no corrections provided"
+
+    // The public correction workflow always requires a real pre-correction
+    // snapshot: a caller cannot opt out before any other validation runs.
+    if (args.skipSnapshot) {
+      return "blocked: skipSnapshot is not permitted in public correction workflow"
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1 — validate every argument and every destination in memory.
+    // Nothing in this phase may create a snapshot, write state or touch the
+    // manuscript: one invalid correction must block the entire batch.
+    // -----------------------------------------------------------------------
+    for (const c of corrections) {
+      if (typeof c?.file !== "string" || c.file.length === 0) {
+        return "blocked: correction entry is missing a target file"
+      }
+      if (typeof c.oldText !== "string") {
+        return `blocked: ${c.file}: oldText must be a string`
+      }
+      if (typeof c.newText !== "string") {
+        return `blocked: ${c.file}: newText must be a string`
+      }
+      if (c.expectedOccurrences !== undefined && !isPositiveSafeInteger(c.expectedOccurrences)) {
+        return `blocked: ${c.file}: expectedOccurrences must be a positive safe integer`
+      }
+    }
 
     // Canonical preflight: resolve every destination to its real path before
     // any snapshot or write. Symlinks escaping the workspace block the batch.
-    const prepared: Array<{ file: string; abs: string; relPath: string }> = []
-    const logicals: string[] = []
+    const resolved: Array<{ file: string; abs: string; relPath: string; logical: string }> = []
     for (const c of corrections) {
       try {
         const abs = resolveRealInsideRoot(root, c.file)
         const relPath = toPosixPath(relative(realWorkspaceRoot(root), abs))
-        prepared.push({ file: c.file, abs, relPath })
         const lexical = lexicalProjectPath(root, c.file)
-        logicals.push(logicalProjectRel(root, lexical))
+        const logical = logicalProjectRel(root, lexical)
+        resolved.push({ file: c.file, abs, relPath, logical })
       } catch {
         return `blocked: ${c.file} escapes project root`
       }
     }
 
-    if (args.skipSnapshot) {
-      return "blocked: skipSnapshot is not permitted in public correction workflow"
-    }
+    const logicals = resolved.map((r) => r.logical)
 
     // Physical destination identity preflight (P1 reversibility): verify the
     // entire batch for physical collisions (symlink aliases, hard links, duplicate
     // targets, or identity incompatibilities) before creating any snapshot or
-    // mutating any file.
+    // mutating any file. Destinations are never deduplicated: two corrections
+    // aimed at one physical file remain prohibited.
     const conflict = destinationIdentityConflict(root, logicals)
     if (conflict !== null) {
       return `blocked: ${conflict}`
-    }
-
-    // Hard link alias preflight: refuse regular files with nlink > 1.
-    // If a destination shares its inode with other directory entries (whether
-    // inside or outside the workspace), in-place modification would alter
-    // unlisted/unauthorized files and break reversibility (restore by rename
-    // detaches the inode, leaving aliases permanently corrupted).
-    for (let i = 0; i < corrections.length; i++) {
-      const c = corrections[i]
-      const p = prepared[i]
-      try {
-        const st = lstatSync(p.abs)
-        if (st.isFile() && st.nlink > 1) {
-          return `blocked: ${c.file} has multiple hard links (nlink: ${st.nlink}) — writing would alter uncontrolled aliases`
-        }
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-          return `blocked: destination for ${c.file} is not accessible`
-        }
-      }
     }
 
     // Workspace persistence paths this tool will touch must also be internal.
@@ -105,133 +194,229 @@ export const bancaCorrigir = defineBancaTool({
       return `blocked: workspace state paths escape project root`
     }
 
-    // immutableFacts guard: block edits to immutable files
+    // immutableFacts guard: block edits to immutable files (whole batch).
     for (let i = 0; i < corrections.length; i++) {
       const c = corrections[i]
       for (const fact of config.immutableFacts) {
-        if (globToRegex(fact).test(prepared[i].relPath)) {
+        if (globToRegex(fact).test(resolved[i].relPath)) {
           return `blocked: ${c.file} is immutable (immutableFacts: "${fact}"). ${c.oldText.substring(0, 60)}...`
         }
       }
     }
 
-    // snapshot: mandatory, registered in state.snapshots, declared partial
-    const snapLabel = `pre-${Date.now()}`
+    const planned: PlannedCorrection[] = []
+    for (let i = 0; i < corrections.length; i++) {
+      const c = corrections[i]
+      const r = resolved[i]
+
+      // Preserve the existing protection/allowlist guards on the canonical path.
+      if (isPathProtected(r.relPath, config)) return `blocked: ${c.file}: protected path`
+      if (!isPathAllowed(r.relPath, config)) return `blocked: ${c.file}: not in allowed paths`
+
+      // Empty oldText would match anywhere and insert text at position 0.
+      if (c.oldText.length === 0) return `blocked: ${c.file}: empty oldText`
+
+      // Existence/type/alias preflight for every destination of the batch.
+      let stat
+      try {
+        stat = lstatSync(r.abs)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          return `blocked: ${c.file}: not found`
+        }
+        return `blocked: ${c.file}: destination is not accessible`
+      }
+      if (!stat.isFile()) return `blocked: ${c.file}: destination is not a regular file`
+      // Hard link alias preflight: refuse regular files with nlink > 1.
+      // If a destination shares its inode with other directory entries (whether
+      // inside or outside the workspace), in-place modification would alter
+      // unlisted/unauthorized files and break reversibility (restore by rename
+      // detaches the inode, leaving aliases permanently corrupted).
+      if (stat.nlink > 1) {
+        return `blocked: ${c.file} has multiple hard links (nlink: ${stat.nlink}) — writing would alter uncontrolled aliases`
+      }
+
+      let bytes: Buffer
+      try {
+        bytes = readFileSync(r.abs)
+      } catch {
+        return `blocked: ${c.file}: not accessible`
+      }
+      const content = decodeUtf8Strict(bytes)
+      if (content === null) {
+        return `blocked: ${c.file}: content is not valid UTF-8 — refusing a lossy textual rewrite`
+      }
+
+      // Count and materialize the replacement with the same literal,
+      // non-overlapping semantics; never interpret `$` templates or regex.
+      const { count, updated } = literalReplaceAll(content, c.oldText, c.newText)
+
+      if (count === 0) return `blocked: ${c.file}: oldText not found`
+
+      if (c.expectedOccurrences !== undefined) {
+        if (count !== c.expectedOccurrences) {
+          // A mismatch is a deterministic preflight failure: the batch is
+          // refused before snapshot, state or manuscript mutation.
+          return `blocked: ${c.file} occurrence preflight failed: expected ${c.expectedOccurrences} (expectedOccurrences), found ${count} — batch rejected before snapshot; no manuscript file was modified`
+        }
+      } else if (count !== 1) {
+        // Without an explicit count only an unambiguous single match is
+        // admissible; the tool never infers authorization from the model text.
+        return `blocked: ${c.file} occurrence preflight failed: expected exactly 1 (expectedOccurrences omitted), found ${count} — batch rejected before snapshot; no manuscript file was modified`
+      }
+
+      planned.push({
+        file: c.file,
+        abs: r.abs,
+        relPath: r.relPath,
+        logical: r.logical,
+        content,
+        count,
+        updated,
+      })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2 — real partial pre-correction snapshot, only after the whole
+    // batch passed preflight.
+    // -----------------------------------------------------------------------
+    let snapshotLabel: string
     try {
       const snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
       // Logical identity: the snapshot keys the correction target by its
       // project-declared path, not by the canonical path a symlink resolves to.
-      const candidates = corrections.map((c) => {
-        const lexical = lexicalProjectPath(root, c.file)
-        return { logical: logicalProjectRel(root, lexical), abs: lexical }
-      })
-      // Internal labels may collide within one millisecond: the central
-      // createSnapshot picks the first free `-N` suffix and never reuses an
-      // existing snapshot directory or manifest. Pre-correction snapshots
-      // are registered in state.snapshots (accessible via banca_restore) and are
-      // declared `partial`: they capture only the files this correction will
-      // touch, so they are never announced as full recovery points (the
-      // physical destination policy still applies to their own contents).
-      createSnapshot({
+      const candidates = planned.map((p) => ({
+        logical: p.logical,
+        abs: lexicalProjectPath(root, p.file),
+      }))
+      // Pre-correction snapshots are registered in state.snapshots (accessible
+      // via banca_restore) and are declared `partial`: they capture only the
+      // files this correction will touch, so they are never announced as full
+      // recovery points.
+      const created = createSnapshot({
         root,
         snapshotsDir,
-        label: snapLabel,
+        label: `pre-${Date.now()}`,
         candidates,
         labelPolicy: "unique",
         register: true,
         scoreBefore: args.previousScore ?? null,
         kind: "partial",
       })
+      snapshotLabel = created.label
+
+      // The recovery point announced to the caller must really cover every
+      // planned target with the exact preflight bytes; otherwise no write is
+      // allowed (a disappearance between preflight and capture is a race, not
+      // a licensing event).
+      const captured = new Map(created.files.map((f) => [f.logical, f]))
+      for (const p of planned) {
+        const entry = captured.get(p.logical)
+        if (entry === undefined || entry.sha256 !== sha256Of(Buffer.from(p.content, "utf-8"))) {
+          const recorded = addFailedIteration(root, args.previousScore)
+          return `blocked: pre-correction snapshot ${snapshotLabel} does not cover ${p.file} — no manuscript file was modified; ${recoveryNote(snapshotLabel)}${recorded}`
+        }
+      }
     } catch (err) {
-      if (err instanceof PathTraversalError) return `blocked: workspace state paths escape project root`
-      if (err instanceof SnapshotConflictError || err instanceof SnapshotCaptureError) {
+      if (
+        err instanceof PathTraversalError ||
+        err instanceof SnapshotConflictError ||
+        err instanceof SnapshotCaptureError
+      ) {
+        // Snapshot creation is mandatory: no path guard or capture failure may
+        // leave the manuscript writable without a real recovery point.
         return `blocked: pre-correction snapshot failed — no manuscript file was modified`
       }
       throw err
     }
 
-    const results: string[] = []
-    for (let i = 0; i < corrections.length; i++) {
-      const c = corrections[i]
-      const p = prepared[i]
-      let fp: string
+    // -----------------------------------------------------------------------
+    // Phase 3 — revalidate identity and content immediately before applying.
+    // -----------------------------------------------------------------------
+    const revalidationFailure = (reason: string): string => {
+      const recorded = addFailedIteration(root, args.previousScore)
+      return `blocked: ${reason} — no manuscript file was modified; ${recoveryNote(snapshotLabel)}${recorded}`
+    }
+
+    const identityConflict = destinationIdentityConflict(root, logicals)
+    if (identityConflict !== null) {
+      return revalidationFailure(identityConflict)
+    }
+    for (const p of planned) {
       try {
-        fp = resolveRealInsideRoot(root, p.abs)
-      } catch {
-        return `blocked: ${c.file} escapes project root`
-      }
-      if (!existsSync(fp)) { results.push(`✗ ${c.file}: not found`); continue }
-
-      if (isPathProtected(p.relPath, config)) { results.push(`✗ ${c.file}: protected path`); continue }
-      if (!isPathAllowed(p.relPath, config)) { results.push(`✗ ${c.file}: not in allowed paths`); continue }
-
-      const content = readFileSync(fp, "utf-8")
-      if (typeof c.oldText !== "string" || c.oldText.length === 0) {
-        // Empty oldText would match anywhere and insert text at position 0.
-        results.push(`✗ ${c.file}: empty oldText`)
-        continue
-      }
-
-      // Count actual occurrences so we can warn on mismatch.
-      let occurrenceCount = 0
-      let searchStart = 0
-      while (true) {
-        const idx = content.indexOf(c.oldText, searchStart)
-        if (idx === -1) break
-        occurrenceCount++
-        searchStart = idx + c.oldText.length
-      }
-
-      if (occurrenceCount === 0) {
-        results.push(`✗ ${c.file}: oldText not found`)
-        continue
-      }
-
-      // Check expectation before replacing, so a mismatch is surfaced even
-      // when the replacement succeeds for a subset.
-      if (
-        typeof c.expectedOccurrences === "number" &&
-        c.expectedOccurrences !== occurrenceCount
-      ) {
-        // Still apply the replacement — but warn so the caller knows the
-        // count was off (partial replacement risk).
-        results.push(
-          `⚠ ${c.file}: expected ${c.expectedOccurrences} occurrences, found ${occurrenceCount}`,
-        )
-      }
-
-      // Replace ALL occurrences (String.replace with string only replaces the
-      // first one, which silently drops repeated corrections).
-      const updated = content.replaceAll(c.oldText, c.newText)
-      let target: string
-      try {
-        // re-resolve immediately before writing to narrow the TOCTOU window
-        target = resolveRealInsideRoot(root, p.abs)
+        const target = resolveRealInsideRoot(root, p.abs)
         const st = lstatSync(target)
-        if (st.isFile() && st.nlink > 1) {
-          return `blocked: ${c.file} has multiple hard links (nlink: ${st.nlink}) — writing would alter uncontrolled aliases`
+        if (!st.isFile()) return revalidationFailure(`${p.file}: destination is no longer a regular file`)
+        if (st.nlink > 1) {
+          return revalidationFailure(
+            `${p.file} has multiple hard links (nlink: ${st.nlink}) — writing would alter uncontrolled aliases`,
+          )
+        }
+        const current = decodeUtf8Strict(readFileSync(target))
+        if (current === null || current !== p.content) {
+          return revalidationFailure(`${p.file}: content changed after preflight`)
         }
       } catch (err) {
         if (err instanceof PathTraversalError) {
-          return `blocked: ${c.file} escapes project root`
+          return revalidationFailure(`${p.file} escapes project root`)
         }
-        return `blocked: destination for ${c.file} is not accessible`
+        return revalidationFailure(`${p.file}: destination is not accessible`)
       }
-      writeFileSync(target, updated, "utf-8")
-      results.push(
-        `✓ ${c.file} (${occurrenceCount} replacement${occurrenceCount > 1 ? "s" : ""})`,
-      )
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — apply only the planned substitutions, re-resolving each
+    // destination immediately before its write (existing TOCTOU guard).
+    // Multi-file I/O is not promised to be atomic: an operational failure
+    // after the first write is reported honestly with the real snapshot kept.
+    // -----------------------------------------------------------------------
+    const applied: string[] = []
+    for (const p of planned) {
+      try {
+        const target = resolveRealInsideRoot(root, p.abs)
+        const st = lstatSync(target)
+        if (!st.isFile()) throw new Error("destination is no longer a regular file")
+        if (st.nlink > 1) throw new Error("destination gained hard links")
+        const current = decodeUtf8Strict(readFileSync(target))
+        if (current === null || current !== p.content) throw new Error("content changed before write")
+        writeFileSync(target, p.updated, "utf-8")
+        applied.push(p.file)
+      } catch (err) {
+        const reason =
+          err instanceof PathTraversalError
+            ? `${p.file} escapes project root`
+            : `${p.file}: write failed (${(err as Error)?.message ?? "I/O error"})`
+        const recorded = addFailedIteration(root, args.previousScore)
+        if (applied.length === 0) {
+          return `blocked: ${reason}. No manuscript file was modified; ${recoveryNote(snapshotLabel)}${recorded}`
+        }
+        return `partial: ${applied.length} of ${planned.length} correction(s) applied (${applied.join(", ")}) before the failure — ${reason}. No automatic rollback was performed; ${recoveryNote(snapshotLabel)} to recover the original bytes.${recorded}`
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5 — success bookkeeping (same contracts as before).
+    // -----------------------------------------------------------------------
+    const results = planned.map(
+      (p) => `✓ ${p.file} (${p.count} replacement${p.count > 1 ? "s" : ""})`,
+    )
 
     // regression score check (canonical citation-density heuristic)
     let curScore: number | null = null
     let regNote = ""
-    if (args.previousScore !== undefined && existsSync(paths.main)) {
-      const mainContent = readFileSync(paths.main, "utf-8")
-      curScore = analyzeCitationDensity(mainContent).score
-      const violation = checkScoreNotDecreased(args.previousScore, curScore)
-      if (violation) {
-        regNote = `\n⚠ ${violation.message}`
+    if (args.previousScore !== undefined) {
+      let mainContent: string | null = null
+      try {
+        mainContent = readFileSync(paths.main, "utf-8")
+      } catch {
+        mainContent = null
+      }
+      if (mainContent !== null) {
+        curScore = analyzeCitationDensity(mainContent).score
+        const violation = checkScoreNotDecreased(args.previousScore, curScore)
+        if (violation) {
+          regNote = `\n⚠ ${violation.message}`
+        }
       }
     }
 

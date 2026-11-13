@@ -578,6 +578,7 @@ export interface RuntimeEvidence {
   auditorMutationAttempts?: unknown
   nativeGuardProbe?: unknown
   nativeRestoreGuardProbe?: unknown
+  correctionPreflight?: unknown
   deniedWorkspaceInventoryBefore?: unknown
   deniedWorkspaceInventoryAfter?: unknown
   permittedStatus?: unknown
@@ -1089,6 +1090,48 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
     nativeRestoreProbe.bodyMarkerAbsent !== true
   ) {
     errors.push("native restore guard probe was not denied before body execution")
+  }
+
+  // Issue #110: the occurrence preflight must be fail-closed over the whole
+  // batch inside the permitted mutation window, before snapshot or write.
+  const correctionPreflight = isRecord(evidence.correctionPreflight) ? evidence.correctionPreflight : undefined
+  const divergentCountRow =
+    correctionPreflight && isRecord(correctionPreflight.divergentCount) ? correctionPreflight.divergentCount : undefined
+  const invalidBatchRow =
+    correctionPreflight && isRecord(correctionPreflight.invalidBatch) ? correctionPreflight.invalidBatch : undefined
+  const occurrenceBlock = (
+    row: Record<string, any> | undefined,
+    file: string,
+    expectedLabel: string,
+    actual: number,
+  ): boolean =>
+    row?.dispatchCount === 1 &&
+    row.isError === false &&
+    row.aborted === false &&
+    row.blocked === true &&
+    row.manuscriptUnchanged === true &&
+    typeof row.message === "string" &&
+    row.message.includes(
+      "blocked: " + file + " occurrence preflight failed: expected " + expectedLabel + ", found " + actual,
+    ) &&
+    row.message.includes("no manuscript file was modified") &&
+    row.iterationsBefore === row.iterationsAfter &&
+    row.snapshotsBefore === row.snapshotsAfter &&
+    hasProtectedState(row.inventoryBefore) &&
+    hasProtectedState(row.inventoryAfter) &&
+    inventoriesEqual(row.inventoryBefore, row.inventoryAfter)
+  if (
+    correctionPreflight?.toolName !== "banca_corrigir" ||
+    divergentCountRow?.expectedOccurrences !== 2 ||
+    divergentCountRow?.actualOccurrences !== 1 ||
+    !occurrenceBlock(divergentCountRow, "main.tex", "2 (expectedOccurrences)", 1) ||
+    invalidBatchRow?.correctionCount !== 2 ||
+    invalidBatchRow?.invalidCorrectionIndex !== 1 ||
+    invalidBatchRow?.firstCorrectionWouldApply !== true ||
+    invalidBatchRow?.partialApplicationAbsent !== true ||
+    !occurrenceBlock(invalidBatchRow, "extra.tex", "2 (expectedOccurrences)", 1)
+  ) {
+    errors.push("banca_corrigir occurrence preflight was not fail-closed over the whole batch")
   }
 
   const beforeDenied = evidence.deniedWorkspaceInventoryBefore

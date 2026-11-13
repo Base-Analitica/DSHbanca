@@ -151,6 +151,45 @@ const completeRuntime = {
     bodyInvocations: 0,
     bodyMarkerAbsent: true,
   },
+  correctionPreflight: {
+    toolName: "banca_corrigir",
+    divergentCount: {
+      expectedOccurrences: 2,
+      actualOccurrences: 1,
+      dispatchCount: 1,
+      isError: false,
+      aborted: false,
+      blocked: true,
+      message:
+        "blocked: main.tex occurrence preflight failed: expected 2 (expectedOccurrences), found 1 — batch rejected before snapshot; no manuscript file was modified",
+      manuscriptUnchanged: true,
+      inventoryBefore: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
+      inventoryAfter: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
+      iterationsBefore: 1,
+      iterationsAfter: 1,
+      snapshotsBefore: 1,
+      snapshotsAfter: 1,
+    },
+    invalidBatch: {
+      correctionCount: 2,
+      invalidCorrectionIndex: 1,
+      firstCorrectionWouldApply: true,
+      dispatchCount: 1,
+      isError: false,
+      aborted: false,
+      blocked: true,
+      message:
+        "blocked: extra.tex occurrence preflight failed: expected 2 (expectedOccurrences), found 1 — batch rejected before snapshot; no manuscript file was modified",
+      manuscriptUnchanged: true,
+      partialApplicationAbsent: true,
+      inventoryBefore: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
+      inventoryAfter: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
+      iterationsBefore: 1,
+      iterationsAfter: 1,
+      snapshotsBefore: 1,
+      snapshotsAfter: 1,
+    },
+  },
   deniedWorkspaceInventoryBefore: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
   deniedWorkspaceInventoryAfter: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
   permittedStatus: {
@@ -411,6 +450,81 @@ describe("DSH profile E2E evidence contract", () => {
         },
       },
       "unverified delegation is not fail-closed",
+    ],
+    [
+      "rejects occurrence preflight evidence that is absent",
+      { correctionPreflight: undefined },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
+    ],
+    [
+      "rejects a divergent count reported as applied",
+      {
+        correctionPreflight: {
+          ...completeRuntime.correctionPreflight,
+          divergentCount: { ...completeRuntime.correctionPreflight.divergentCount, blocked: false },
+        },
+      },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
+    ],
+    [
+      "rejects a divergent count that changed the manuscript",
+      {
+        correctionPreflight: {
+          ...completeRuntime.correctionPreflight,
+          divergentCount: {
+            ...completeRuntime.correctionPreflight.divergentCount,
+            inventoryAfter: { "main.tex": "sha256:changed", ".banca/state.json": "sha256:state" },
+          },
+        },
+      },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
+    ],
+    [
+      "rejects a divergent count surfaced as a dispatch error",
+      {
+        correctionPreflight: {
+          ...completeRuntime.correctionPreflight,
+          divergentCount: { ...completeRuntime.correctionPreflight.divergentCount, isError: true },
+        },
+      },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
+    ],
+    [
+      "rejects an invalid batch with partial application",
+      {
+        correctionPreflight: {
+          ...completeRuntime.correctionPreflight,
+          invalidBatch: { ...completeRuntime.correctionPreflight.invalidBatch, partialApplicationAbsent: false },
+        },
+      },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
+    ],
+    [
+      "rejects an invalid batch that created a snapshot",
+      {
+        correctionPreflight: {
+          ...completeRuntime.correctionPreflight,
+          invalidBatch: { ...completeRuntime.correctionPreflight.invalidBatch, snapshotsAfter: 2 },
+        },
+      },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
+    ],
+    [
+      "rejects an incomplete invalid-batch fixture",
+      {
+        correctionPreflight: {
+          ...completeRuntime.correctionPreflight,
+          invalidBatch: { ...completeRuntime.correctionPreflight.invalidBatch, correctionCount: 1 },
+        },
+      },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
+    ],
+    [
+      "rejects occurrence preflight evidence bound to another tool",
+      {
+        correctionPreflight: { ...completeRuntime.correctionPreflight, toolName: "banca_restore" },
+      },
+      "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
     ],
   ])("%s", (_label, override, expectedError) => {
     expect(validateEvidence({ ...completeRuntime, ...override } as any)).toContain(expectedError)

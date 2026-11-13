@@ -248,7 +248,16 @@ O resultado é registrado de forma independente em `stages.nativeQuestions` com 
 
 ## Cenário, integridade e teardown
 
-O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo. Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
+O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo (`expectedOccurrences: 1` explícito). Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
+
+## Issue #110: preflight de ocorrências fail-closed
+
+Ainda na mesma janela de mutação permitida (antes da seleção nativa de `banca-auditor`), o observador despacha duas sondas adicionais pelo `ToolRuntime` real e exige que ambas sejam recusadas pelo preflight determinístico de `banca_corrigir`, com `isError: false` (valor de domínio `blocked:`), sem aborto:
+
+1. **Contagem divergente**: uma correção em `main.tex` com `expectedOccurrences: 2` quando existe exatamente 1 ocorrência real de `CURRENT_SENTINEL`. A resposta precisa conter `blocked: main.tex occurrence preflight failed: expected 2 (expectedOccurrences), found 1` e `no manuscript file was modified`.
+2. **Lote inválido sem aplicação parcial**: lote de duas correções em arquivos físicos distintos (para não colidir com `destinationIdentityConflict`), sendo a primeira válida e a segunda com `expectedOccurrences` divergente. A recusa precisa citar o segundo arquivo (`extra.tex`) e deixar ambos os arquivos inalterados.
+
+Em ambos os casos o observador compara o inventário SHA-256 completo do workspace (incluindo `main.tex`, `.banca/state.json` e `.banca/snapshots`) antes e depois: manuscrito, estado e vault precisam permanecer byte a byte idênticos, sem snapshot novo e sem iteração acrescentada. A evidência é registrada em `stages.observedRuntime.correctionPreflight` e validada por `validateEvidence`; uma execução nativa só pode ser `PASS` quando as duas recusas forem realmente observadas. Enquanto não houver autorização humana específica para o lifecycle no SHA final, esta sonda permanece **BLOCKED** — fixtures e testes de contrato não contam como prova do host real.
 
 Depois da seleção nativa de `banca-auditor`, o teste:
 
@@ -260,6 +269,8 @@ Depois da seleção nativa de `banca-auditor`, o teste:
 6. verifica zero eventos `turn/start` e `request/header`, descarta os dois `AgentHandle`s com `dispose()` e, ao sair do processo DSH, remove o sandbox completo.
 
 As tools-sombra são uma sonda adicional do guard nativo: seus corpos deliberadamente não contêm verificação de identidade. Elas não substituem os despachos das tools acadêmicas reais, que também são feitos com argumentos válidos e têm sua integridade verificada.
+
+As sondas da issue #110 (contagem divergente e lote inválido) ocorrem antes da seleção do preset auditor, na mesma janela de mutação do controle positivo. Elas exigem o valor de domínio `blocked:` com `isError: false` e inventário/estado/vault inalterados; não são negações do guard read-only e não substituem a prova de negação do auditor, que continua sendo feita separadamente depois da seleção do preset.
 
 O relatório sanitizado registra SHA do repositório, versões, preset composto, tentativas e classificações, inventários relativos, atividade externa e teardown. Por padrão, o arquivo é `docs/evidence/dsh-profile-e2e.latest.json`. Para preservar um artefato preexistente, o chamador pode apontar `DSHBANCA_DSH_PROFILE_REPORT_PATH` para um caminho de scratch. O caminho externo não é gravado nem impresso no relatório.
 
@@ -282,7 +293,7 @@ Cada execução cria um diretório aleatório com permissões restritas e coloca
 
 ## Status e interpretação
 
-- `PASS` / exit `0`: instalação offline, composição Cordis, descoberta das 16 tools e skills, identidade real `banca-auditor` pelo AgentRegistry/preset registry, negações antes dos corpos, integridade, status permitido, ausência de atividade de modelo e teardown passaram.
+- `PASS` / exit `0`: instalação offline, composição Cordis, descoberta das 16 tools e skills, identidade real `banca-auditor` pelo AgentRegistry/preset registry, preflight de ocorrências fail-closed (contagem divergente e lote inválido sem mutação parcial), negações antes dos corpos, integridade, status permitido, ausência de atividade de modelo e teardown passaram.
 - `FAIL` / exit `1`: DSH estava disponível, mas uma etapa ou asserção do contrato falhou.
 - `BLOCKED` / exit `2`: DSH, runtime ou dependência offline necessária não estava disponível. Ausência do host nunca conta como aprovação.
 

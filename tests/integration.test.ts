@@ -200,7 +200,7 @@ describe("Integration — immutableFacts guard", () => {
     expect(content).toContain("Introduction paragraph")
   })
 
-  test("replaces ALL occurrences, not just the first one", async () => {
+  test("replaces ALL occurrences (not just the first) when the explicit count matches", async () => {
     mockProjectJson()
     // Write content with a repeated pattern
     writeFileSync(join(testRoot, "main.tex"), `\\documentclass{article}
@@ -216,7 +216,7 @@ Third paragraph with FIXME marker too.
     const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
     const result = await bancaCorrigir.execute({
       projectRoot: testRoot,
-      corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE" }],
+      corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE", expectedOccurrences: 3 }],
     }, {} as any)
 
     expect(result).toContain("✓")
@@ -227,12 +227,13 @@ Third paragraph with FIXME marker too.
     expect((content.match(/DONE/g) || []).length).toBe(3)
   })
 
-  test("warns when expectedOccurrences does not match actual", async () => {
+  test("fails closed when expectedOccurrences does not match actual (issue #110)", async () => {
     mockProjectJson()
-    writeFileSync(join(testRoot, "main.tex"), `\\documentclass{article}
+    const original = `\\documentclass{article}
 \\begin{document}
 One FIXME here.
-\\end{document}`)
+\\end{document}`
+    writeFileSync(join(testRoot, "main.tex"), original)
     writeFileSync(join(testRoot, "refs.bib"), "@article{a, author={A}, title={T}, year={2020}}")
 
     const { bancaCorrigir } = await import("../src/tools/banca_corrigir")
@@ -241,12 +242,12 @@ One FIXME here.
       corrections: [{ file: "main.tex", oldText: "FIXME", newText: "DONE", expectedOccurrences: 5 }],
     }, {} as any)
 
-    // Should still apply the replacement (1 found) but warn about the mismatch
-    expect(result).toContain("⚠")
-    expect(result).toContain("expected 5")
-    expect(result).toContain("found 1")
-    const content = readFileSync(join(testRoot, "main.tex"), "utf-8")
-    expect(content).toContain("DONE")
+    // A count mismatch is deterministic preflight failure: nothing is written.
+    expect(result).toContain("blocked")
+    expect(result).toContain("occurrence preflight failed")
+    expect(result).toContain("expected 5 (expectedOccurrences), found 1")
+    expect(result).not.toContain("⚠")
+    expect(readFileSync(join(testRoot, "main.tex"), "utf-8")).toBe(original)
   })
 
   test("does not warn when expectedOccurrences matches actual", async () => {
@@ -265,6 +266,7 @@ Another FIXME here.
     }, {} as any)
 
     expect(result).not.toContain("⚠")
+    expect(result).toContain("✓")
     expect(result).toContain("2 replacement")
   })
 })

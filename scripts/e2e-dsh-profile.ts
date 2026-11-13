@@ -5031,7 +5031,7 @@ export async function apply(ctx) {
 
     const beforeCorrection = await readFile(join(workspace, "main.tex"), "utf8");
     const setupCorrectionArgs = {
-      corrections: [{ file: "main.tex", oldText: "BASELINE_SENTINEL", newText: "CURRENT_SENTINEL" }],
+      corrections: [{ file: "main.tex", oldText: "BASELINE_SENTINEL", newText: "CURRENT_SENTINEL", expectedOccurrences: 1 }],
     };
     const setupCorrection = await runTool(ctx, "dshbanca-e2e-setup-correction", "banca_corrigir", setupCorrectionArgs, agent);
     const currentText = await readFile(join(workspace, "main.tex"), "utf8");
@@ -5040,6 +5040,67 @@ export async function apply(ctx) {
     if (!correctionWouldMutate) fail("the valid synthetic correction precondition did not perform its expected setup mutation");
     const restoreWouldMutate = snapshotExists && currentText !== baselineText;
     if (!restoreWouldMutate) fail("the valid snapshot restore precondition would not change the synthetic manuscript");
+
+    // Issue #110: literal occurrence preflight must be fail-closed over the
+    // whole batch, in the permitted mutation window and before any snapshot or
+    // write. A divergent expectedOccurrences or a batch whose later correction
+    // is invalid must leave manuscript, state and snapshot vault untouched.
+    const readStateBudget = async () => {
+      const st = JSON.parse(await readFile(join(workspace, ".banca", "state.json"), "utf8"));
+      return {
+        iterations: Array.isArray(st.iterations) ? st.iterations.length : 0,
+        snapshots: Array.isArray(st.snapshots) ? st.snapshots.length : 0,
+      };
+    };
+    const isOccurrenceBlock = (message, file, expectedLabel, actual) =>
+      typeof message === "string" &&
+      message.includes("blocked: " + file + " occurrence preflight failed: expected " + expectedLabel + ", found " + actual) &&
+      message.includes("no manuscript file was modified");
+
+    const divergentCountArgs = { corrections: [{
+      file: "main.tex", oldText: "CURRENT_SENTINEL",
+      newText: "DIVERGENT_COUNT_MUST_NOT_APPLY", expectedOccurrences: 2,
+    }] };
+    const divergentBefore = await inventory(workspace);
+    const divergentBudgetBefore = await readStateBudget();
+    const divergentAttempt = await runTool(ctx, "dshbanca-e2e-divergent-count", "banca_corrigir", divergentCountArgs, agent);
+    const divergentText = await readFile(join(workspace, "main.tex"), "utf8");
+    const divergentAfter = await inventory(workspace);
+    const divergentBudgetAfter = await readStateBudget();
+    const divergentCountBlocked =
+      divergentAttempt.result.isError === false && divergentAttempt.aborted === false &&
+      isOccurrenceBlock(divergentAttempt.message, "main.tex", "2 (expectedOccurrences)", 1) &&
+      divergentText === currentText && !divergentText.includes("DIVERGENT_COUNT_MUST_NOT_APPLY") &&
+      JSON.stringify(divergentBefore) === JSON.stringify(divergentAfter) &&
+      divergentBudgetBefore.iterations === divergentBudgetAfter.iterations &&
+      divergentBudgetBefore.snapshots === divergentBudgetAfter.snapshots;
+    if (!divergentCountBlocked) fail("the divergent expectedOccurrences batch was not rejected before manuscript, state or snapshot mutation");
+
+    // The second correction targets a distinct physical file: two corrections
+    // for one file are already refused by destinationIdentityConflict, so the
+    // occurrence preflight itself must be the rejection under test here.
+    const invalidBatchExtraFile = "extra.tex";
+    await writeFile(join(workspace, invalidBatchExtraFile), "EXTRA_SENTINEL once.", { mode: 0o600 });
+    const invalidBatchArgs = { corrections: [
+      { file: "main.tex", oldText: "CURRENT_SENTINEL", newText: "BATCH_PARTIAL_MUST_NOT_APPLY", expectedOccurrences: 1 },
+      { file: invalidBatchExtraFile, oldText: "EXTRA_SENTINEL", newText: "BATCH_PARTIAL_MUST_NOT_APPLY", expectedOccurrences: 2 },
+    ] };
+    const invalidBatchBefore = await inventory(workspace);
+    const invalidBatchBudgetBefore = await readStateBudget();
+    const invalidBatchAttempt = await runTool(ctx, "dshbanca-e2e-invalid-batch", "banca_corrigir", invalidBatchArgs, agent);
+    const invalidBatchText = await readFile(join(workspace, "main.tex"), "utf8");
+    const invalidBatchExtraText = await readFile(join(workspace, invalidBatchExtraFile), "utf8");
+    const invalidBatchAfter = await inventory(workspace);
+    const invalidBatchBudgetAfter = await readStateBudget();
+    const invalidBatchBlocked =
+      invalidBatchAttempt.result.isError === false && invalidBatchAttempt.aborted === false &&
+      isOccurrenceBlock(invalidBatchAttempt.message, invalidBatchExtraFile, "2 (expectedOccurrences)", 1) &&
+      invalidBatchText === currentText && !invalidBatchText.includes("BATCH_PARTIAL_MUST_NOT_APPLY") &&
+      invalidBatchExtraText === "EXTRA_SENTINEL once." &&
+      JSON.stringify(invalidBatchBefore) === JSON.stringify(invalidBatchAfter) &&
+      invalidBatchBudgetBefore.iterations === invalidBatchBudgetAfter.iterations &&
+      invalidBatchBudgetBefore.snapshots === invalidBatchBudgetAfter.snapshots;
+    if (!invalidBatchBlocked) fail("the batch with a valid first correction and an invalid later correction was rejected with partial application");
 
     const presetSelected = await ctx.agentPresets.select(agent, "banca-auditor");
     const effectivePreset = ctx.agentPresets.composedPreset(agent.ctx);
@@ -5513,6 +5574,43 @@ export async function apply(ctx) {
         message: nativeRestoreProbe.message,
         bodyInvocations: nativeRestoreBodyInvocations,
         bodyMarkerAbsent: !Object.hasOwn(afterNativeProbe, nativeRestoreMarker),
+      },
+      correctionPreflight: {
+        toolName: "banca_corrigir",
+        divergentCount: {
+          expectedOccurrences: 2,
+          actualOccurrences: 1,
+          dispatchCount: 1,
+          isError: divergentAttempt.result.isError === true,
+          aborted: divergentAttempt.aborted,
+          blocked: divergentCountBlocked,
+          message: divergentAttempt.message,
+          manuscriptUnchanged: divergentText === currentText,
+          inventoryBefore: divergentBefore,
+          inventoryAfter: divergentAfter,
+          iterationsBefore: divergentBudgetBefore.iterations,
+          iterationsAfter: divergentBudgetAfter.iterations,
+          snapshotsBefore: divergentBudgetBefore.snapshots,
+          snapshotsAfter: divergentBudgetAfter.snapshots,
+        },
+        invalidBatch: {
+          correctionCount: invalidBatchArgs.corrections.length,
+          invalidCorrectionIndex: 1,
+          firstCorrectionWouldApply: true,
+          dispatchCount: 1,
+          isError: invalidBatchAttempt.result.isError === true,
+          aborted: invalidBatchAttempt.aborted,
+          blocked: invalidBatchBlocked,
+          message: invalidBatchAttempt.message,
+          manuscriptUnchanged: invalidBatchText === currentText,
+          partialApplicationAbsent: invalidBatchText === currentText && invalidBatchExtraText === "EXTRA_SENTINEL once.",
+          inventoryBefore: invalidBatchBefore,
+          inventoryAfter: invalidBatchAfter,
+          iterationsBefore: invalidBatchBudgetBefore.iterations,
+          iterationsAfter: invalidBatchBudgetAfter.iterations,
+          snapshotsBefore: invalidBatchBudgetBefore.snapshots,
+          snapshotsAfter: invalidBatchBudgetAfter.snapshots,
+        },
       },
       deniedWorkspaceInventoryBefore: deniedBefore,
       deniedWorkspaceInventoryAfter: deniedAfter,
@@ -6893,6 +6991,7 @@ async function main(): Promise<void> {
     auditorMutationAttempts: observed.auditorMutationAttempts,
     nativeGuardProbe: observed.nativeGuardProbe,
     nativeRestoreGuardProbe: observed.nativeRestoreGuardProbe,
+    correctionPreflight: observed.correctionPreflight,
     deniedWorkspaceInventoryBefore: observed.deniedWorkspaceInventoryBefore,
     deniedWorkspaceInventoryAfter: observed.deniedWorkspaceInventoryAfter,
     permittedStatus: observed.permittedStatus,
