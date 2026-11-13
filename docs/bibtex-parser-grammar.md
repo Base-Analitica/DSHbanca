@@ -93,6 +93,12 @@ arquivos que dependam delas.
   é ignorado. Para conteúdo com `@` fora de entradas, use `@comment{...}`.
 - `@xdata` e outras extensões do biblatex não recebem tratamento especial.
 - Não há tolerância a múltiplos erros: a primeira falha interrompe o parse.
+- Chaves de citação duplicadas não são deduplicadas: cada ocorrência vira uma
+  entrada, e o parser não decide qual delas é a correta.
+- O conteúdo de `@comment`/`@preamble` precisa ter delimitadores balanceados
+  (com escapes) para ser saltado; construções desbalanceadas falham com erro.
+- Erros em entrada não terminada no fim do arquivo apontam para o início da
+  entrada (e não para o EOF), preservando a linha/coluna onde ela começa.
 
 ## Uso pelo consumidor `banca_refs`
 
@@ -132,7 +138,3 @@ continua sujeita ao contrato de provedores do DSH.
 
 Nenhum teste desta issue executa rede, MCP, REST, LLM ou LaTeX/BibTeX real.
 
-- Chaves de citação duplicadas não são deduplicadas: cada ocorrência vira uma
-  entrada, e o parser não decide qual delas é a correta.
-- O conteúdo de `@comment`/`@preamble` precisa ter delimitadores balanceados
-  (com escapes) para ser saltado; construções desbalanceadas falham com erro.
