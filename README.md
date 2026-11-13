@@ -91,7 +91,7 @@ Camada acadêmica presente no código da `master`, com os limites acima:
 - findings estruturados validados por plano, lote e proveniência, e entrada de síntese global condicionada à cobertura completa;
 - rubricas e validações acadêmicas determinísticas;
 - guardrails de correção, snapshots e política de restore;
-- utilitários de referências/BibTeX, compilação LaTeX e relatórios.
+- utilitários de referências/BibTeX ([gramática suportada e limitações](docs/bibtex-parser-grammar.md)), compilação LaTeX e relatórios.
 
 Validações LaTeX/BibTeX verificam estrutura, includes e referências. Análise heurística de IA e de similaridade produz **sinais metodológicos**. Nenhuma delas constitui avaliação acadêmica humana, nota, aprovação ou reprovação.
 

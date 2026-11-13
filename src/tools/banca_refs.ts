@@ -3,7 +3,7 @@ import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
-import { parseBibtex, bibEntryToRef } from "../lib/bibtex"
+import { parseBibtex, bibEntryToRef, BibtexParseError } from "../lib/bibtex"
 import { resolveRef } from "../lib/provider_chain"
 import { RefCache } from "../lib/cache"
 import { saveReport } from "../lib/reports"
@@ -35,7 +35,19 @@ export const bancaRefs = defineBancaTool({
     }
 
     const content = readFileSync(canonicalBib, "utf-8")
-    const entries = parseBibtex(content)
+
+    let entries
+    try {
+      entries = parseBibtex(content)
+    } catch (err) {
+      // Parsing is all-or-nothing: a malformed or unsupported construct must
+      // not be reported as a successful (or empty) bibliography. Fail closed
+      // before any reference resolution or report is written.
+      if (err instanceof BibtexParseError) {
+        return `bib parse error: ${err.message}`
+      }
+      throw err
+    }
 
     if (entries.length === 0) return "no entries found in bib file"
 
