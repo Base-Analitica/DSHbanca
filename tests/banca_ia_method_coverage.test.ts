@@ -1,8 +1,9 @@
 /**
  * Focal tests for issue #113 — `banca_ia` method/coverage report contract.
  *
- * Contract of record: /tmp/dshbanca-113-contract.md (22 scenarios in §9,
- * exact report markers in §8, reason codes in §6/§7, hermetic rules in §10).
+ * Contract of record: issue #113 acceptance criteria and the implementation
+ * contract (22 scenarios; report markers; reason codes; hermetic rules are
+ * restated inline by the helpers below).
  *
  * Hermetic by construction:
  * - every scenario uses a synthetic workspace created with `mkdtempSync(tmpdir())`;
@@ -715,6 +716,27 @@ describe("banca_ia — caminho Python válido e limite de 50 parágrafos", () =>
     expect(analysisInvocations()).toBe(1)
   })
 
+  test("4b. manuscrito CRLF: contagem Python alinhada à tradução universal de newlines", async () => {
+    writeProjectJson()
+    const content = paragraphs(2).replaceAll("\n", "\r\n")
+    writeMain(content)
+    configureAnalysis({ stdout: okJson(2, 0.2) })
+
+    const report = await runBancaIa()
+    expect(headerField(report, "Método global efetivo")).toBe("Python (pt_ai_detector)")
+    expectFileCoverage(report, "main.tex", {
+      method: "python",
+      reason: "python-ok",
+      eligible: 2,
+      analyzed: 2,
+      omitted: 0,
+      truncated: false,
+    })
+    expect(summaryNumber(report, "Parágrafos elegíveis (segmentação Python)")).toBe(2)
+    expect(summaryNumber(report, "Parágrafos analisados por Python")).toBe(2)
+    expect(analysisInvocations()).toBe(1)
+  })
+
   test("5. exatamente 50 elegíveis: 50/50/0 e sem truncamento", async () => {
     writeProjectJson()
     const content = paragraphs(50)
@@ -775,6 +797,26 @@ describe("banca_ia — caminho Python válido e limite de 50 parágrafos", () =>
 // §9.3 + §9.7 — probe availability and absence of evidence
 // ===========================================================================
 describe("banca_ia — sonda Python e ausência de evidência", () => {
+  test("7b. caracteres astrais: elegibilidade Python conta code points, não unidades UTF-16", async () => {
+    writeProjectJson()
+    // 11 code points (22 unidades UTF-16) + espaços: inelegível para o
+    // `len(p.strip()) > 20` do script Python.
+    writeMain("😀".repeat(11) + "  ")
+
+    const report = await runBancaIa()
+    expect(headerField(report, "Estado")).toBe("ausencia-de-evidencia")
+    expect(headerField(report, "Método global efetivo")).toBe("Nenhum (nada analisado)")
+    expectFileCoverage(report, "main.tex", {
+      method: "none",
+      reason: "no-eligible-content",
+      eligible: 0,
+      analyzed: 0,
+    })
+    expect(summaryNumber(report, "Parágrafos elegíveis (segmentação Python)")).toBe(0)
+    expect(probeInvocations()).toBe(1)
+    expect(analysisInvocations()).toBe(0)
+  })
+
   test("3. Python indisponível na sonda: regex/python-unavailable com 1 sonda e 0 análises", async () => {
     writeProjectJson()
     writeMain(paragraphs(2))

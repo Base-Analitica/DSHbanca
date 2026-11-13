@@ -250,8 +250,29 @@ function analyzePython(filePath: string, moduleDir: string, pythonEligible: numb
 // Heurística regex existente (padrões, fórmulas e thresholds preservados).
 // ---------------------------------------------------------------------------
 
+// Whitespace set of Python's str.strip() with no arguments. Kept explicit so
+// eligibility counting in the parent matches the Python script exactly.
+const PYTHON_WHITESPACE =
+  "\\t\\n\\v\\f\\r \\x1c-\\x1f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"
+const PYTHON_STRIP_RE = new RegExp(`^[${PYTHON_WHITESPACE}]+|[${PYTHON_WHITESPACE}]+$`, "g")
+
+/**
+ * Python counts `len(p.strip())` in Unicode code points, and `open()` applies
+ * universal-newline translation. The parent must replicate both rules before
+ * validating `paragraphs_total`, otherwise CRLF manuscripts or astral
+ * characters would diverge and a valid Python result would be discarded as
+ * `python-inconsistent-counts`.
+ */
+function pythonEligibleLength(paragraph: string): number {
+  const stripped = paragraph.replace(PYTHON_STRIP_RE, "")
+  let length = 0
+  for (const _codePoint of stripped) length += 1
+  return length
+}
+
 function countPythonEligible(content: string): number {
-  return content.split("\n\n").filter((p) => p.trim().length > 20).length
+  const normalized = content.replace(/\r\n?/g, "\n")
+  return normalized.split("\n\n").filter((p) => pythonEligibleLength(p) > 20).length
 }
 
 function countRegexEligible(content: string): number {
