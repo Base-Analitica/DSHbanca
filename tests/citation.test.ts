@@ -118,6 +118,16 @@ const positiveCitationCases: Array<[string, string]> = [
   ["comando válido após linha comentada", "% \\cite{ignorada}\nAgora a citação real \\parencite{autor2020} aparece."],
   ["percentual escapado antes da citação", "50\\% \\cite{autor2020}"],
   ["barra dupla antes de citação válida (quebra de linha)", String.raw`\\\cite{autor2020}`],
+  // R1 — controles positivos de balanceamento e vazio estrutural.
+  ["opcional com colchete protegido por grupo", String.raw`\cite[{note ] here}]{a}`],
+  ["opcional com chave escapada", String.raw`\cite[\} note]{a}`],
+  ["opcional com colchete escapado", String.raw`\cite[ver \] note]{a}`],
+  ["opcional com comentário que não altera a profundidade", "\\cite[{%} comentado\nok}]{a}"],
+  ["opcional com fechamento comentado antes do fechamento real", "\\cite[ver % ]\n]{a}"],
+  ["dois opcionais válidos com grupos balanceados", String.raw`\parencite[p.~{1}][p.~{12}]{a}`],
+  ["grupo aninhado com chave de referência", String.raw`\cite{{autor2020}}`],
+  ["comentário interno não esvazia a chave", "\\cite{autor% comentário\n2020}"],
+  ["apud com primeiro argumento aninhado com conteúdo", String.raw`\apud{{autorOriginal}}{autorConsultado}`],
 ]
 
 describe("citation command recognition (issue #112) — positives", () => {
@@ -152,6 +162,23 @@ const negativeCitationCases: Array<[string, string]> = [
   ["\\apud com dois opcionais (assinatura aceita um)", String.raw`\apud[original][consultado]{autorOriginal}{autorConsultado}`],
   ["\\apudonline com apenas um argumento obrigatório", String.raw`\apudonline{autorOriginal}`],
   ["\\citeonline com dois opcionais (assinatura aceita um)", String.raw`\citeonline[a][b]{autor2020}`],
+  // R1 — balanceamento de chaves em argumentos opcionais (profundidade de prefixo).
+  ["opcional com chave de fechamento sem abertura", String.raw`\cite[}{]{a}`],
+  ["opcional com chave de fechamento sem abertura e texto", String.raw`\cite[}text{]{a}`],
+  ["apud com opcional contendo chave de fechamento sem abertura", String.raw`\apud[}{]{a}{b}`],
+  ["primeiro opcional com chave de fechamento sem abertura", String.raw`\parencite[}{][p.~12]{a}`],
+  ["segundo opcional com chave de fechamento sem abertura", String.raw`\parencite[ver][}{]{a}`],
+  ["fechamento excedente depois de grupo balanceado no opcional", String.raw`\cite[{text}}{]{a}`],
+  ["fechamento excedente compensado por abertura posterior", String.raw`\cite[{}{}}{]{a}`],
+  ["opcional aberto sem fechamento", String.raw`\cite[{a]{a}`],
+  // R1 — vazio estrutural de argumentos obrigatórios.
+  ["grupo obrigatório estruturalmente vazio", String.raw`\cite{{}}`],
+  ["grupo obrigatório aninhado só com separadores", String.raw`\cite{{,}}`],
+  ["grupo obrigatório aninhado só com espaços", String.raw`\cite{{ }}`],
+  ["grupo obrigatório aninhado só com comentário", "\\cite{{% somente comentário\n}}"],
+  ["grupo obrigatório com múltiplos grupos vazios", String.raw`\cite{{}{}}`],
+  ["apud com primeiro argumento estruturalmente vazio", String.raw`\apud{{}}{a}`],
+  ["apud com segundo argumento estruturalmente vazio", String.raw`\apud{a}{{}}`],
   ["comando truncado no fim do conteúdo", String.raw`\textcite{autor2020`],
   ["comando sem argumentos no fim do conteúdo", String.raw`\parencite`],
 ]
@@ -240,5 +267,38 @@ describe("citation-density contract preserved (issue #112)", () => {
     )
     expect(result.totalParagraphs).toBe(2)
     expect(result.citedParagraphs).toBe(0)
+  })
+
+  // R1 — o falso positivo de opcional malformado não pode inflar o índice.
+  test("opcional malformado não infla o índice na fronteira de 30%", () => {
+    const valid = [
+      "O primeiro parágrafo sintético cita \\parencite[p.~12]{autor2020} na fundamentação.",
+      "O segundo parágrafo sintético cita \\textcite{autor2020} na revisão de literatura.",
+      "O terceiro parágrafo sintético cita \\citeauthor{autor2020} ao atribuir a tese.",
+      "O quarto parágrafo sintético cita \\apud{orig2020}{cons2020} na articulação.",
+      "O quinto parágrafo sintético cita \\cite[p.~7]{autor2020} na evidência empírica.",
+      "O sexto parágrafo sintético cita \\citeonline[p.~1]{autor2020} na nota corrida.",
+      "O sétimo parágrafo sintético cita \\parencite{autor2020,outro2021} na síntese parcial.",
+    ]
+    const malformed =
+      "O oitavo parágrafo sintético contém \\cite[}{]{autor2020} com opcional corrompido."
+    const uncited = [
+      "O nono parágrafo sintético encerra a discussão sem chamada bibliográfica aqui.",
+      "O décimo parágrafo sintético apresenta a síntese final sem chamada bibliográfica.",
+    ]
+    const result = analyzeCitationDensity([...valid, malformed, ...uncited].join("\n\n"))
+    expect(result.totalParagraphs).toBe(10)
+    expect(result.citedParagraphs).toBe(7)
+    expect(result.paragraphsWithoutCitation).toBe(3)
+    expect(result.percentWithoutCitation).toBe(30)
+    expect(result.score).toBe(6)
+  })
+
+  test("opcional inválido não mascara citação válida independente no mesmo parágrafo", () => {
+    const result = analyzeCitationDensity(
+      "Este parágrafo sintético longo contém \\cite[}{]{x} malformada e \\parencite{autor2020} válida.",
+    )
+    expect(result.totalParagraphs).toBe(1)
+    expect(result.citedParagraphs).toBe(1)
   })
 })
