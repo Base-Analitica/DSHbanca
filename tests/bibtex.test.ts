@@ -344,3 +344,133 @@ describe("parseBibtex — malformed and unsupported input fails explicitly", () 
     expect(error.message).toMatch(/column \d+/i)
   })
 })
+
+// ---------------------------------------------------------------------------
+// R1 remediation (maintainer review of PR #116): parenthesized directives must
+// respect protected value contexts and must never leak ghost references; entry
+// keys get minimal lexical validation independent of the entry delimiter.
+// ---------------------------------------------------------------------------
+
+describe("parseBibtex — directives never leak references (R1)", () => {
+  test("P1.1: quoted literal in parenthesized @preamble does not expose a ghost entry", () => {
+    const entries = parseBibtex(`@preamble("x) @article{fantasma, title={Não é referência}} (x")
+@article{real, title={Real}}
+`)
+
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+    expect(entries).toHaveLength(1)
+    expect(entries[0].fields.title).toBe("Real")
+  })
+
+  test("P1.2: braced literal in parenthesized @comment does not expose a ghost entry", () => {
+    const entries = parseBibtex(`@comment(ignored {x) @article{fantasma, title={Não é referência}} (x})
+@article{real, title={Real}}
+`)
+
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+    expect(entries).toHaveLength(1)
+  })
+
+  test("P1.3: opening parenthesis inside a quoted literal does not unbalance the directive", () => {
+    const entries = parseBibtex(`@preamble("A (")
+@article{real,title={Real}}
+`)
+
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+    expect(entries).toHaveLength(1)
+  })
+
+  test("brace-delimited directives protect quoted literals containing the closing brace", () => {
+    const entries = parseBibtex(`@comment{"} @article{fantasma, title={Não é referência}}"}
+@preamble{"\\newcommand{\\x}{y}"}
+@article{real, title={Real}}
+`)
+
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+    expect(entries).toHaveLength(1)
+    expect(entries[0].fields.title).toBe("Real")
+  })
+
+  test("escaped delimiters inside directives do not close them", () => {
+    const entries = parseBibtex(`@comment(texto com \\) parêntese escapado)
+@preamble("A \\( B")
+@article{real,title={Real}}
+`)
+
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+    expect(entries).toHaveLength(1)
+  })
+
+  test("nested parentheses inside parenthesized directives remain balanced", () => {
+    const entries = parseBibtex(`@comment(ignorar (aninhado) e mais)
+@article{real,title={Real}}
+`)
+
+    expect(entries.map((entry) => entry.key)).toEqual(["real"])
+    expect(entries).toHaveLength(1)
+  })
+
+  test("unterminated brace-delimited directive between valid entries fails closed", () => {
+    expectParseFailure(`@article{ok1, title={A}}
+@comment{diretiva sem fechamento
+@article{ok2, title={B}}
+`, "malformed", /unterminated @comment/i)
+  })
+
+  test("unterminated quoted parenthesized directive between valid entries fails closed", () => {
+    expectParseFailure(`@article{ok1, title={A}}
+@preamble("sem fechamento
+@article{ok2, title={B}}
+`, "malformed", /unterminated @preamble/i)
+  })
+
+  test("unterminated parenthesized directive without literals fails closed", () => {
+    expectParseFailure(`@article{ok1, title={A}}
+@comment(diretiva sem fechamento
+`, "malformed", /unterminated @comment/i)
+  })
+})
+
+describe("parseBibtex — citation key lexical validation (R1)", () => {
+  test("rejects structural delimiters in parenthesized entry keys", () => {
+    expectParseFailure("@article(bad{key, title={A})", "malformed", /citation key/i)
+    expectParseFailure("@article(bad}key, title={A})", "malformed", /citation key/i)
+    expectParseFailure("@article(bad(key, title={A})", "malformed", /citation key/i)
+    expectParseFailure("@article(bad)key, title={A})", "malformed", /citation key/i)
+  })
+
+  test("rejects structural delimiters in braced entry keys", () => {
+    expectParseFailure("@article{bad{key, title={A}}", "malformed", /citation key/i)
+    expectParseFailure("@article{bad}key, title={A}}", "malformed", /citation key/i)
+    expectParseFailure("@article{bad(key, title={A}}", "malformed", /citation key/i)
+    expectParseFailure("@article{bad)key, title={A}}", "malformed", /citation key/i)
+  })
+
+  test("rejects quotes and internal whitespace in citation keys", () => {
+    expectParseFailure('@article{bad"key, title={A}}', "malformed", /citation key/i)
+    expectParseFailure("@article(bad\"key, title={A})", "malformed", /citation key/i)
+    expectParseFailure("@article{bad key, title={A}}", "malformed", /citation key/i)
+    expectParseFailure("@article(bad\tkey, title={A})", "malformed", /citation key/i)
+  })
+
+  test("accepts legitimate traditional and punctuated keys in both entry delimiters", () => {
+    const entries = parseBibtex(`@article{autor2020, title = {A}}
+@book(10.1000/xyz-1, title = {B})
+@misc{chave_com:pontos-e.pontos, title = {C}}
+@inproceedings(Chave-Mista:2024, title = {D})
+`)
+
+    expect(entries.map((entry) => entry.key)).toEqual([
+      "autor2020",
+      "10.1000/xyz-1",
+      "chave_com:pontos-e.pontos",
+      "Chave-Mista:2024",
+    ])
+    expect(entries.map((entry) => entry.type)).toEqual(["article", "book", "misc", "inproceedings"])
+  })
+
+  test("keeps trimming surrounding whitespace in keys for both entry delimiters", () => {
+    const entries = parseBibtex("@article{  chave2020  , title = {A}}\n@book(  outra2021  , title = {B})")
+    expect(entries.map((entry) => entry.key)).toEqual(["chave2020", "outra2021"])
+  })
+})

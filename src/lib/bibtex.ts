@@ -204,7 +204,17 @@ export function parseBibtex(content: string): BibEntry[] {
   return entries
 }
 
-/** Skip the balanced body of a recognized non-reference directive. */
+/**
+ * Skip the body of a recognized non-reference directive (`@comment`,
+ * `@preamble`).
+ *
+ * The scan follows the protected contexts of the supported grammar so that the
+ * directive's external delimiter is only honored when it is structural:
+ * escapes consume the next character; braced literals and quoted literals may
+ * contain the external delimiter, and quotes inside braces (or unmatched
+ * closing braces inside quotes) are literal content. This prevents references
+ * written inside a directive body from leaking into the entry list.
+ */
 function skipBalancedDirective(
   scanner: Scanner,
   type: string,
@@ -212,19 +222,65 @@ function skipBalancedDirective(
   close: string,
   directiveOffset: number,
 ): void {
-  let depth = 1
+  let externalDepth = 1
+  let braceDepth = 0
+  let inQuote = false
+
   while (!scanner.eof()) {
     const ch = scanner.advance()
+
+    // Escapes are preserved by the supported grammar; the escaped character is
+    // literal and never changes a structural depth.
     if (ch === "\\") {
       if (!scanner.eof()) scanner.advance()
       continue
     }
-    if (ch === open) depth++
-    else if (ch === close) {
-      depth--
-      if (depth === 0) return
+
+    if (inQuote) {
+      if (ch === "{") {
+        braceDepth++
+      } else if (ch === "}") {
+        if (braceDepth > 0) braceDepth--
+        // An unmatched closing brace inside a quoted literal is literal text
+        // for the purpose of finding the directive end.
+      } else if (ch === '"' && braceDepth === 0) {
+        inQuote = false
+      }
+      continue
+    }
+
+    if (braceDepth > 0) {
+      // Inside a braced literal only braces are structural.
+      if (ch === "{") braceDepth++
+      else if (ch === "}") braceDepth--
+      continue
+    }
+
+    if (ch === '"') {
+      inQuote = true
+      braceDepth = 0
+      continue
+    }
+    if (ch === "{") {
+      braceDepth = 1
+      continue
+    }
+    if (open === "(") {
+      if (ch === "(") {
+        externalDepth++
+      } else if (ch === ")") {
+        externalDepth--
+        if (externalDepth === 0) return
+      }
+      continue
+    }
+    // Brace-delimited directive: only a top-level closing brace ends the body.
+    if (ch === close) {
+      externalDepth--
+      if (externalDepth === 0) return
     }
   }
+
   scanner.fail("malformed", `unterminated @${type} directive`, directiveOffset)
 }
 
@@ -236,6 +292,7 @@ function parseEntry(
   entryOffset: number,
 ): BibEntry {
   // Citation key: read up to the first comma outside of any structured value.
+  const keyOffset = scanner.offset
   let key = ""
   while (true) {
     if (scanner.eof()) {
@@ -262,6 +319,17 @@ function parseEntry(
   key = key.trim()
   if (key.length === 0) {
     scanner.fail("malformed", `empty citation key in @${type} entry`)
+  }
+
+  // Minimal lexical validation, independent of the entry's outer delimiter: a
+  // citation key cannot contain structural delimiters, quote characters or
+  // internal whitespace. Surrounding whitespace was already trimmed.
+  const invalidKeyChar = key.match(/[{}()"]/)?.[0]
+  if (invalidKeyChar !== undefined) {
+    scanner.fail("malformed", `invalid character '${invalidKeyChar}' in citation key of @${type} entry`, keyOffset)
+  }
+  if (/\s/.test(key)) {
+    scanner.fail("malformed", `citation key must not contain internal whitespace in @${type} entry`, keyOffset)
   }
 
   const fields: Record<string, string> = {}

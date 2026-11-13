@@ -280,4 +280,76 @@ describe("banca_refs — BibTeX consumer regression (Issue #111)", () => {
     expect(fetchCalls).toHaveLength(0)
     expect(mcpStartSpy).not.toHaveBeenCalled()
   })
+
+  test("does not send ghost directive references to the cache or the report (R1)", async () => {
+    const root = makeProject(`@preamble("x) @article{fantasma, title={Não é referência}} (x")
+@article{real2026,
+  title = {Referência real},
+  author = {Souza, Ana},
+  year = {2026},
+  doi = "10.1000/real",
+}
+`)
+    const captured: RefMetadata[] = []
+    const getSpy = spyOn(RefCache.prototype, "get").mockImplementation((ref: RefMetadata) => {
+      captured.push(ref)
+      return null
+    })
+
+    try {
+      const text = await runRefs(root)
+
+      expect(captured.map((ref) => ref.key)).toEqual(["real2026"])
+      expect(captured[0]).toMatchObject({
+        key: "real2026",
+        title: "Referência real",
+        authors: ["Souza, Ana"],
+        year: 2026,
+        doi: "10.1000/real",
+      })
+      expect(text).toContain("References: 1")
+      expect(text).not.toContain("fantasma")
+
+      const reportFiles = reports(root)
+      expect(reportFiles).toHaveLength(1)
+      const reportText = readFileSync(join(root, REPORT_DIR, reportFiles[0]), "utf-8")
+      expect(reportText).toContain("Total: 1")
+      expect(reportText).toContain("real2026")
+      expect(reportText).not.toContain("fantasma")
+
+      expect(fetchCalls).toHaveLength(0)
+      expect(mcpStartSpy).not.toHaveBeenCalled()
+    } finally {
+      getSpy.mockRestore()
+    }
+  })
+
+  test("fails closed on an unbalanced directive before cache or report resolution (R1)", async () => {
+    const root = makeProject(`@article{ok2026,
+  title = {Válida},
+}
+@comment(diretiva sem fechamento
+`)
+    const bibPath = join(root, BIB_FILE)
+    const bibHash = sha256(bibPath)
+    let cacheGets = 0
+    const getSpy = spyOn(RefCache.prototype, "get").mockImplementation(() => {
+      cacheGets++
+      return null
+    })
+
+    try {
+      const text = await runRefs(root)
+
+      expect(text.startsWith("bib parse error:")).toBe(true)
+      expect(text).toMatch(/unterminated @comment/i)
+      expect(cacheGets).toBe(0)
+      expect(reports(root)).toEqual([])
+      expect(sha256(bibPath)).toBe(bibHash)
+      expect(fetchCalls).toHaveLength(0)
+      expect(mcpStartSpy).not.toHaveBeenCalled()
+    } finally {
+      getSpy.mockRestore()
+    }
+  })
 })

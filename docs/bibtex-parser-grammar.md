@@ -26,9 +26,12 @@ ocorrência de `date`/`year` para o ano e divisão de autores por `and`.
 - Entradas `@tipo{...}` ou `@tipo(...)`, com delimitadores externos coerentes:
   uma entrada aberta com `{` fecha com `}`; uma entrada aberta com `(` fecha
   com `)`. Espaços entre `@`, tipo e delimitador são tolerados.
-- `@comment{...}` e `@preamble{...}` (ou com parênteses) são reconhecidos e
-  **ignorados de forma deliberada**: não são devolvidos como referências e o
-  corpo é saltado com balanceamento de delimitadores.
+- `@comment{...}` e `@preamble{...}` (com chaves ou parênteses) são reconhecidos
+  e **ignorados de forma deliberada**: não são devolvidos como referências. O
+  corpo é saltado acompanhando os contextos protegidos da gramática (escapes,
+  chaves balanceadas e aspas): delimitadores externos dentro de um literal
+  protegido não encerram nem abrem a diretiva, e o conteúdo interno nunca é
+  interpretado como entrada bibliográfica.
 - Texto fora de entradas é ignorado, como no BibTeX. Exceção: todo `@` fora de
   uma entrada precisa iniciar um item bem formado; um `@` solto (por exemplo
   um endereço de e-mail fora de uma entrada) gera erro em vez de ser ignorado
@@ -38,12 +41,17 @@ ocorrência de `date`/`year` para o ano e divisão de autores por `and`.
 
 ### Entradas
 
-- Chave de citação não vazia, lida até a primeira vírgula, aparada.
+- Chave de citação não vazia, lida até a primeira vírgula e aparada nas
+  extremidades. A validação lexical é idêntica para entradas abertas com `{` ou
+  `(`: delimitadores estruturais (`{ } ( )`), aspas e espaços internos são
+  rejeitados; pontuação legítima (por exemplo `:`, `.`, `-`, `_`, `/`, `+`) é
+  preservada.
 - Zero ou mais campos `nome = valor` separados por vírgula; a vírgula final
   antes do fechamento é aceita. Nome de campo: `[A-Za-z][A-Za-z0-9_-]*`
   normalizado para minúsculas.
-- Campos duplicados são rejeitados: manter um dos valores seria metadado
-  ambíguo, então o parser falha fechado.
+- Campos duplicados dentro da mesma entrada são rejeitados: manter um dos
+  valores seria metadado ambíguo, então o parser falha fechado. Duplicidade de
+  chaves de citação entre entradas é questão distinta (ver limitações).
 
 ### Valores de campo
 
@@ -93,10 +101,14 @@ arquivos que dependam delas.
   é ignorado. Para conteúdo com `@` fora de entradas, use `@comment{...}`.
 - `@xdata` e outras extensões do biblatex não recebem tratamento especial.
 - Não há tolerância a múltiplos erros: a primeira falha interrompe o parse.
-- Chaves de citação duplicadas não são deduplicadas: cada ocorrência vira uma
-  entrada, e o parser não decide qual delas é a correta.
-- O conteúdo de `@comment`/`@preamble` precisa ter delimitadores balanceados
-  (com escapes) para ser saltado; construções desbalanceadas falham com erro.
+- Duplicidade de chaves de citação **entre entradas** não é erro de parsing nem
+  deduplicação: cada ocorrência vira uma entrada, e o parser não decide qual
+  delas é a correta. Apenas campos duplicados dentro de uma mesma entrada são
+  rejeitados.
+- O corpo de `@comment`/`@preamble` é saltado com os contextos protegidos da
+  gramática (escapes, chaves balanceadas e aspas). Aspas ou literais abertos e
+  delimitadores externos sem fechamento falham com erro; não há tentativa de
+  interpretar o conteúdo como a gramática completa de valores do BibTeX.
 - Erros em entrada não terminada no fim do arquivo apontam para o início da
   entrada (e não para o EOF), preservando a linha/coluna onde ela começa.
 
@@ -135,5 +147,10 @@ continua sujeita ao contrato de provedores do DSH.
   cache, cache hit por DOI entre aspas, cache miss bloqueado, erro de parsing
   distinguível de arquivo ausente/vazio, ausência de relatório parcial e
   preservação de originais e guards de path.
+
+- Revisão R1 da PR #116: contraexemplos de diretivas parentetizadas que
+  vazavam referência fantasma, diretivas com literais protegidos (aspas,
+  chaves, escapes), diretiva desbalanceada entre entradas e validação lexical
+  de chaves nas duas formas de abertura de entrada.
 
 Nenhum teste desta issue executa rede, MCP, REST, LLM ou LaTeX/BibTeX real.
