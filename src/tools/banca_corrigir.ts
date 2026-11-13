@@ -79,6 +79,29 @@ function decodeUtf8Strict(bytes: Buffer): string | null {
   return Buffer.from(content, "utf-8").equals(bytes) ? content : null
 }
 
+/**
+ * True only when the string contains no isolated UTF-16 surrogate code unit.
+ *
+ * JavaScript strings may carry lone surrogates; encoding them to UTF-8
+ * silently substitutes U+FFFD. Such a substitution would change the text the
+ * caller authorized, so arguments are validated as well-formed Unicode before
+ * any snapshot is created. Valid surrogate pairs and non-BMP characters are
+ * preserved as-is — no normalization is applied.
+ */
+function isWellFormedUnicode(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < value.length ? value.charCodeAt(i + 1) : -1
+      if (next < 0xdc00 || next > 0xdfff) return false
+      i += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false
+    }
+  }
+  return true
+}
+
 interface PlannedCorrection {
   file: string
   /** Canonical destination resolved at preflight time. */
@@ -87,6 +110,9 @@ interface PlannedCorrection {
   relPath: string
   /** Project-declared logical identity used by the snapshot vault. */
   logical: string
+  /** Device/inode identity captured at preflight time. */
+  dev: number
+  ino: number
   /** Bytes decoded from the destination at preflight time. */
   content: string
   count: number
@@ -109,6 +135,36 @@ function addFailedIteration(root: string, previousScore: number | null | undefin
     return ""
   } catch {
     return " (the failure could not be recorded in state.json)"
+  }
+}
+
+type FailedDestinationState =
+  | { state: "unchanged"; sha256: string }
+  | { state: "modified"; sha256: string; size: number }
+  | { state: "indeterminate"; reason: string }
+
+/**
+ * Classify a destination after an I/O failure. `writeFileSync` may truncate or
+ * write partially before throwing, so the in-flight destination is never
+ * assumed intact: it is re-resolved, its physical identity is compared with the
+ * preflight identity and its bytes are compared with the preflight bytes.
+ * An unreadable or replaced destination is reported as indeterminate — never as
+ * a preserved manuscript.
+ */
+function inspectFailedDestination(root: string, planned: PlannedCorrection): FailedDestinationState {
+  try {
+    const target = resolveRealInsideRoot(root, planned.abs)
+    const st = lstatSync(target)
+    if (!st.isFile() || st.dev !== planned.dev || st.ino !== planned.ino) {
+      return { state: "indeterminate", reason: "destination identity could not be revalidated" }
+    }
+    const bytes = readFileSync(target)
+    if (bytes.equals(Buffer.from(planned.content, "utf-8"))) {
+      return { state: "unchanged", sha256: sha256Of(bytes) }
+    }
+    return { state: "modified", sha256: sha256Of(bytes), size: bytes.length }
+  } catch {
+    return { state: "indeterminate", reason: "destination bytes could not be re-read" }
   }
 }
 
@@ -153,6 +209,12 @@ export const bancaCorrigir = defineBancaTool({
       }
       if (typeof c.newText !== "string") {
         return `blocked: ${c.file}: newText must be a string`
+      }
+      if (!isWellFormedUnicode(c.oldText)) {
+        return `blocked: ${c.file}: oldText is not well-formed Unicode (isolated UTF-16 surrogate)`
+      }
+      if (!isWellFormedUnicode(c.newText)) {
+        return `blocked: ${c.file}: newText is not well-formed Unicode (isolated UTF-16 surrogate)`
       }
       if (c.expectedOccurrences !== undefined && !isPositiveSafeInteger(c.expectedOccurrences)) {
         return `blocked: ${c.file}: expectedOccurrences must be a positive safe integer`
@@ -251,6 +313,12 @@ export const bancaCorrigir = defineBancaTool({
       // non-overlapping semantics; never interpret `$` templates or regex.
       const { count, updated } = literalReplaceAll(content, c.oldText, c.newText)
 
+      // The planned result must be exactly representable in UTF-8: a lone
+      // surrogate or any lossy round-trip is refused before the snapshot.
+      if (!isWellFormedUnicode(updated) || Buffer.from(updated, "utf-8").toString("utf-8") !== updated) {
+        return `blocked: ${c.file}: planned replacement is not exactly representable in UTF-8 — refusing a lossy rewrite`
+      }
+
       if (count === 0) return `blocked: ${c.file}: oldText not found`
 
       if (c.expectedOccurrences !== undefined) {
@@ -270,6 +338,8 @@ export const bancaCorrigir = defineBancaTool({
         abs: r.abs,
         relPath: r.relPath,
         logical: r.logical,
+        dev: stat.dev,
+        ino: stat.ino,
         content,
         count,
         updated,
@@ -352,6 +422,9 @@ export const bancaCorrigir = defineBancaTool({
             `${p.file} has multiple hard links (nlink: ${st.nlink}) — writing would alter uncontrolled aliases`,
           )
         }
+        if (st.dev !== p.dev || st.ino !== p.ino) {
+          return revalidationFailure(`${p.file}: destination identity changed after preflight`)
+        }
         const current = decodeUtf8Strict(readFileSync(target))
         if (current === null || current !== p.content) {
           return revalidationFailure(`${p.file}: content changed after preflight`)
@@ -371,26 +444,56 @@ export const bancaCorrigir = defineBancaTool({
     // after the first write is reported honestly with the real snapshot kept.
     // -----------------------------------------------------------------------
     const applied: string[] = []
-    for (const p of planned) {
+    for (let i = 0; i < planned.length; i++) {
+      const p = planned[i]
+      let writeStarted = false
       try {
         const target = resolveRealInsideRoot(root, p.abs)
         const st = lstatSync(target)
         if (!st.isFile()) throw new Error("destination is no longer a regular file")
         if (st.nlink > 1) throw new Error("destination gained hard links")
+        if (st.dev !== p.dev || st.ino !== p.ino) throw new Error("destination identity changed before write")
         const current = decodeUtf8Strict(readFileSync(target))
         if (current === null || current !== p.content) throw new Error("content changed before write")
+        // From this point on the file may be truncated/partially written even
+        // when writeFileSync throws; the catch below verifies the real bytes.
+        writeStarted = true
         writeFileSync(target, p.updated, "utf-8")
         applied.push(p.file)
       } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code
+        const detail = typeof code === "string" ? code : ((err as Error)?.message ?? "I/O error")
         const reason =
           err instanceof PathTraversalError
             ? `${p.file} escapes project root`
-            : `${p.file}: write failed (${(err as Error)?.message ?? "I/O error"})`
+            : writeStarted
+              ? `${p.file}: write failed (${detail})`
+              : `${p.file}: pre-write revalidation failed (${detail})`
+
         const recorded = addFailedIteration(root, args.previousScore)
-        if (applied.length === 0) {
-          return `blocked: ${reason}. No manuscript file was modified; ${recoveryNote(snapshotLabel)}${recorded}`
-        }
-        return `partial: ${applied.length} of ${planned.length} correction(s) applied (${applied.join(", ")}) before the failure — ${reason}. No automatic rollback was performed; ${recoveryNote(snapshotLabel)} to recover the original bytes.${recorded}`
+        const notProcessed = planned.slice(i + 1).map((rest) => rest.file)
+        const outcome = inspectFailedDestination(root, p)
+        const originalSha = sha256Of(Buffer.from(p.content, "utf-8"))
+
+        const failedDestination =
+          outcome.state === "modified"
+            ? `partially modified: ${p.file} (sha256 ${originalSha} -> ${outcome.sha256}, ${outcome.size} bytes after the failure)`
+            : outcome.state === "unchanged"
+              ? `failed destination re-read and verified unchanged: ${p.file}`
+              : `indeterminate/potentially modified: ${p.file} (${outcome.reason})`
+
+        // Only a verified, byte-identical destination allows the claim that no
+        // manuscript was modified. Any applied file, partial write or
+        // unverifiable state is reported as a partial mutation with recovery.
+        const anyMutation = applied.length > 0 || outcome.state !== "unchanged"
+        const headline = anyMutation
+          ? "No automatic rollback was performed"
+          : "No manuscript file was modified"
+        const lists =
+          `applied: ${applied.length > 0 ? applied.join(", ") : "none"}; ` +
+          `${failedDestination}; ` +
+          `not processed: ${notProcessed.length > 0 ? notProcessed.join(", ") : "none"}`
+        return `${anyMutation ? "partial" : "blocked"}: ${reason}. ${headline}; ${lists}; ${recoveryNote(snapshotLabel)} to recover the original bytes.${recorded}`
       }
     }
 

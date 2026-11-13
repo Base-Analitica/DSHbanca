@@ -15,6 +15,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import { createHash } from "node:crypto"
+import { spawnSync } from "node:child_process"
 import {
   chmodSync,
   existsSync,
@@ -716,4 +717,275 @@ describe("Issue #110 — snapshot real, restore e lote multiarquivo", () => {
       }
     },
   )
+})
+
+// ---------------------------------------------------------------------------
+// R1 helpers — real tool execution in a child process restricted by RLIMIT_FSIZE.
+// ---------------------------------------------------------------------------
+
+const isLinux = process.platform === "linux"
+
+/**
+ * Run the real `bancaCorrigir` in a child process whose file-size limit is
+ * 8 KiB (RLIMIT_FSIZE) and whose SIGXFSZ is ignored. Under that limit a large
+ * `writeFileSync` can truncate or partially write the destination and then
+ * throw EFBIG, which is exactly the P1-A scenario. The limit is applied only
+ * to the child: this test process, the checkout and real files are untouched.
+ */
+function runCorrectionUnderFileSizeLimit(corrections: unknown[]): {
+  result: string
+  stdout: string
+  stderr: string
+  status: number | null
+} {
+  const childScript = join(base, `r1-write-failure-child-${Date.now()}.ts`)
+  const toolPath = join(import.meta.dir, "..", "src", "tools", "banca_corrigir.ts")
+  writeFileSync(
+    childScript,
+    [
+      `const { bancaCorrigir } = await import(${JSON.stringify(toolPath)})`,
+      `const projectRoot = process.env.DSHBANCA_R1_PROJECT`,
+      `const corrections = JSON.parse(process.env.DSHBANCA_R1_CORRECTIONS ?? "[]")`,
+      `const result = await bancaCorrigir.execute({ projectRoot, corrections }, {})`,
+      `process.stdout.write(JSON.stringify({ result: String(result) }))`,
+      "",
+    ].join("\n"),
+    "utf-8",
+  )
+  const run = spawnSync(
+    "bash",
+    ["-c", 'trap "" XFSZ; ulimit -f 8; exec "$0" run "$1"', process.execPath, childScript],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DSHBANCA_R1_PROJECT: project,
+        DSHBANCA_R1_CORRECTIONS: JSON.stringify(corrections),
+      },
+    },
+  )
+  let result = ""
+  try {
+    result = JSON.parse((run.stdout ?? "").trim() || "{}").result ?? ""
+  } catch {
+    result = ""
+  }
+  return { result, stdout: run.stdout ?? "", stderr: run.stderr ?? "", status: run.status }
+}
+
+async function restoreAndVerify(label: string, expected: Record<string, string>): Promise<void> {
+  const { bancaRestore } = await import("../src/tools/banca_restore")
+  const restored = String(
+    await bancaRestore.execute({ projectRoot: project, snapshotId: label, confirm: true } as any, {} as any),
+  )
+  expect(restored).toContain(`restored from ${label}`)
+  for (const [rel, content] of Object.entries(expected)) {
+    expect(readFileSync(join(project, rel), "utf-8")).toBe(content)
+    expect(sha256(readFileSync(join(project, rel)))).toBe(sha256(content))
+  }
+}
+
+describe("Issue #110 R1/P1-A — falha de escrita após truncamento/escrita parcial", () => {
+  test.skipIf(!isLinux)(
+    "destino único: relata mutação parcial verificada (sha256 antes/depois) e nunca 'não modificado'",
+    async () => {
+      const original = "Original ALVO final\n"
+      writeManuscript("main.tex", original)
+      const originalHash = sha256(original)
+
+      const run = runCorrectionUnderFileSizeLimit([
+        { file: "main.tex", oldText: "ALVO", newText: "X".repeat(65536), expectedOccurrences: 1 },
+      ])
+      expect(run.status).toBe(0)
+      expect(run.result).not.toContain("✓")
+      expect(run.result.toLowerCase()).not.toContain("no manuscript file was modified")
+      expect(run.result).toContain("partial:")
+      expect(run.result).toContain("partially modified: main.tex")
+      expect(run.result).toContain(`sha256 ${originalHash} ->`)
+      expect(run.result.toLowerCase()).toContain("no automatic rollback")
+      expect(run.result).toContain("applied: none")
+      expect(run.result).toContain("not processed: none")
+
+      // Filesystem proof: the write really changed the destination bytes.
+      const failedBytes = readFileSync(join(project, "main.tex"))
+      expect(failedBytes.length).toBeGreaterThan(Buffer.byteLength(original))
+      expect(failedBytes.equals(Buffer.from(original, "utf-8"))).toBe(false)
+
+      // Real snapshot kept; iteration recorded as failed, never ok.
+      const { loadState } = await import("../src/lib/state")
+      const state = loadState(project)
+      expect(state.snapshots).toHaveLength(1)
+      const label = state.snapshots[0].label
+      expect(state.iterations).toHaveLength(1)
+      expect(state.iterations[0].status).toBe("failed")
+      expect(run.result).toContain(label)
+
+      // Recovery through the public restore contract recovers exact bytes.
+      await restoreAndVerify(label, { "main.tex": original })
+      expect(sha256(readFileSync(join(project, "main.tex")))).toBe(originalHash)
+    },
+  )
+
+  test.skipIf(!isLinux)(
+    "destino posterior falha após um destino aplicado: classifica aplicado, parcialmente modificado e não processado",
+    async () => {
+      const originals = {
+        "capitulos/a.tex": "ALVO A\n",
+        "capitulos/b.tex": "ALVO B\n",
+        "capitulos/c.tex": "ALVO C\n",
+      }
+      for (const [rel, content] of Object.entries(originals)) writeManuscript(rel, content)
+
+      const run = runCorrectionUnderFileSizeLimit([
+        { file: "capitulos/a.tex", oldText: "ALVO A", newText: "FEITO A", expectedOccurrences: 1 },
+        { file: "capitulos/b.tex", oldText: "ALVO B", newText: "Y".repeat(65536), expectedOccurrences: 1 },
+        { file: "capitulos/c.tex", oldText: "ALVO C", newText: "FEITO C", expectedOccurrences: 1 },
+      ])
+      expect(run.status).toBe(0)
+      expect(run.result).not.toContain("✓")
+      expect(run.result).toContain("partial:")
+      expect(run.result).toContain("applied: capitulos/a.tex")
+      expect(run.result).toContain("partially modified: capitulos/b.tex")
+      expect(run.result).toContain("not processed: capitulos/c.tex")
+      expect(run.result.toLowerCase()).not.toContain("no manuscript file was modified")
+      expect(run.result.toLowerCase()).toContain("no automatic rollback")
+
+      expect(readFileSync(join(project, "capitulos", "a.tex"), "utf-8")).toBe("FEITO A\n")
+      expect(readFileSync(join(project, "capitulos", "b.tex")).equals(Buffer.from(originals["capitulos/b.tex"], "utf-8"))).toBe(false)
+      expect(sha256(readFileSync(join(project, "capitulos", "c.tex")))).toBe(sha256(originals["capitulos/c.tex"]))
+
+      const { loadState } = await import("../src/lib/state")
+      const state = loadState(project)
+      expect(state.snapshots).toHaveLength(1)
+      expect(state.iterations).toHaveLength(1)
+      expect(state.iterations[0].status).toBe("failed")
+
+      // Restore recovers all three original files and hashes.
+      await restoreAndVerify(state.snapshots[0].label, originals)
+    },
+  )
+
+  test.skipIf(!isLinux)(
+    "primeiro destino falha: aplicados vazios, falho verificado e demais não processados",
+    async () => {
+      const originals = {
+        "main.tex": "ALVO M\n",
+        "capitulos/b.tex": "ALVO B\n",
+        "capitulos/c.tex": "ALVO C\n",
+      }
+      for (const [rel, content] of Object.entries(originals)) writeManuscript(rel, content)
+
+      const run = runCorrectionUnderFileSizeLimit([
+        { file: "main.tex", oldText: "ALVO M", newText: "Z".repeat(65536), expectedOccurrences: 1 },
+        { file: "capitulos/b.tex", oldText: "ALVO B", newText: "FEITO B", expectedOccurrences: 1 },
+        { file: "capitulos/c.tex", oldText: "ALVO C", newText: "FEITO C", expectedOccurrences: 1 },
+      ])
+      expect(run.status).toBe(0)
+      expect(run.result).toContain("partial:")
+      expect(run.result).toContain("applied: none")
+      expect(run.result).toContain("partially modified: main.tex")
+      expect(run.result).toContain("not processed: capitulos/b.tex, capitulos/c.tex")
+      expect(run.result.toLowerCase()).not.toContain("no manuscript file was modified")
+
+      expect(readFileSync(join(project, "main.tex")).equals(Buffer.from(originals["main.tex"], "utf-8"))).toBe(false)
+      expect(readFileSync(join(project, "capitulos", "b.tex"), "utf-8")).toBe(originals["capitulos/b.tex"])
+      expect(readFileSync(join(project, "capitulos", "c.tex"), "utf-8")).toBe(originals["capitulos/c.tex"])
+
+      const { loadState } = await import("../src/lib/state")
+      const state = loadState(project)
+      expect(state.snapshots).toHaveLength(1)
+      expect(state.iterations).toHaveLength(1)
+      expect(state.iterations[0].status).toBe("failed")
+      await restoreAndVerify(state.snapshots[0].label, originals)
+    },
+  )
+})
+
+describe("Issue #110 R1/P1-B — Unicode malformado rejeitado antes do snapshot", () => {
+  test.each([
+    ["newText surrogate alto isolado", { oldText: "ALVO", newText: "\uD800" }],
+    ["newText surrogate baixo isolado", { oldText: "ALVO", newText: "\uDC00" }],
+    ["oldText malformado", { oldText: "ALVO\uD800", newText: "X" }],
+  ])("%s é rejeitado sem mutação, snapshot ou iteração", async (_label, correction) => {
+    const original = "Original ALVO final\n"
+    writeManuscript("main.tex", original)
+    const before = captureBefore(["main.tex"])
+
+    const result = await runCorrection({
+      corrections: [{ file: "main.tex", expectedOccurrences: 1, ...correction }],
+    })
+
+    expectFailClosed(result, before)
+    expect(result).toContain("not well-formed Unicode")
+    expect(readFileSync(join(project, "main.tex"), "utf-8")).toBe(original)
+  })
+
+  test("busca que dividiria um par substituto existente é rejeitada", async () => {
+    const original = "Emoji \u{1F600} aqui\n"
+    writeManuscript("main.tex", original)
+    const before = captureBefore(["main.tex"])
+
+    const result = await runCorrection({
+      // High surrogate of U+1F600 used alone: it would match half of the pair.
+      corrections: [{ file: "main.tex", oldText: "\uD83D", newText: "METADE", expectedOccurrences: 1 }],
+    })
+
+    expectFailClosed(result, before)
+    expect(result).toContain("not well-formed Unicode")
+    expect(readFileSync(join(project, "main.tex"), "utf-8")).toBe(original)
+  })
+
+  test("lote com primeiro arquivo válido e segundo argumento Unicode inválido bloqueia integralmente", async () => {
+    const mainOrig = "ALVO MAIN\n"
+    const capOrig = "ALVO CAP\n"
+    writeManuscript("main.tex", mainOrig)
+    writeManuscript("capitulos/cap1.tex", capOrig)
+    const before = captureBefore(["main.tex", "capitulos/cap1.tex"])
+
+    const result = await runCorrection({
+      corrections: [
+        { file: "main.tex", oldText: "ALVO MAIN", newText: "FEITO MAIN", expectedOccurrences: 1 },
+        { file: "capitulos/cap1.tex", oldText: "ALVO CAP", newText: "\uDC00", expectedOccurrences: 1 },
+      ],
+    })
+
+    expectFailClosed(result, before)
+    expect(result).toContain("not well-formed Unicode")
+    expect(readFileSync(join(project, "main.tex"), "utf-8")).toBe(mainOrig)
+    expect(readFileSync(join(project, "capitulos", "cap1.tex"), "utf-8")).toBe(capOrig)
+  })
+
+  test("pares substitutos válidos e caracteres não-BMP são preservados exatamente", async () => {
+    const original = "Início \u{1F600} ação, fim\n"
+    writeManuscript("main.tex", original)
+
+    const result = await runCorrection({
+      corrections: [{ file: "main.tex", oldText: "\u{1F600}", newText: "\u{1F389}\u{1F680}", expectedOccurrences: 1 }],
+    })
+
+    expect(result).toContain("✓ main.tex")
+    expect(readFileSync(join(project, "main.tex"), "utf-8")).toBe("Início \u{1F389}\u{1F680} ação, fim\n")
+    // Bytes of the supplementary characters are the real UTF-8 encodings.
+    const bytes = readFileSync(join(project, "main.tex"))
+    expect(bytes.includes(Buffer.from("\u{1F389}", "utf-8"))).toBe(true)
+    expect(bytes.includes(Buffer.from("\u{1F680}", "utf-8"))).toBe(true)
+    expect(bytes.includes(Buffer.from("\u{FFFD}", "utf-8"))).toBe(false)
+  })
+
+  test("substituição literal envolvendo emoji mantém o restante do texto intacto e é restaurável", async () => {
+    const original = "Antes \u{1F680} depois — ção\n"
+    writeManuscript("main.tex", original)
+    const originalHash = sha256(original)
+
+    const result = await runCorrection({
+      corrections: [{ file: "main.tex", oldText: "\u{1F680}", newText: "\u{1F984}", expectedOccurrences: 1 }],
+    })
+    expect(result).toContain("✓ main.tex")
+    expect(readFileSync(join(project, "main.tex"), "utf-8")).toBe("Antes \u{1F984} depois — ção\n")
+
+    const { loadState } = await import("../src/lib/state")
+    const label = loadState(project).snapshots[0].label
+    await restoreAndVerify(label, { "main.tex": original })
+    expect(sha256(readFileSync(join(project, "main.tex")))).toBe(originalHash)
+  })
 })

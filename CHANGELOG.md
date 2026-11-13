@@ -9,6 +9,8 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Corrigido
 
+- `banca_corrigir`: falha de escrita após truncamento/escrita parcial agora é classificada pela releitura real do destino (identidade dev/ino + bytes), com distinção entre destinos aplicados, destino possivelmente alterado (sha256 antes/depois, tamanho observado) e destinos não processados; estado é declarado indeterminado quando não verificável, o snapshot real permanece para recuperação e a iteração é registrada como `failed`. O retorno nunca afirma manuscrito intacto sem verificação byte a byte.
+- `banca_corrigir`: `oldText`, `newText` e o conteúdo planejado precisam ser Unicode bem-formado e representável exatamente em UTF-8; surrogates UTF-16 isolados (incluindo busca que dividiria um par substituto) são rejeitados antes do snapshot e o round-trip do resultado é verificado, sem normalização nem substituição silenciosa por U+FFFD.
 - `banca_corrigir`: preflight integral fail-closed do lote antes de snapshot, estado ou escrita — uma correção inválida (inclusive no segundo arquivo) bloqueia todas as demais, sem aplicação parcial, sem iteração de sucesso e sem snapshot.
 - `banca_corrigir`: `expectedOccurrences` agora é inteiro positivo seguro e precisa coincidir com a contagem real de ocorrências literais não sobrepostas; quando omitido, apenas uma ocorrência é admitida. Divergência ou ambiguidade bloqueia o lote (antes emitia aviso e aplicava `replaceAll`).
 - `banca_corrigir`: `newText` é inserido literalmente, sem interpretar templates de substituição JavaScript (`$&`, `$$`, `$'`, `` $` ``), regex, comandos LaTeX ou normalização textual; conteúdo não UTF-8 é recusado para não corromper bytes não selecionados.
