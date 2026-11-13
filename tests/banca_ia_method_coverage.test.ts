@@ -436,7 +436,7 @@ function stripCode(value: string | undefined | null): string {
   return (value ?? "").replace(/`/g, "").trim()
 }
 
-/** Per-file blocks of "## Resultados por arquivo", keyed by project-relative path. */
+/** Per-source blocks of "## Resultados por fonte", keyed by project-relative canonical path. */
 function fileBlocks(report: string): Map<string, Record<string, string>> {
   const blocks = new Map<string, Record<string, string>>()
   let current: Record<string, string> | null = null
@@ -496,10 +496,11 @@ function expectFileCoverage(
 }
 
 function expectCoverageRow(report: string, file: string, method: string, reason: string): void {
+  // New R1 table: | Fonte canônica | Caminhos configurados | Método | Motivo | ...
   const pattern = new RegExp(
     "\\|\\s*`" +
       escapeRegExp(file) +
-      "`\\s*\\|\\s*`" +
+      "`\\s*\\|[^\\n]*\\|\\s*`" +
       escapeRegExp(method) +
       "`\\s*\\|\\s*`" +
       escapeRegExp(reason) +
@@ -519,8 +520,8 @@ function expectCoreReportMarkers(report: string): void {
   expect(report).toContain("**Sonda Python:**")
   expect(report).toContain("**Gerado em:**")
   expect(report).toContain("## Resumo de cobertura")
-  expect(report).toContain("## Cobertura por arquivo")
-  expect(report).toContain("## Resultados por arquivo")
+  expect(report).toContain("## Cobertura por fonte")
+  expect(report).toContain("## Resultados por fonte")
   expect(report).toContain("## Agregados heurísticos por método")
   expect(report).toContain("## Limitações metodológicas")
   expect(report).toContain("**Escopo:** sinais heurísticos locais")
@@ -640,7 +641,7 @@ describe("banca_ia — relatório heurístico e forceRegex", () => {
     for (const marker of [
       "**Método global efetivo:**",
       "## Resumo de cobertura",
-      "## Resultados por arquivo",
+      "## Resultados por fonte",
       "## Limitações metodológicas",
     ]) {
       expect(result).toContain(marker)
@@ -695,10 +696,12 @@ describe("banca_ia — caminho Python válido e limite de 50 parágrafos", () =>
     expect(block?.["Fallback"]).toBe("não aplicável (execução Python válida)")
     expectCoverageRow(report, "main.tex", "python", "python-ok")
 
-    expect(summaryNumber(report, "Arquivos descobertos")).toBe(1)
+    expect(summaryNumber(report, "Entradas de caminho descobertas")).toBe(1)
+    expect(summaryNumber(report, "Fontes canônicas distintas")).toBe(1)
+    expect(summaryNumber(report, "Entradas repetidas ou aliases consolidados")).toBe(0)
     expect(summaryNumber(report, "Arquivos configurados ausentes ou inválidos")).toBe(0)
-    expect(summaryNumber(report, "Arquivos efetivamente analisados")).toBe(1)
-    expect(summaryNumber(report, "Arquivos não analisados")).toBe(0)
+    expect(summaryNumber(report, "Fontes efetivamente analisadas")).toBe(1)
+    expect(summaryNumber(report, "Fontes não analisadas")).toBe(0)
     expect(summaryNumber(report, "Parágrafos elegíveis (segmentação Python)")).toBe(3)
     expect(summaryNumber(report, "Parágrafos analisados por Python")).toBe(3)
     expect(summaryNumber(report, "Parágrafos omitidos por limite Python (50/arquivo)")).toBe(0)
@@ -709,7 +712,7 @@ describe("banca_ia — caminho Python válido e limite de 50 parágrafos", () =>
     expect(pythonAggregate).not.toContain("não aplicável")
     expect(
       aggregateLine(report, "- Regex heuristic (indicador binário heurístico não calibrado):"),
-    ).toContain("não aplicável (nenhum arquivo analisado por regex)")
+    ).toContain("não aplicável (nenhuma fonte analisada por regex)")
     expect(report).toContain("Média combinada Python+regex: não calculada")
 
     expect(probeInvocations()).toBe(1)
@@ -785,7 +788,7 @@ describe("banca_ia — caminho Python válido e limite de 50 parágrafos", () =>
     const truncation = bulletField(report, "Truncamento")
     expect(truncation).not.toBeNull()
     expect(String(truncation).startsWith("sim")).toBe(true)
-    expect(String(truncation)).toContain("1 arquivo(s)")
+    expect(String(truncation)).toContain("1 fonte(s)")
     expect(String(truncation)).toContain("5 parágrafo(s) omitido(s) por limite")
     expect(summaryNumber(report, "Parágrafos elegíveis (segmentação Python)")).toBe(55)
     expect(summaryNumber(report, "Parágrafos analisados por Python")).toBe(50)
@@ -877,8 +880,11 @@ describe("banca_ia — sonda Python e ausência de evidência", () => {
     expect(report).not.toContain("risk=low")
     expect(report).not.toContain("Risco final")
     expect(report).not.toContain("**Confiança:**")
-    expect(summaryNumber(report, "Arquivos efetivamente analisados")).toBe(0)
-    expect(summaryNumber(report, "Arquivos não analisados")).toBe(1)
+    expect(summaryNumber(report, "Entradas de caminho descobertas")).toBe(1)
+    expect(summaryNumber(report, "Fontes canônicas distintas")).toBe(1)
+    expect(summaryNumber(report, "Entradas repetidas ou aliases consolidados")).toBe(0)
+    expect(summaryNumber(report, "Fontes efetivamente analisadas")).toBe(0)
+    expect(summaryNumber(report, "Fontes não analisadas")).toBe(1)
 
     // §6: zero Python-eligible paragraphs must not invoke the analysis script.
     expect(probeInvocations()).toBe(1)
@@ -1087,7 +1093,7 @@ describe("banca_ia — métodos mistos e manuscrito ausente", () => {
     )
     expect(regexAggregate).toBeDefined()
     expect(regexAggregate).toMatch(
-      /:\s*\d+ de 1 arquivo\(s\) com indicador acionado \(matches>10\)/,
+      /:\s*\d+ de 1 fonte\(s\) com indicador acionado \(matches>10\)/,
     )
     expect(report).toContain("Média combinada Python+regex: não calculada")
 
@@ -1103,13 +1109,15 @@ describe("banca_ia — métodos mistos e manuscrito ausente", () => {
     expect(headerField(report, "Estado")).toBe("ausencia-de-manuscrito")
     expect(headerField(report, "Método global efetivo")).toBe("Nenhum (nada analisado)")
     expect(headerField(report, "Arquivos configurados ausentes ou inválidos")).toBe("1")
+    expect(headerField(report, "Entradas de caminho descobertas")).toBe("0")
+    expect(headerField(report, "Fontes canônicas distintas")).toBe("0")
     expect(report).toContain("Nenhum arquivo de manuscrito foi encontrado para análise")
     expect(report).toContain("Nenhum relatório foi persistido porque não houve análise")
     expect(report).toContain("não constitui evidência de risco baixo")
     expect(report).not.toContain("Risco final")
     expect(report).not.toContain("**Confiança:**")
     expect(report).not.toContain("risk=")
-    expect(report).not.toContain("## Resultados por arquivo")
+    expect(report).not.toContain("## Resultados por fonte")
     expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
   })
 })
@@ -1169,6 +1177,8 @@ describe("banca_ia — integridade, confinamento e arquivos inválidos", () => {
     const report = await runBancaIa({ forceRegex: true })
     expect(headerField(report, "Estado")).toBe("ausencia-de-manuscrito")
     expect(headerField(report, "Arquivos configurados ausentes ou inválidos")).toBe("1")
+    expect(headerField(report, "Entradas de caminho descobertas")).toBe("0")
+    expect(headerField(report, "Fontes canônicas distintas")).toBe("0")
     expect(report).not.toContain("Risco final")
     expect(existsSync(join(project, ".banca", "reports"))).toBe(false)
   })
@@ -1209,6 +1219,223 @@ describe("banca_ia — integridade, confinamento e arquivos inválidos", () => {
       } finally {
         chmodSync(unreadablePath, 0o644)
       }
+    },
+  )
+})
+
+// ===========================================================================
+// R1 (review PR #118) — identidade canônica única e proveniência de aliases
+// ===========================================================================
+describe("banca_ia — identidade canônica, aliases e proveniência", () => {
+  function expectSourcesSummary(
+    report: string,
+    expected: {
+      entries: number
+      sources: number
+      aliases: number
+      analyzed: number
+      notAnalyzed: number
+    },
+  ): void {
+    expect(summaryNumber(report, "Entradas de caminho descobertas")).toBe(expected.entries)
+    expect(summaryNumber(report, "Fontes canônicas distintas")).toBe(expected.sources)
+    expect(summaryNumber(report, "Entradas repetidas ou aliases consolidados")).toBe(expected.aliases)
+    expect(summaryNumber(report, "Fontes efetivamente analisadas")).toBe(expected.analyzed)
+    expect(summaryNumber(report, "Fontes não analisadas")).toBe(expected.notAnalyzed)
+  }
+
+  function coverageRows(report: string): string[] {
+    return report.split("\n").filter((line) => line.startsWith("| `"))
+  }
+
+  function normalizeGeneratedAt(report: string): string {
+    return report.replace(/\*\*Gerado em:\*\* .*/g, "**Gerado em:** <timestamp>")
+  }
+
+  symlinkTest(
+    "R1.1 symlink interno (main.tex -> capitulos/real.tex) + glob do alvo: 2 entradas, 1 fonte, 1 análise",
+    async () => {
+      writeProjectJson({ main: "main.tex", chapters: ["capitulos/*.tex"] })
+      writeFileAt("capitulos/real.tex", paragraphs(1))
+      symlinkSync(join(project, "capitulos", "real.tex"), join(project, "main.tex"), "file")
+
+      const report = await runBancaIa({ forceRegex: true })
+      expectCoreReportMarkers(report)
+      expect(headerField(report, "Método global efetivo")).toBe("Regex heuristic")
+      expectSourcesSummary(report, { entries: 2, sources: 1, aliases: 1, analyzed: 1, notAnalyzed: 0 })
+      expect(summaryNumber(report, "Parágrafos analisados por regex")).toBe(1)
+      // forceRegex nunca inicia subprocesso, inclusive com alias consolidado.
+      expect(stubInvocations()).toEqual([])
+
+      const blocks = fileBlocks(report)
+      expect([...blocks.keys()]).toEqual(["capitulos/real.tex"])
+      const block = blocks.get("capitulos/real.tex")
+      expect(stripCode(block?.["Fonte canônica"])).toBe("capitulos/real.tex")
+      expect(block?.["Caminhos configurados"]).toBe("`main.tex`, `capitulos/real.tex`")
+      expect(block?.["Entradas de caminho"]).toBe("2 (aliases consolidados: 1)")
+      expect(block?.["Analisados"]).toBe("1")
+      expect(block?.["Elegíveis (método)"]).toBe("1")
+      expect(coverageRows(report)).toHaveLength(1)
+      expect(report).not.toContain("dois parágrafos")
+    },
+  )
+
+  test("R1.2 main.tex também configurado nos chapters: fonte e agregados não duplicam", async () => {
+    writeProjectJson({ main: "main.tex", chapters: ["main.tex"] })
+    writeMain(paragraphs(2))
+
+    const report = await runBancaIa({ forceRegex: true })
+    expectSourcesSummary(report, { entries: 2, sources: 1, aliases: 1, analyzed: 1, notAnalyzed: 0 })
+    expect(summaryNumber(report, "Parágrafos analisados por regex")).toBe(2)
+
+    const blocks = fileBlocks(report)
+    expect([...blocks.keys()]).toEqual(["main.tex"])
+    expect(blocks.get("main.tex")?.["Caminhos configurados"]).toBe("`main.tex`")
+    expect(blocks.get("main.tex")?.["Entradas de caminho"]).toBe("2 (aliases consolidados: 1)")
+    expect(coverageRows(report)).toHaveLength(1)
+  })
+
+  test("R1.3 fontes canônicas distintas com conteúdo idêntico continuam sendo duas fontes", async () => {
+    writeProjectJson({ main: "main.tex", chapters: ["capitulos/*.tex"] })
+    const identical = paragraphs(2)
+    writeMain(identical)
+    writeFileAt("capitulos/copia.tex", identical)
+
+    const report = await runBancaIa({ forceRegex: true })
+    expectSourcesSummary(report, { entries: 2, sources: 2, aliases: 0, analyzed: 2, notAnalyzed: 0 })
+    expect(summaryNumber(report, "Parágrafos analisados por regex")).toBe(4)
+    expect([...fileBlocks(report).keys()]).toEqual(["main.tex", "capitulos/copia.tex"])
+    expect(coverageRows(report)).toHaveLength(2)
+  })
+
+  symlinkTest(
+    "R1.4 repro B: alias sem sinal + fonte com sinal = 1 de 2 fontes e 6 parágrafos",
+    async () => {
+      writeProjectJson({ main: "main.tex", chapters: ["capitulos/*.tex"] })
+      writeFileAt(
+        "capitulos/real.tex",
+        "Texto acadêmico sem conectivos sinalizados e suficientemente longo para ser elegível.",
+      )
+      symlinkSync(join(project, "capitulos", "real.tex"), join(project, "main.tex"), "file")
+      // 5 parágrafos com 4 matches cada (total 20 > 10): indicador regex acionado.
+      writeFileAt("capitulos/alto.tex", paragraphs(5))
+
+      const report = await runBancaIa({ forceRegex: true })
+      expectSourcesSummary(report, { entries: 3, sources: 2, aliases: 1, analyzed: 2, notAnalyzed: 0 })
+      expect(summaryNumber(report, "Parágrafos elegíveis (segmentação regex)")).toBe(6)
+      expect(summaryNumber(report, "Parágrafos analisados por regex")).toBe(6)
+
+      const regexAggregate = aggregateLine(
+        report,
+        "- Regex heuristic (indicador binário heurístico não calibrado):",
+      )
+      expect(regexAggregate).toBeDefined()
+      expect(regexAggregate).toContain("1 de 2 fonte(s) com indicador acionado (matches>10)")
+      expect(regexAggregate).toContain("6 parágrafo(s) analisado(s)")
+      expect(regexAggregate).toContain("cobertura 6/6 elegíveis")
+
+      expect([...fileBlocks(report).keys()]).toEqual(["capitulos/real.tex", "capitulos/alto.tex"])
+      expect(coverageRows(report)).toHaveLength(2)
+    },
+  )
+
+  symlinkTest(
+    "R1.5 caminho Python: uma execução por fonte canônica e peso correto no agregado",
+    async () => {
+      writeProjectJson({ main: "main.tex", chapters: ["capitulos/*.tex"] })
+      writeFileAt("capitulos/real.tex", paragraphs(2))
+      symlinkSync(join(project, "capitulos", "real.tex"), join(project, "main.tex"), "file")
+      writeFileAt("capitulos/segundo.tex", paragraphs(2))
+      configureAnalysis({ basename: "real.tex", stdout: okJson(2, 0.2) })
+      configureAnalysis({ basename: "segundo.tex", stdout: okJson(2, 0.8) })
+
+      const report = await runBancaIa()
+      expectSourcesSummary(report, { entries: 3, sources: 2, aliases: 1, analyzed: 2, notAnalyzed: 0 })
+      expect(summaryNumber(report, "Parágrafos analisados por Python")).toBe(4)
+
+      // Uma sonda global e exatamente uma análise por fonte canônica elegível.
+      expect(probeInvocations()).toBe(1)
+      expect(analysisInvocations()).toBe(2)
+      expect(stubInvocations().filter((line) => line === "analysis real.tex")).toHaveLength(1)
+      expect(stubInvocations().filter((line) => line === "analysis segundo.tex")).toHaveLength(1)
+
+      const pythonAggregate = aggregateLine(report, "- Python (score heurístico não calibrado):")
+      expect(pythonAggregate).toBeDefined()
+      // Média por fonte, não por entrada de caminho/alias: (0.2 + 0.8) / 2 = 0.5.
+      expect(pythonAggregate).toContain("média 0.5 em 2 fonte(s)")
+      expect(pythonAggregate).toContain("4 parágrafo(s) analisado(s)")
+      expect(pythonAggregate).toContain("cobertura 4/4 elegíveis")
+      expect(pythonAggregate).not.toContain("3 fonte(s)")
+      expect(pythonAggregate).not.toContain("6 parágrafo(s)")
+    },
+  )
+
+  symlinkTest(
+    "R1.6 proveniência: caminhos configurados distintos e ordem determinística preservados",
+    async () => {
+      writeProjectJson({ main: "main.tex", chapters: ["capitulos/*.tex"] })
+      writeFileAt("capitulos/a.tex", paragraphs(1))
+      writeFileAt("capitulos/b.tex", paragraphs(1))
+      // main.tex é alias interno de capitulos/a.tex (não criar main.tex regular antes).
+      symlinkSync(join(project, "capitulos", "a.tex"), join(project, "main.tex"), "file")
+
+      const first = await runBancaIa({ forceRegex: true })
+      const second = await runBancaIa({ forceRegex: true })
+
+      expect(normalizeGeneratedAt(first)).toBe(normalizeGeneratedAt(second))
+      expectSourcesSummary(first, { entries: 3, sources: 2, aliases: 1, analyzed: 2, notAnalyzed: 0 })
+      const blocks = fileBlocks(first)
+      // Ordem de descoberta: main (alias de a.tex) primeiro; depois glob ordenado (a.tex alias, b.tex).
+      expect([...blocks.keys()]).toEqual(["capitulos/a.tex", "capitulos/b.tex"])
+      expect(blocks.get("capitulos/a.tex")?.["Caminhos configurados"]).toBe(
+        "`main.tex`, `capitulos/a.tex`",
+      )
+      expect(blocks.get("capitulos/b.tex")?.["Caminhos configurados"]).toBe("`capitulos/b.tex`")
+    },
+  )
+
+  symlinkTest(
+    "R1.7 relatório retornado e persistido permanecem consistentes com alias",
+    async () => {
+      writeProjectJson({ main: "main.tex", chapters: ["capitulos/*.tex"] })
+      writeFileAt("capitulos/real.tex", paragraphs(1))
+      symlinkSync(join(project, "capitulos", "real.tex"), join(project, "main.tex"), "file")
+
+      const result = await runBancaIa({ forceRegex: true })
+      const reportsDir = join(project, ".banca", "reports")
+      const mdFiles = readdirSync(reportsDir).filter(
+        (file) => file.startsWith("ia-") && file.endsWith(".md"),
+      )
+      expect(mdFiles).toHaveLength(1)
+      const persisted = readFileSync(join(reportsDir, mdFiles[0]), "utf-8")
+      expect(persisted).toBe(result)
+      for (const marker of [
+        "- Entradas de caminho descobertas: 2",
+        "- Fontes canônicas distintas: 1",
+        "- Entradas repetidas ou aliases consolidados: 1",
+        "## Cobertura por fonte",
+        "## Resultados por fonte",
+      ]) {
+        expect(result).toContain(marker)
+        expect(persisted).toContain(marker)
+      }
+    },
+  )
+
+  symlinkTest(
+    "R1.8 alias não é rejeitado como symlink externo: confinamento preservado",
+    async () => {
+      writeProjectJson({ main: "main.tex", chapters: ["capitulos/*.tex"] })
+      writeFileAt("capitulos/real.tex", paragraphs(1))
+      symlinkSync(join(project, "capitulos", "real.tex"), join(project, "main.tex"), "file")
+      const canonicalBefore = readFileSync(join(project, "capitulos", "real.tex"), "utf-8")
+
+      const report = await runBancaIa({ forceRegex: true })
+      expect(report).toContain("IA Detection Report")
+      expect(report).toContain("capitulos/real.tex")
+      // O alias interno é aceito; o alvo permanece legível e inalterado.
+      expect(readFileSync(join(project, "capitulos", "real.tex"), "utf-8")).toBe(canonicalBefore)
+      expect(existsSync(join(project, "main.tex"))).toBe(true)
     },
   )
 })

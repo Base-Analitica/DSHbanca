@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs"
-import { isAbsolute, relative, sep } from "node:path"
+import { isAbsolute, relative, resolve, sep } from "node:path"
 import { spawnSync } from "node:child_process"
 import type { SpawnSyncReturns } from "node:child_process"
 import { z } from "zod"
@@ -77,8 +77,27 @@ type PythonAnalysis =
 
 type RegexAnalysis = { matches: number; firstExcerpt: string | null; riskLabel: "low" | "moderate" | "high" }
 
+/**
+ * Fonte canônica única do workspace. Vários caminhos configurados (por exemplo
+ * `main.tex` e um capítulo descoberto pelo glob) podem resolver para a mesma
+ * identidade canônica: a análise e as métricas contam a fonte uma única vez,
+ * enquanto a proveniência preserva os caminhos relativos configurados.
+ */
+type DiscoveredSource = {
+  /** Identidade canônica (realpath) usada para deduplicar e ler uma única vez. */
+  canonical: string
+  /** Caminho canônico relativo seguro, exibido como identidade da fonte. */
+  canonicalDisplay: string
+  /** Caminhos relativos configurados/descobertos, em ordem determinística. */
+  configuredPaths: string[]
+  /** Número de entradas de caminho que resolveram para esta fonte. */
+  pathEntries: number
+}
+
 type FileResult = {
   file: string
+  configuredPaths: string[]
+  pathEntries: number
   method: Method
   reason: ReasonCode
   segmentation: Segmentation
@@ -318,6 +337,14 @@ function relativeSafe(root: string, canonical: string): string {
   return rel.split(sep).join("/")
 }
 
+function relativeConfiguredPath(root: string, file: string): string {
+  const rel = relative(resolve(root), file)
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new PathTraversalError("path escapes workspace root")
+  }
+  return rel.split(sep).join("/")
+}
+
 function segmentationLabel(segmentation: Segmentation): string {
   if (segmentation === "python") return "Python (`\\n\\n`, parágrafo >20 caracteres)"
   if (segmentation === "regex") return "Regex (`\\n\\s*\\n`, parágrafo >20 caracteres)"
@@ -329,14 +356,16 @@ function pythonRiskLabel(risk: number): "low" | "moderate" | "high" {
 }
 
 function pythonResult(
-  file: string,
+  source: DiscoveredSource,
   analysis: { risk: number; paragraphsTotal: number; paragraphsAnalyzed: number },
   pythonEligible: number,
   regexEligible: number,
 ): FileResult {
   const omitted = analysis.paragraphsTotal - analysis.paragraphsAnalyzed
   return {
-    file,
+    file: source.canonicalDisplay,
+    configuredPaths: source.configuredPaths,
+    pathEntries: source.pathEntries,
     method: "python",
     reason: "python-ok",
     segmentation: "python",
@@ -354,7 +383,7 @@ function pythonResult(
 }
 
 function regexResult(
-  file: string,
+  source: DiscoveredSource,
   reason: ReasonCode,
   analysis: RegexAnalysis,
   pythonEligible: number,
@@ -367,7 +396,9 @@ function regexResult(
         ? "regex aplicada porque Python está indisponível (python-unavailable)"
         : `regex aplicada após falha do caminho Python (${reason}); diagnóstico sanitizado, sem stderr`
   return {
-    file,
+    file: source.canonicalDisplay,
+    configuredPaths: source.configuredPaths,
+    pathEntries: source.pathEntries,
     method: "regex",
     reason,
     segmentation: "regex",
@@ -385,7 +416,7 @@ function regexResult(
 }
 
 function notAnalysedResult(
-  file: string,
+  source: DiscoveredSource,
   reason: ReasonCode,
   segmentation: Segmentation,
   pythonEligible: number,
@@ -395,7 +426,9 @@ function notAnalysedResult(
   const eligible =
     segmentation === "python" ? pythonEligible : segmentation === "regex" ? regexEligible : 0
   return {
-    file,
+    file: source.canonicalDisplay,
+    configuredPaths: source.configuredPaths,
+    pathEntries: source.pathEntries,
     method: "none",
     reason,
     segmentation,
@@ -429,15 +462,22 @@ function probeSummary(forceRegex: boolean, probe: ProbeOutcome | null): string {
   return probe.available ? "disponível" : `indisponível (diagnóstico: ${probe.code})`
 }
 
+function configuredPathsCell(result: FileResult): string {
+  return result.configuredPaths.map((path) => `\`${escapeTableCell(path)}\``).join(", ")
+}
+
 function buildReport(
   forceRegex: boolean,
   probe: ProbeOutcome | null,
   configuredMissing: number,
+  pathEntries: number,
   results: FileResult[],
 ): string {
   const analyzedResults = results.filter((r) => r.method !== "none")
   const pythonFiles = results.filter((r) => r.method === "python")
   const regexFiles = results.filter((r) => r.method === "regex")
+  const sourcesCount = results.length
+  const aliasesConsolidated = Math.max(0, pathEntries - sourcesCount)
 
   const pythonEligibleTotal = results.reduce((sum, r) => sum + r.pythonEligible, 0)
   const pythonAnalyzedTotal = pythonFiles.reduce((sum, r) => sum + r.analyzed, 0)
@@ -448,21 +488,21 @@ function buildReport(
   const regexCoveredEligible = regexFiles.reduce((sum, r) => sum + r.eligible, 0)
   const regexFlagged = regexFiles.filter((r) => r.indicator.startsWith("risk=moderate") || r.indicator.startsWith("risk=high")).length
   const pythonRiskTotal = pythonFiles.reduce((sum, r) => sum + (r.pythonRisk ?? 0), 0)
-  const truncatedFiles = results.filter((r) => r.truncated)
-  const truncatedParagraphs = truncatedFiles.reduce((sum, r) => sum + r.omitted, 0)
+  const truncatedSources = results.filter((r) => r.truncated)
+  const truncatedParagraphs = truncatedSources.reduce((sum, r) => sum + r.omitted, 0)
 
   const state = analyzedResults.length > 0 ? "analise-concluida" : "ausencia-de-evidencia"
-  const truncationLine = truncatedFiles.length > 0
-    ? `sim — ${truncatedFiles.length} arquivo(s), ${truncatedParagraphs} parágrafo(s) omitido(s) por limite`
+  const truncationLine = truncatedSources.length > 0
+    ? `sim — ${truncatedSources.length} fonte(s), ${truncatedParagraphs} parágrafo(s) omitido(s) por limite`
     : "não"
 
   const pythonAggregate = pythonFiles.length > 0
-    ? `média ${round4(pythonFiles.length === 0 ? 0 : pythonRiskTotal / pythonFiles.length)} em ${pythonFiles.length} arquivo(s); ${pythonAnalyzedTotal} parágrafo(s) analisado(s); cobertura ${pythonAnalyzedTotal}/${pythonCoveredEligible} elegíveis (${pythonOmittedTotal} omitido(s) por limite)`
-    : "não aplicável (nenhum arquivo analisado por Python)"
+    ? `média ${round4(pythonFiles.length === 0 ? 0 : pythonRiskTotal / pythonFiles.length)} em ${pythonFiles.length} fonte(s); ${pythonAnalyzedTotal} parágrafo(s) analisado(s); cobertura ${pythonAnalyzedTotal}/${pythonCoveredEligible} elegíveis (${pythonOmittedTotal} omitido(s) por limite)`
+    : "não aplicável (nenhuma fonte analisada por Python)"
 
   const regexAggregate = regexFiles.length > 0
-    ? `${regexFlagged} de ${regexFiles.length} arquivo(s) com indicador acionado (matches>10); ${regexAnalyzedTotal} parágrafo(s) analisado(s); cobertura ${regexAnalyzedTotal}/${regexCoveredEligible} elegíveis`
-    : "não aplicável (nenhum arquivo analisado por regex)"
+    ? `${regexFlagged} de ${regexFiles.length} fonte(s) com indicador acionado (matches>10); ${regexAnalyzedTotal} parágrafo(s) analisado(s); cobertura ${regexAnalyzedTotal}/${regexCoveredEligible} elegíveis`
+    : "não aplicável (nenhuma fonte analisada por regex)"
 
   const lines: string[] = [
     "# IA Detection Report",
@@ -472,13 +512,15 @@ function buildReport(
     `**Método global efetivo:** ${globalMethodLabel(pythonFiles.length, regexFiles.length)}`,
     `**Estado:** ${state}`,
     `**Sonda Python:** ${probeSummary(forceRegex, probe)}`,
-    "**Escopo:** sinais heurísticos locais; não comprova autoria, fraude ou nota; não substitui a auditoria integral do manuscrito.",
+    "**Escopo:** sinais heurísticos locais sobre fontes canônicas únicas; não comprova autoria, fraude ou nota; não substitui a auditoria integral do manuscrito.",
     "",
     "## Resumo de cobertura",
-    `- Arquivos descobertos: ${results.length}`,
+    `- Entradas de caminho descobertas: ${pathEntries}`,
+    `- Fontes canônicas distintas: ${sourcesCount}`,
+    `- Entradas repetidas ou aliases consolidados: ${aliasesConsolidated}`,
     `- Arquivos configurados ausentes ou inválidos: ${configuredMissing}`,
-    `- Arquivos efetivamente analisados: ${analyzedResults.length}`,
-    `- Arquivos não analisados: ${results.length - analyzedResults.length}`,
+    `- Fontes efetivamente analisadas: ${analyzedResults.length}`,
+    `- Fontes não analisadas: ${sourcesCount - analyzedResults.length}`,
     `- Parágrafos elegíveis (segmentação Python): ${pythonEligibleTotal}`,
     `- Parágrafos analisados por Python: ${pythonAnalyzedTotal}`,
     `- Parágrafos omitidos por limite Python (50/arquivo): ${pythonOmittedTotal}`,
@@ -493,20 +535,23 @@ function buildReport(
   }
   lines.push(
     "",
-    "## Cobertura por arquivo",
-    "| Arquivo | Método efetivo | Motivo | Elegíveis | Analisados | Omitidos | Truncado |",
-    "|---|---|---|---|---|---|---|",
+    "## Cobertura por fonte",
+    "| Fonte canônica | Caminhos configurados | Método efetivo | Motivo | Elegíveis | Analisados | Omitidos | Truncado |",
+    "|---|---|---|---|---|---|---|---|",
   )
   for (const r of results) {
     lines.push(
-      `| \`${escapeTableCell(r.file)}\` | \`${methodLabel(r.method)}\` | \`${r.reason}\` | ${r.eligible} | ${r.analyzed} | ${r.omitted} | ${r.truncated ? "sim" : "não"} |`,
+      `| \`${escapeTableCell(r.file)}\` | ${configuredPathsCell(r)} | \`${methodLabel(r.method)}\` | \`${r.reason}\` | ${r.eligible} | ${r.analyzed} | ${r.omitted} | ${r.truncated ? "sim" : "não"} |`,
     )
   }
-  lines.push("", "## Resultados por arquivo")
+  lines.push("", "## Resultados por fonte")
   for (const r of results) {
     lines.push(
       "",
       `### \`${escapeTableCell(r.file)}\``,
+      `- Fonte canônica: \`${escapeTableCell(r.file)}\``,
+      `- Caminhos configurados: ${configuredPathsCell(r)}`,
+      `- Entradas de caminho: ${r.pathEntries} (aliases consolidados: ${r.pathEntries - 1})`,
       `- Método efetivo: \`${methodLabel(r.method)}\``,
       `- Motivo: \`${r.reason}\` — ${REASON_LABELS[r.reason]}`,
       `- Segmentação: ${segmentationLabel(r.segmentation)}`,
@@ -536,6 +581,7 @@ function buildReport(
     '- A ferramenta produz sinais heurísticos, não provas de autoria; escrita acadêmica legítima — por exemplo, com conectivos como "ademais", "outrossim", "não obstante", "ou seja" e "vale ressaltar" — pode gerar os mesmos sinais.',
     "- O caminho Python apenas executa o detector externo `pt_ai_detector` quando ele já está instalado no ambiente; a sonda de disponibilidade não comprova execução bem-sucedida. A confiança fixa histórica de 0.85 não é calibrada e não é apresentada como probabilidade de autoria.",
     "- O caminho regex conta padrões lexicais existentes e produz indicador binário; matches não são comparáveis ao score Python nem constituem confiança calibrada.",
+    "- Caminhos configurados que resolvem para a mesma fonte canônica (por exemplo, `main.tex` apontando para um capítulo descoberto pelo glob) são consolidados em uma única análise; contagens, cobertura e agregados contam fontes canônicas únicas, não entradas de caminho, e a proveniência dos caminhos relativos é preservada por fonte.",
     "- As segmentações diferem: Python divide por linha em branco dupla (`\\n\\n`) e a regex por linha em branco com espaços (`\\n\\s*\\n`), ambas com parágrafo >20 caracteres; por isso as contagens de elegíveis podem divergir entre os métodos.",
     "- O caminho Python analisa no máximo 50 parágrafos elegíveis por arquivo; a cobertura informada é local à ferramenta e não equivale à cobertura integral do manuscrito nem ao plano canônico de auditoria, checkpoints ou síntese acadêmica do DSHbanca.",
     "- Este relatório não constitui nota acadêmica, parecer conclusivo ou recomendação de penalidade e não demonstra fraude.",
@@ -554,6 +600,8 @@ function buildAbsentReport(configuredMissing: number): string {
     "**Estado:** ausencia-de-manuscrito",
     "**Ferramenta:** `banca_ia` — triagem heurística local (sinal não conclusivo)",
     "**Método global efetivo:** Nenhum (nada analisado)",
+    "**Entradas de caminho descobertas:** 0",
+    "**Fontes canônicas distintas:** 0",
     `**Arquivos configurados ausentes ou inválidos:** ${configuredMissing}`,
     "**Escopo:** sinais heurísticos locais; não comprova autoria, fraude ou nota; não substitui a auditoria integral do manuscrito.",
     "",
@@ -571,7 +619,9 @@ export const bancaIa = defineBancaTool({
     const root = args.projectRoot || ctx.directory
     const paths = resolveManuscriptPaths(root, loadConfig(root))
     const rawFiles = [paths.main, ...paths.chapters]
-    const files: Array<{ file: string; canonical: string }> = []
+    const sources: DiscoveredSource[] = []
+    const sourceByCanonical = new Map<string, DiscoveredSource>()
+    let pathEntries = 0
     let configuredMissing = 0
 
     for (const file of rawFiles) {
@@ -584,15 +634,35 @@ export const bancaIa = defineBancaTool({
         }
         throw new PathTraversalError("failed to inspect a workspace path component")
       }
+      // Cada entrada é validada (lstat + realpath confinado) ANTES de qualquer
+      // consolidação: um caminho não pode ser ignorado apenas por parecer
+      // repetido, e symlinks externos/quebrados continuam sendo rejeitados.
       const canonical = resolveRealInsideRoot(root, file)
       if (!existsSync(canonical) || !lstatSync(canonical).isFile()) {
         configuredMissing++
         continue
       }
-      files.push({ file, canonical })
+      const configuredPath = relativeConfiguredPath(root, file)
+      pathEntries++
+      const existing = sourceByCanonical.get(canonical)
+      if (existing) {
+        existing.pathEntries++
+        if (!existing.configuredPaths.includes(configuredPath)) {
+          existing.configuredPaths.push(configuredPath)
+        }
+        continue
+      }
+      const source: DiscoveredSource = {
+        canonical,
+        canonicalDisplay: relativeSafe(root, canonical),
+        configuredPaths: [configuredPath],
+        pathEntries: 1,
+      }
+      sourceByCanonical.set(canonical, source)
+      sources.push(source)
     }
 
-    if (files.length === 0) {
+    if (sources.length === 0) {
       return buildAbsentReport(configuredMissing)
     }
 
@@ -600,15 +670,16 @@ export const bancaIa = defineBancaTool({
     const probe = forceRegex ? null : probePythonEnsemble()
     const results: FileResult[] = []
 
-    for (const { canonical } of files) {
-      const name = relativeSafe(root, canonical)
+    // Uma única leitura/análise por fonte canônica, independentemente de
+    // quantos caminhos configurados (aliases) resolveram para ela.
+    for (const source of sources) {
       let content: string
       try {
-        content = readFileSync(canonical, "utf-8")
+        content = readFileSync(source.canonical, "utf-8")
       } catch {
         results.push(
           notAnalysedResult(
-            name,
+            source,
             "file-unreadable",
             "none",
             0,
@@ -626,7 +697,7 @@ export const bancaIa = defineBancaTool({
         if (regexEligible === 0) {
           results.push(
             notAnalysedResult(
-              name,
+              source,
               "no-eligible-content",
               "regex",
               pythonEligible,
@@ -635,7 +706,7 @@ export const bancaIa = defineBancaTool({
             ),
           )
         } else {
-          results.push(regexResult(name, "force-regex", analyzeRegex(content), pythonEligible, regexEligible))
+          results.push(regexResult(source, "force-regex", analyzeRegex(content), pythonEligible, regexEligible))
         }
         continue
       }
@@ -644,7 +715,7 @@ export const bancaIa = defineBancaTool({
         if (regexEligible === 0) {
           results.push(
             notAnalysedResult(
-              name,
+              source,
               "no-eligible-content",
               "regex",
               pythonEligible,
@@ -653,7 +724,7 @@ export const bancaIa = defineBancaTool({
             ),
           )
         } else {
-          results.push(regexResult(name, "python-unavailable", analyzeRegex(content), pythonEligible, regexEligible))
+          results.push(regexResult(source, "python-unavailable", analyzeRegex(content), pythonEligible, regexEligible))
         }
         continue
       }
@@ -661,7 +732,7 @@ export const bancaIa = defineBancaTool({
       if (pythonEligible === 0) {
         results.push(
           notAnalysedResult(
-            name,
+            source,
             "no-eligible-content",
             "python",
             pythonEligible,
@@ -672,16 +743,16 @@ export const bancaIa = defineBancaTool({
         continue
       }
 
-      const analysis = analyzePython(canonical, __dirname, pythonEligible)
+      const analysis = analyzePython(source.canonical, __dirname, pythonEligible)
       if (analysis.ok) {
-        results.push(pythonResult(name, analysis, pythonEligible, regexEligible))
+        results.push(pythonResult(source, analysis, pythonEligible, regexEligible))
         continue
       }
 
       if (regexEligible === 0) {
         results.push(
           notAnalysedResult(
-            name,
+            source,
             "no-eligible-content",
             "regex",
             pythonEligible,
@@ -690,11 +761,11 @@ export const bancaIa = defineBancaTool({
           ),
         )
       } else {
-        results.push(regexResult(name, analysis.reason, analyzeRegex(content), pythonEligible, regexEligible))
+        results.push(regexResult(source, analysis.reason, analyzeRegex(content), pythonEligible, regexEligible))
       }
     }
 
-    const report = buildReport(forceRegex, probe, configuredMissing, results)
+    const report = buildReport(forceRegex, probe, configuredMissing, pathEntries, results)
     saveReport(root, `ia-${Date.now()}.md`, report)
     return report
   },
