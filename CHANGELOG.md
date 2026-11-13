@@ -11,9 +11,8 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 - `banca_corrigir`: preflight integral fail-closed do lote antes de snapshot, estado ou escrita — uma correção inválida (inclusive no segundo arquivo) bloqueia todas as demais, sem aplicação parcial, sem iteração de sucesso e sem snapshot.
 - `banca_corrigir`: `expectedOccurrences` agora é inteiro positivo seguro e precisa coincidir com a contagem real de ocorrências literais não sobrepostas; quando omitido, apenas uma ocorrência é admitida. Divergência ou ambiguidade bloqueia o lote (antes emitia aviso e aplicava `replaceAll`).
-- `banca_corrigir`: `newText` é inserido literalmente, sem interpretar templates de substituição JavaScript (`$&`, `$$`, `$'`, `` $` ``), regex, `$&`/LaTeX ou normalização textual; conteúdo não UTF-8 é recusado para não corromper bytes não selecionados.
+- `banca_corrigir`: `newText` é inserido literalmente, sem interpretar templates de substituição JavaScript (`$&`, `$$`, `$'`, `` $` ``), regex, comandos LaTeX ou normalização textual; conteúdo não UTF-8 é recusado para não corromper bytes não selecionados.
 - `banca_corrigir`: snapshot parcial real é criado apenas após o lote válido, revalidado contra os bytes do preflight e registrado antes da aplicação; falhas de I/O posteriores são comunicadas com recuperação honesta pelo snapshot, sem rollback fictício.
-
 - Runner E2E nativo DSH (`scripts/e2e-dsh-profile.ts`): compatibilidade com pnpm 12 nativo (`pnpm-native`) e entrypoints JavaScript (`.cjs`/`.mjs`), validação estrita de manifesto `package.json` (`name: "pnpm"`), confinamento de entrypoints, coerência de versão com cache, fail-closed e rejeição do dispatcher Corepack (#32).
 - Integração nativa DSH registra as 16 ferramentas `banca_*`, com schemas, validação e diretório da sessão; catálogo compartilhado com OpenCode e regressão do bundle compilado.
 - `banca_corrigir`: substituição agora usa `replaceAll` em vez de `replace` (string), que substituía apenas a primeira ocorrência — correções repetidas no manuscrito eram silenciosamente dropadas
