@@ -137,4 +137,3 @@ continua sujeita ao contrato de provedores do DSH.
   preservação de originais e guards de path.
 
 Nenhum teste desta issue executa rede, MCP, REST, LLM ou LaTeX/BibTeX real.
-
