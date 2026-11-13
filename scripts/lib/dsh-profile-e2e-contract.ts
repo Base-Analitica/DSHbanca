@@ -1163,6 +1163,28 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
   const invalidBatchRow =
     correctionPreflight && isRecord(correctionPreflight.invalidBatch) ? correctionPreflight.invalidBatch : undefined
 
+  // The rejected-correction probes run after the valid correction and before
+  // the positive restore, so their inventories must contain the exact automatic
+  // capture identified by the positive proof. Previous snapshot artifacts are
+  // not a substitute for that specific label/manifest/captured bytes.
+  const linkedRestoreEvidence = isRecord(evidence.correctionRestore) ? evidence.correctionRestore : undefined
+  const linkedRestoreCorrection =
+    linkedRestoreEvidence && isRecord(linkedRestoreEvidence.correction) ? linkedRestoreEvidence.correction : undefined
+  const linkedRestoreSnapshot =
+    linkedRestoreEvidence && isRecord(linkedRestoreEvidence.snapshot) ? linkedRestoreEvidence.snapshot : undefined
+  const linkedCapture =
+    typeof linkedRestoreSnapshot?.label === "string" &&
+    isSha256Hex(linkedRestoreCorrection?.originalSha256) &&
+    isSha256Hex(linkedRestoreCorrection?.correctedSha256) &&
+    isSha256Hex(linkedRestoreSnapshot?.vaultManuscriptSha256)
+      ? {
+          label: linkedRestoreSnapshot.label,
+          originalSha256: linkedRestoreCorrection.originalSha256,
+          correctedSha256: linkedRestoreCorrection.correctedSha256,
+          vaultSha256: linkedRestoreSnapshot.vaultManuscriptSha256,
+        }
+      : null
+
   const occurrenceMessageMatches = (
     row: Record<string, any> | undefined,
     file: string,
@@ -1181,6 +1203,7 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
     expectedLabel: string,
     actual: number,
     requireExtraFile: boolean,
+    linkedCapture: { label: string; originalSha256: string; correctedSha256: string; vaultSha256: string } | null,
   ): boolean => {
     if (row === undefined) return false
     if (!isCompleteCorrectionInventory(row.inventoryBefore)) return false
@@ -1189,6 +1212,19 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
     if (requireExtraFile) {
       if (!isSha256Hex(row.inventoryBefore["extra.tex"])) return false
       if (!isSha256Hex(row.inventoryAfter["extra.tex"])) return false
+    }
+    if (linkedCapture !== null) {
+      const manifestKey = ".banca/snapshots/" + linkedCapture.label + ".manifest.json"
+      const capturedKey = ".banca/snapshots/" + linkedCapture.label + "/main.tex"
+      for (const inventory of [row.inventoryBefore, row.inventoryAfter]) {
+        if (!isSha256Hex(inventory[manifestKey])) return false
+        if (!isSha256Hex(inventory[capturedKey])) return false
+        if (inventory[capturedKey] !== linkedCapture.originalSha256) return false
+        if (inventory[capturedKey] !== linkedCapture.vaultSha256) return false
+        if (!isSha256Hex(inventory["main.tex"])) return false
+        if (inventory["main.tex"] !== linkedCapture.correctedSha256) return false
+      }
+      if (row.inventoryBefore[manifestKey] !== row.inventoryAfter[manifestKey]) return false
     }
     return row.dispatchCount === 1 &&
       row.isError === false &&
@@ -1201,14 +1237,15 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
 
   const correctionPreflightValid =
     correctionPreflight?.toolName === "banca_corrigir" &&
+    linkedCapture !== null &&
     divergentCountRow?.expectedOccurrences === 2 &&
     divergentCountRow?.actualOccurrences === 1 &&
-    correctionRejectionRowValid(divergentCountRow, "main.tex", "2 (expectedOccurrences)", 1, false) &&
+    correctionRejectionRowValid(divergentCountRow, "main.tex", "2 (expectedOccurrences)", 1, false, linkedCapture) &&
     invalidBatchRow?.correctionCount === 2 &&
     invalidBatchRow?.invalidCorrectionIndex === 1 &&
     invalidBatchRow?.firstCorrectionWouldApply === true &&
     invalidBatchRow?.partialApplicationAbsent === true &&
-    correctionRejectionRowValid(invalidBatchRow, "extra.tex", "2 (expectedOccurrences)", 1, true)
+    correctionRejectionRowValid(invalidBatchRow, "extra.tex", "2 (expectedOccurrences)", 1, true, linkedCapture)
   if (!correctionPreflightValid) {
     errors.push("banca_corrigir occurrence preflight was not fail-closed over the whole batch")
   }
@@ -1249,6 +1286,8 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
     isSha256Hex(originalSha) &&
     isSha256Hex(correctedSha) &&
     originalSha !== correctedSha &&
+    isSha256Hex(correctionRow?.expectedCorrectedSha256) &&
+    correctionRow.expectedCorrectedSha256 === correctedSha &&
     correctionRow?.changedExactly === true &&
     snapshotRow?.stateRegistered === true &&
     snapshotRow?.autoCreatedByCorrection === true &&

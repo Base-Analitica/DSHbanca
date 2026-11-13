@@ -99,7 +99,6 @@ const evidenceHash = (seed: string) => createHash("sha256").update(seed).digest(
 const correctionOriginalSha256 = evidenceHash("baseline-sentinel-original")
 const correctionCurrentSha256 = evidenceHash("current-sentinel-corrected")
 const correctionStateSha256 = evidenceHash("state-after-setup-correction")
-const correctionVaultSha256 = evidenceHash("vault-partial-main")
 const correctionManifestSha256 = evidenceHash("vault-partial-manifest")
 const correctionNamedVaultSha256 = evidenceHash("vault-named-main")
 const correctionNamedManifestSha256 = evidenceHash("vault-named-manifest")
@@ -110,7 +109,7 @@ const correctionPreexistingLabels = ["dshbanca-issue-2-restore-sentinel"]
 const correctionVaultInventory = {
   ".banca/snapshots/dshbanca-issue-2-restore-sentinel/main.tex": correctionNamedVaultSha256,
   ".banca/snapshots/dshbanca-issue-2-restore-sentinel.manifest.json": correctionNamedManifestSha256,
-  [".banca/snapshots/" + correctionAutoPartialLabel + "/main.tex"]: correctionVaultSha256,
+  [".banca/snapshots/" + correctionAutoPartialLabel + "/main.tex"]: correctionOriginalSha256,
   [".banca/snapshots/" + correctionAutoPartialLabel + ".manifest.json"]: correctionManifestSha256,
 }
 const correctionRejectedInventory = () => ({
@@ -232,6 +231,7 @@ const completeRuntime = {
       targetFile: "main.tex",
       originalSha256: correctionOriginalSha256,
       correctedSha256: correctionCurrentSha256,
+      expectedCorrectedSha256: correctionCurrentSha256,
       changedExactly: true,
     },
     snapshot: {
@@ -7137,5 +7137,105 @@ describe("Issue #110 R2 — fail-closed positive snapshot restore evidence", () 
     ],
   ])("rejects positive restore evidence when %s", (_label, mutate) => {
     expect(validateEvidence(mutatedCorrectionEvidence(mutate))).toContain(R2_RESTORE_ERROR)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #110 R3 — the positive proof and the rejected-probe inventories must
+// describe the same automatic capture (label, manifest, bytes and hashes).
+// ---------------------------------------------------------------------------
+
+function removeAutoCaptureEntries(evidence: any, kind: "manifest" | "captured" | "both") {
+  const label = evidence.correctionRestore.snapshot.label
+  const manifestKey = ".banca/snapshots/" + label + ".manifest.json"
+  const capturedKey = ".banca/snapshots/" + label + "/main.tex"
+  const inventories = [
+    evidence.correctionPreflight.divergentCount.inventoryBefore,
+    evidence.correctionPreflight.divergentCount.inventoryAfter,
+    evidence.correctionPreflight.invalidBatch.inventoryBefore,
+    evidence.correctionPreflight.invalidBatch.inventoryAfter,
+  ]
+  for (const inventory of inventories) {
+    if (kind === "manifest" || kind === "both") delete inventory[manifestKey]
+    if (kind === "captured" || kind === "both") delete inventory[capturedKey]
+  }
+}
+
+function rewriteAutoCaptureHash(evidence: any, hash: string) {
+  const label = evidence.correctionRestore.snapshot.label
+  const capturedKey = ".banca/snapshots/" + label + "/main.tex"
+  const inventories = [
+    evidence.correctionPreflight.divergentCount.inventoryBefore,
+    evidence.correctionPreflight.divergentCount.inventoryAfter,
+    evidence.correctionPreflight.invalidBatch.inventoryBefore,
+    evidence.correctionPreflight.invalidBatch.inventoryAfter,
+  ]
+  for (const inventory of inventories) inventory[capturedKey] = hash
+}
+
+describe("Issue #110 R3 — cross-linked automatic capture evidence", () => {
+  test("accepts the coherent positive fixture", () => {
+    expect(validateEvidence(completeRuntime)).toEqual([])
+  })
+
+  test.each([
+    [
+      "automatic manifest removed while the named snapshot manifest remains",
+      (e: any) => removeAutoCaptureEntries(e, "manifest"),
+    ],
+    [
+      "automatic captured main.tex removed while other vault files remain",
+      (e: any) => removeAutoCaptureEntries(e, "captured"),
+    ],
+    [
+      "automatic manifest and captured file removed together",
+      (e: any) => removeAutoCaptureEntries(e, "both"),
+    ],
+    [
+      "captured hash changed equally in all inventories but diverging from the positive proof",
+      (e: any) => rewriteAutoCaptureHash(e, evidenceHash("contradictory-capture")),
+    ],
+    [
+      "workspace main.tex hash diverges from the declared corrected hash",
+      (e: any) => {
+        const diverging = evidenceHash("diverging-workspace-main")
+        for (const row of [e.correctionPreflight.divergentCount, e.correctionPreflight.invalidBatch]) {
+          row.inventoryBefore["main.tex"] = diverging
+          row.inventoryAfter["main.tex"] = diverging
+        }
+      },
+    ],
+    [
+      "positive proof and inventories describe different captures",
+      (e: any) => {
+        // Keep the positive proof internally consistent but point it at another
+        // capture; the inventories still reference the original bytes.
+        const other = evidenceHash("other-capture-bytes")
+        e.correctionRestore.snapshot.manifestFiles[0].sha256 = other
+        e.correctionRestore.snapshot.originalManuscriptSha256 = other
+        e.correctionRestore.snapshot.vaultManuscriptSha256 = other
+        e.correctionRestore.restore.originalSha256 = other
+        e.correctionRestore.restore.restoredSha256 = other
+        e.correctionRestore.correction.originalSha256 = other
+      },
+    ],
+    [
+      "snapshot label is not present in the negative inventories",
+      (e: any) => {
+        e.correctionRestore.snapshot.label = "pre-1700000009999"
+        e.correctionRestore.restore.snapshotId = "pre-1700000009999"
+        e.correctionRestore.restore.message =
+          "restored from pre-1700000009999\nRestored files (content verified):\n- main.tex"
+      },
+    ],
+  ])("rejects cross-linked capture evidence when %s", (_label, mutate) => {
+    expect(validateEvidence(mutatedCorrectionEvidence(mutate))).toContain(R2_PREFLIGHT_ERROR)
+  })
+
+  test("rejects a declared corrected hash that contradicts the expected full-text correction", () => {
+    const evidence = mutatedCorrectionEvidence((e: any) => {
+      e.correctionRestore.correction.expectedCorrectedSha256 = evidenceHash("different-expected-text")
+    })
+    expect(validateEvidence(evidence)).toContain(R2_RESTORE_ERROR)
   })
 })

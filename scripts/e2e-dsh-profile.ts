@@ -5030,6 +5030,14 @@ export async function apply(ctx) {
     if (!snapshotExists) fail("the DSHbanca state did not persist the setup snapshot used by the restore denial");
 
     const beforeCorrection = await readFile(join(workspace, "main.tex"), "utf8");
+    // Factual positive-correction expectation: the full observed text must be
+    // exactly the single authorized substitution over the pre-correction bytes.
+    const baselineSentinelOccurrences = beforeCorrection.split("BASELINE_SENTINEL").length - 1;
+    if (baselineSentinelOccurrences !== 1) {
+      fail("the synthetic manuscript does not contain exactly one baseline sentinel before the correction");
+    }
+    const expectedCorrectedText = beforeCorrection.split("BASELINE_SENTINEL").join("CURRENT_SENTINEL");
+    const expectedCorrectedSha256 = createHash("sha256").update(expectedCorrectedText).digest("hex");
     const baselineManuscriptSha256 = await sha(join(workspace, "main.tex"));
     const unselectedManuscriptPath = "referencias.bib";
     const unselectedManuscriptSha256Before = await sha(join(workspace, unselectedManuscriptPath));
@@ -5703,7 +5711,10 @@ export async function apply(ctx) {
           targetFile: "main.tex",
           originalSha256: baselineManuscriptSha256,
           correctedSha256: correctedManuscriptSha256,
-          changedExactly: correctionWouldMutate && !currentText.includes("BASELINE_SENTINEL"),
+          expectedCorrectedSha256: expectedCorrectedSha256,
+          changedExactly: setupCorrection.result.isError === false &&
+            setupCorrection.aborted === false &&
+            currentText === expectedCorrectedText,
         },
         snapshot: {
           label: autoPartialLabel,
