@@ -48,11 +48,20 @@ manual do natbib (<https://tug.ctan.org/macros/latex/contrib/natbib/natbib.pdf>)
 - Argumentos opcionais `[...]` vêm antes dos obrigatórios `{...}`; espaços,
   quebras de linha simples dentro do mesmo parágrafo e comentários não
   escapados são tolerados entre eles.
+- O balanceamento de chaves dentro de um argumento opcional é verificado como
+  propriedade de prefixo: um `}` não escapado sem `{` correspondente invalida o
+  argumento opcional imediatamente, e uma abertura posterior não compensa a
+  profundidade negativa (por exemplo `\cite[}{]{a}` não é citação). Comentários
+  e escapes não alteram a profundidade; colchetes protegidos por chaves ou
+  escapados não fecham o argumento antes da hora.
 - Argumentos obrigatórios exigem chaves balanceadas; `\{`, `\}` e demais
   escapes não alteram o balanceamento.
 - Um argumento obrigatório precisa de pelo menos uma chave de referência:
-  grupos vazios, apenas com espaços, apenas com `,` ou apenas com comentários
-  não constituem citação.
+  grupos vazios, apenas com espaços, apenas com `,`, apenas com comentários ou
+  apenas com delimitadores estruturais internos (`\cite{{}}`, `\cite{{,}}`)
+  não constituem citação. Chaves internas com conteúdo legítimo
+  (`\cite{autor{2020}}`, `\cite{autor{\c{c}}ao2020}`) e escapes literais
+  (`\cite{autor\{2020\}}`) permanecem válidos.
 - `\apud` e `\apudonline` exigem os **dois** argumentos obrigatórios com
   conteúdo; um único argumento não conta.
 - Múltiplas chaves em um argumento (`\cite{autor2020,autor2021}`) contam como

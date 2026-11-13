@@ -165,8 +165,13 @@ function readRequiredArgument(text: string, start: number, budget: ScanBudget): 
  * Read a balanced optional `[...]` argument starting at `start`. Braces inside
  * the note are tracked so a `]` protected by `{}` does not close it early, and
  * escaped brackets never close it either. The note ends at the first
- * unprotected `]`, matching the delimited-argument reading of LaTeX. Returns
- * the index right after the closing bracket, or -1 when it is incomplete.
+ * unprotected `]`, matching the delimited-argument reading of LaTeX.
+ *
+ * Brace balance is checked as a prefix property: an unescaped `}` without a
+ * corresponding `{` rejects the argument immediately, so a later opening brace
+ * can never compensate a negative depth. Comments and escapes never change the
+ * depth. Returns the index right after the closing bracket, or -1 when the
+ * argument is incomplete or malformed.
  */
 function readOptionalArgument(text: string, start: number, budget: ScanBudget): number {
   let braceDepth = 0
@@ -190,6 +195,9 @@ function readOptionalArgument(text: string, start: number, budget: ScanBudget): 
       continue
     }
     if (char === "}") {
+      // Prefix balance: a closing brace without a matching opening brace makes
+      // the whole optional argument invalid; a later `{` must not compensate it.
+      if (braceDepth === 0) return -1
       braceDepth -= 1
       index += 1
       budget.remaining -= 1
@@ -203,10 +211,15 @@ function readOptionalArgument(text: string, start: number, budget: ScanBudget): 
 }
 
 /**
- * True when a mandatory argument carries at least one reference key: after
- * skipping unescaped comments, whitespace and the `,` key separator, at least
- * one other character remains. Empty, blank and comma-only groups are not
- * citations, and neither are comment-only groups (`\cite{% x}`).
+ * True when a mandatory argument carries at least one reference key.
+ *
+ * Content is "structurally empty" — and therefore not a citation — when it
+ * only has comments, whitespace, the `,` key separator and the `{`/`}`
+ * delimiters of nested groups: `\cite{{}}` and `\cite{{,}}` have no key even
+ * though their braces are balanced. An escape (`\{`, `\%`, `\c{c}`...) is
+ * literal argument material and counts as content. Nested groups with real
+ * content (`\cite{autor{2020}}`, `\cite{autor{\c{c}}ao2020}`) stay valid. No
+ * bibliographic key validation is performed.
  */
 function hasReferenceKey(text: string, from: number, to: number): boolean {
   let index = from
@@ -218,6 +231,12 @@ function hasReferenceKey(text: string, from: number, to: number): boolean {
     }
     if (char === "%") {
       while (index < to && text[index] !== "\n") index += 1
+      continue
+    }
+    // Structural delimiters of nested groups do not demonstrate key content by
+    // themselves; only a non-structural character does.
+    if (char === "{" || char === "}") {
+      index += 1
       continue
     }
     if (!isWhitespace(char) && char !== ",") return true
