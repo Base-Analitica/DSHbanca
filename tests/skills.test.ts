@@ -1037,7 +1037,7 @@ describe("Skills Validation", () => {
       const EXPECTED_HASHES: Record<string, string> = {
         "banca-avaliacao": "60bdcd97061da7748f7d1f9d6d7999fd62afac9b1269bf089eb23da7aab7c85e",
         "banca-correcao": "d0a05d3feb78f5ef05615a48892b3c5cdc88fc589b3fc2100f2d78a0a32d45c7",
-        "banca-detector-ia": "db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b",
+        "banca-detector-ia": "72f7153155678afadee8315bc718b1a3773d5f2e4505fe69f0d033d06ba96aa1",
         "banca-grille": "9a861c773444a1fc537619202bb0818936bafd313efdd9438d3eb1985d0fc6e6",
         "banca-plagio": "1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661",
         "banca-planejador": "d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64",

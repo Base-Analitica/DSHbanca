@@ -58,7 +58,7 @@ Todas as oito skills possuem integridade comprovada byte a byte entre a fonte ca
 |---|---|---|---|
 | `banca-avaliacao` | `banca-avaliacao` | Protocolo de auditoria exaustiva por lotes e síntese relacional global | `60bdcd97061da7748f7d1f9d6d7999fd62afac9b1269bf089eb23da7aab7c85e` |
 | `banca-correcao` | `banca-correcao` | Aplica correções com snapshots, contratos e compilação | `d0a05d3feb78f5ef05615a48892b3c5cdc88fc589b3fc2100f2d78a0a32d45c7` |
-| `banca-detector-ia` | `banca-detector-ia` | Triagem heurística não-conclusiva de padrões estilísticos | `db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b` |
+| `banca-detector-ia` | `banca-detector-ia` | Triagem heurística não-conclusiva de padrões estilísticos | `72f7153155678afadee8315bc718b1a3773d5f2e4505fe69f0d033d06ba96aa1` |
 | `banca-grille` | `banca-grille` | Entrevista com o autor para resolução de ambiguidades | `9a861c773444a1fc537619202bb0818936bafd313efdd9438d3eb1985d0fc6e6` |
 | `banca-plagio` | `banca-plagio` | Tratamento e reescrita de trechos de relatórios de similaridade | `1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661` |
 | `banca-planejador` | `banca-planejador` | Planejamento da estratégia de correções por prioridade | `d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64` |
