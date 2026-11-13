@@ -52,6 +52,7 @@ try {
 const ORIGINAL_INTERNALS = {
   probeTimeoutMs: initialModule?.bancaIaInternals?.probeTimeoutMs as number | undefined,
   analysisTimeoutMs: initialModule?.bancaIaInternals?.analysisTimeoutMs as number | undefined,
+  pythonBin: initialModule?.bancaIaInternals?.pythonBin as string | undefined,
 }
 
 let loadedInternals: any = null
@@ -219,7 +220,7 @@ let stubDir: string
 let controlDir: string
 let markerPath: string
 
-beforeEach(() => {
+beforeEach(async () => {
   base = mkdtempSync(join(tmpdir(), "banca-ia-113-"))
   project = join(base, "project")
   stubDir = join(base, "stub-bin")
@@ -235,6 +236,13 @@ beforeEach(() => {
   process.env.PATH = `${stubDir}:${systemPath}`
   process.env.BANCA_IA_STUB_CONTROL = controlDir
   process.env.BANCA_IA_STUB_MARKER = markerPath
+  // O seam absoluto evita depender da semântica de resolução de PATH do
+  // runtime (Bun 1.3.9 no CI não resolve o stub só pela mutação de PATH).
+  const mod: any = await importBancaIa()
+  const internals = mod?.bancaIaInternals
+  if (internals && typeof internals === "object") {
+    internals.pythonBin = join(stubDir, "python3")
+  }
 })
 
 afterEach(() => {
@@ -248,6 +256,9 @@ afterEach(() => {
     }
     if (typeof ORIGINAL_INTERNALS.analysisTimeoutMs === "number") {
       loadedInternals.analysisTimeoutMs = ORIGINAL_INTERNALS.analysisTimeoutMs
+    }
+    if (typeof ORIGINAL_INTERNALS.pythonBin === "string") {
+      loadedInternals.pythonBin = ORIGINAL_INTERNALS.pythonBin
     }
   }
   if (base) rmSync(base, { recursive: true, force: true })
@@ -758,12 +769,11 @@ describe("banca_ia — sonda Python e ausência de evidência", () => {
     expect(analysisInvocations()).toBe(0)
   })
 
-  test("sonda com python3 ausente do PATH: diagnóstico python-missing", async () => {
+  test("executável Python ausente: diagnóstico python-missing", async () => {
     writeProjectJson()
     writeMain(paragraphs(2))
-    const emptyBinDir = join(base, "empty-bin")
-    mkdirSync(emptyBinDir)
-    process.env.PATH = emptyBinDir
+    const mod: any = await importBancaIa()
+    ;(requireInternals(mod) as any).pythonBin = join(base, "missing-python3")
 
     const report = await runBancaIa()
     expect(headerField(report, "Sonda Python")).toBe("indisponível (diagnóstico: python-missing)")

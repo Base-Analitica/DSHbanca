@@ -29,6 +29,7 @@ const PYTHON_PARAGRAPH_LIMIT = 50
 export const bancaIaInternals = {
   probeTimeoutMs: 5000,
   analysisTimeoutMs: 60000,
+  pythonBin: "python3",
 }
 
 type Method = "python" | "regex" | "none"
@@ -148,7 +149,7 @@ print(json.dumps({"ok": True, "risk": round(risk, 4), "paragraphs_total": len(pa
 
 function probePythonEnsemble(): ProbeOutcome {
   try {
-    const result = spawnSync("python3", ["-c", PROBE_CODE], {
+    const result = spawnSync(bancaIaInternals.pythonBin, ["-c", PROBE_CODE], {
       encoding: "utf-8",
       timeout: bancaIaInternals.probeTimeoutMs,
     })
@@ -173,7 +174,7 @@ function probePythonEnsemble(): ProbeOutcome {
 function analyzePython(filePath: string, moduleDir: string, pythonEligible: number): PythonAnalysis {
   let result: SpawnSyncReturns<string>
   try {
-    result = spawnSync("python3", ["-c", PYTHON_ANALYSIS_SCRIPT, moduleDir, filePath], {
+    result = spawnSync(bancaIaInternals.pythonBin, ["-c", PYTHON_ANALYSIS_SCRIPT, moduleDir, filePath], {
       encoding: "utf-8",
       timeout: bancaIaInternals.analysisTimeoutMs,
     })
