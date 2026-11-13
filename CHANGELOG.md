@@ -31,6 +31,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 - Compilação LaTeX ajustada para evitar execução via shell string (`execSync` → `spawnSync` com args separados)
 - Auto-registro do MCP crossref-academic tornado explícito/opt-in (requer `OPENBANCA_ENABLE_CROSSREF_MCP=1`)
 - Script de verificação de segredos ajustado para reduzir falsos positivos (modo `--ci` ignora docs/prompts)
+- `banca_ia`: o relatório retornado e persistido passa a informar o método efetivo por arquivo (Python, regex ou não analisado), o motivo da seleção/fallback, os parágrafos elegíveis/analisados/omitidos, o truncamento do limite de 50 parágrafos Python por arquivo e as limitações metodológicas; a disponibilidade do módulo `pt_ai_detector` deixa de ser apresentada como execução bem-sucedida, respostas Python inválidas (timeout, sinal, exit code, JSON, schema, score, contagens) são rejeitadas com fallback explícito e sanitizado, ausência de parágrafos elegíveis vira ausência de evidência — não risco baixo — e os agregados por método não são combinados como medida comparável nem apresentados como confiança calibrada. Entradas de caminho que resolvem para a mesma fonte canônica (aliases internos, como `main.tex` também listado nos capítulos) são consolidadas em uma única análise, com proveniência dos caminhos relativos configurados e contagens/agregados por fonte canônica única. A skill `banca-detector-ia` e o guia de uso foram alinhados ao mesmo contrato.
 
 ### Segurança
 

@@ -1,12 +1,14 @@
-import { existsSync, lstatSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, lstatSync, readFileSync } from "node:fs"
+import { isAbsolute, relative, resolve, sep } from "node:path"
 import { spawnSync } from "node:child_process"
+import type { SpawnSyncReturns } from "node:child_process"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { saveReport } from "../lib/reports"
-import { PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
+import { PathTraversalError, realWorkspaceRoot, resolveRealInsideRoot } from "../lib/safe_paths"
+
 const PATTERNS: RegExp[] = [
   /(ademais|outrossim|destarte|sobremaneira|conquanto|tampouco)\b/gi,
   /(é imperativo|é crucial|é fundamental|é mister) que\b/gi,
@@ -16,53 +18,595 @@ const PATTERNS: RegExp[] = [
   /(cabe destacar|faz-se necessário|haja vista|tendo em vista)\b/gi,
 ]
 
-function hasPythonEnsemble(): boolean {
-  try {
-    const result = spawnSync("python3", ["-c", "import pt_ai_detector; print('ok')"], { encoding: "utf-8", timeout: 5000 })
-    return result.stdout ? result.stdout.trim() === "ok" : false
-  } catch {
-    return false
-  }
+/** Limite histórico de parágrafos por arquivo no caminho Python. Não expandir aqui. */
+const PYTHON_PARAGRAPH_LIMIT = 50
+
+/**
+ * Constantes internas usadas pelos subprocessos de sonda/análise Python.
+ * É um seam de teste: o código de produção não expõe estes valores na API da
+ * ferramenta e os testes restauram os valores originais ao final.
+ */
+export const bancaIaInternals = {
+  probeTimeoutMs: 5000,
+  analysisTimeoutMs: 60000,
+  pythonBin: "python3",
 }
 
-function runPythonEnsemble(filePath: string, moduleDir: string): { risk: number; confidence: number } | null {
-  try {
-    const script = `
-import sys
-import json
+type Method = "python" | "regex" | "none"
 
-if len(sys.argv) < 3:
-    print(json.dumps({"risk": 0, "confidence": 0, "error": "missing arguments"}))
+type ReasonCode =
+  | "python-ok"
+  | "force-regex"
+  | "python-unavailable"
+  | "python-start-failed"
+  | "python-timeout"
+  | "python-signal"
+  | "python-exit-code"
+  | "python-invalid-json"
+  | "python-detector-error"
+  | "python-schema-invalid"
+  | "python-invalid-score"
+  | "python-inconsistent-counts"
+  | "no-eligible-content"
+  | "file-unreadable"
+
+const REASON_LABELS: Record<ReasonCode, string> = {
+  "python-ok": "execução Python válida",
+  "force-regex": "forceRegex ativo: caminho Python desativado",
+  "python-unavailable": "Python/pt_ai_detector indisponível",
+  "python-start-failed": "falha ao iniciar o subprocesso Python",
+  "python-timeout": "timeout na execução Python",
+  "python-signal": "execução Python encerrada por sinal",
+  "python-exit-code": "execução Python com exit code diferente de zero",
+  "python-invalid-json": "resposta Python ausente ou JSON inválido",
+  "python-detector-error": "erro explícito retornado pelo detector",
+  "python-schema-invalid": "campos obrigatórios ausentes ou malformados",
+  "python-invalid-score": "score não finito ou fora do domínio [0,1]",
+  "python-inconsistent-counts": "contagens incompatíveis com elegíveis ou limite 50",
+  "no-eligible-content": "nenhum parágrafo elegível",
+  "file-unreadable": "arquivo não pôde ser lido (I/O)",
+}
+
+type Segmentation = "python" | "regex" | "none"
+
+type ProbeOutcome = { available: boolean; code: string }
+
+type PythonAnalysis =
+  | { ok: true; risk: number; paragraphsTotal: number; paragraphsAnalyzed: number }
+  | { ok: false; reason: ReasonCode }
+
+type RegexAnalysis = { matches: number; firstExcerpt: string | null; riskLabel: "low" | "moderate" | "high" }
+
+/**
+ * Fonte canônica única do workspace. Vários caminhos configurados (por exemplo
+ * `main.tex` e um capítulo descoberto pelo glob) podem resolver para a mesma
+ * identidade canônica: a análise e as métricas contam a fonte uma única vez,
+ * enquanto a proveniência preserva os caminhos relativos configurados.
+ */
+type DiscoveredSource = {
+  /** Identidade canônica (realpath) usada para deduplicar e ler uma única vez. */
+  canonical: string
+  /** Caminho canônico relativo seguro, exibido como identidade da fonte. */
+  canonicalDisplay: string
+  /** Caminhos relativos configurados/descobertos, em ordem determinística. */
+  configuredPaths: string[]
+  /** Número de entradas de caminho que resolveram para esta fonte. */
+  pathEntries: number
+}
+
+type FileResult = {
+  file: string
+  configuredPaths: string[]
+  pathEntries: number
+  method: Method
+  reason: ReasonCode
+  segmentation: Segmentation
+  pythonEligible: number
+  regexEligible: number
+  eligible: number
+  analyzed: number
+  omitted: number
+  truncated: boolean
+  indicator: string
+  excerpt: string | null
+  fallback: string
+  pythonRisk: number | null
+}
+
+// ---------------------------------------------------------------------------
+// Caminho Python: sonda de disponibilidade e análise com validação estrita.
+// A disponibilidade do módulo é apenas uma sonda; nunca é prova de execução.
+// ---------------------------------------------------------------------------
+
+const PROBE_CODE = "import pt_ai_detector; print('ok')"
+
+const PYTHON_ANALYSIS_SCRIPT = `
+import sys, json
+
+def fail(code, stage, cls=""):
+    print(json.dumps({"ok": False, "error_code": code, "error_stage": stage, "error_class": cls}))
     sys.exit(1)
 
+if len(sys.argv) < 3:
+    fail("missing_arguments", "arguments")
 module_dir = sys.argv[1]
 file_path = sys.argv[2]
-
 sys.path.insert(0, module_dir)
 try:
     from pt_ai_detector import detect_text
-    with open(file_path, encoding="utf-8") as f:
-        text = f.read()
-    paragraphs = [p for p in text.split("\\n\\n") if len(p.strip()) > 20]
-    scores = []
-    for p in paragraphs[:50]:
-        s = detect_text(p)
-        scores.append(s.get("ai_score", 0))
-    risk = sum(scores) / len(scores) if scores else 0
-    print(json.dumps({"risk": round(risk, 4), "confidence": 0.85, "paragraphs_analyzed": len(scores)}))
-except ImportError:
-    print(json.dumps({"risk": 0, "confidence": 0, "error": "pt_ai_detector not available"}))
-except Exception as e:
-    print(json.dumps({"risk": 0, "confidence": 0, "error": str(e)}))
+except ImportError as exc:
+    fail("pt_ai_detector_not_available", "import", type(exc).__name__)
+except Exception as exc:
+    fail("detector_import_error", "import", type(exc).__name__)
+try:
+    with open(file_path, encoding="utf-8") as handle:
+        text = handle.read()
+except OSError as exc:
+    fail("file_read_error", "read", type(exc).__name__)
+paragraphs = [p for p in text.split("\\n\\n") if len(p.strip()) > 20]
+limit = ${PYTHON_PARAGRAPH_LIMIT}
+scores = []
+for paragraph in paragraphs[:limit]:
+    try:
+        result = detect_text(paragraph)
+    except Exception as exc:
+        fail("detector_error", "paragraph-analysis", type(exc).__name__)
+    if not isinstance(result, dict):
+        fail("invalid_paragraph_result", "paragraph-analysis", "non_dict")
+    if result.get("error"):
+        fail("detector_error", "paragraph-analysis", "reported_error")
+    value = result.get("ai_score")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        fail("invalid_paragraph_result", "paragraph-analysis", "invalid_ai_score")
+    value = float(value)
+    if value != value or value in (float("inf"), float("-inf")) or value < 0.0 or value > 1.0:
+        fail("invalid_paragraph_result", "paragraph-analysis", "out_of_domain")
+    scores.append(value)
+risk = sum(scores) / len(scores) if scores else 0.0
+print(json.dumps({"ok": True, "risk": round(risk, 4), "paragraphs_total": len(paragraphs), "paragraphs_analyzed": len(scores)}))
 `
-    const result = spawnSync("python3", ["-c", script, moduleDir, filePath], { encoding: "utf-8", timeout: 60000 })
-    if (result.status !== 0) {
-      return null
+
+function probePythonEnsemble(): ProbeOutcome {
+  try {
+    const result = spawnSync(bancaIaInternals.pythonBin, ["-c", PROBE_CODE], {
+      encoding: "utf-8",
+      timeout: bancaIaInternals.probeTimeoutMs,
+    })
+    if (result.error) {
+      const code = (result.error as NodeJS.ErrnoException).code
+      return { available: false, code: code === "ETIMEDOUT" ? "probe-timeout" : "python-missing" }
     }
-    return JSON.parse((result.stdout || "").trim())
+    if (result.signal) return { available: false, code: "probe-signal" }
+    if (result.status !== 0) return { available: false, code: "probe-exit-code" }
+    if ((result.stdout || "").trim() !== "ok") return { available: false, code: "probe-invalid-output" }
+    return { available: true, code: "probe-ok" }
   } catch {
-    return null
+    return { available: false, code: "python-missing" }
   }
+}
+
+/**
+ * Executa e valida a resposta do subprocesso Python.
+ * Resultados ausentes, inválidos, incoerentes ou não finitos NUNCA são
+ * convertidos em score zero: retornam uma falha explícita por arquivo.
+ */
+function analyzePython(filePath: string, moduleDir: string, pythonEligible: number): PythonAnalysis {
+  let result: SpawnSyncReturns<string>
+  try {
+    result = spawnSync(bancaIaInternals.pythonBin, ["-c", PYTHON_ANALYSIS_SCRIPT, moduleDir, filePath], {
+      encoding: "utf-8",
+      timeout: bancaIaInternals.analysisTimeoutMs,
+    })
+  } catch {
+    return { ok: false, reason: "python-start-failed" }
+  }
+
+  if (result.error) {
+    const code = (result.error as NodeJS.ErrnoException).code
+    return { ok: false, reason: code === "ETIMEDOUT" ? "python-timeout" : "python-start-failed" }
+  }
+  if (result.signal) {
+    return { ok: false, reason: "python-signal" }
+  }
+
+  const stdout = (result.stdout || "").trim()
+  const exitCode = result.status
+  let parsed: unknown
+  let jsonValid = false
+  if (stdout.length > 0) {
+    try {
+      parsed = JSON.parse(stdout)
+      jsonValid = true
+    } catch {
+      jsonValid = false
+    }
+  }
+  if (!jsonValid) {
+    return { ok: false, reason: exitCode !== 0 ? "python-exit-code" : "python-invalid-json" }
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, reason: exitCode !== 0 ? "python-exit-code" : "python-schema-invalid" }
+  }
+  const payload = parsed as Record<string, unknown>
+  if (payload.ok === false) {
+    const errorCode = typeof payload.error_code === "string" ? payload.error_code : ""
+    if (errorCode === "pt_ai_detector_not_available") {
+      return { ok: false, reason: "python-unavailable" }
+    }
+    return { ok: false, reason: "python-detector-error" }
+  }
+  if (payload.ok !== true) {
+    return { ok: false, reason: exitCode !== 0 ? "python-exit-code" : "python-schema-invalid" }
+  }
+  if (exitCode !== 0) {
+    return { ok: false, reason: "python-exit-code" }
+  }
+  if (typeof payload.error === "string" && payload.error.trim() !== "") {
+    return { ok: false, reason: "python-detector-error" }
+  }
+
+  const risk = payload.risk
+  const total = payload.paragraphs_total
+  const analyzed = payload.paragraphs_analyzed
+  if (typeof total !== "number" || !Number.isInteger(total) || total < 0) {
+    return { ok: false, reason: "python-schema-invalid" }
+  }
+  if (typeof analyzed !== "number" || !Number.isInteger(analyzed) || analyzed < 0) {
+    return { ok: false, reason: "python-schema-invalid" }
+  }
+  if (typeof risk !== "number" || !Number.isFinite(risk) || risk < 0 || risk > 1) {
+    return { ok: false, reason: "python-invalid-score" }
+  }
+  const expectedTotal = pythonEligible
+  const expectedAnalyzed = Math.min(pythonEligible, PYTHON_PARAGRAPH_LIMIT)
+  if (total !== expectedTotal || analyzed !== expectedAnalyzed) {
+    return { ok: false, reason: "python-inconsistent-counts" }
+  }
+  return { ok: true, risk, paragraphsTotal: total, paragraphsAnalyzed: analyzed }
+}
+
+// ---------------------------------------------------------------------------
+// Heurística regex existente (padrões, fórmulas e thresholds preservados).
+// ---------------------------------------------------------------------------
+
+// Whitespace set of Python's str.strip() with no arguments. Kept explicit so
+// eligibility counting in the parent matches the Python script exactly.
+const PYTHON_WHITESPACE =
+  "\\t\\n\\v\\f\\r \\x1c-\\x1f\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"
+const PYTHON_STRIP_RE = new RegExp(`^[${PYTHON_WHITESPACE}]+|[${PYTHON_WHITESPACE}]+$`, "g")
+
+/**
+ * Python counts `len(p.strip())` in Unicode code points, and `open()` applies
+ * universal-newline translation. The parent must replicate both rules before
+ * validating `paragraphs_total`, otherwise CRLF manuscripts or astral
+ * characters would diverge and a valid Python result would be discarded as
+ * `python-inconsistent-counts`.
+ */
+function pythonEligibleLength(paragraph: string): number {
+  const stripped = paragraph.replace(PYTHON_STRIP_RE, "")
+  let length = 0
+  for (const _codePoint of stripped) length += 1
+  return length
+}
+
+function countPythonEligible(content: string): number {
+  const normalized = content.replace(/\r\n?/g, "\n")
+  return normalized.split("\n\n").filter((p) => pythonEligibleLength(p) > 20).length
+}
+
+function countRegexEligible(content: string): number {
+  return content.split(/\n\s*\n/).filter((p) => p.trim().length > 20).length
+}
+
+function analyzeRegex(content: string): RegexAnalysis {
+  let matches = 0
+  let firstExcerpt: string | null = null
+  const paragraphs = content.split(/\n\s*\n/).filter((p: string) => p.trim().length > 20)
+  for (const para of paragraphs) {
+    let nM = 0
+    for (const pattern of PATTERNS) {
+      const found = para.match(pattern)
+      if (found) nM += found.length
+    }
+    if (nM > 2) {
+      matches += nM
+      if (firstExcerpt === null) firstExcerpt = `${sanitizeExcerpt(para)}... (${nM} matches)`
+    }
+  }
+  const riskLabel = matches > 20 ? "high" : matches > 10 ? "moderate" : "low"
+  return { matches, firstExcerpt, riskLabel }
+}
+
+// ---------------------------------------------------------------------------
+// Relatório
+// ---------------------------------------------------------------------------
+
+function sanitizeExcerpt(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 60)
+}
+
+function escapeTableCell(text: string): string {
+  return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ")
+}
+
+function relativeSafe(root: string, canonical: string): string {
+  const rel = relative(realWorkspaceRoot(root), canonical)
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new PathTraversalError("path escapes workspace root")
+  }
+  return rel.split(sep).join("/")
+}
+
+function relativeConfiguredPath(root: string, file: string): string {
+  const rel = relative(resolve(root), file)
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new PathTraversalError("path escapes workspace root")
+  }
+  return rel.split(sep).join("/")
+}
+
+function segmentationLabel(segmentation: Segmentation): string {
+  if (segmentation === "python") return "Python (`\\n\\n`, parágrafo >20 caracteres)"
+  if (segmentation === "regex") return "Regex (`\\n\\s*\\n`, parágrafo >20 caracteres)"
+  return "N/A"
+}
+
+function pythonRiskLabel(risk: number): "low" | "moderate" | "high" {
+  return risk > 0.5 ? "high" : risk > 0.2 ? "moderate" : "low"
+}
+
+function pythonResult(
+  source: DiscoveredSource,
+  analysis: { risk: number; paragraphsTotal: number; paragraphsAnalyzed: number },
+  pythonEligible: number,
+  regexEligible: number,
+): FileResult {
+  const omitted = analysis.paragraphsTotal - analysis.paragraphsAnalyzed
+  return {
+    file: source.canonicalDisplay,
+    configuredPaths: source.configuredPaths,
+    pathEntries: source.pathEntries,
+    method: "python",
+    reason: "python-ok",
+    segmentation: "python",
+    pythonEligible,
+    regexEligible,
+    eligible: analysis.paragraphsTotal,
+    analyzed: analysis.paragraphsAnalyzed,
+    omitted,
+    truncated: omitted > 0,
+    indicator: `risk=${pythonRiskLabel(analysis.risk)} score=${analysis.risk} (score Python não calibrado; thresholds locais preservados)`,
+    excerpt: null,
+    fallback: "não aplicável (execução Python válida)",
+    pythonRisk: analysis.risk,
+  }
+}
+
+function regexResult(
+  source: DiscoveredSource,
+  reason: ReasonCode,
+  analysis: RegexAnalysis,
+  pythonEligible: number,
+  regexEligible: number,
+): FileResult {
+  const fallback =
+    reason === "force-regex"
+      ? "não aplicável (forceRegex solicitado explicitamente)"
+      : reason === "python-unavailable"
+        ? "regex aplicada porque Python está indisponível (python-unavailable)"
+        : `regex aplicada após falha do caminho Python (${reason}); diagnóstico sanitizado, sem stderr`
+  return {
+    file: source.canonicalDisplay,
+    configuredPaths: source.configuredPaths,
+    pathEntries: source.pathEntries,
+    method: "regex",
+    reason,
+    segmentation: "regex",
+    pythonEligible,
+    regexEligible,
+    eligible: regexEligible,
+    analyzed: regexEligible,
+    omitted: 0,
+    truncated: false,
+    indicator: `risk=${analysis.riskLabel} patterns=${analysis.matches} (indicador binário heurístico; matches>20 high, matches>10 moderate; não comparável ao score Python)`,
+    excerpt: analysis.firstExcerpt,
+    fallback,
+    pythonRisk: null,
+  }
+}
+
+function notAnalysedResult(
+  source: DiscoveredSource,
+  reason: ReasonCode,
+  segmentation: Segmentation,
+  pythonEligible: number,
+  regexEligible: number,
+  fallback: string,
+): FileResult {
+  const eligible =
+    segmentation === "python" ? pythonEligible : segmentation === "regex" ? regexEligible : 0
+  return {
+    file: source.canonicalDisplay,
+    configuredPaths: source.configuredPaths,
+    pathEntries: source.pathEntries,
+    method: "none",
+    reason,
+    segmentation,
+    pythonEligible,
+    regexEligible,
+    eligible,
+    analyzed: 0,
+    omitted: eligible,
+    truncated: false,
+    indicator: "não produzido (nenhum parágrafo analisado)",
+    excerpt: null,
+    fallback,
+    pythonRisk: null,
+  }
+}
+
+function methodLabel(method: Method): string {
+  return method === "python" ? "python" : method === "regex" ? "regex" : "none"
+}
+
+function globalMethodLabel(pythonFiles: number, regexFiles: number): string {
+  if (pythonFiles > 0 && regexFiles > 0) return "Métodos mistos (Python + Regex heuristic)"
+  if (pythonFiles > 0) return "Python (pt_ai_detector)"
+  if (regexFiles > 0) return "Regex heuristic"
+  return "Nenhum (nada analisado)"
+}
+
+function probeSummary(forceRegex: boolean, probe: ProbeOutcome | null): string {
+  if (forceRegex) return "não executada (forceRegex)"
+  if (!probe) return "não executada"
+  return probe.available ? "disponível" : `indisponível (diagnóstico: ${probe.code})`
+}
+
+function configuredPathsCell(result: FileResult): string {
+  return result.configuredPaths.map((path) => `\`${escapeTableCell(path)}\``).join(", ")
+}
+
+function buildReport(
+  forceRegex: boolean,
+  probe: ProbeOutcome | null,
+  configuredMissing: number,
+  pathEntries: number,
+  results: FileResult[],
+): string {
+  const analyzedResults = results.filter((r) => r.method !== "none")
+  const pythonFiles = results.filter((r) => r.method === "python")
+  const regexFiles = results.filter((r) => r.method === "regex")
+  const sourcesCount = results.length
+  const aliasesConsolidated = Math.max(0, pathEntries - sourcesCount)
+
+  const pythonEligibleTotal = results.reduce((sum, r) => sum + r.pythonEligible, 0)
+  const pythonAnalyzedTotal = pythonFiles.reduce((sum, r) => sum + r.analyzed, 0)
+  const pythonOmittedTotal = pythonFiles.reduce((sum, r) => sum + r.omitted, 0)
+  const pythonCoveredEligible = pythonFiles.reduce((sum, r) => sum + r.eligible, 0)
+  const regexEligibleTotal = results.reduce((sum, r) => sum + r.regexEligible, 0)
+  const regexAnalyzedTotal = regexFiles.reduce((sum, r) => sum + r.analyzed, 0)
+  const regexCoveredEligible = regexFiles.reduce((sum, r) => sum + r.eligible, 0)
+  const regexFlagged = regexFiles.filter((r) => r.indicator.startsWith("risk=moderate") || r.indicator.startsWith("risk=high")).length
+  const pythonRiskTotal = pythonFiles.reduce((sum, r) => sum + (r.pythonRisk ?? 0), 0)
+  const truncatedSources = results.filter((r) => r.truncated)
+  const truncatedParagraphs = truncatedSources.reduce((sum, r) => sum + r.omitted, 0)
+
+  const state = analyzedResults.length > 0 ? "analise-concluida" : "ausencia-de-evidencia"
+  const truncationLine = truncatedSources.length > 0
+    ? `sim — ${truncatedSources.length} fonte(s), ${truncatedParagraphs} parágrafo(s) omitido(s) por limite`
+    : "não"
+
+  const pythonAggregate = pythonFiles.length > 0
+    ? `média ${round4(pythonFiles.length === 0 ? 0 : pythonRiskTotal / pythonFiles.length)} em ${pythonFiles.length} fonte(s); ${pythonAnalyzedTotal} parágrafo(s) analisado(s); cobertura ${pythonAnalyzedTotal}/${pythonCoveredEligible} elegíveis (${pythonOmittedTotal} omitido(s) por limite)`
+    : "não aplicável (nenhuma fonte analisada por Python)"
+
+  const regexAggregate = regexFiles.length > 0
+    ? `${regexFlagged} de ${regexFiles.length} fonte(s) com indicador acionado (matches>10); ${regexAnalyzedTotal} parágrafo(s) analisado(s); cobertura ${regexAnalyzedTotal}/${regexCoveredEligible} elegíveis`
+    : "não aplicável (nenhuma fonte analisada por regex)"
+
+  const lines: string[] = [
+    "# IA Detection Report",
+    "",
+    `**Gerado em:** ${new Date().toISOString()}`,
+    "**Ferramenta:** `banca_ia` — triagem heurística local (sinal não conclusivo)",
+    `**Método global efetivo:** ${globalMethodLabel(pythonFiles.length, regexFiles.length)}`,
+    `**Estado:** ${state}`,
+    `**Sonda Python:** ${probeSummary(forceRegex, probe)}`,
+    "**Escopo:** sinais heurísticos locais sobre fontes canônicas únicas; não comprova autoria, fraude ou nota; não substitui a auditoria integral do manuscrito.",
+    "",
+    "## Resumo de cobertura",
+    `- Entradas de caminho descobertas: ${pathEntries}`,
+    `- Fontes canônicas distintas: ${sourcesCount}`,
+    `- Entradas repetidas ou aliases consolidados: ${aliasesConsolidated}`,
+    `- Arquivos configurados ausentes ou inválidos: ${configuredMissing}`,
+    `- Fontes efetivamente analisadas: ${analyzedResults.length}`,
+    `- Fontes não analisadas: ${sourcesCount - analyzedResults.length}`,
+    `- Parágrafos elegíveis (segmentação Python): ${pythonEligibleTotal}`,
+    `- Parágrafos analisados por Python: ${pythonAnalyzedTotal}`,
+    `- Parágrafos omitidos por limite Python (50/arquivo): ${pythonOmittedTotal}`,
+    `- Parágrafos elegíveis (segmentação regex): ${regexEligibleTotal}`,
+    `- Parágrafos analisados por regex: ${regexAnalyzedTotal}`,
+    `- Truncamento: ${truncationLine}`,
+  ]
+  if (analyzedResults.length === 0 && results.length > 0) {
+    lines.push(
+      "- Ausência de evidência: nenhum parágrafo elegível foi analisado; isto não é classificação de risco baixo nem evidência de autoria.",
+    )
+  }
+  lines.push(
+    "",
+    "## Cobertura por fonte",
+    "| Fonte canônica | Caminhos configurados | Método efetivo | Motivo | Elegíveis | Analisados | Omitidos | Truncado |",
+    "|---|---|---|---|---|---|---|---|",
+  )
+  for (const r of results) {
+    lines.push(
+      `| \`${escapeTableCell(r.file)}\` | ${configuredPathsCell(r)} | \`${methodLabel(r.method)}\` | \`${r.reason}\` | ${r.eligible} | ${r.analyzed} | ${r.omitted} | ${r.truncated ? "sim" : "não"} |`,
+    )
+  }
+  lines.push("", "## Resultados por fonte")
+  for (const r of results) {
+    lines.push(
+      "",
+      `### \`${escapeTableCell(r.file)}\``,
+      `- Fonte canônica: \`${escapeTableCell(r.file)}\``,
+      `- Caminhos configurados: ${configuredPathsCell(r)}`,
+      `- Entradas de caminho: ${r.pathEntries} (aliases consolidados: ${r.pathEntries - 1})`,
+      `- Método efetivo: \`${methodLabel(r.method)}\``,
+      `- Motivo: \`${r.reason}\` — ${REASON_LABELS[r.reason]}`,
+      `- Segmentação: ${segmentationLabel(r.segmentation)}`,
+      `- Elegíveis (método): ${r.eligible}`,
+      `- Analisados: ${r.analyzed}`,
+      `- Omitidos: ${r.omitted}`,
+      `- Truncamento: ${r.truncated ? "sim" : "não"}`,
+      `- Contagem de elegíveis por segmentação: Python=${r.pythonEligible}; Regex=${r.regexEligible}`,
+      `- Indicador heurístico: ${r.indicator}`,
+    )
+    if (r.method !== "python" && r.pythonEligible > 0) {
+      lines.push(`- Parágrafos Python não analisados (falha, indisponibilidade ou desativação): ${r.pythonEligible}`)
+    }
+    if (r.excerpt !== null) {
+      lines.push(`- Trecho sinalizado (primeiro): "${r.excerpt}"`)
+    }
+    lines.push(`- Fallback: ${r.fallback}`)
+  }
+  lines.push(
+    "",
+    "## Agregados heurísticos por método",
+    `- Python (score heurístico não calibrado): ${pythonAggregate}`,
+    `- Regex heuristic (indicador binário heurístico não calibrado): ${regexAggregate}`,
+    "- Média combinada Python+regex: não calculada; os métodos produzem medidas diferentes e não comparáveis.",
+    "",
+    "## Limitações metodológicas",
+    '- A ferramenta produz sinais heurísticos, não provas de autoria; escrita acadêmica legítima — por exemplo, com conectivos como "ademais", "outrossim", "não obstante", "ou seja" e "vale ressaltar" — pode gerar os mesmos sinais.',
+    "- O caminho Python apenas executa o detector externo `pt_ai_detector` quando ele já está instalado no ambiente; a sonda de disponibilidade não comprova execução bem-sucedida. A confiança fixa histórica de 0.85 não é calibrada e não é apresentada como probabilidade de autoria.",
+    "- O caminho regex conta padrões lexicais existentes e produz indicador binário; matches não são comparáveis ao score Python nem constituem confiança calibrada.",
+    "- Caminhos configurados que resolvem para a mesma fonte canônica (por exemplo, `main.tex` apontando para um capítulo descoberto pelo glob) são consolidados em uma única análise; contagens, cobertura e agregados contam fontes canônicas únicas, não entradas de caminho, e a proveniência dos caminhos relativos é preservada por fonte.",
+    "- As segmentações diferem: Python divide por linha em branco dupla (`\\n\\n`) e a regex por linha em branco com espaços (`\\n\\s*\\n`), ambas com parágrafo >20 caracteres; por isso as contagens de elegíveis podem divergir entre os métodos.",
+    "- O caminho Python analisa no máximo 50 parágrafos elegíveis por arquivo; a cobertura informada é local à ferramenta e não equivale à cobertura integral do manuscrito nem ao plano canônico de auditoria, checkpoints ou síntese acadêmica do DSHbanca.",
+    "- Este relatório não constitui nota acadêmica, parecer conclusivo ou recomendação de penalidade e não demonstra fraude.",
+  )
+  return lines.join("\n")
+}
+
+function round4(value: number): number {
+  return Math.round(value * 10000) / 10000
+}
+
+function buildAbsentReport(configuredMissing: number): string {
+  return [
+    "# IA Detection Report",
+    "",
+    "**Estado:** ausencia-de-manuscrito",
+    "**Ferramenta:** `banca_ia` — triagem heurística local (sinal não conclusivo)",
+    "**Método global efetivo:** Nenhum (nada analisado)",
+    "**Entradas de caminho descobertas:** 0",
+    "**Fontes canônicas distintas:** 0",
+    `**Arquivos configurados ausentes ou inválidos:** ${configuredMissing}`,
+    "**Escopo:** sinais heurísticos locais; não comprova autoria, fraude ou nota; não substitui a auditoria integral do manuscrito.",
+    "",
+    "Nenhum arquivo de manuscrito foi encontrado para análise. Ausência de arquivo não constitui evidência de risco baixo, de autoria humana ou artificial, nem substitui a auditoria integral do manuscrito. Nenhum relatório foi persistido porque não houve análise.",
+  ].join("\n")
 }
 
 export const bancaIa = defineBancaTool({
@@ -75,89 +619,154 @@ export const bancaIa = defineBancaTool({
     const root = args.projectRoot || ctx.directory
     const paths = resolveManuscriptPaths(root, loadConfig(root))
     const rawFiles = [paths.main, ...paths.chapters]
-    const files: Array<{ file: string; canonical: string }> = []
+    const sources: DiscoveredSource[] = []
+    const sourceByCanonical = new Map<string, DiscoveredSource>()
+    let pathEntries = 0
+    let configuredMissing = 0
 
     for (const file of rawFiles) {
-      let st
       try {
-        st = lstatSync(file)
+        lstatSync(file)
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          configuredMissing++
           continue
         }
         throw new PathTraversalError("failed to inspect a workspace path component")
       }
+      // Cada entrada é validada (lstat + realpath confinado) ANTES de qualquer
+      // consolidação: um caminho não pode ser ignorado apenas por parecer
+      // repetido, e symlinks externos/quebrados continuam sendo rejeitados.
       const canonical = resolveRealInsideRoot(root, file)
       if (!existsSync(canonical) || !lstatSync(canonical).isFile()) {
+        configuredMissing++
         continue
       }
-      files.push({ file, canonical })
+      const configuredPath = relativeConfiguredPath(root, file)
+      pathEntries++
+      const existing = sourceByCanonical.get(canonical)
+      if (existing) {
+        existing.pathEntries++
+        if (!existing.configuredPaths.includes(configuredPath)) {
+          existing.configuredPaths.push(configuredPath)
+        }
+        continue
+      }
+      const source: DiscoveredSource = {
+        canonical,
+        canonicalDisplay: relativeSafe(root, canonical),
+        configuredPaths: [configuredPath],
+        pathEntries: 1,
+      }
+      sourceByCanonical.set(canonical, source)
+      sources.push(source)
     }
 
-    if (files.length === 0) return "no manuscript files found"
-
-    const pythonAvailable = !args.forceRegex && hasPythonEnsemble()
-
-    const results: string[] = []
-    const fileReports: Array<{ file: string; risk: string; details: string }> = []
-    let totalRisk = 0
-    let fileCount = 0
-
-    for (const { file, canonical } of files) {
-      const content = readFileSync(canonical, "utf-8")
-      const name = file.replace(root, "").replace(/^\//, "")
-
-      if (pythonAvailable) {
-        const result = runPythonEnsemble(canonical, __dirname)
-        if (result && result.confidence > 0) {
-          const riskLabel = result.risk > 0.5 ? "high" : result.risk > 0.2 ? "moderate" : "low"
-          const confidence = result.confidence
-          results.push(`${name}: risk=${riskLabel} score=${result.risk} confidence=${confidence}`)
-          fileReports.push({ file: name, risk: riskLabel, details: JSON.stringify(result) })
-          totalRisk += result.risk
-          fileCount++
-          continue
-        }
-      }
-
-      // regex fallback
-      let matches = 0
-      const details: string[] = []
-      const paragraphs = content.split(/\n\s*\n/).filter((p: string) => p.trim().length > 20)
-      for (const para of paragraphs) {
-        let nM = 0
-        for (const p of PATTERNS) {
-          const m = para.match(p)
-          if (m) nM += m.length
-        }
-        if (nM > 2) {
-          matches += nM
-          details.push(`${para.slice(0, 60)}... (${nM} matches)`)
-        }
-      }
-
-      const risk = matches > 20 ? "high" : matches > 10 ? "moderate" : "low"
-      results.push(`${name}: risk=${risk} patterns=${matches} ${details.length > 0 ? `(ex: "${details[0]}")` : ""}`)
-      fileReports.push({ file: name, risk, details: `${matches} regex matches` })
-      totalRisk += matches > 10 ? 1 : 0
-      fileCount++
+    if (sources.length === 0) {
+      return buildAbsentReport(configuredMissing)
     }
 
-    const globalRisk = totalRisk / fileCount
-    const finalRisk = globalRisk > 0.5 ? "high" : globalRisk > 0.2 ? "moderate" : "low"
+    const forceRegex = args.forceRegex === true
+    const probe = forceRegex ? null : probePythonEnsemble()
+    const results: FileResult[] = []
 
-    const report = [
-      "# IA Detection Report",
-      pythonAvailable ? "**Método:** Python ensemble (pt-ai-detector)" : "**Método:** Regex heuristic (Python ensemble not available)",
-      "**Risco final:** " + finalRisk,
-      pythonAvailable ? "**Confiança:** alta" : "**Confiança:** baixa (regex apenas)",
-      "",
-      "## Por arquivo",
-      ...results,
-    ].join("\n")
+    // Uma única leitura/análise por fonte canônica, independentemente de
+    // quantos caminhos configurados (aliases) resolveram para ela.
+    for (const source of sources) {
+      let content: string
+      try {
+        content = readFileSync(source.canonical, "utf-8")
+      } catch {
+        results.push(
+          notAnalysedResult(
+            source,
+            "file-unreadable",
+            "none",
+            0,
+            0,
+            "sem fallback: arquivo ilegível; nenhuma classificação é produzida",
+          ),
+        )
+        continue
+      }
 
+      const pythonEligible = countPythonEligible(content)
+      const regexEligible = countRegexEligible(content)
+
+      if (forceRegex) {
+        if (regexEligible === 0) {
+          results.push(
+            notAnalysedResult(
+              source,
+              "no-eligible-content",
+              "regex",
+              pythonEligible,
+              regexEligible,
+              "não aplicável (nenhum parágrafo elegível)",
+            ),
+          )
+        } else {
+          results.push(regexResult(source, "force-regex", analyzeRegex(content), pythonEligible, regexEligible))
+        }
+        continue
+      }
+
+      if (!probe || !probe.available) {
+        if (regexEligible === 0) {
+          results.push(
+            notAnalysedResult(
+              source,
+              "no-eligible-content",
+              "regex",
+              pythonEligible,
+              regexEligible,
+              "sem fallback útil: Python indisponível (python-unavailable) e a regex não tem parágrafos elegíveis",
+            ),
+          )
+        } else {
+          results.push(regexResult(source, "python-unavailable", analyzeRegex(content), pythonEligible, regexEligible))
+        }
+        continue
+      }
+
+      if (pythonEligible === 0) {
+        results.push(
+          notAnalysedResult(
+            source,
+            "no-eligible-content",
+            "python",
+            pythonEligible,
+            regexEligible,
+            "não aplicável (nenhum parágrafo elegível)",
+          ),
+        )
+        continue
+      }
+
+      const analysis = analyzePython(source.canonical, __dirname, pythonEligible)
+      if (analysis.ok) {
+        results.push(pythonResult(source, analysis, pythonEligible, regexEligible))
+        continue
+      }
+
+      if (regexEligible === 0) {
+        results.push(
+          notAnalysedResult(
+            source,
+            "no-eligible-content",
+            "regex",
+            pythonEligible,
+            regexEligible,
+            `sem fallback útil: Python falhou (${analysis.reason}) e a regex não tem parágrafos elegíveis`,
+          ),
+        )
+      } else {
+        results.push(regexResult(source, analysis.reason, analyzeRegex(content), pythonEligible, regexEligible))
+      }
+    }
+
+    const report = buildReport(forceRegex, probe, configuredMissing, pathEntries, results)
     saveReport(root, `ia-${Date.now()}.md`, report)
-
     return report
   },
 })

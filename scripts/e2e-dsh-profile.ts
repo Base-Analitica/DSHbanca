@@ -2167,9 +2167,9 @@ const canonicalNativeSkillsMeta = {
   },
   "banca-detector-ia": {
     "sourcePath": "skills/banca-detector-ia/SKILL.md",
-    "sourceSha256": "db296d3e384e809847b2398638d55c2bcf62e092c2058943013a7523cb1b6a4b",
-    "bodySha256": "69be0b5a2debf9dc3b177e9a593928d82421caa4985e9d6b1ce6de8469fa8eb5",
-    "bodyLength": 1537
+    "sourceSha256": "72f7153155678afadee8315bc718b1a3773d5f2e4505fe69f0d033d06ba96aa1",
+    "bodySha256": "c2ca61ad8148b2ab643a56978a273a940df2be189bd8e816e1409eab6c5a3056",
+    "bodyLength": 2066
   },
   "banca-grille": {
     "sourcePath": "skills/banca-grille/SKILL.md",
