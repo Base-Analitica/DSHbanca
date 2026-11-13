@@ -248,7 +248,7 @@ O resultado é registrado de forma independente em `stages.nativeQuestions` com 
 
 ## Cenário, integridade e teardown
 
-O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot restaurável e executa uma correção válida como controle positivo (`expectedOccurrences: 1` explícito). Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
+O observador cria um workspace LaTeX/BibTeX sintético e um `Agent` real. Antes de selecionar o preset auditor, ele inicializa o projeto, cria um snapshot nomeado restaurável, registra os hashes originais do manuscrito, executa uma correção válida como controle positivo (`expectedOccurrences: 1` explícito) e **restaura positivamente** o snapshot parcial automático criado por essa própria correção pelo `ToolRuntime` nativo. Depois dessa prova de recuperação, a correção válida é reaplicada para que as negações do auditor continuem operando sobre argumentos que realmente alterariam o manuscrito. Assim, os argumentos de `banca_corrigir` correspondem a uma mutação real e `banca_restore` recebe um snapshot existente com `confirm: true`.
 
 ## Issue #110: preflight de ocorrências fail-closed
 
@@ -258,6 +258,25 @@ Ainda na mesma janela de mutação permitida (antes da seleção nativa de `banc
 2. **Lote inválido sem aplicação parcial**: lote de duas correções em arquivos físicos distintos (para não colidir com `destinationIdentityConflict`), sendo a primeira válida e a segunda com `expectedOccurrences` divergente. A recusa precisa citar o segundo arquivo (`extra.tex`) e deixar ambos os arquivos inalterados.
 
 Em ambos os casos o observador compara o inventário SHA-256 completo do workspace (incluindo `main.tex`, `.banca/state.json` e `.banca/snapshots`) antes e depois: manuscrito, estado e vault precisam permanecer byte a byte idênticos, sem snapshot novo e sem iteração acrescentada. A evidência é registrada em `stages.observedRuntime.correctionPreflight` e validada por `validateEvidence`; uma execução nativa só pode ser `PASS` quando as duas recusas forem realmente observadas. Enquanto não houver autorização humana específica para o lifecycle no SHA final, esta sonda permanece **BLOCKED** — fixtures e testes de contrato não contam como prova do host real.
+
+## Issue #110 R2: restauração positiva do snapshot parcial automático
+
+Ainda na janela de mutação permitida, o observador comprova o ciclo completo de correção e recuperação exigido pelo contrato da #110, sem depender de declaração de sucesso da ferramenta:
+
+1. registra bytes/hash originais de `main.tex` e o hash de um arquivo não selecionado (`referencias.bib`);
+2. executa a correção válida pelo `ToolRuntime` nativo e confirma que o texto mudou exatamente como solicitado;
+3. identifica o snapshot parcial automático criado pela correção (exatamente um label novo em `state.snapshots`, prefixo `pre-`, ausente antes da correção) e o distingue dos snapshots preexistentes;
+4. lê o manifesto (`kind: "partial"`), exige a entrada `main.tex` com o hash original e confere os bytes do vault contra esse mesmo hash;
+5. despacha `banca_restore` com esse label e `confirm: true` pelo `ToolRuntime` nativo, ainda no contexto permitido;
+6. confirma que o manuscrito restaurado é byte a byte igual ao original e que o hash restaurado coincide com o hash original;
+7. confirma que `referencias.bib`, não selecionado, permaneceu intacto;
+8. reaplica a correção válida para preservar a prova negativa do auditor (correção e restore continuariam realmente alterando o manuscrito) e mantém as sondas de contagem divergente, lote inválido, tools-sombra e teardown.
+
+A evidência estruturada fica em `stages.observedRuntime.correctionRestore` e é ligada por hash de ponta a ponta: hash original → manifesto do snapshot → bytes do vault → despacho `banca_restore` com o mesmo `snapshotId` → hash restaurado. O validador `validateEvidence` só considera o estágio válido quando esse vínculo existe e o arquivo não selecionado permanece inalterado; `restoreSucceeded` ou mensagem de sucesso isoladas não bastam.
+
+O validador também é fail-closed para as sondas de preflight: contadores de iterações/snapshots precisam estar **presentes**, ser inteiros seguros não negativos e iguais antes/depois; inventários precisam conter entradas com hashes SHA-256 de `main.tex`, `.banca/state.json`, `extra.tex` (no lote inválido) e artefatos reais do vault (`...manifest.json` e arquivo capturado); inventários antes/depois são comparados integralmente e hash divergente, ausente ou malformado falha. Campos ausentes nunca passam por comparação vazia (`undefined === undefined`).
+
+Enquanto não houver autorização humana específica para o lifecycle no SHA final, esta sonda permanece **BLOCKED** — fixtures e testes de contrato validam apenas a estrutura e a rejeição de evidência incompleta, não o host real.
 
 Depois da seleção nativa de `banca-auditor`, o teste:
 
@@ -270,7 +289,7 @@ Depois da seleção nativa de `banca-auditor`, o teste:
 
 As tools-sombra são uma sonda adicional do guard nativo: seus corpos deliberadamente não contêm verificação de identidade. Elas não substituem os despachos das tools acadêmicas reais, que também são feitos com argumentos válidos e têm sua integridade verificada.
 
-As sondas da issue #110 (contagem divergente e lote inválido) ocorrem antes da seleção do preset auditor, na mesma janela de mutação do controle positivo. Elas exigem o valor de domínio `blocked:` com `isError: false` e inventário/estado/vault inalterados; não são negações do guard read-only e não substituem a prova de negação do auditor, que continua sendo feita separadamente depois da seleção do preset.
+As sondas da issue #110 (contagem divergente e lote inválido) e a restauração positiva do snapshot parcial automático ocorrem antes da seleção do preset auditor, na mesma janela de mutação do controle positivo. As recusas exigem o valor de domínio `blocked:` com `isError: false` e inventário/estado/vault inalterados; a restauração positiva exige a execução real com hashes ligados ao snapshot automático. Nenhuma delas é negação do guard read-only: a prova de negação do auditor continua sendo feita separadamente depois da seleção do preset, com argumentos válidos e operação que realmente alteraria o manuscrito (correção reaplicada e snapshot preexistente).
 
 O relatório sanitizado registra SHA do repositório, versões, preset composto, tentativas e classificações, inventários relativos, atividade externa e teardown. Por padrão, o arquivo é `docs/evidence/dsh-profile-e2e.latest.json`. Para preservar um artefato preexistente, o chamador pode apontar `DSHBANCA_DSH_PROFILE_REPORT_PATH` para um caminho de scratch. O caminho externo não é gravado nem impresso no relatório.
 
@@ -293,7 +312,7 @@ Cada execução cria um diretório aleatório com permissões restritas e coloca
 
 ## Status e interpretação
 
-- `PASS` / exit `0`: instalação offline, composição Cordis, descoberta das 16 tools e skills, identidade real `banca-auditor` pelo AgentRegistry/preset registry, preflight de ocorrências fail-closed (contagem divergente e lote inválido sem mutação parcial), negações antes dos corpos, integridade, status permitido, ausência de atividade de modelo e teardown passaram.
+- `PASS` / exit `0`: instalação offline, composição Cordis, descoberta das 16 tools e skills, identidade real `banca-auditor` pelo AgentRegistry/preset registry, preflight de ocorrências fail-closed (contagem divergente e lote inválido sem mutação parcial), restauração positiva do snapshot parcial automático pelo `ToolRuntime` com hashes ligados e arquivo não selecionado preservado, validador de evidência fail-closed, negações antes dos corpos, integridade, status permitido, ausência de atividade de modelo e teardown passaram.
 - `FAIL` / exit `1`: DSH estava disponível, mas uma etapa ou asserção do contrato falhou.
 - `BLOCKED` / exit `2`: DSH, runtime ou dependência offline necessária não estava disponível. Ausência do host nunca conta como aprovação.
 

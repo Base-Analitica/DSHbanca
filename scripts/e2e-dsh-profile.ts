@@ -5030,6 +5030,12 @@ export async function apply(ctx) {
     if (!snapshotExists) fail("the DSHbanca state did not persist the setup snapshot used by the restore denial");
 
     const beforeCorrection = await readFile(join(workspace, "main.tex"), "utf8");
+    const baselineManuscriptSha256 = await sha(join(workspace, "main.tex"));
+    const unselectedManuscriptPath = "referencias.bib";
+    const unselectedManuscriptSha256Before = await sha(join(workspace, unselectedManuscriptPath));
+    const snapshotLabelsBeforeCorrection = Array.isArray(snapshotState.snapshots)
+      ? snapshotState.snapshots.map((row) => row.label)
+      : [];
     const setupCorrectionArgs = {
       corrections: [{ file: "main.tex", oldText: "BASELINE_SENTINEL", newText: "CURRENT_SENTINEL", expectedOccurrences: 1 }],
     };
@@ -5038,8 +5044,45 @@ export async function apply(ctx) {
     const correctionWouldMutate = beforeCorrection.includes("BASELINE_SENTINEL") &&
       setupCorrection.result.isError === false && currentText.includes("CURRENT_SENTINEL");
     if (!correctionWouldMutate) fail("the valid synthetic correction precondition did not perform its expected setup mutation");
-    const restoreWouldMutate = snapshotExists && currentText !== baselineText;
-    if (!restoreWouldMutate) fail("the valid snapshot restore precondition would not change the synthetic manuscript");
+
+    // Issue #110 R2 G1: the correction itself must have created exactly one new
+    // automatic partial snapshot, registered and containing the original bytes.
+    const correctedManuscriptSha256 = await sha(join(workspace, "main.tex"));
+    const stateAfterSetupCorrection = JSON.parse(await readFile(join(workspace, ".banca", "state.json"), "utf8"));
+    const snapshotLabelsAfterCorrection = Array.isArray(stateAfterSetupCorrection.snapshots)
+      ? stateAfterSetupCorrection.snapshots.map((row) => row.label)
+      : [];
+    const newSnapshotLabels = snapshotLabelsAfterCorrection.filter(
+      (label) => !snapshotLabelsBeforeCorrection.includes(label),
+    );
+    if (newSnapshotLabels.length !== 1) {
+      fail("the valid correction did not create exactly one automatic partial snapshot");
+    }
+    const autoPartialLabel = newSnapshotLabels[0];
+    if (typeof autoPartialLabel !== "string" || !autoPartialLabel.startsWith("pre-")) {
+      fail("the automatic correction snapshot label is not a partial pre-correction snapshot");
+    }
+    if (!snapshotLabelsAfterCorrection.includes(autoPartialLabel)) {
+      fail("the automatic partial snapshot is not registered in the persistent state");
+    }
+    if (snapshotLabelsBeforeCorrection.includes(autoPartialLabel)) {
+      fail("the automatic partial snapshot label already existed before the correction");
+    }
+    const autoPartialManifest = JSON.parse(
+      await readFile(join(workspace, ".banca", "snapshots", autoPartialLabel + ".manifest.json"), "utf8"),
+    );
+    if (autoPartialManifest.kind !== "partial") fail("the automatic correction snapshot is not classified partial");
+    if (!Array.isArray(autoPartialManifest.files)) fail("the automatic partial snapshot manifest has no files");
+    const autoPartialMainEntry = autoPartialManifest.files.find((file) => file && file.logical === "main.tex");
+    if (!autoPartialMainEntry || autoPartialMainEntry.sha256 !== baselineManuscriptSha256) {
+      fail("the automatic partial snapshot manifest does not carry the original manuscript hash");
+    }
+    const autoPartialVaultBytes = await readFile(join(workspace, ".banca", "snapshots", autoPartialLabel, "main.tex"));
+    const autoPartialVaultSha256 = createHash("sha256").update(autoPartialVaultBytes).digest("hex");
+    const autoPartialVaultSize = autoPartialVaultBytes.length;
+    if (autoPartialVaultSha256 !== baselineManuscriptSha256) {
+      fail("the automatic partial snapshot vault does not carry the original manuscript bytes");
+    }
 
     // Issue #110: literal occurrence preflight must be fail-closed over the
     // whole batch, in the permitted mutation window and before any snapshot or
@@ -5101,6 +5144,45 @@ export async function apply(ctx) {
       invalidBatchBudgetBefore.iterations === invalidBatchBudgetAfter.iterations &&
       invalidBatchBudgetBefore.snapshots === invalidBatchBudgetAfter.snapshots;
     if (!invalidBatchBlocked) fail("the batch with a valid first correction and an invalid later correction was rejected with partial application");
+
+    // Issue #110 R2 G1: restore the automatic partial snapshot through the
+    // native ToolRuntime in the permitted mutation window and verify the bytes.
+    const unselectedManuscriptSha256AtRestore = await sha(join(workspace, unselectedManuscriptPath));
+    const positiveRestore = await runTool(
+      ctx,
+      "dshbanca-e2e-positive-restore",
+      "banca_restore",
+      { snapshotId: autoPartialLabel, confirm: true },
+      agent,
+    );
+    const restoredManuscriptText = await readFile(join(workspace, "main.tex"), "utf8");
+    const restoredManuscriptSha256 = await sha(join(workspace, "main.tex"));
+    const unselectedManuscriptSha256AfterRestore = await sha(join(workspace, unselectedManuscriptPath));
+    const positiveRestoreValid =
+      positiveRestore.result.isError === false && positiveRestore.aborted === false &&
+      positiveRestore.message.includes("restored from " + autoPartialLabel) &&
+      restoredManuscriptText === baselineText &&
+      restoredManuscriptSha256 === baselineManuscriptSha256 &&
+      unselectedManuscriptSha256AfterRestore === unselectedManuscriptSha256Before;
+    if (!positiveRestoreValid) {
+      fail("the native positive restore of the automatic partial snapshot did not recover the exact original bytes");
+    }
+
+    // Reapply the valid correction so the auditor read-only negatives keep an
+    // operation that would really change the manuscript (and a restorable
+    // preexisting snapshot whose restore would really mutate it).
+    const reapplyCorrection = await runTool(ctx, "dshbanca-e2e-reapply-correction", "banca_corrigir", setupCorrectionArgs, agent);
+    const currentTextAfterReapply = await readFile(join(workspace, "main.tex"), "utf8");
+    const reapplyValid =
+      reapplyCorrection.result.isError === false && reapplyCorrection.aborted === false &&
+      currentTextAfterReapply === currentText &&
+      currentTextAfterReapply.includes("CURRENT_SENTINEL") &&
+      !currentTextAfterReapply.includes("BASELINE_SENTINEL");
+    if (!reapplyValid) {
+      fail("the valid correction reapply after the positive restore did not restore the auditor-negative precondition");
+    }
+    const restoreWouldMutate = snapshotExists && currentTextAfterReapply !== baselineText;
+    if (!restoreWouldMutate) fail("the valid snapshot restore precondition would not change the synthetic manuscript");
 
     const presetSelected = await ctx.agentPresets.select(agent, "banca-auditor");
     const effectivePreset = ctx.agentPresets.composedPreset(agent.ctx);
@@ -5610,6 +5692,58 @@ export async function apply(ctx) {
           iterationsAfter: invalidBatchBudgetAfter.iterations,
           snapshotsBefore: invalidBatchBudgetBefore.snapshots,
           snapshotsAfter: invalidBatchBudgetAfter.snapshots,
+        },
+      },
+      correctionRestore: {
+        toolName: "banca_corrigir",
+        correction: {
+          dispatchCount: 1,
+          isError: setupCorrection.result.isError === true,
+          aborted: setupCorrection.aborted,
+          targetFile: "main.tex",
+          originalSha256: baselineManuscriptSha256,
+          correctedSha256: correctedManuscriptSha256,
+          changedExactly: correctionWouldMutate && !currentText.includes("BASELINE_SENTINEL"),
+        },
+        snapshot: {
+          label: autoPartialLabel,
+          preexistingLabels: snapshotLabelsBeforeCorrection,
+          autoCreatedByCorrection: !snapshotLabelsBeforeCorrection.includes(autoPartialLabel),
+          stateRegistered: snapshotLabelsAfterCorrection.includes(autoPartialLabel),
+          manifestKind: autoPartialManifest.kind,
+          manifestFiles: autoPartialManifest.files.map((file) => ({
+            logical: file.logical,
+            sha256: file.sha256,
+            size: file.size,
+          })),
+          originalManuscriptSha256: baselineManuscriptSha256,
+          vaultManuscriptSha256: autoPartialVaultSha256,
+          vaultManuscriptSize: autoPartialVaultSize,
+        },
+        restore: {
+          toolName: "banca_restore",
+          dispatchCount: 1,
+          isError: positiveRestore.result.isError === true,
+          aborted: positiveRestore.aborted,
+          snapshotId: autoPartialLabel,
+          confirm: true,
+          message: positiveRestore.message,
+          originalSha256: baselineManuscriptSha256,
+          restoredSha256: restoredManuscriptSha256,
+          restoredContentEqualsOriginal: restoredManuscriptText === baselineText,
+          unselectedFile: {
+            path: unselectedManuscriptPath,
+            sha256Before: unselectedManuscriptSha256AtRestore,
+            sha256After: unselectedManuscriptSha256AfterRestore,
+            unchanged: unselectedManuscriptSha256AtRestore === unselectedManuscriptSha256AfterRestore,
+          },
+        },
+        reapplyCorrection: {
+          dispatchCount: 1,
+          isError: reapplyCorrection.result.isError === true,
+          aborted: reapplyCorrection.aborted,
+          restoredOriginalAbsent: !currentTextAfterReapply.includes("BASELINE_SENTINEL"),
+          correctedPresent: currentTextAfterReapply.includes("CURRENT_SENTINEL"),
         },
       },
       deniedWorkspaceInventoryBefore: deniedBefore,
@@ -6992,6 +7126,7 @@ async function main(): Promise<void> {
     nativeGuardProbe: observed.nativeGuardProbe,
     nativeRestoreGuardProbe: observed.nativeRestoreGuardProbe,
     correctionPreflight: observed.correctionPreflight,
+    correctionRestore: observed.correctionRestore,
     deniedWorkspaceInventoryBefore: observed.deniedWorkspaceInventoryBefore,
     deniedWorkspaceInventoryAfter: observed.deniedWorkspaceInventoryAfter,
     permittedStatus: observed.permittedStatus,

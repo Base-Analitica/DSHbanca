@@ -579,6 +579,7 @@ export interface RuntimeEvidence {
   nativeGuardProbe?: unknown
   nativeRestoreGuardProbe?: unknown
   correctionPreflight?: unknown
+  correctionRestore?: unknown
   deniedWorkspaceInventoryBefore?: unknown
   deniedWorkspaceInventoryAfter?: unknown
   permittedStatus?: unknown
@@ -595,13 +596,73 @@ function isGuardDenial(message: unknown, detail: string): boolean {
   return typeof message === "string" && message.includes("DSHbanca guard:") && message.includes(detail)
 }
 
+/**
+ * Canonical inventory comparison: same key set (order-independent) and same
+ * value for every key. Used by the issue #110 evidence gates so a reordered but
+ * identical inventory is not a false failure and a missing entry is never a
+ * vacuous `undefined === undefined` success.
+ */
 function inventoriesEqual(before: unknown, after: unknown): boolean {
-  return isRecord(before) && isRecord(after) && JSON.stringify(before) === JSON.stringify(after)
+  if (!isRecord(before) || !isRecord(after)) return false
+  const beforeKeys = Object.keys(before).sort()
+  const afterKeys = Object.keys(after).sort()
+  if (beforeKeys.length !== afterKeys.length) return false
+  for (let i = 0; i < beforeKeys.length; i++) {
+    const key = beforeKeys[i]
+    if (key !== afterKeys[i] || before[key] !== after[key]) return false
+  }
+  return true
 }
 
 function hasProtectedState(inventory: unknown): boolean {
   return isRecord(inventory) && typeof inventory["main.tex"] === "string" &&
     typeof inventory[".banca/state.json"] === "string"
+}
+
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/
+
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === "string" && SHA256_HEX_RE.test(value)
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+}
+
+/** A partial pre-correction snapshot and the preexisting vault are concrete
+ * artifacts of the rejected-correction scenario: their hashed entries must be
+ * visible in the inventory, not merely announced by a boolean. */
+function hasSnapshotVaultArtifacts(inventory: Record<string, unknown>): boolean {
+  const keys = Object.keys(inventory)
+  const manifests = keys.filter((key) => /^\.banca\/snapshots\/[^/]+\.manifest\.json$/.test(key))
+  const captured = keys.filter((key) => /^\.banca\/snapshots\/[^/]+\/.+$/.test(key))
+  return manifests.length > 0 && captured.length > 0
+}
+
+/** Complete correction inventory: every entry is a sha256 digest, the manuscript
+ * and persistent state are present and the snapshot vault artifacts are visible. */
+function isCompleteCorrectionInventory(inventory: unknown): boolean {
+  if (!isRecord(inventory)) return false
+  const entries = Object.entries(inventory)
+  if (entries.length === 0) return false
+  for (const [key, value] of entries) {
+    if (key.length === 0 || !isSha256Hex(value)) return false
+  }
+  if (!isSha256Hex(inventory["main.tex"])) return false
+  if (!isSha256Hex(inventory[".banca/state.json"])) return false
+  return hasSnapshotVaultArtifacts(inventory)
+}
+
+/** Counters must be explicitly present, non-negative safe integers and equal
+ * before/after. Absence is a failure, never a vacuous equality. */
+function correctionCountersValid(row: Record<string, any> | undefined): boolean {
+  if (row === undefined) return false
+  const counters = [row.iterationsBefore, row.iterationsAfter, row.snapshotsBefore, row.snapshotsAfter]
+  if (!counters.every(isNonNegativeSafeInteger)) return false
+  return row.iterationsBefore === row.iterationsAfter &&
+    row.snapshotsBefore === row.snapshotsAfter &&
+    row.iterationsBefore >= 1 &&
+    row.snapshotsBefore >= 1
 }
 
 export function validateProfileEvidence(evidence: ProfileEvidence): string[] {
@@ -1094,44 +1155,138 @@ export function validateEvidence(evidence: RuntimeEvidence): string[] {
 
   // Issue #110: the occurrence preflight must be fail-closed over the whole
   // batch inside the permitted mutation window, before snapshot or write.
+  // Absence of required proof is a failure: counters and inventories must be
+  // present, well-typed and byte-consistent, never vacuously equal undefined.
   const correctionPreflight = isRecord(evidence.correctionPreflight) ? evidence.correctionPreflight : undefined
   const divergentCountRow =
     correctionPreflight && isRecord(correctionPreflight.divergentCount) ? correctionPreflight.divergentCount : undefined
   const invalidBatchRow =
     correctionPreflight && isRecord(correctionPreflight.invalidBatch) ? correctionPreflight.invalidBatch : undefined
-  const occurrenceBlock = (
+
+  const occurrenceMessageMatches = (
     row: Record<string, any> | undefined,
     file: string,
     expectedLabel: string,
     actual: number,
   ): boolean =>
-    row?.dispatchCount === 1 &&
-    row.isError === false &&
-    row.aborted === false &&
-    row.blocked === true &&
-    row.manuscriptUnchanged === true &&
-    typeof row.message === "string" &&
+    typeof row?.message === "string" &&
     row.message.includes(
       "blocked: " + file + " occurrence preflight failed: expected " + expectedLabel + ", found " + actual,
     ) &&
-    row.message.includes("no manuscript file was modified") &&
-    row.iterationsBefore === row.iterationsAfter &&
-    row.snapshotsBefore === row.snapshotsAfter &&
-    hasProtectedState(row.inventoryBefore) &&
-    hasProtectedState(row.inventoryAfter) &&
-    inventoriesEqual(row.inventoryBefore, row.inventoryAfter)
-  if (
-    correctionPreflight?.toolName !== "banca_corrigir" ||
-    divergentCountRow?.expectedOccurrences !== 2 ||
-    divergentCountRow?.actualOccurrences !== 1 ||
-    !occurrenceBlock(divergentCountRow, "main.tex", "2 (expectedOccurrences)", 1) ||
-    invalidBatchRow?.correctionCount !== 2 ||
-    invalidBatchRow?.invalidCorrectionIndex !== 1 ||
-    invalidBatchRow?.firstCorrectionWouldApply !== true ||
-    invalidBatchRow?.partialApplicationAbsent !== true ||
-    !occurrenceBlock(invalidBatchRow, "extra.tex", "2 (expectedOccurrences)", 1)
-  ) {
+    row.message.includes("no manuscript file was modified")
+
+  const correctionRejectionRowValid = (
+    row: Record<string, any> | undefined,
+    file: string,
+    expectedLabel: string,
+    actual: number,
+    requireExtraFile: boolean,
+  ): boolean => {
+    if (row === undefined) return false
+    if (!isCompleteCorrectionInventory(row.inventoryBefore)) return false
+    if (!isCompleteCorrectionInventory(row.inventoryAfter)) return false
+    if (!inventoriesEqual(row.inventoryBefore, row.inventoryAfter)) return false
+    if (requireExtraFile) {
+      if (!isSha256Hex(row.inventoryBefore["extra.tex"])) return false
+      if (!isSha256Hex(row.inventoryAfter["extra.tex"])) return false
+    }
+    return row.dispatchCount === 1 &&
+      row.isError === false &&
+      row.aborted === false &&
+      row.blocked === true &&
+      row.manuscriptUnchanged === true &&
+      occurrenceMessageMatches(row, file, expectedLabel, actual) &&
+      correctionCountersValid(row)
+  }
+
+  const correctionPreflightValid =
+    correctionPreflight?.toolName === "banca_corrigir" &&
+    divergentCountRow?.expectedOccurrences === 2 &&
+    divergentCountRow?.actualOccurrences === 1 &&
+    correctionRejectionRowValid(divergentCountRow, "main.tex", "2 (expectedOccurrences)", 1, false) &&
+    invalidBatchRow?.correctionCount === 2 &&
+    invalidBatchRow?.invalidCorrectionIndex === 1 &&
+    invalidBatchRow?.firstCorrectionWouldApply === true &&
+    invalidBatchRow?.partialApplicationAbsent === true &&
+    correctionRejectionRowValid(invalidBatchRow, "extra.tex", "2 (expectedOccurrences)", 1, true)
+  if (!correctionPreflightValid) {
     errors.push("banca_corrigir occurrence preflight was not fail-closed over the whole batch")
+  }
+
+  // Issue #110 R2 G1: the positive restore of the automatic partial snapshot
+  // must be dispatched through the native ToolRuntime and be hash-linked end to
+  // end (original bytes -> manifest -> vault -> restore dispatch -> restored
+  // bytes), including preservation of an unselected file. Declarative success
+  // booleans are only accepted together with those concrete links.
+  const correctionRestore = isRecord(evidence.correctionRestore) ? evidence.correctionRestore : undefined
+  const correctionRow = correctionRestore && isRecord(correctionRestore.correction) ? correctionRestore.correction : undefined
+  const snapshotRow = correctionRestore && isRecord(correctionRestore.snapshot) ? correctionRestore.snapshot : undefined
+  const restoreRow = correctionRestore && isRecord(correctionRestore.restore) ? correctionRestore.restore : undefined
+  const reapplyRow =
+    correctionRestore && isRecord(correctionRestore.reapplyCorrection) ? correctionRestore.reapplyCorrection : undefined
+  const unselectedRow = restoreRow && isRecord(restoreRow.unselectedFile) ? restoreRow.unselectedFile : undefined
+  const snapshotLabel = typeof snapshotRow?.label === "string" ? snapshotRow.label : null
+  const preexistingLabels =
+    snapshotRow && Array.isArray(snapshotRow.preexistingLabels) ? snapshotRow.preexistingLabels : null
+  const manifestFiles = snapshotRow && Array.isArray(snapshotRow.manifestFiles) ? snapshotRow.manifestFiles : []
+  const manifestMain = manifestFiles.find((entry) => isRecord(entry) && entry.logical === "main.tex")
+  const originalSha = typeof correctionRow?.originalSha256 === "string" ? correctionRow.originalSha256 : null
+  const correctedSha = typeof correctionRow?.correctedSha256 === "string" ? correctionRow.correctedSha256 : null
+  const manifestMainSha = isRecord(manifestMain) && isSha256Hex(manifestMain.sha256) ? manifestMain.sha256 : null
+  const manifestMainSize =
+    isRecord(manifestMain) && isNonNegativeSafeInteger(manifestMain.size) ? manifestMain.size : null
+  const restoreMessageMatches =
+    typeof restoreRow?.message === "string" &&
+    snapshotLabel !== null &&
+    restoreRow.message.includes("restored from " + snapshotLabel)
+
+  const correctionRestoreValid =
+    correctionRestore?.toolName === "banca_corrigir" &&
+    correctionRow?.dispatchCount === 1 &&
+    correctionRow?.isError === false &&
+    correctionRow?.aborted === false &&
+    correctionRow?.targetFile === "main.tex" &&
+    isSha256Hex(originalSha) &&
+    isSha256Hex(correctedSha) &&
+    originalSha !== correctedSha &&
+    correctionRow?.changedExactly === true &&
+    snapshotRow?.stateRegistered === true &&
+    snapshotRow?.autoCreatedByCorrection === true &&
+    snapshotRow?.manifestKind === "partial" &&
+    snapshotLabel !== null &&
+    snapshotLabel.startsWith("pre-") &&
+    preexistingLabels !== null &&
+    preexistingLabels.every((label: unknown) => typeof label === "string") &&
+    !preexistingLabels.includes(snapshotLabel) &&
+    manifestMainSha !== null &&
+    manifestMainSha === originalSha &&
+    manifestMainSize !== null &&
+    manifestMainSize > 0 &&
+    snapshotRow?.originalManuscriptSha256 === originalSha &&
+    snapshotRow?.vaultManuscriptSha256 === originalSha &&
+    snapshotRow?.vaultManuscriptSize === manifestMainSize &&
+    restoreRow?.toolName === "banca_restore" &&
+    restoreRow?.dispatchCount === 1 &&
+    restoreRow?.isError === false &&
+    restoreRow?.aborted === false &&
+    restoreRow?.snapshotId === snapshotLabel &&
+    restoreRow?.confirm === true &&
+    restoreMessageMatches &&
+    restoreRow?.originalSha256 === originalSha &&
+    restoreRow?.restoredSha256 === originalSha &&
+    restoreRow?.restoredContentEqualsOriginal === true &&
+    unselectedRow?.path === "referencias.bib" &&
+    isSha256Hex(unselectedRow?.sha256Before) &&
+    isSha256Hex(unselectedRow?.sha256After) &&
+    unselectedRow?.sha256Before === unselectedRow?.sha256After &&
+    unselectedRow?.unchanged === true &&
+    reapplyRow?.dispatchCount === 1 &&
+    reapplyRow?.isError === false &&
+    reapplyRow?.aborted === false &&
+    reapplyRow?.restoredOriginalAbsent === true &&
+    reapplyRow?.correctedPresent === true
+  if (!correctionRestoreValid) {
+    errors.push("banca_corrigir positive snapshot restore evidence is missing, incomplete or not hash-linked")
   }
 
   const beforeDenied = evidence.deniedWorkspaceInventoryBefore

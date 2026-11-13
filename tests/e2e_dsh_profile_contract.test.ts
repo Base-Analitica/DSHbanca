@@ -92,6 +92,39 @@ const completeProfile = {
   controlPresetEntry: true,
 }
 
+// Issue #110 R2 — structural fixtures for the correction preflight/restore
+// evidence contract. These are NOT observed host results: real hashes and
+// inventories are produced by the native observer when the E2E is authorized.
+const evidenceHash = (seed: string) => createHash("sha256").update(seed).digest("hex")
+const correctionOriginalSha256 = evidenceHash("baseline-sentinel-original")
+const correctionCurrentSha256 = evidenceHash("current-sentinel-corrected")
+const correctionStateSha256 = evidenceHash("state-after-setup-correction")
+const correctionVaultSha256 = evidenceHash("vault-partial-main")
+const correctionManifestSha256 = evidenceHash("vault-partial-manifest")
+const correctionNamedVaultSha256 = evidenceHash("vault-named-main")
+const correctionNamedManifestSha256 = evidenceHash("vault-named-manifest")
+const correctionUnselectedSha256 = evidenceHash("referencias-bib-unchanged")
+const correctionExtraSha256 = evidenceHash("extra-tex-unchanged")
+const correctionAutoPartialLabel = "pre-1700000000500"
+const correctionPreexistingLabels = ["dshbanca-issue-2-restore-sentinel"]
+const correctionVaultInventory = {
+  ".banca/snapshots/dshbanca-issue-2-restore-sentinel/main.tex": correctionNamedVaultSha256,
+  ".banca/snapshots/dshbanca-issue-2-restore-sentinel.manifest.json": correctionNamedManifestSha256,
+  [".banca/snapshots/" + correctionAutoPartialLabel + "/main.tex"]: correctionVaultSha256,
+  [".banca/snapshots/" + correctionAutoPartialLabel + ".manifest.json"]: correctionManifestSha256,
+}
+const correctionRejectedInventory = () => ({
+  "main.tex": correctionCurrentSha256,
+  ".banca/state.json": correctionStateSha256,
+  ...correctionVaultInventory,
+})
+const correctionInvalidBatchInventory = () => ({
+  "main.tex": correctionCurrentSha256,
+  ".banca/state.json": correctionStateSha256,
+  "extra.tex": correctionExtraSha256,
+  ...correctionVaultInventory,
+})
+
 const completeRuntime = {
   profileRuntime: true,
   lifecycle: "observer Cordis apply reached after DSHbanca registrations",
@@ -163,12 +196,12 @@ const completeRuntime = {
       message:
         "blocked: main.tex occurrence preflight failed: expected 2 (expectedOccurrences), found 1 — batch rejected before snapshot; no manuscript file was modified",
       manuscriptUnchanged: true,
-      inventoryBefore: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
-      inventoryAfter: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
+      inventoryBefore: correctionRejectedInventory(),
+      inventoryAfter: correctionRejectedInventory(),
       iterationsBefore: 1,
       iterationsAfter: 1,
-      snapshotsBefore: 1,
-      snapshotsAfter: 1,
+      snapshotsBefore: 2,
+      snapshotsAfter: 2,
     },
     invalidBatch: {
       correctionCount: 2,
@@ -182,12 +215,61 @@ const completeRuntime = {
         "blocked: extra.tex occurrence preflight failed: expected 2 (expectedOccurrences), found 1 — batch rejected before snapshot; no manuscript file was modified",
       manuscriptUnchanged: true,
       partialApplicationAbsent: true,
-      inventoryBefore: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
-      inventoryAfter: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
+      inventoryBefore: correctionInvalidBatchInventory(),
+      inventoryAfter: correctionInvalidBatchInventory(),
       iterationsBefore: 1,
       iterationsAfter: 1,
-      snapshotsBefore: 1,
-      snapshotsAfter: 1,
+      snapshotsBefore: 2,
+      snapshotsAfter: 2,
+    },
+  },
+  correctionRestore: {
+    toolName: "banca_corrigir",
+    correction: {
+      dispatchCount: 1,
+      isError: false,
+      aborted: false,
+      targetFile: "main.tex",
+      originalSha256: correctionOriginalSha256,
+      correctedSha256: correctionCurrentSha256,
+      changedExactly: true,
+    },
+    snapshot: {
+      label: correctionAutoPartialLabel,
+      preexistingLabels: correctionPreexistingLabels,
+      autoCreatedByCorrection: true,
+      stateRegistered: true,
+      manifestKind: "partial",
+      manifestFiles: [{ logical: "main.tex", sha256: correctionOriginalSha256, size: 96 }],
+      originalManuscriptSha256: correctionOriginalSha256,
+      vaultManuscriptSha256: correctionOriginalSha256,
+      vaultManuscriptSize: 96,
+    },
+    restore: {
+      toolName: "banca_restore",
+      dispatchCount: 1,
+      isError: false,
+      aborted: false,
+      snapshotId: correctionAutoPartialLabel,
+      confirm: true,
+      message:
+        "restored from " + correctionAutoPartialLabel + "\nRestored files (content verified):\n- main.tex",
+      originalSha256: correctionOriginalSha256,
+      restoredSha256: correctionOriginalSha256,
+      restoredContentEqualsOriginal: true,
+      unselectedFile: {
+        path: "referencias.bib",
+        sha256Before: correctionUnselectedSha256,
+        sha256After: correctionUnselectedSha256,
+        unchanged: true,
+      },
+    },
+    reapplyCorrection: {
+      dispatchCount: 1,
+      isError: false,
+      aborted: false,
+      restoredOriginalAbsent: true,
+      correctedPresent: true,
     },
   },
   deniedWorkspaceInventoryBefore: { "main.tex": "sha256:before", ".banca/state.json": "sha256:state" },
@@ -504,7 +586,7 @@ describe("DSH profile E2E evidence contract", () => {
       {
         correctionPreflight: {
           ...completeRuntime.correctionPreflight,
-          invalidBatch: { ...completeRuntime.correctionPreflight.invalidBatch, snapshotsAfter: 2 },
+          invalidBatch: { ...completeRuntime.correctionPreflight.invalidBatch, snapshotsAfter: 3 },
         },
       },
       "banca_corrigir occurrence preflight was not fail-closed over the whole batch",
@@ -6847,5 +6929,213 @@ describe("R9 procfs process-group interpretation", () => {
     // targets fail closed.
     expect(runner.processGroupAbsenceAfterCloseObservation(0)).toMatchObject({ absent: false, reason: "invalid-target" })
     expect(runner.processGroupAbsenceAfterCloseObservation(-1)).toMatchObject({ absent: false, reason: "invalid-target" })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #110 R2 — fail-closed evidence for the native correction probe.
+// The fixture above is structural (not observed host evidence); these tests
+// prove the validator rejects missing, malformed or contradictory proof.
+// ---------------------------------------------------------------------------
+
+const R2_PREFLIGHT_ERROR = "banca_corrigir occurrence preflight was not fail-closed over the whole batch"
+const R2_RESTORE_ERROR =
+  "banca_corrigir positive snapshot restore evidence is missing, incomplete or not hash-linked"
+
+function mutatedCorrectionEvidence(mutate: (evidence: any) => void) {
+  const evidence = JSON.parse(JSON.stringify(completeRuntime)) as any
+  mutate(evidence)
+  return evidence
+}
+
+function removeVaultArtifacts(inventory: Record<string, string>) {
+  for (const key of Object.keys(inventory)) {
+    if (key.startsWith(".banca/snapshots/")) delete inventory[key]
+  }
+}
+
+describe("Issue #110 R2 — fail-closed correction preflight evidence", () => {
+  test("accepts the complete positive correction restore fixture", () => {
+    expect(validateEvidence(completeRuntime)).toEqual([])
+  })
+
+  test.each([
+    [
+      "both iteration counters absent",
+      (e: any) => {
+        for (const row of [e.correctionPreflight.divergentCount, e.correctionPreflight.invalidBatch]) {
+          delete row.iterationsBefore
+          delete row.iterationsAfter
+        }
+      },
+    ],
+    [
+      "both snapshot counters absent",
+      (e: any) => {
+        for (const row of [e.correctionPreflight.divergentCount, e.correctionPreflight.invalidBatch]) {
+          delete row.snapshotsBefore
+          delete row.snapshotsAfter
+        }
+      },
+    ],
+    ["divergent iterationsBefore absent", (e: any) => { delete e.correctionPreflight.divergentCount.iterationsBefore }],
+    ["divergent iterationsAfter absent", (e: any) => { delete e.correctionPreflight.divergentCount.iterationsAfter }],
+    ["invalidBatch snapshotsBefore absent", (e: any) => { delete e.correctionPreflight.invalidBatch.snapshotsBefore }],
+    ["invalidBatch snapshotsAfter absent", (e: any) => { delete e.correctionPreflight.invalidBatch.snapshotsAfter }],
+    [
+      "negative counters",
+      (e: any) => {
+        e.correctionPreflight.divergentCount.iterationsBefore = -1
+        e.correctionPreflight.divergentCount.iterationsAfter = -1
+      },
+    ],
+    [
+      "fractional counters",
+      (e: any) => {
+        e.correctionPreflight.divergentCount.snapshotsBefore = 1.5
+        e.correctionPreflight.divergentCount.snapshotsAfter = 1.5
+      },
+    ],
+    [
+      "non-numeric counters",
+      (e: any) => {
+        e.correctionPreflight.invalidBatch.snapshotsBefore = "2"
+        e.correctionPreflight.invalidBatch.snapshotsAfter = "2"
+      },
+    ],
+    [
+      "unsafe integer counters",
+      (e: any) => {
+        e.correctionPreflight.divergentCount.iterationsBefore = Number.MAX_SAFE_INTEGER + 1
+        e.correctionPreflight.divergentCount.iterationsAfter = Number.MAX_SAFE_INTEGER + 1
+      },
+    ],
+    [
+      "divergent before/after counters",
+      (e: any) => {
+        e.correctionPreflight.divergentCount.iterationsAfter = 2
+      },
+    ],
+    [
+      "extra.tex absent from invalid batch inventories",
+      (e: any) => {
+        delete e.correctionPreflight.invalidBatch.inventoryBefore["extra.tex"]
+        delete e.correctionPreflight.invalidBatch.inventoryAfter["extra.tex"]
+      },
+    ],
+    [
+      "snapshot/vault artifacts absent from inventories",
+      (e: any) => {
+        removeVaultArtifacts(e.correctionPreflight.divergentCount.inventoryBefore)
+        removeVaultArtifacts(e.correctionPreflight.divergentCount.inventoryAfter)
+        removeVaultArtifacts(e.correctionPreflight.invalidBatch.inventoryBefore)
+        removeVaultArtifacts(e.correctionPreflight.invalidBatch.inventoryAfter)
+      },
+    ],
+    [
+      "inventory hash diverges before/after",
+      (e: any) => {
+        e.correctionPreflight.divergentCount.inventoryAfter["main.tex"] = evidenceHash("changed-main")
+      },
+    ],
+    [
+      "inventory hash is not a sha256 digest",
+      (e: any) => {
+        e.correctionPreflight.divergentCount.inventoryBefore["main.tex"] = "sha256:before"
+        e.correctionPreflight.divergentCount.inventoryAfter["main.tex"] = "sha256:before"
+      },
+    ],
+    [
+      "main.tex absent from inventories",
+      (e: any) => {
+        delete e.correctionPreflight.invalidBatch.inventoryBefore["main.tex"]
+        delete e.correctionPreflight.invalidBatch.inventoryAfter["main.tex"]
+      },
+    ],
+    [
+      "state.json absent from inventories",
+      (e: any) => {
+        delete e.correctionPreflight.invalidBatch.inventoryBefore[".banca/state.json"]
+        delete e.correctionPreflight.invalidBatch.inventoryAfter[".banca/state.json"]
+      },
+    ],
+  ])("rejects correction preflight evidence when %s", (_label, mutate) => {
+    expect(validateEvidence(mutatedCorrectionEvidence(mutate))).toContain(R2_PREFLIGHT_ERROR)
+  })
+})
+
+describe("Issue #110 R2 — fail-closed positive snapshot restore evidence", () => {
+  test.each([
+    ["correctionRestore evidence is absent", (e: any) => { delete e.correctionRestore }],
+    [
+      "restore snapshotId differs from the automatic partial snapshot label",
+      (e: any) => { e.correctionRestore.restore.snapshotId = "pre-other" },
+    ],
+    [
+      "snapshot manifest hash differs from the original manuscript hash",
+      (e: any) => { e.correctionRestore.snapshot.manifestFiles[0].sha256 = evidenceHash("tampered-manifest") },
+    ],
+    [
+      "restored hash differs from the original hash",
+      (e: any) => { e.correctionRestore.restore.restoredSha256 = evidenceHash("tampered-restore") },
+    ],
+    [
+      "success claim contradicts the restored bytes",
+      (e: any) => { e.correctionRestore.restore.restoredContentEqualsOriginal = false },
+    ],
+    [
+      "snapshot was not created by the correction",
+      (e: any) => { e.correctionRestore.snapshot.autoCreatedByCorrection = false },
+    ],
+    [
+      "snapshot label was already preexisting",
+      (e: any) => { e.correctionRestore.snapshot.preexistingLabels = [correctionAutoPartialLabel] },
+    ],
+    [
+      "snapshot manifest is not partial",
+      (e: any) => { e.correctionRestore.snapshot.manifestKind = "restorable" },
+    ],
+    [
+      "vault bytes hash differs from the original hash",
+      (e: any) => { e.correctionRestore.snapshot.vaultManuscriptSha256 = evidenceHash("tampered-vault") },
+    ],
+    [
+      "vault size differs from the manifest entry size",
+      (e: any) => { e.correctionRestore.snapshot.vaultManuscriptSize = 95 },
+    ],
+    [
+      "restore dispatch count is missing",
+      (e: any) => { e.correctionRestore.restore.dispatchCount = 0 },
+    ],
+    [
+      "restore dispatch is reported as an error",
+      (e: any) => { e.correctionRestore.restore.isError = true },
+    ],
+    [
+      "unselected file hash changed during restore",
+      (e: any) => { e.correctionRestore.restore.unselectedFile.sha256After = evidenceHash("changed-unselected") },
+    ],
+    [
+      "unselected file preservation is denied",
+      (e: any) => { e.correctionRestore.restore.unselectedFile.unchanged = false },
+    ],
+    [
+      "restore message is not linked to the snapshot label",
+      (e: any) => { e.correctionRestore.restore.message = "restore succeeded" },
+    ],
+    [
+      "reapply correction evidence is absent",
+      (e: any) => { delete e.correctionRestore.reapplyCorrection },
+    ],
+    [
+      "correction dispatch is reported as an error",
+      (e: any) => { e.correctionRestore.correction.isError = true },
+    ],
+    [
+      "corrected hash equals the original hash",
+      (e: any) => { e.correctionRestore.correction.correctedSha256 = correctionOriginalSha256 },
+    ],
+  ])("rejects positive restore evidence when %s", (_label, mutate) => {
+    expect(validateEvidence(mutatedCorrectionEvidence(mutate))).toContain(R2_RESTORE_ERROR)
   })
 })
