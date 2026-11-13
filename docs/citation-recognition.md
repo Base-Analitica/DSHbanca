@@ -80,8 +80,10 @@ não alega suporte a:
   isoladamente, então `\cite` no fim de um bloco e `{chave}` no seguinte não
   contam;
 - comandos com mais opcionais do que a assinatura documentada (por exemplo
-  `\cite[a][b][c]{k}`, `\apud[a][b]{x}{y}`) ou com opcionais depois dos
-  obrigatórios;
+  `\cite[a][b][c]{k}` e `\apud[a][b]{x}{y}`), que não são reconhecidos;
+- opcionais adicionais depois dos argumentos obrigatórios (`\cite{a}[b]`) não
+  fazem parte da assinatura: são lidos como texto e a citação anterior continua
+  contada;
 - outras variantes de pacotes não listados acima (`\citet`, `\citep`,
   `\citetext`, `\citeyear`, `\nocite`, `\autocite`, `\footcite`,
   `\fullcite`, `\supercite`, `\Cite`, `\citeauthorx`, etc.);
