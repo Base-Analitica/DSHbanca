@@ -1,6 +1,8 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { EventEmitter } from "node:events"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -36,6 +38,15 @@ import {
   validateComposedProfilePlugins,
 } from "../scripts/lib/dsh-profile-e2e-contract.js"
 import * as profileEvidenceContract from "../scripts/lib/dsh-profile-e2e-contract.js"
+import {
+  createReportPersistencePlan,
+  mayStartAbruptPhaseTwo,
+  parseLinuxProcStatProcessGroupId,
+  processGroupAbsentFromProcRows,
+  persistReportWithPlan,
+  run as runControlledProcess,
+  terminateOwnedDshChild,
+} from "../scripts/e2e-dsh-profile.js"
 
 const completeAuditorMarkdownEvidence = {
   sourcePath: "assets/dsh/agents/banca-auditor.md",
@@ -678,13 +689,17 @@ describe("observer evidence capture and fail-closed catalog completeness", () =>
     const renderObserver = new Function(
       "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
       "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-      "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+      "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+      "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "abruptParentDecisionToken",
+      "renderControlPresetSelector", "e2eControlPresetId",
       `return \`${template}\`;`,
     ) as (...args: unknown[]) => string
     const generatedModuleSource = renderObserver(
       "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
       "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
       "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+      "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
+      "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json", "test-parent-decision-token",
       renderControlPresetSelector, e2eControlPresetId,
     )
 
@@ -4018,12 +4033,13 @@ describe("DSH E2E diagnostic redaction", () => {
 
   test("runner sanitizes the complete report and withholds raw exception and child output", () => {
     const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
-    const writeReportStart = runnerSource.indexOf("function writeReport(): void")
+    const writeReportStart = runnerSource.indexOf("export function persistReportWithPlanAndDigest(")
     const failFunctionStart = runnerSource.indexOf("function fail(message:", writeReportStart)
     const writeReportSource = runnerSource.slice(writeReportStart, failFunctionStart)
-    expect(writeReportSource).toContain("sanitizeReport(report)")
-    expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(commandVersion(nodeExecutable")
-    expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(commandVersion(bunExecutable")
+    expect(writeReportSource).toContain("sanitizeReport(value)")
+    expect(writeReportSource).toContain("persistReportWithPlan(reportPersistencePlan, report)")
+    expect(runnerSource).toContain("const nodeVersion = safeRuntimeVersion(await commandVersion(nodeExecutable")
+    expect(runnerSource).toContain("const bunVersion = safeRuntimeVersion(await commandVersion(bunExecutable")
     expect(runnerSource).toContain("const reportedVersion = safeRuntimeVersion(pnpmCheck.stdout")
     expect(runnerSource).toContain("const safeVersions = (sanitizeReport({ versions: report.versions }) as { versions: GateReport[\"versions\"] }).versions")
     expect(runnerSource).not.toContain("sanitizeReport(report.versions)")
@@ -4032,8 +4048,2690 @@ describe("DSH E2E diagnostic redaction", () => {
     expect(runnerSource).toContain('fail("Runner orchestration: unexpected exception; details withheld")')
     expect(runnerSource).toContain('report.failures.push("Report persistence failed; details withheld")')
     expect(runnerSource).toContain('formatCommandFailure("native DSH profile boot"')
-    expect(runnerSource).toContain('const reportPathLabel = configuredReportPath')
+    expect(runnerSource).toContain('const reportPathLabel = reportPersistencePlan.mode === "abrupt"')
     expect(runnerSource).not.toContain("error.message.replaceAll(scratchRoot")
     expect(runnerSource).not.toContain("Could not preserve sanitized report at ${reportPathLabel}: ${error.message")
+  })
+})
+
+function abruptRestartEvidenceFixture(): any {
+  const evidence: any = structuredClone(completeCrossProcessBatchAuditEvidence)
+  evidence.executionMode = "abrupt-restart-native-dsh"
+  evidence.processBoundary.second = {
+    ...evidence.processBoundary.second,
+    runnerOwnedChild: true,
+    controlCompleted: true,
+    controlFailed: false,
+    closeObserved: true,
+    processGroupIdObserved: true,
+    targetAbsentAfterClose: true,
+    processGroupAbsentAfterClose: true,
+  }
+  evidence.processBoundary.first = {
+    ...evidence.processBoundary.first,
+    exitCode: null,
+    signal: "SIGKILL",
+    timedOut: false,
+    forcedTermination: true,
+    naturalBeforeExitObserved: false,
+    nativeTeardownMarkerObserved: false,
+    runnerOwnedChild: true,
+    childIdentityRevalidatedBeforeSignal: true,
+    parentBarrierArmed: true,
+    killRequestedByParent: true,
+    killSignalRequested: "SIGKILL",
+    targetAbsentAfterClose: true,
+    processGroupAbsentAfterClose: true,
+  }
+  evidence.parentVerifiedPersistence = {
+    source: "parent-read-persisted-files",
+    verifiedBeforeSignal: true,
+    checkpointFileParsed: true,
+    receiptFileParsed: true,
+    findingFileParsed: true,
+    workspaceInventorySha256: evidence.phaseOne.workspaceInventorySha256,
+    persistence: { ...evidence.phaseOne.persistence },
+    checkpoint: { ...evidence.phaseOne.checkpoint },
+    receiptCount: 2,
+    receiptBatchIds: [...evidence.phaseOne.persistedBatchIds],
+    findingsCount: 1,
+    finding: { ...evidence.phaseOne.finding },
+  }
+  evidence.teardown = {
+    firstExitObserved: true,
+    firstCloseObserved: true,
+    firstTargetAbsentAfterClose: true,
+    firstProcessGroupAbsentAfterClose: true,
+    secondExitObserved: true,
+    secondCloseObserved: true,
+    secondTargetAbsentAfterClose: true,
+    secondProcessGroupAbsentAfterClose: true,
+    secondAgentSessionDisposed: true,
+    teardownFailed: false,
+  }
+  return evidence
+}
+
+// The former positive fixture before R2: it never proves that phase B's target
+// and private process group are empty after close.
+function abruptRestartEvidenceWithoutSecondAbsence(): any {
+  const evidence = abruptRestartEvidenceFixture()
+  for (const key of ["closeObserved", "processGroupIdObserved", "targetAbsentAfterClose", "processGroupAbsentAfterClose"]) {
+    delete evidence.processBoundary.second[key]
+  }
+  delete evidence.teardown.secondTargetAbsentAfterClose
+  delete evidence.teardown.secondProcessGroupAbsentAfterClose
+  return evidence
+}
+
+const abruptRestartEvidenceContract = profileEvidenceContract as unknown as {
+  validateAbruptRestartEvidence(value: unknown): string[]
+  classifyAbruptRestartEvidenceStatus(value: unknown): string
+}
+
+describe("DSH abrupt process-restart evidence gate (#107)", () => {
+  test("exports a strict validator and leaves unexecuted evidence BLOCKED", () => {
+    expect(typeof abruptRestartEvidenceContract.validateAbruptRestartEvidence).toBe("function")
+    expect(typeof abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus).toBe("function")
+    for (const value of [undefined, null, {}, { probeExecuted: undefined }, { probeExecuted: false }]) {
+      expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(value)).toBe("BLOCKED")
+    }
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus({ probeExecuted: true })).toBe("FAIL")
+  })
+
+  test("accepts only parent-verified durable phase A followed by owned SIGKILL and independent recovery", () => {
+    const evidence = abruptRestartEvidenceFixture()
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence)).toEqual([])
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("PASS")
+  })
+
+  test.each([
+    ["missing parent readiness", (e: any) => { e.parentVerifiedPersistence.verifiedBeforeSignal = false }],
+    ["missing persisted receipt proof", (e: any) => { delete e.parentVerifiedPersistence.receiptBatchIds }],
+    ["falsified persistence hash", (e: any) => { e.parentVerifiedPersistence.persistence.findingsSha256 = "0".repeat(64) }],
+    ["one-of-five checkpoint", (e: any) => { e.phaseOne.checkpoint.completedBatches = 1 }],
+    ["three-of-five checkpoint", (e: any) => { e.phaseOne.checkpoint.completedBatches = 3 }],
+    ["duplicate receipts", (e: any) => { e.parentVerifiedPersistence.receiptBatchIds[1] = e.parentVerifiedPersistence.receiptBatchIds[0] }],
+    ["finding duplicated", (e: any) => { e.parentVerifiedPersistence.findingsCount = 2 }],
+    ["first process exited normally without signal", (e: any) => { e.processBoundary.first.exitCode = 0; e.processBoundary.first.signal = null }],
+    ["wrong termination signal", (e: any) => { e.processBoundary.first.signal = "SIGTERM" }],
+    ["child ownership not proved", (e: any) => { e.processBoundary.first.runnerOwnedChild = false }],
+    ["identity not revalidated before signal", (e: any) => { e.processBoundary.first.childIdentityRevalidatedBeforeSignal = false }],
+    ["parent barrier not armed before signal", (e: any) => { e.processBoundary.first.parentBarrierArmed = false }],
+    ["process identity changed", (e: any) => { e.processBoundary.first.hostIdentitySha256 = "4".repeat(64) }],
+    ["B started before A closed", (e: any) => { e.processBoundary.secondStartedAfterFirstExit = false }],
+    ["recovery child startup control failed", (e: any) => { e.processBoundary.second.controlFailed = true }],
+    ["recovery child is not runner-owned", (e: any) => { e.processBoundary.second.runnerOwnedChild = false }],
+    ["same process reused", (e: any) => { e.processBoundary.second.hostIdentitySha256 = e.processBoundary.first.hostIdentitySha256 }],
+    ["second Agent/Session reused", (e: any) => { e.phaseTwo.agentIdentity.agentId = e.phaseOne.agentIdentity.agentId }],
+    ["changed workspace inventory", (e: any) => { e.parentVerifiedPersistence.workspaceInventorySha256 = "5".repeat(64) }],
+    ["partial synthesis", (e: any) => { e.phaseTwo.synthesis.completedBatches = 4 }],
+    ["finding changed at synthesis", (e: any) => { e.phaseTwo.synthesis.finding.findingId = "6".repeat(64) }],
+    ["cleanup or teardown failed", (e: any) => { e.teardown.teardownFailed = true }],
+    ["target process survived close", (e: any) => { e.teardown.firstTargetAbsentAfterClose = false }],
+    ["runner-owned process group has survivor", (e: any) => { e.teardown.firstProcessGroupAbsentAfterClose = false }],
+    ["recovery target process survived close", (e: any) => { e.processBoundary.second.targetAbsentAfterClose = false }],
+    ["recovery process group has survivor", (e: any) => { e.processBoundary.second.processGroupAbsentAfterClose = false }],
+    ["recovery private process group not observed", (e: any) => { e.processBoundary.second.processGroupIdObserved = false }],
+    ["recovery close not observed after exit", (e: any) => { e.processBoundary.second.closeObserved = false }],
+    ["teardown claims surviving recovery target absence", (e: any) => { e.teardown.secondTargetAbsentAfterClose = false }],
+    ["teardown claims surviving recovery group member", (e: any) => { e.teardown.secondProcessGroupAbsentAfterClose = false }],
+  ])("fails closed for %s", (_label, mutate) => {
+    const evidence = abruptRestartEvidenceFixture()
+    mutate(evidence)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("rejects the former positive fixture once phase-B absence and private-PGID proof are absent", () => {
+    const evidence = abruptRestartEvidenceWithoutSecondAbsence()
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("requires every phase-B absence, close, and private-PGID observation", () => {
+    const required: Array<[string, (e: any) => void]> = [
+      ["processBoundary.second.closeObserved", (e) => { delete e.processBoundary.second.closeObserved }],
+      ["processBoundary.second.processGroupIdObserved", (e) => { delete e.processBoundary.second.processGroupIdObserved }],
+      ["processBoundary.second.targetAbsentAfterClose", (e) => { delete e.processBoundary.second.targetAbsentAfterClose }],
+      ["processBoundary.second.processGroupAbsentAfterClose", (e) => { delete e.processBoundary.second.processGroupAbsentAfterClose }],
+      ["teardown.secondTargetAbsentAfterClose", (e) => { delete e.teardown.secondTargetAbsentAfterClose }],
+      ["teardown.secondProcessGroupAbsentAfterClose", (e) => { delete e.teardown.secondProcessGroupAbsentAfterClose }],
+    ]
+    for (const [field, mutate] of required) {
+      const evidence = abruptRestartEvidenceFixture()
+      mutate(evidence)
+      expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length, field).toBeGreaterThan(0)
+      expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence), field).toBe("FAIL")
+    }
+  })
+
+  test("rejects contradictory phase-B absence between process boundary and teardown", () => {
+    const boundaryOnly = abruptRestartEvidenceFixture()
+    boundaryOnly.processBoundary.second.targetAbsentAfterClose = false
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(boundaryOnly).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(boundaryOnly)).toBe("FAIL")
+    const teardownOnly = abruptRestartEvidenceFixture()
+    teardownOnly.teardown.secondProcessGroupAbsentAfterClose = false
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(teardownOnly).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(teardownOnly)).toBe("FAIL")
+  })
+
+  test("a simulated surviving member of phase B's private process group fails closed", () => {
+    const stat = (pid: number, groupId: number) => `${pid} (dsh-child) S 1 ${groupId} ${groupId} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+    const groupId = 7301
+    const survivorRows = [{ pid: 7302, stat: stat(7302, groupId) }]
+    expect(processGroupAbsentFromProcRows(groupId, survivorRows)).toBe(false)
+    const evidence = abruptRestartEvidenceFixture()
+    evidence.processBoundary.second.processGroupAbsentAfterClose = processGroupAbsentFromProcRows(groupId, survivorRows)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("requires every parent persistence receipt and finding field", () => {
+    for (const key of Object.keys(abruptRestartEvidenceFixture().parentVerifiedPersistence)) {
+      const evidence = abruptRestartEvidenceFixture()
+      delete evidence.parentVerifiedPersistence[key]
+      expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    }
+  })
+})
+
+class MockWritable extends EventEmitter {
+  endCalls = 0
+  destroyCalls = 0
+  end(): this { this.endCalls++; return this }
+  destroy(): this { this.destroyCalls++; return this }
+}
+
+class MockReadable extends EventEmitter {
+  destroyCalls = 0
+  destroy(): this { this.destroyCalls++; return this }
+}
+
+class MockControlledChild extends EventEmitter {
+  pid: number | undefined = 4242
+  exitCode: number | null = null
+  signalCode: string | null = null
+  stdin = new MockWritable()
+  stdout = new MockReadable()
+  stderr = new MockReadable()
+  unrefCalls = 0
+  unref(): this { this.unrefCalls++; return this }
+  observeExit(code: number | null, signal: string | null): void {
+    this.exitCode = code
+    this.signalCode = signal
+    this.emit("exit", code, signal)
+  }
+  observeClose(code: number | null, signal: string | null): void {
+    this.emit("close", code, signal)
+  }
+}
+
+class ManualClock {
+  private readonly timers: Array<{ callback: () => void; delay: number; cancelled: boolean; fired: boolean }> = []
+  readonly delays: number[] = []
+  readonly setTimeout: typeof setTimeout = ((callback: () => void, delay = 0) => {
+    const timer = { callback, delay, cancelled: false, fired: false }
+    this.timers.push(timer)
+    this.delays.push(delay)
+    return timer as unknown as ReturnType<typeof setTimeout>
+  }) as typeof setTimeout
+  readonly clearTimeout: typeof clearTimeout = ((handle: ReturnType<typeof setTimeout>) => {
+    const timer = handle as unknown as { cancelled: boolean }
+    timer.cancelled = true
+  }) as typeof clearTimeout
+  runNext(): void {
+    const timer = this.timers.find((candidate) => !candidate.cancelled && !candidate.fired)
+    if (!timer) throw new Error("manual clock has no pending timeout")
+    timer.fired = true
+    timer.callback()
+  }
+  runAll(): void {
+    let count = 0
+    while (this.timers.some((candidate) => !candidate.cancelled && !candidate.fired)) {
+      if (++count > 20) throw new Error("manual clock exceeded bounded timeout schedule")
+      this.runNext()
+    }
+  }
+  // Fire the most recently scheduled callback even if it was cancelled, to prove
+  // late timers/callbacks cannot signal after the terminal state.
+  runLastScheduled(): void {
+    const timer = this.timers[this.timers.length - 1]
+    if (!timer) throw new Error("manual clock has no scheduled timeout")
+    timer.fired = true
+    timer.callback()
+  }
+  pendingCount(): number {
+    return this.timers.filter((candidate) => !candidate.cancelled && !candidate.fired).length
+  }
+}
+
+function startMockControlledRun(options: Record<string, unknown> = {}) {
+  const child = new MockControlledChild()
+  const clock = new ManualClock()
+  const result = runControlledProcess("mock-dsh", [], {
+    cwd: tmpdir(),
+    env: {},
+    timeoutMs: 10,
+    controlledTeardownGraceMs: 5,
+    controlledCloseGraceMs: 3,
+    ...options,
+  } as any, {
+    spawn: (() => child) as any,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+  })
+  child.emit("spawn")
+  return { child, clock, result }
+}
+
+function createAbruptReportPlan(root: string, repo: string, path: string, overrides: Record<string, unknown> = {}) {
+  const configured = overrides.configuredReportPath ?? path
+  const abruptPath = overrides.abruptReportPath ?? path
+  return createReportPersistencePlan({
+    abruptRestartRequested: true,
+    configuredReportPath: configured as string,
+    abruptReportPath: abruptPath as string,
+    repositoryRoot: repo,
+    temporaryRoot: root,
+    defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
+  })
+}
+
+describe("P1 report-writer and controlled-process regressions", () => {
+  test("blocked #107 finally write leaves an existing sentinel unchanged", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-blocked-"))
+    try {
+      const repo = join(root, "checkout")
+      const privateParent = join(root, "reports")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(privateParent, { mode: 0o700 })
+      const sentinel = join(privateParent, "existing.json")
+      const bytes = Buffer.from("DO-NOT-OVERWRITE\n")
+      writeFileSync(sentinel, bytes, { mode: 0o600 })
+      const plan = createAbruptReportPlan(root, repo, sentinel)
+      expect(plan.mode).toBe("abrupt")
+      expect(plan.authorized).toBe(false)
+      let reportResult: string | undefined
+      let dshBoots = 0
+      const earlyBlockedReturn = () => {
+        try {
+          return
+        } finally {
+          reportResult = persistReportWithPlan(plan, { status: "BLOCKED", dshBoots })
+        }
+      }
+      earlyBlockedReturn()
+      expect(dshBoots).toBe(0)
+      expect(reportResult).toBe("blocked")
+      expect(readFileSync(sentinel)).toEqual(bytes)
+      const missingApprovedTarget = createReportPersistencePlan({
+        abruptRestartRequested: true,
+        configuredReportPath: undefined,
+        abruptReportPath: undefined,
+        repositoryRoot: repo,
+        temporaryRoot: root,
+        defaultReportPath: "docs/evidence/fallback.json",
+      })
+      expect(missingApprovedTarget.mode).toBe("abrupt")
+      expect(missingApprovedTarget.authorized).toBe(false)
+      expect(persistReportWithPlan(missingApprovedTarget, { status: "BLOCKED" })).toBe("blocked")
+      expect(existsSync(join(repo, "docs/evidence/fallback.json"))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("refuses checkout, outside-temp, missing-parent, and symlink report paths without creating them", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-guards-"))
+    const outside = mkdtempSync(join(tmpdir(), "dshbanca-report-outside-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      const insideCheckout = join(repo, "report.json")
+      const missingParent = join(root, "absent", "report.json")
+      const outsideTemp = join(outside, "report.json")
+      const symlinkParent = join(root, "redirect")
+      symlinkSync(outside, symlinkParent, "dir")
+      const symlinkEscape = join(symlinkParent, "report.json")
+      for (const target of [insideCheckout, missingParent, outsideTemp, symlinkEscape]) {
+        const plan = createAbruptReportPlan(root, repo, target)
+        expect(plan.authorized).toBe(false)
+        expect(persistReportWithPlan(plan, { status: "BLOCKED" })).toBe("blocked")
+      }
+      expect(existsSync(join(root, "absent"))).toBe(false)
+      expect(existsSync(insideCheckout)).toBe(false)
+      expect(existsSync(outsideTemp)).toBe(false)
+      expect(existsSync(join(outside, "report.json"))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects final symlink and a target created after preflight without changing sentinel bytes", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-race-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      const sentinel = join(parent, "sentinel.json")
+      const sentinelBytes = Buffer.from("sentinel bytes\n")
+      writeFileSync(sentinel, sentinelBytes, { mode: 0o600 })
+      const link = join(parent, "link.json")
+      symlinkSync(sentinel, link)
+      const linkPlan = createAbruptReportPlan(root, repo, link)
+      expect(linkPlan.authorized).toBe(false)
+      expect(persistReportWithPlan(linkPlan, { status: "FAIL" })).toBe("blocked")
+      expect(readFileSync(sentinel)).toEqual(sentinelBytes)
+
+      const racedTarget = join(parent, "raced.json")
+      const preflight = createAbruptReportPlan(root, repo, racedTarget)
+      expect(preflight.authorized).toBe(true)
+      writeFileSync(racedTarget, sentinelBytes, { mode: 0o600, flag: "wx" })
+      expect(() => persistReportWithPlan(preflight, { status: "FAIL" })).toThrow()
+      expect(readFileSync(racedTarget)).toEqual(sentinelBytes)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("parent replacement between preflight and persist is refused without writing through a symlink", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-parent-race-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      const movedParent = join(root, "private-moved")
+      const escape = join(root, "escape")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      mkdirSync(escape, { mode: 0o700 })
+      const target = join(parent, "report.json")
+      const plan = createAbruptReportPlan(root, repo, target)
+      expect(plan.authorized).toBe(true)
+      renameSync(parent, movedParent)
+      symlinkSync(escape, parent, "dir")
+      expect(() => persistReportWithPlan(plan, { status: "FAIL" })).toThrow()
+      expect(existsSync(join(escape, "report.json"))).toBe(false)
+      expect(existsSync(join(movedParent, "report.json"))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("writes one new abrupt report exclusively and preserves legacy report semantics", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-report-valid-"))
+    try {
+      const repo = join(root, "checkout")
+      const parent = join(root, "private")
+      mkdirSync(repo, { mode: 0o700 })
+      mkdirSync(parent, { mode: 0o700 })
+      const target = join(parent, "report.json")
+      const plan = createAbruptReportPlan(root, repo, target)
+      expect(plan.authorized).toBe(true)
+      expect(persistReportWithPlan(plan, { status: "BLOCKED", message: "safe report" })).toBe("written")
+      const firstBytes = readFileSync(target)
+      expect(statSync(target).mode & 0o777).toBe(0o600)
+      expect(JSON.parse(firstBytes.toString("utf8")).status).toBe("BLOCKED")
+      expect(() => persistReportWithPlan(plan, { status: "FAIL" })).toThrow()
+      expect(readFileSync(target)).toEqual(firstBytes)
+
+      const legacyParent = join(repo, "legacy")
+      mkdirSync(legacyParent, { mode: 0o700 })
+      const legacyTarget = join(legacyParent, "latest.json")
+      writeFileSync(legacyTarget, "legacy sentinel\n", { mode: 0o600 })
+      const legacyPlan = createReportPersistencePlan({
+        abruptRestartRequested: false,
+        configuredReportPath: "legacy/latest.json",
+        repositoryRoot: repo,
+        temporaryRoot: root,
+        defaultReportPath: "docs/evidence/dsh-profile-e2e.latest.json",
+      })
+      expect(legacyPlan.mode).toBe("legacy")
+      expect(persistReportWithPlan(legacyPlan, { status: "PASS" })).toBe("written")
+      expect(JSON.parse(readFileSync(legacyTarget, "utf8")).status).toBe("PASS")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("controlled timeout is bounded when readiness never completes and no close/error arrives", async () => {
+    const requested: string[] = []
+    const { child, clock, result } = startMockControlledRun({
+      onSpawn: async () => await new Promise<void>(() => {}),
+      onControlTimeout: () => { requested.push("SIGTERM"); return "SIGTERM" },
+      onControlHardTimeout: () => { requested.push("SIGKILL"); return "SIGKILL" },
+    })
+    await Promise.resolve()
+    clock.runNext()
+    expect(child.stdin.endCalls).toBe(1)
+    clock.runAll()
+    const completed = await result
+    expect(completed.timedOut).toBe(true)
+    expect(completed.controlFailed).toBe(true)
+    expect(completed.exitObserved).toBe(false)
+    expect(completed.closeObserved).toBe(false)
+    expect(completed.timeoutContainmentSignalsRequested).toEqual(["SIGTERM", "SIGKILL"])
+    expect(child.unrefCalls).toBe(1)
+    expect(child.stdout.destroyCalls).toBe(1)
+    expect(clock.delays).toEqual([10, 5, 3])
+  })
+
+  test("SIGTERM without close settles as uncertain and cannot release phase B", async () => {
+    const { child, clock, result } = startMockControlledRun({
+      onSpawn: async () => await new Promise<void>(() => {}),
+      onControlTimeout: () => "SIGTERM",
+      onControlHardTimeout: () => null,
+    })
+    await Promise.resolve()
+    clock.runAll()
+    const completed = await result
+    expect(completed.timeoutContainmentSignalsRequested).toEqual(["SIGTERM"])
+    expect(completed.closeObserved).toBe(false)
+    expect(child.unrefCalls).toBe(1)
+    expect(mayStartAbruptPhaseTwo({
+      parentBarrierArmed: true,
+      parentVerifiedPersistence: true,
+      controlCompleted: completed.controlCompleted === true,
+      controlFailed: completed.controlFailed === true,
+      firstKillRequested: false,
+      exitCode: completed.exitCode,
+      signal: completed.signal,
+      timedOut: completed.timedOut,
+      exitObserved: completed.exitObserved === true,
+      closeObserved: completed.closeObserved === true,
+      targetAbsentAfterClose: false,
+      processGroupAbsentAfterClose: false,
+      nativeTeardownMarkerObserved: false,
+    })).toBe(false)
+  })
+
+  test("unverified child identity prevents every timeout signal", async () => {
+    const requested: string[] = []
+    const { clock, result } = startMockControlledRun({
+      onSpawn: async (_child: unknown, identity: string | null) => {
+        if (!identity) throw new Error("child identity unavailable")
+      },
+      onControlTimeout: (_child: unknown, identity: string | null) => {
+        if (!identity) return null
+        requested.push("SIGTERM")
+        return "SIGTERM"
+      },
+      onControlHardTimeout: (_child: unknown, identity: string | null) => {
+        if (!identity) return null
+        requested.push("SIGKILL")
+        return "SIGKILL"
+      },
+    })
+    await Promise.resolve()
+    clock.runAll()
+    const completed = await result
+    expect(requested).toEqual([])
+    expect(completed.timeoutContainmentSignalsRequested).toEqual([])
+    expect(completed.controlFailed).toBe(true)
+    expect(completed.closeObserved).toBe(false)
+  })
+
+  test("late onSpawn callback cannot signal after timeout terminal state", async () => {
+    let releaseCallback: (() => void) | undefined
+    let signalAttempts = 0
+    const { clock, result } = startMockControlledRun({
+      onSpawn: async (_child: unknown, _identity: string | null, _signal: AbortSignal, mayContinue: () => boolean) => {
+        await new Promise<void>((resolve) => { releaseCallback = resolve })
+        if (mayContinue()) signalAttempts++
+      },
+      onControlTimeout: () => null,
+      onControlHardTimeout: () => null,
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    clock.runAll()
+    const completed = await result
+    expect(completed.closeObserved).toBe(false)
+    releaseCallback?.()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(signalAttempts).toBe(0)
+    expect(completed.timedOut).toBe(true)
+    expect(completed.controlFailed).toBe(true)
+  })
+
+  test("exit is not close and a delayed control callback cannot signal afterward", async () => {
+    let releaseCallback: (() => void) | undefined
+    let experimentalSignals = 0
+    const { child, result } = startMockControlledRun({
+      onSpawn: async (_child: unknown, _identity: string | null, _signal: AbortSignal, mayContinue: () => boolean) => {
+        await new Promise<void>((resolve) => { releaseCallback = resolve })
+        if (mayContinue()) experimentalSignals++
+      },
+      onControlTimeout: () => null,
+      onControlHardTimeout: () => null,
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    child.observeExit(0, null)
+    expect(child.exitCode).toBe(0)
+    expect(child.listenerCount("close")).toBeGreaterThan(0)
+    releaseCallback?.()
+    await Promise.resolve()
+    expect(experimentalSignals).toBe(0)
+    child.observeClose(0, null)
+    const completed = await result
+    expect(completed.exitObserved).toBe(true)
+    expect(completed.closeObserved).toBe(true)
+    expect(completed.controlFailed).toBe(true)
+    expect(completed.signal).toBe(null)
+  })
+
+  test("owned-child signaling revalidates and targets only the positive direct PID", () => {
+    const child = new MockControlledChild() as any
+    const signals: Array<[number, string]> = []
+    const args: string[] = []
+    const key = Buffer.alloc(32)
+    expect(terminateOwnedDshChild(
+      child, "node", "dsh", args, "identity", key, "SIGTERM", () => true,
+      (_target, identity) => identity === "identity",
+      (pid, signal) => { signals.push([pid, signal]) },
+    )).toBe(true)
+    expect(terminateOwnedDshChild(
+      child, "node", "dsh", args, "identity", key, "SIGKILL", () => true,
+      () => false,
+      (pid, signal) => { signals.push([pid, signal]) },
+    )).toBe(false)
+    expect(terminateOwnedDshChild(
+      child, "node", "dsh", args, "identity", key, "SIGKILL", () => false,
+      () => true,
+      (pid, signal) => { signals.push([pid, signal]) },
+    )).toBe(false)
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
+  })
+
+  test("process-group absence inspection is fail-closed and never signals a group", () => {
+    const stat = (pid: number, groupId: number, command = "worker") => `${pid} (${command}) S 1 ${groupId} ${groupId} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+    expect(parseLinuxProcStatProcessGroupId(stat(110, 101, "worker ) helper"))).toBe(101)
+    expect(processGroupAbsentFromProcRows(101, [
+      { pid: 201, stat: stat(201, 202) },
+      { pid: 301, stat: stat(301, 302) },
+    ])).toBe(true)
+    expect(processGroupAbsentFromProcRows(101, [{ pid: 201, stat: stat(201, 101) }])).toBe(false)
+    expect(processGroupAbsentFromProcRows(101, [{ pid: 201, stat: "malformed" }])).toBe(false)
+    expect(processGroupAbsentFromProcRows(101, [{ pid: 0, stat: stat(201, 202) }])).toBe(false)
+    expect(processGroupAbsentFromProcRows(101, [])).toBe(false)
+    expect(processGroupAbsentFromProcRows(0, [])).toBe(false)
+  })
+
+  test("phase B requires completed parent barrier, experimental kill, close, and absence proof", () => {
+    const ready = {
+      parentBarrierArmed: true,
+      parentVerifiedPersistence: true,
+      controlCompleted: true,
+      controlFailed: false,
+      firstKillRequested: true,
+      exitCode: null,
+      signal: "SIGKILL",
+      timedOut: false,
+      exitObserved: true,
+      closeObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+      nativeTeardownMarkerObserved: false,
+    }
+    expect(mayStartAbruptPhaseTwo(ready)).toBe(true)
+    for (const change of [
+      { parentBarrierArmed: false },
+      { parentVerifiedPersistence: false },
+      { controlCompleted: false },
+      { controlFailed: true },
+      { firstKillRequested: false },
+      { timedOut: true },
+      { exitObserved: false },
+      { closeObserved: false },
+      { targetAbsentAfterClose: false },
+      { processGroupAbsentAfterClose: false },
+      { nativeTeardownMarkerObserved: true },
+    ]) expect(mayStartAbruptPhaseTwo({ ...ready, ...change })).toBe(false)
+  })
+})
+
+describe("Runner phase-B absence gate decision (#107 R2)", () => {
+  test("preserves scratch unless B's target and private process group are absent after exit and close", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.abruptSecondProcessAbsenceDecision).toBe("function")
+    const ready = {
+      closeObserved: true,
+      controlCompleted: true,
+      runnerOwnedChild: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    }
+    expect(runner.abruptSecondProcessAbsenceDecision(ready)).toEqual({
+      closeConfirmed: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+      preserveScratch: false,
+    })
+    // Exit 0 plus close alone (or any unproven observation) cannot accept the gate.
+    for (const change of [
+      { closeObserved: false },
+      { controlCompleted: false },
+      { runnerOwnedChild: false },
+      { processGroupIdObserved: false },
+      { targetAbsentAfterClose: false },
+      { processGroupAbsentAfterClose: false },
+    ]) {
+      const decision = runner.abruptSecondProcessAbsenceDecision({ ...ready, ...change })
+      expect(decision.preserveScratch, JSON.stringify(change)).toBe(true)
+      expect(decision.targetAbsentAfterClose && decision.processGroupAbsentAfterClose, JSON.stringify(change)).toBe(false)
+    }
+  })
+
+  test("binds phase B's observed PGID to the direct child PID instead of any non-null group", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.abruptPrivateProcessGroupIdMatchesChildPid).toBe("function")
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(7301, 7301)).toBe(true)
+    for (const [childPid, observed] of [
+      [7301, 7302],
+      [7301, null],
+      [undefined, 7301],
+      [0, 0],
+      [-1, -1],
+      [1, 1],
+      [7301.5, 7301.5],
+      [7301, undefined],
+    ] as Array<[number | undefined | null, number | null | undefined]>) {
+      expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(childPid, observed), `${childPid}/${observed}`).toBe(false)
+    }
+    const ready = {
+      closeObserved: true,
+      controlCompleted: true,
+      runnerOwnedChild: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    }
+    const mismatched = runner.abruptPrivateProcessGroupIdMatchesChildPid(7301, 7302)
+    expect(mismatched).toBe(false)
+    const decision = runner.abruptSecondProcessAbsenceDecision({ ...ready, processGroupIdObserved: mismatched })
+    expect(decision.preserveScratch).toBe(true)
+  })
+
+  test("ties the read-only procfs survivor and scan-failure observations to scratch preservation", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    const stat = (pid: number, groupId: number) => `${pid} (dsh-child) S 1 ${groupId} ${groupId} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+    const ready = {
+      closeObserved: true,
+      controlCompleted: true,
+      runnerOwnedChild: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    }
+    const survivor = processGroupAbsentFromProcRows(8101, [{ pid: 8102, stat: stat(8102, 8101) }])
+    const unreadableScan = processGroupAbsentFromProcRows(8101, [])
+    expect(survivor).toBe(false)
+    expect(unreadableScan).toBe(false)
+    for (const observed of [survivor, unreadableScan]) {
+      const decision = runner.abruptSecondProcessAbsenceDecision({ ...ready, processGroupAbsentAfterClose: observed })
+      expect(decision.processGroupAbsentAfterClose).toBe(false)
+      expect(decision.preserveScratch).toBe(true)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #107 R3: the abrupt provider must build the exact envelope its own
+// validator consumes. Inputs below mimic the real sidecars (observer envelope +
+// crossProcessPhaseOne/Two payloads) and parent observations; the builder is the
+// same one called by the runner.
+// ---------------------------------------------------------------------------
+
+function abruptIntegrationInputs(): any {
+  const phaseOne = structuredClone(completeCrossProcessBatchAuditEvidence.phaseOne) as any
+  const phaseTwo = structuredClone(completeCrossProcessBatchAuditEvidence.phaseTwo) as any
+  const readinessObserverIdentitySha256 = "2".repeat(64)
+  const recoveryObserverIdentitySha256 = "3".repeat(64)
+  const workspaceIdentitySha256 = "1".repeat(64)
+  return {
+    phaseOneSidecar: {
+      observerProcessIdentitySha256: readinessObserverIdentitySha256,
+      crossProcessPhaseOne: phaseOne,
+      parentBarrierArmed: true,
+    },
+    phaseTwoSidecar: {
+      observerProcessIdentitySha256: recoveryObserverIdentitySha256,
+      crossProcessPhaseTwo: phaseTwo,
+    },
+    parentObservedHostIdentitySha256: readinessObserverIdentitySha256,
+    barrierObserverIdentitySha256: readinessObserverIdentitySha256,
+    parentVerifiedPersistence: {
+      source: "parent-read-persisted-files",
+      verifiedBeforeSignal: true,
+      checkpointFileParsed: true,
+      receiptFileParsed: true,
+      findingFileParsed: true,
+      workspaceInventorySha256: phaseOne.workspaceInventorySha256,
+      persistence: { ...phaseOne.persistence },
+      checkpoint: { ...phaseOne.checkpoint },
+      receiptCount: 2,
+      receiptBatchIds: [...phaseOne.persistedBatchIds],
+      findingsCount: 1,
+      finding: { ...phaseOne.finding },
+    },
+    firstProcess: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: readinessObserverIdentitySha256,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: null,
+      signal: "SIGKILL",
+      timedOut: false,
+      forcedTermination: true,
+      naturalBeforeExitObserved: false,
+      nativeTeardownMarkerObserved: false,
+      runnerOwnedChild: true,
+      childIdentityRevalidatedBeforeSignal: true,
+      parentBarrierArmed: true,
+      killRequestedByParent: true,
+      killSignalRequested: "SIGKILL",
+      timeoutContainmentSignalsRequested: [],
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    },
+    secondProcess: {
+      dshExecutableSha256: "b".repeat(64),
+      profileIdentitySha256: "c".repeat(64),
+      hostIdentitySha256: recoveryObserverIdentitySha256,
+      observerIdentitySha256: recoveryObserverIdentitySha256,
+      identityMatched: true,
+      spawnObserved: true,
+      kernelStartIdentityObserved: true,
+      exitObserved: true,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      forcedTermination: false,
+      naturalBeforeExitObserved: true,
+      nativeTeardownMarkerObserved: true,
+      runnerOwnedChild: true,
+      controlCompleted: true,
+      controlFailed: false,
+      closeObserved: true,
+      processGroupIdObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupAbsentAfterClose: true,
+    },
+    secondStartedAfterFirstExit: true,
+    processesDidNotOverlap: true,
+    workspace: {
+      sameWorkspace: true,
+      preservedBetweenProcesses: true,
+      resetBetweenProcesses: false,
+      identitySha256: workspaceIdentitySha256,
+      firstProcessEndFilesystemIdentitySha256: workspaceIdentitySha256,
+      secondProcessStartFilesystemIdentitySha256: workspaceIdentitySha256,
+      secondProcessEndFilesystemIdentitySha256: workspaceIdentitySha256,
+      firstProcessEndInventorySha256: phaseOne.workspaceInventorySha256,
+      secondProcessStartInventorySha256: phaseOne.workspaceInventorySha256,
+      secondProcessEndInventorySha256: "a".repeat(64),
+    },
+    teardown: {
+      firstExitObserved: true,
+      firstCloseObserved: true,
+      firstTargetAbsentAfterClose: true,
+      firstProcessGroupAbsentAfterClose: true,
+      secondExitObserved: true,
+      secondCloseObserved: true,
+      secondTargetAbsentAfterClose: true,
+      secondProcessGroupAbsentAfterClose: true,
+      secondAgentSessionDisposed: true,
+      teardownFailed: false,
+    },
+  }
+}
+
+async function abruptIntegrationBuilder(): Promise<any> {
+  const runner = await import("../scripts/e2e-dsh-profile.js") as any
+  return runner.buildAbruptRestartEvidence
+}
+
+describe("Abrupt producer → validator integration (#107 R3)", () => {
+  test("the runner builder produces a complete envelope that the full validator accepts as PASS", async () => {
+    const build = await abruptIntegrationBuilder()
+    expect(typeof build).toBe("function")
+    const inputs = abruptIntegrationInputs()
+    const evidence = build(inputs)
+    expect(evidence.totalBatches).toBe(5)
+    expect(evidence.totalCharacters).toBe(595)
+    expect(evidence.planId).toBe(inputs.phaseOneSidecar.crossProcessPhaseOne.planId)
+    expect(evidence.manuscriptFingerprint).toBe(inputs.phaseOneSidecar.crossProcessPhaseOne.manuscriptFingerprint)
+    expect(evidence.planBatchIds).toEqual(inputs.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds)
+    expect(evidence.phaseOne.checkpoint.completedBatches).toBe(2)
+    expect(evidence.phaseTwo.finalCheckpoint.completedBatches).toBe(5)
+    expect(evidence.phaseTwo.synthesis.findingsCount).toBe(1)
+    expect(evidence.processBoundary.first.observerIdentitySha256).toBe(inputs.phaseOneSidecar.observerProcessIdentitySha256)
+    expect(evidence.processBoundary.first.identityMatched).toBe(true)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence)).toEqual([])
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("PASS")
+  })
+
+  test("retains the readiness-envelope observer digest instead of copying the host digest", async () => {
+    const build = await abruptIntegrationBuilder()
+    const inputs = abruptIntegrationInputs()
+    const differentObserver = "d".repeat(64)
+    inputs.phaseOneSidecar.observerProcessIdentitySha256 = differentObserver
+    inputs.barrierObserverIdentitySha256 = differentObserver
+    const evidence = build(inputs)
+    expect(evidence.processBoundary.first.observerIdentitySha256).toBe(differentObserver)
+    expect(evidence.processBoundary.first.hostIdentitySha256).toBe(inputs.parentObservedHostIdentitySha256)
+    expect(evidence.processBoundary.first.identityMatched).toBe(false)
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+
+  test("rejects missing or contradictory projections and identities from builder inputs", async () => {
+    const build = await abruptIntegrationBuilder()
+    const cases: Array<[string, (input: any) => void]> = [
+      ["missing readiness observer digest", (i) => { delete i.phaseOneSidecar.observerProcessIdentitySha256 }],
+      ["null readiness observer digest", (i) => { i.phaseOneSidecar.observerProcessIdentitySha256 = null }],
+      ["readiness observer digest diverges from host", (i) => { i.phaseOneSidecar.observerProcessIdentitySha256 = "9".repeat(64) }],
+      ["barrier digest diverges from readiness", (i) => { i.barrierObserverIdentitySha256 = "8".repeat(64) }],
+      ["missing phase-one planId", (i) => { delete i.phaseOneSidecar.crossProcessPhaseOne.planId }],
+      ["phase-two planId diverges", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.resumeQuery.checkpointBefore.planId = "5".repeat(64) }],
+      ["missing manuscript fingerprint", (i) => { delete i.phaseOneSidecar.crossProcessPhaseOne.manuscriptFingerprint }],
+      ["phase-two fingerprint diverges", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.finalCheckpoint.manuscriptFingerprint = "6".repeat(64) }],
+      ["incompatible total batches", (i) => { i.phaseOneSidecar.crossProcessPhaseOne.totalBatches = 4 }],
+      ["incompatible total characters", (i) => { i.phaseOneSidecar.crossProcessPhaseOne.totalCharacters = 597 }],
+      ["duplicated batch ids", (i) => {
+        const ids = i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds
+        ids[1] = ids[0]
+      }],
+      ["reordered batch ids", (i) => {
+        const ids = i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds
+        ;[ids[0], ids[1]] = [ids[1], ids[0]]
+      }],
+      ["missing batch id", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.orderedBatchIds.pop() }],
+      ["incomplete synthesis", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.completedBatches = 4 }],
+      ["duplicated synthesis finding", (i) => { i.phaseTwoSidecar.crossProcessPhaseTwo.synthesis.findingsCount = 2 }],
+      ["missing second teardown absence proof", (i) => { delete i.teardown.secondTargetAbsentAfterClose }],
+      ["false first teardown absence proof", (i) => { i.teardown.firstProcessGroupAbsentAfterClose = false }],
+      ["missing phase-two sidecar payload", (i) => { delete i.phaseTwoSidecar.crossProcessPhaseTwo }],
+    ]
+    for (const [label, mutate] of cases) {
+      const inputs = abruptIntegrationInputs()
+      mutate(inputs)
+      const evidence = build(inputs)
+      expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length, label).toBeGreaterThan(0)
+      expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence), label).toBe("FAIL")
+    }
+  })
+
+  test("phase B receives the flat resume expectation the resume probe consumes", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.buildAbruptResumeExpectation).toBe("function")
+    const inputs = abruptIntegrationInputs()
+    const phaseOne = inputs.phaseOneSidecar.crossProcessPhaseOne
+    const expectation = runner.buildAbruptResumeExpectation(phaseOne, phaseOne.workspaceInventorySha256)
+    for (const key of ["probeExecuted", "workspaceIdentitySha256", "planId", "manuscriptFingerprint", "persistence", "completedBatchIds", "checkpoint", "finding"]) {
+      expect(Object.prototype.hasOwnProperty.call(expectation, key), key).toBe(true)
+      expect(expectation[key], key).toEqual(phaseOne[key])
+    }
+    expect(expectation.workspaceInventorySha256).toBe(phaseOne.workspaceInventorySha256)
+    expect(Object.prototype.hasOwnProperty.call(expectation, "phaseOne")).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(expectation, "parentVerifiedPersistence")).toBe(false)
+    const empty = runner.buildAbruptResumeExpectation(undefined, "a".repeat(64))
+    expect(empty.planId).toBeUndefined()
+    expect(empty.probeExecuted).toBeUndefined()
+    expect(empty.workspaceInventorySha256).toBe("a".repeat(64))
+  })
+
+  test("the retired provider shape without root projections or envelope identity is rejected", async () => {
+    const build = await abruptIntegrationBuilder()
+    const evidence = build(abruptIntegrationInputs()) as any
+    for (const key of ["totalBatches", "totalCharacters", "planId", "manuscriptFingerprint", "planBatchIds"]) delete evidence[key]
+    evidence.processBoundary.first.observerIdentitySha256 = null
+    evidence.processBoundary.first.identityMatched = false
+    expect(abruptRestartEvidenceContract.validateAbruptRestartEvidence(evidence).length).toBeGreaterThan(0)
+    expect(abruptRestartEvidenceContract.classifyAbruptRestartEvidenceStatus(evidence)).toBe("FAIL")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #107 R4: the whole runner must obey the verified-direct-child
+// containment authority whenever #107 is requested. These tests execute the
+// real `run()` containment path with fake ChildProcess objects, fake
+// process.kill, a manual clock, and simulated procfs identity observations.
+// Every test first asserts the R4 API exists, so the suite never reaches the
+// legacy group-signaling path on an old HEAD.
+// ---------------------------------------------------------------------------
+
+describe("R4 containment authority for the whole #107 runner", () => {
+  async function strictRunner(): Promise<any> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.ContainmentAuthorityAbort).toBe("function")
+    expect(typeof runner.containmentIncidentSnapshot).toBe("function")
+    expect(typeof runner.containmentAuthorityReportSnapshot).toBe("function")
+    expect(typeof runner.scratchPreservationForSafetySnapshot).toBe("function")
+    expect(typeof runner.containmentRequiresScratchPreservation).toBe("function")
+    expect(typeof runner.selectContainmentPolicy).toBe("function")
+    expect(typeof runner.resolveCommandExecutableForIdentity).toBe("function")
+    return runner
+  }
+
+  function startStrictRun(
+    runner: any,
+    options: Record<string, unknown> = {},
+    identityState: { value?: string | null; executableMatches?: boolean; emitSpawn?: boolean } = {},
+  ) {
+    const child = new MockControlledChild()
+    const clock = new ManualClock()
+    const signals: Array<[number, string]> = []
+    const identity: { value: string | null; executableMatches: boolean; executableChecks: number } = {
+      value: identityState.value === undefined ? "identity-a" : identityState.value,
+      executableMatches: identityState.executableMatches ?? true,
+      executableChecks: 0,
+    }
+    const promise = runner.run("mock-command", [], {
+      cwd: tmpdir(),
+      env: {},
+      timeoutMs: 10,
+      processIdentityKey: Buffer.alloc(32),
+      containment: "strict-direct-only",
+      containmentStage: "strict-test-stage",
+      strictContainmentGraceMs: 5,
+      controlledCloseGraceMs: 3,
+      ...options,
+    }, {
+      spawn: (() => child) as any,
+      setTimeout: clock.setTimeout,
+      clearTimeout: clock.clearTimeout,
+      kill: (pid: number, signal: "SIGTERM" | "SIGKILL") => { signals.push([pid, signal]) },
+      processIdentity: () => identity.value,
+      verifyExecutable: () => {
+        identity.executableChecks++
+        return identity.executableMatches
+      },
+    })
+    if (identityState.emitSpawn !== false) child.emit("spawn")
+    return { child, clock, signals, identity, promise }
+  }
+
+  async function outcome(promise: Promise<any>): Promise<{ result?: any; error?: any }> {
+    try {
+      return { result: await promise }
+    } catch (error) {
+      return { error }
+    }
+  }
+
+  test("production strict matrix records the incident, rejects, and preserves the scratch", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise } = startStrictRun(
+      runner,
+      { containmentStage: "production-strict-stage" },
+      { value: null },
+    )
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(error.stage).toBe("production-strict-stage")
+    expect(error.result?.timedOut).toBe(true)
+    expect(String(error.result?.containmentIncident)).toContain("identity")
+    expect(signals).toEqual([])
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
+    const incident = runner.containmentIncidentSnapshot()
+    expect(incident?.stage).toBe("production-strict-stage")
+    expect(String(incident?.reason).length).toBeGreaterThan(0)
+    const reportStage = runner.containmentAuthorityReportSnapshot() as any
+    expect(reportStage?.status).toBe("FAIL")
+    expect(reportStage?.stage).toBe("production-strict-stage")
+    expect(runner.scratchPreservationForSafetySnapshot()).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: incident })).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: true, containmentIncident: null })).toBe(true)
+    expect(runner.containmentRequiresScratchPreservation({ preserveForSafety: false, containmentIncident: null })).toBe(false)
+  })
+
+  test("strict timeout signals only the verified direct child, never a group", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise, child } = startStrictRun(runner)
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"], [4242, "SIGKILL"]])
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    const result = error.result
+    expect(result.timedOut).toBe(true)
+    expect(result.closeObserved).toBe(false)
+    expect(typeof result.containmentIncident).toBe("string")
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
+    expect(child.unrefCalls).toBeGreaterThan(0)
+  })
+
+  test("missing identity forbids every signal and rejects the bounded run closed", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, identity, promise } = startStrictRun(runner)
+    identity.value = null
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(signals).toEqual([])
+    expect(error.result.timedOut).toBe(true)
+    expect(String(error.result.containmentIncident)).toContain("identity")
+  })
+
+  test("PID reuse or a changed identity before timeout forbids every signal", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, identity, promise } = startStrictRun(runner)
+    identity.value = "identity-from-reused-pid"
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(signals).toEqual([])
+  })
+
+  test("identity change between SIGTERM and the deferred attempt blocks SIGKILL", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, identity, promise } = startStrictRun(runner)
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    identity.value = "identity-changed"
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    expect(String(error.result.containmentIncident).length).toBeGreaterThan(0)
+  })
+
+  test("missing process-identity key or an unexpected executable forbids signals", async () => {
+    const runner = await strictRunner()
+    const withoutKey = startStrictRun(runner, { processIdentityKey: undefined })
+    withoutKey.clock.runNext()
+    withoutKey.clock.runNext()
+    expect(withoutKey.signals).toEqual([])
+    expect((await outcome(withoutKey.promise)).error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    const unexpectedExecutable = startStrictRun(runner)
+    unexpectedExecutable.identity.executableMatches = false
+    unexpectedExecutable.clock.runNext()
+    unexpectedExecutable.clock.runNext()
+    expect(unexpectedExecutable.signals).toEqual([])
+    expect((await outcome(unexpectedExecutable.promise)).error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+  })
+
+  test("wrapper targets are never signaled and the wait stays bounded", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise } = startStrictRun(runner, { containmentTarget: "wrapper-unverifiable" })
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(signals).toEqual([])
+    expect(error.result.closeObserved).toBe(false)
+    expect(String(error.result.containmentIncident)).toContain("wrapper")
+  })
+
+  test("exit without close stays bounded, reports uncertainty, and sends no signal", async () => {
+    const runner = await strictRunner()
+    const { child, clock, signals, promise } = startStrictRun(runner)
+    child.observeExit(0, null)
+    clock.runLastScheduled()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(error.result.closeObserved).toBe(false)
+    expect(error.result.timedOut).toBe(false)
+    expect(signals).toEqual([])
+    expect(String(error.result.containmentIncident)).toContain("close")
+  })
+
+  test("post-spawn error releases runner handles, fences timers, signals nothing, and rejects", async () => {
+    const runner = await strictRunner()
+    const { child, clock, signals, promise } = startStrictRun(runner)
+    child.emit("error", new Error("synthetic child failure"))
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    expect(String(error.result.containmentIncident)).toContain("error")
+    expect(error.result.closeObserved).toBe(false)
+    expect(signals).toEqual([])
+    expect(child.stdin.destroyCalls).toBeGreaterThan(0)
+    expect(child.stdout.destroyCalls).toBeGreaterThan(0)
+    expect(child.stderr.destroyCalls).toBeGreaterThan(0)
+    expect(child.unrefCalls).toBeGreaterThan(0)
+    expect(clock.pendingCount()).toBe(0)
+    // A late close/timer after the terminal state must stay inert.
+    child.observeClose(0, null)
+    clock.runLastScheduled()
+    expect(signals).toEqual([])
+  })
+
+  test("error before spawn releases runner handles without inventing a containment incident", async () => {
+    const runner = await strictRunner()
+    const { child, clock, signals, promise } = startStrictRun(runner, {}, { emitSpawn: false })
+    child.emit("error", new Error("synthetic spawn failure"))
+    const { result, error } = await outcome(promise)
+    expect(error).toBeUndefined()
+    expect(result.closeObserved).toBe(false)
+    expect(signals).toEqual([])
+    expect(child.stdin.destroyCalls).toBeGreaterThan(0)
+    expect(child.stdout.destroyCalls).toBeGreaterThan(0)
+    expect(child.stderr.destroyCalls).toBeGreaterThan(0)
+    expect(child.unrefCalls).toBeGreaterThan(0)
+    expect(clock.pendingCount()).toBe(0)
+  })
+
+  test("a timer delayed past a rejected terminal cannot signal", async () => {
+    const runner = await strictRunner()
+    const { clock, signals, promise } = startStrictRun(runner)
+    clock.runNext()
+    expect(signals).toEqual([[4242, "SIGTERM"]])
+    clock.runNext()
+    clock.runNext()
+    const { error } = await outcome(promise)
+    expect(error).toBeInstanceOf(runner.ContainmentAuthorityAbort)
+    const before = signals.length
+    clock.runLastScheduled()
+    expect(signals.length).toBe(before)
+    expect(signals.every(([pid]) => pid > 0)).toBe(true)
+  })
+
+  test("confirmed close cancels timers and late callbacks cannot signal", async () => {
+    const runner = await strictRunner()
+    const { child, clock, signals, promise } = startStrictRun(runner)
+    child.observeClose(0, null)
+    const { result, error } = await outcome(promise)
+    expect(error).toBeUndefined()
+    expect(result.closeObserved).toBe(true)
+    expect(clock.pendingCount()).toBe(0)
+    clock.runLastScheduled()
+    expect(signals).toEqual([])
+  })
+
+  test("selects the strict policy only for non-empty #107 request variables", async () => {
+    const runner = await strictRunner()
+    expect(runner.selectContainmentPolicy({})).toBe("legacy")
+    expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED: "yes" })).toBe("strict-direct-only")
+    expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256: "   " })).toBe("legacy")
+    expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: "/tmp/report.json" })).toBe("strict-direct-only")
+  })
+
+  test("resolves relative command names through PATH for identity comparison", async () => {
+    const runner = await strictRunner()
+    const git = runner.resolveCommandExecutableForIdentity("git")
+    expect(typeof git).toBe("string")
+    expect(git.length).toBeGreaterThan(0)
+    expect(runner.resolveCommandExecutableForIdentity("dshbanca-definitely-missing-command")).toBeNull()
+  })
+
+  test("the real executable verifier fails closed for invalid or unknown identities", async () => {
+    const runner = await strictRunner()
+    expect(runner.verifyProcessExecutableIdentity(0, "git", [])).toBe(false)
+    expect(runner.verifyProcessExecutableIdentity(1, "git", [])).toBe(false)
+    expect(runner.verifyProcessExecutableIdentity(process.pid, "dshbanca-definitely-missing-command", [])).toBe(false)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R5: terminal scratch/evidence preservation. The real decision used
+// by runCli() is exercised with filesystem fixtures; FAIL/BLOCKED can never
+// destroy the only diagnostic evidence, and cleanup only follows durable
+// exclusive report persistence with proven teardown.
+// ---------------------------------------------------------------------------
+
+describe("R5 terminal scratch and evidence preservation", () => {
+  async function runnerApi(): Promise<any> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.decideScratchCleanup).toBe("function")
+    expect(typeof runner.applyScratchCleanup).toBe("function")
+    return runner
+  }
+
+  function decisionInput(overrides: Record<string, unknown> = {}) {
+    return {
+      abruptMode: true,
+      scratchExists: true,
+      finalStatus: "PASS",
+      containmentIncident: false,
+      reportPersistenceFailed: false,
+      reportPersistenceBlocked: false,
+      teardownProven: true,
+      ...overrides,
+    }
+  }
+
+  test("FAIL, BLOCKED, incidents, unproven teardown, and persistence failures preserve the scratch", async () => {
+    const runner = await runnerApi()
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["conventional FAIL without containment incident", { finalStatus: "FAIL" }],
+      ["conventional BLOCKED without containment incident", { finalStatus: "BLOCKED" }],
+      ["offline plugin-add failure (BLOCKED)", { finalStatus: "BLOCKED" }],
+      ["conventional setup/build failure (FAIL)", { finalStatus: "FAIL" }],
+      ["timeout or post-spawn error incident", { finalStatus: "FAIL", containmentIncident: true }],
+      ["invalid final evidence (FAIL)", { finalStatus: "FAIL" }],
+      ["teardown uncertain while status is PASS", { teardownProven: false }],
+      ["report persistence failed", { reportPersistenceFailed: true }],
+      ["report persistence blocked", { reportPersistenceBlocked: true }],
+    ]
+    for (const [label, overrides] of cases) {
+      const decision = runner.decideScratchCleanup(decisionInput(overrides))
+      expect(decision.preserve, label).toBe(true)
+      expect(decision.remove, label).toBe(false)
+      expect(typeof decision.reason, label).toBe("string")
+    }
+  })
+
+  test("PASS with proven teardown and durable report removes; missing scratch never invents cleanup", async () => {
+    const runner = await runnerApi()
+    const remove = runner.decideScratchCleanup(decisionInput())
+    expect(remove).toEqual({ preserve: false, remove: true, reason: null })
+    const noScratch = runner.decideScratchCleanup(decisionInput({ scratchExists: false }))
+    expect(noScratch).toEqual({ preserve: false, remove: false, reason: null })
+    const legacyBlocked = runner.decideScratchCleanup(decisionInput({ abruptMode: false, finalStatus: "FAIL" }))
+    expect(legacyBlocked.remove).toBe(true)
+    const legacyReportFailure = runner.decideScratchCleanup(decisionInput({ abruptMode: false, reportPersistenceFailed: true }))
+    expect(legacyReportFailure.preserve).toBe(true)
+  })
+
+  test("filesystem cleanup preserves the directory on failure and removes it only for PASS", async () => {
+    const runner = await runnerApi()
+    const preservedRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-preserve-"))
+    const removedRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-remove-"))
+    try {
+      const preservedIdentity = runner.initializeScratchRootIdentity(preservedRoot)
+      const removedIdentity = runner.initializeScratchRootIdentity(removedRoot)
+      const failDecision = runner.decideScratchCleanup(decisionInput({ finalStatus: "FAIL" }))
+      const preserved = runner.applyScratchCleanup({ scratchRoot: preservedRoot, scratchIdentity: preservedIdentity, temporaryRoot: tmpdir(), decision: failDecision })
+      expect(preserved.observed).toBe(true)
+      expect(preserved.removed).toBe(false)
+      expect(preserved.error).toBeNull()
+      expect(existsSync(preservedRoot)).toBe(true)
+
+      const passDecision = runner.decideScratchCleanup(decisionInput())
+      const removed = runner.applyScratchCleanup({ scratchRoot: removedRoot, scratchIdentity: removedIdentity, temporaryRoot: tmpdir(), decision: passDecision })
+      expect(removed.attempted).toBe(true)
+      expect(removed.removed).toBe(true)
+      expect(removed.error).toBeNull()
+      expect(existsSync(removedRoot)).toBe(false)
+
+      const noScratch = runner.applyScratchCleanup({ scratchRoot: undefined, temporaryRoot: tmpdir(), decision: passDecision })
+      expect(noScratch).toEqual({ attempted: false, removed: false, observed: false, error: null })
+      const missingScratch = runner.applyScratchCleanup({ scratchRoot: removedRoot, scratchIdentity: removedIdentity, temporaryRoot: tmpdir(), decision: passDecision })
+      expect(missingScratch.attempted).toBe(false)
+      expect(missingScratch.removed).toBe(false)
+      expect(missingScratch.observed).toBe(false)
+    } finally {
+      rmSync(preservedRoot, { recursive: true, force: true })
+      rmSync(removedRoot, { recursive: true, force: true })
+    }
+  })
+
+  test("a cleanup that cannot remove or resolve the runner directory fails closed", async () => {
+    const runner = await runnerApi()
+    const notRunnerOwned = tmpdir()
+    const decision = runner.decideScratchCleanup(decisionInput())
+    const fixture = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r5-fixture-"))
+    const fixtureIdentity = runner.initializeScratchRootIdentity(fixture)
+    const outcome = runner.applyScratchCleanup({ scratchRoot: notRunnerOwned, scratchIdentity: fixtureIdentity, temporaryRoot: tmpdir(), decision })
+    rmSync(fixture, { recursive: true, force: true })
+    expect(outcome.attempted).toBe(false)
+    expect(outcome.removed).toBe(false)
+    expect(typeof outcome.error).toBe("string")
+    expect(existsSync(notRunnerOwned)).toBe(true)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R6: two-artifact terminal evidence protocol (human-approved
+// Option A). Exercises the real executeTerminalProtocol used by runCli() with
+// temporary destinations, real exclusive persistence, real filesystem cleanup,
+// digest binding, and the aggregator used by main().
+// ---------------------------------------------------------------------------
+
+describe("R6 terminal evidence protocol", () => {
+  const repoSha = "a".repeat(40)
+  const temporaryRoots: string[] = []
+  afterEach(() => {
+    for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
+
+  async function r6Api(): Promise<{ runner: any; contract: any }> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    const contract = await import("../scripts/lib/dsh-profile-e2e-contract.js") as any
+    for (const name of ["executeTerminalProtocol", "createReportPersistencePlan", "createAbruptTerminalReportPlan", "abruptReportPairAuthorized", "persistReportWithPlanAndDigest", "evidenceReportDigest"]) {
+      expect(typeof runner[name], name).toBe("function")
+    }
+    for (const name of ["validateAbruptTerminalReceipt", "validateAbruptEvidencePair", "classifyAbruptEvidencePairStatus", "aggregateProfileAndAbruptStatus"]) {
+      expect(typeof contract[name], name).toBe("function")
+    }
+    return { runner, contract }
+  }
+
+  function destinations(): { root: string; evidencePath: string; terminalPath: string } {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-r6-"))
+    temporaryRoots.push(root)
+    const parent = join(root, "reports")
+    mkdirSync(parent, { mode: 0o700 })
+    return { root, evidencePath: join(parent, "evidence.json"), terminalPath: join(parent, "terminal.json") }
+  }
+
+  function plans(runner: any, target: { evidencePath: string; terminalPath: string }) {
+    const base = { abruptRestartRequested: true, repositoryRoot: process.cwd(), temporaryRoot: tmpdir(), defaultReportPath: "docs/evidence/x.json" }
+    const evidencePlan = runner.createReportPersistencePlan({ ...base, configuredReportPath: target.evidencePath, abruptReportPath: target.evidencePath })
+    const terminalPlan = runner.createAbruptTerminalReportPlan({ ...base, terminalReportPath: target.terminalPath })
+    return { evidencePlan, terminalPlan }
+  }
+
+  function evidenceReportFixture() {
+    return {
+      schemaVersion: 1,
+      status: "BLOCKED",
+      startedAt: new Date().toISOString(),
+      repository: { revision: repoSha, dirty: false },
+      versions: {},
+      sandbox: { isolated: true, removed: null },
+      stages: {
+        gateSummary: {
+          issue2Status: "PASS",
+          auditorMarkdownStatus: "PASS",
+          nativeSkillsStatus: "PASS",
+          batchAuditStatus: "PASS",
+          nativeQuestionsStatus: "PASS",
+          academicDecisionStatus: "PASS",
+          crossProcessBatchAuditStatus: "PASS",
+          sourceDriftStatus: "PASS",
+          abruptRestartStatus: "PASS",
+          overallStatus: "PASS",
+          exitCode: 0,
+        },
+        abruptRestart: { status: "PASS", probeExecuted: true, validationErrors: [] },
+        crossProcessBatchAudit: { status: "PASS", validationErrors: [] },
+        sourceDrift: { status: "PASS", validationErrors: [] },
+      },
+      failures: [],
+      limitations: [],
+    }
+  }
+
+  function scratchDirectory(runner: any): { path: string; identity: any } {
+    const scratchPath = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r6-"))
+    writeFileSync(join(scratchPath, "diagnostic.txt"), "diagnostic evidence\n", { mode: 0o600 })
+    const identity = runner.initializeScratchRootIdentity(scratchPath)
+    expect(identity).not.toBeNull()
+    return { path: scratchPath, identity }
+  }
+
+  function runProtocol(runner: any, input: Record<string, unknown> = {}) {
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory(runner)
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : status === "BLOCKED" ? 2 : 1,
+      ...input,
+    })
+    return { result, target, scratch }
+  }
+
+  test("valid evidence + observed cleanup + receipt yields a coherent PASS pair", async () => {
+    const { runner, contract } = await r6Api()
+    const { result, target, scratch } = runProtocol(runner)
+    expect(result.finalStatus).toBe("PASS")
+    expect(existsSync(scratch.path)).toBe(false)
+    const evidenceBytes = readFileSync(target.evidencePath)
+    const evidence = JSON.parse(evidenceBytes.toString("utf8"))
+    expect(evidence.reportKind).toBe(contract.abruptEvidenceReportKind)
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
+    expect(evidence.terminalState).toBe("pending-cleanup")
+    expect(evidence.sandbox.removed).toBeNull()
+    expect(evidence.stages.gateSummary.overallStatus).toBe("pending-cleanup")
+    const evidenceDigest = createHash("sha256").update(evidenceBytes).digest("hex")
+    expect(result.evidenceSha256).toBe(evidenceDigest)
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).toBe("PASS")
+    expect(receipt.kind).toBe(contract.abruptTerminalReceiptKind)
+    expect(receipt.evidenceReportSha256).toBe(evidenceDigest)
+    expect(receipt.repositorySha).toBe(repoSha)
+    expect(receipt.exitCode).toBe(0)
+    expect(receipt.sandbox).toEqual({ attempted: true, removed: true, observed: true })
+    expect(contract.validateAbruptEvidencePair({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceDigest,
+      evidenceReportBytes: evidenceBytes,
+      repositorySha: repoSha,
+      observedExitCode: 0,
+    })).toEqual([])
+    expect(contract.classifyAbruptEvidencePairStatus({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceDigest,
+      evidenceReportBytes: evidenceBytes,
+      repositorySha: repoSha,
+      observedExitCode: 0,
+    })).toBe("PASS")
+    // External exit code is authoritative: a non-zero observation cannot PASS.
+    expect(contract.classifyAbruptEvidencePairStatus({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: evidenceDigest,
+      evidenceReportBytes: evidenceBytes,
+      repositorySha: repoSha,
+      observedExitCode: 1,
+    })).toBe("FAIL")
+  })
+
+  test("cleanup failure never leaves a PASS-reachable pair and preserves the scratch", async () => {
+    const { runner, contract } = await r6Api()
+    const { result, target, scratch } = runProtocol(runner, { temporaryRoot: process.cwd() })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("cleanup-failed")
+    expect(existsSync(scratch.path)).toBe(true)
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
+    expect(evidence.terminalState).toBe("pending-cleanup")
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).toBe("FAIL")
+    expect(receipt.sandbox.removed).toBe(false)
+    const evidenceBytes = readFileSync(target.evidencePath)
+    const digest = createHash("sha256").update(evidenceBytes).digest("hex")
+    expect(contract.classifyAbruptEvidencePairStatus({
+      evidenceReport: evidence,
+      terminalReceipt: receipt,
+      evidenceReportSha256: digest,
+      evidenceReportBytes: evidenceBytes,
+      repositorySha: repoSha,
+      observedExitCode: 1,
+    })).toBe("FAIL")
+    rmSync(scratch.path, { recursive: true, force: true })
+  })
+
+  test("initial evidence persistence failure prevents cleanup and receipt", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory(runner)
+    writeFileSync(target.evidencePath, "sentinel\n", { mode: 0o600 })
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(["failed", "blocked"]).toContain(result.evidenceOutcome)
+    expect(existsSync(scratch.path)).toBe(true)
+    expect(readFileSync(target.evidencePath, "utf8")).toBe("sentinel\n")
+    expect(existsSync(target.terminalPath)).toBe(false)
+    rmSync(scratch.path, { recursive: true, force: true })
+  })
+
+  test("receipt persistence failure after successful cleanup cannot PASS and preserves evidence", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory(runner)
+    writeFileSync(target.terminalPath, "sentinel-terminal\n", { mode: 0o600 })
+    const unauthorizedTerminal = runner.createAbruptTerminalReportPlan({
+      abruptRestartRequested: true,
+      terminalReportPath: target.terminalPath,
+      repositoryRoot: process.cwd(),
+      temporaryRoot: tmpdir(),
+      defaultReportPath: "docs/evidence/x.json",
+    })
+    expect(unauthorizedTerminal.authorized).toBe(false)
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan: unauthorizedTerminal,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("receipt-persistence-failed")
+    expect(existsSync(scratch.path)).toBe(false)
+    expect(existsSync(target.evidencePath)).toBe(true)
+    expect(readFileSync(target.terminalPath, "utf8")).toBe("sentinel-terminal\n")
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
+  })
+
+  test("an authorized terminal plan that loses its leaf to a race cannot persist a PASS receipt", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    expect(terminalPlan.authorized).toBe(true)
+    const scratch = scratchDirectory(runner)
+    // The plan was authorized while the leaf was absent; a racing writer creates it now.
+    writeFileSync(target.terminalPath, "raced-terminal\n", { mode: 0o600 })
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("receipt-persistence-failed")
+    expect(existsSync(scratch.path)).toBe(false)
+    expect(existsSync(target.evidencePath)).toBe(true)
+    expect(readFileSync(target.terminalPath, "utf8")).toBe("raced-terminal\n")
+  })
+
+  test("externally vanished scratch is not accepted as runner cleanup", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory(runner)
+    rmSync(scratch.path, { recursive: true, force: true })
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("scratch-vanished")
+    expect(result.cleanup.attempted).toBe(false)
+    expect(result.cleanup.removed).toBe(false)
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).toBe("FAIL")
+    expect(receipt.sandbox.removed).toBe(false)
+  })
+
+  test("no scratch execution does not invent removal and cannot PASS", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: { ...evidenceReportFixture(), sandbox: { isolated: false, removed: null } },
+      repositorySha: repoSha,
+      evidenceStatus: "PASS",
+      scratchRoot: undefined,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: false,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    expect(result.terminalState).toBe("no-scratch")
+    expect(result.cleanup.attempted).toBe(false)
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.sandbox.removed).toBeNull()
+  })
+
+  test("FAIL/BLOCKED evidence preserves scratch and writes non-PASS receipts", async () => {
+    const { runner } = await r6Api()
+    for (const status of ["FAIL", "BLOCKED"] as const) {
+      const target = destinations()
+      const { evidencePlan, terminalPlan } = plans(runner, target)
+      const scratch = scratchDirectory(runner)
+      const result = runner.executeTerminalProtocol({
+        evidencePlan,
+        terminalPlan,
+        evidenceReport: evidenceReportFixture(),
+        repositorySha: repoSha,
+        evidenceStatus: status,
+        scratchRoot: scratch.path,
+        scratchIdentity: scratch.identity,
+        temporaryRoot: tmpdir(),
+        scratchIsolated: true,
+        containmentIncident: false,
+        teardownProven: false,
+        exitCodeFor: (value: string) => value === "PASS" ? 0 : value === "BLOCKED" ? 2 : 1,
+      })
+      expect(result.finalStatus, status).toBe(status)
+      expect(existsSync(scratch.path), status).toBe(true)
+      const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+      expect(evidence.status, status).toBe(status)
+      expect(evidence.evidenceStatus, status).toBe(status)
+      expect(evidence.sandbox.removed, status).toBeNull()
+      const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+      expect(receipt.status, status).toBe(status)
+      expect(receipt.sandbox.attempted, status).toBe(false)
+      expect(receipt.exitCode, status).toBe(status === "BLOCKED" ? 2 : 1)
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
+  test("tampered evidence bytes, divergent SHA, and invalid receipt are rejected", async () => {
+    const { runner, contract } = await r6Api()
+    const { target } = runProtocol(runner)
+    const bytes = readFileSync(target.evidencePath)
+    const digest = createHash("sha256").update(bytes).digest("hex")
+    const evidence = JSON.parse(bytes.toString("utf8"))
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 })).toEqual([])
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, evidenceReportSha256: "b".repeat(64) }, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, repositorySha: "c".repeat(40) }, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: { ...evidence, status: "PASS" }, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, sandbox: { attempted: false, removed: false, observed: false } }, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: { ...receipt, exitCode: 1 }, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptTerminalReceipt({ kind: "wrong", schemaVersion: 1 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 })).toEqual([])
+    const changed = Buffer.from(bytes)
+    changed[0] ^= 0xff
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: changed, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    const changedDigest = createHash("sha256").update(changed).digest("hex")
+    expect(changedDigest).not.toBe(digest)
+    // No academic/#107 subgate evidence is not a valid PASS pair (F1 regression).
+    const emptyStages = { ...evidence, stages: {} }
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: emptyStages, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.classifyAbruptEvidencePairStatus({ evidenceReport: emptyStages, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: repoSha, observedExitCode: 0 })).toBe("FAIL")
+    // Missing/invalid expected checkout SHA must fail closed (F6).
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: evidence, terminalReceipt: receipt, evidenceReportSha256: digest, evidenceReportBytes: bytes, repositorySha: "unknown", observedExitCode: 0 }).length).toBeGreaterThan(0)
+  })
+
+  test("evidence and terminal destinations must be distinct and explicitly authorized", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    expect(runner.abruptReportPairAuthorized(evidencePlan, terminalPlan)).toEqual({ authorized: true, reason: null })
+    const coincident = runner.createReportPersistencePlan({
+      abruptRestartRequested: true,
+      configuredReportPath: target.evidencePath,
+      abruptReportPath: target.evidencePath,
+      repositoryRoot: process.cwd(),
+      temporaryRoot: tmpdir(),
+      defaultReportPath: "docs/evidence/x.json",
+    })
+    expect(runner.abruptReportPairAuthorized(evidencePlan, coincident).authorized).toBe(false)
+    const notRequested = runner.createAbruptTerminalReportPlan({
+      abruptRestartRequested: false,
+      repositoryRoot: process.cwd(),
+      temporaryRoot: tmpdir(),
+      defaultReportPath: "docs/evidence/x.json",
+    })
+    expect(notRequested.authorized).toBe(false)
+    expect(runner.abruptReportPairAuthorized(evidencePlan, notRequested).authorized).toBe(false)
+  })
+
+  test("a rejected candidate pair never persists a PASS terminal receipt", async () => {
+    const { runner } = await r6Api()
+    const target = destinations()
+    const { evidencePlan, terminalPlan } = plans(runner, target)
+    const scratch = scratchDirectory(runner)
+    const result = runner.executeTerminalProtocol({
+      evidencePlan,
+      terminalPlan,
+      evidenceReport: evidenceReportFixture(),
+      repositorySha: "unknown",
+      evidenceStatus: "PASS",
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      scratchIsolated: true,
+      containmentIncident: false,
+      teardownProven: true,
+      exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+    })
+    expect(result.finalStatus).toBe("FAIL")
+    const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+    expect(receipt.status).not.toBe("PASS")
+    expect(receipt.exitCode).not.toBe(0)
+    const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+    expect(evidence.status).toBe("BLOCKED")
+    expect(evidence.evidenceStatus).toBe("PASS")
+    rmSync(scratch.path, { recursive: true, force: true })
+  })
+
+  test("aggregator preserves normal controls and never promotes an unrequested #107", async () => {
+    const { contract } = await r6Api()
+    const aggregate = contract.aggregateProfileAndAbruptStatus
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "NOT_REQUESTED" })).toBe("PASS")
+    expect(aggregate({ gateStatus: "FAIL", abruptStatus: "NOT_REQUESTED" })).toBe("FAIL")
+    expect(aggregate({ gateStatus: "BLOCKED", abruptStatus: "NOT_REQUESTED" })).toBe("BLOCKED")
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "BLOCKED" })).toBe("BLOCKED")
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "FAIL" })).toBe("FAIL")
+    expect(aggregate({ gateStatus: "PASS", abruptStatus: "PASS" })).toBe("PASS")
+    expect(aggregate({ gateStatus: "FAIL", abruptStatus: "BLOCKED" })).toBe("FAIL")
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R7: the runner may only remove the scratch directory it provably
+// created, and PASS may only be derived from the persisted evidence bytes
+// (decoded) rather than from an independent object.
+// ---------------------------------------------------------------------------
+
+describe("R7 scratch identity and persisted-bytes binding", () => {
+  const repoSha = "a".repeat(40)
+  const r7Roots: string[] = []
+  afterEach(() => {
+    for (const root of r7Roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
+
+  async function r7Api(): Promise<{ runner: any; contract: any }> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    const contract = await import("../scripts/lib/dsh-profile-e2e-contract.js") as any
+    for (const name of ["initializeScratchRootIdentity", "captureScratchRootIdentity", "applyScratchCleanup", "executeTerminalProtocol", "decideScratchCleanup", "createReportPersistencePlan", "createAbruptTerminalReportPlan"]) {
+      expect(typeof runner[name], name).toBe("function")
+    }
+    for (const name of ["validateAbruptEvidencePair", "classifyAbruptEvidencePairStatus", "validateAbruptEvidenceForCleanupEligibility", "decodeAbruptEvidenceReport"]) {
+      expect(typeof contract[name], name).toBe("function")
+    }
+    return { runner, contract }
+  }
+
+  function scratchFixture(runner: any, marker = "sentinel"): { path: string; identity: any } {
+    const path = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-r7-"))
+    writeFileSync(join(path, "sentinel.txt"), `${marker}\n`, { mode: 0o600 })
+    const identity = runner.initializeScratchRootIdentity(path)
+    expect(identity).not.toBeNull()
+    return { path, identity }
+  }
+
+  function removeDecision(runner: any) {
+    return runner.decideScratchCleanup({
+      abruptMode: true,
+      scratchExists: true,
+      finalStatus: "PASS",
+      containmentIncident: false,
+      reportPersistenceFailed: false,
+      reportPersistenceBlocked: false,
+      teardownProven: true,
+    })
+  }
+
+  test("cleanup removes only the directory whose original identity was captured", async () => {
+    const { runner } = await r7Api()
+    const scratch = scratchFixture(runner)
+    const outcome = runner.applyScratchCleanup({
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      decision: removeDecision(runner),
+    })
+    expect(outcome).toEqual({ attempted: true, removed: true, observed: true, error: null })
+    expect(existsSync(scratch.path)).toBe(false)
+  })
+
+  test("cleanup refuses a symlink alias pointing to another valid fixture", async () => {
+    const { runner } = await r7Api()
+    const original = scratchFixture(runner, "original")
+    const other = scratchFixture(runner, "other")
+    const alias = join(tmpdir(), `dshbanca-profile-e2e-alias-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    symlinkSync(other.path, alias, "dir")
+    try {
+      const outcome = runner.applyScratchCleanup({
+        scratchRoot: alias,
+        scratchIdentity: original.identity,
+        temporaryRoot: tmpdir(),
+        decision: removeDecision(runner),
+      })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(typeof outcome.error).toBe("string")
+      expect(existsSync(alias)).toBe(true)
+      expect(existsSync(other.path)).toBe(true)
+      expect(readFileSync(join(other.path, "sentinel.txt"), "utf8")).toBe("other\n")
+      expect(existsSync(original.path)).toBe(true)
+    } finally {
+      rmSync(alias, { force: true })
+      rmSync(other.path, { recursive: true, force: true })
+      rmSync(original.path, { recursive: true, force: true })
+    }
+  })
+
+  test("cleanup refuses a directory replaced at the original path", async () => {
+    const { runner } = await r7Api()
+    const original = scratchFixture(runner, "original")
+    const aside = `${original.path}.aside`
+    renameSync(original.path, aside)
+    mkdirSync(original.path, { mode: 0o700 })
+    writeFileSync(join(original.path, "sentinel.txt"), "replacement\n", { mode: 0o600 })
+    try {
+      const outcome = runner.applyScratchCleanup({
+        scratchRoot: original.path,
+        scratchIdentity: original.identity,
+        temporaryRoot: tmpdir(),
+        decision: removeDecision(runner),
+      })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(existsSync(original.path)).toBe(true)
+      expect(readFileSync(join(original.path, "sentinel.txt"), "utf8")).toBe("replacement\n")
+      expect(existsSync(aside)).toBe(true)
+    } finally {
+      rmSync(original.path, { recursive: true, force: true })
+      rmSync(aside, { recursive: true, force: true })
+    }
+  })
+
+  test("cleanup refuses a path deleted and recreated with a reused dev/inode and no creation token", async () => {
+    const { runner } = await r7Api()
+    const original = scratchFixture(runner, "original")
+    rmSync(original.path, { recursive: true, force: true })
+    mkdirSync(original.path, { mode: 0o700 })
+    writeFileSync(join(original.path, "sentinel.txt"), "recreated\n", { mode: 0o600 })
+    try {
+      const outcome = runner.applyScratchCleanup({
+        scratchRoot: original.path,
+        scratchIdentity: original.identity,
+        temporaryRoot: tmpdir(),
+        decision: removeDecision(runner),
+      })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(typeof outcome.error).toBe("string")
+      expect(existsSync(original.path)).toBe(true)
+      expect(readFileSync(join(original.path, "sentinel.txt"), "utf8")).toBe("recreated\n")
+    } finally {
+      rmSync(original.path, { recursive: true, force: true })
+    }
+  })
+
+  test("cleanup refuses a decision that does not authorize removal", async () => {
+    const { runner } = await r7Api()
+    const scratch = scratchFixture(runner)
+    try {
+      const outcome = runner.applyScratchCleanup({
+        scratchRoot: scratch.path,
+        scratchIdentity: scratch.identity,
+        temporaryRoot: tmpdir(),
+        decision: { preserve: false, remove: false, reason: "not authorized" },
+      })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(typeof outcome.error).toBe("string")
+      expect(existsSync(scratch.path)).toBe(true)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
+  test("BLOCKED decisions never perform destructive cleanup", async () => {
+    const { runner } = await r7Api()
+    const scratch = scratchFixture(runner)
+    try {
+      const decision = runner.decideScratchCleanup({
+        abruptMode: true,
+        scratchExists: true,
+        finalStatus: "BLOCKED",
+        containmentIncident: false,
+        reportPersistenceFailed: false,
+        reportPersistenceBlocked: false,
+        teardownProven: false,
+      })
+      const outcome = runner.applyScratchCleanup({ scratchRoot: scratch.path, scratchIdentity: scratch.identity, temporaryRoot: tmpdir(), decision })
+      expect(outcome.attempted).toBe(false)
+      expect(outcome.removed).toBe(false)
+      expect(existsSync(scratch.path)).toBe(true)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
+  test("cleanup refuses missing identity, vanished scratch, and divergent parent identity", async () => {
+    const { runner } = await r7Api()
+    const scratch = scratchFixture(runner)
+    const withoutIdentity = runner.applyScratchCleanup({
+      scratchRoot: scratch.path,
+      scratchIdentity: undefined,
+      temporaryRoot: tmpdir(),
+      decision: removeDecision(runner),
+    })
+    expect(withoutIdentity.attempted).toBe(false)
+    expect(withoutIdentity.removed).toBe(false)
+    expect(typeof withoutIdentity.error).toBe("string")
+    expect(existsSync(scratch.path)).toBe(true)
+
+    const vanished = scratchFixture(runner)
+    rmSync(vanished.path, { recursive: true, force: true })
+    const vanishedOutcome = runner.applyScratchCleanup({
+      scratchRoot: vanished.path,
+      scratchIdentity: vanished.identity,
+      temporaryRoot: tmpdir(),
+      decision: removeDecision(runner),
+    })
+    expect(vanishedOutcome.attempted).toBe(false)
+    expect(vanishedOutcome.removed).toBe(false)
+    expect(typeof vanishedOutcome.error).toBe("string")
+
+    const parentMismatch = runner.applyScratchCleanup({
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: process.cwd(),
+      decision: removeDecision(runner),
+    })
+    expect(parentMismatch.attempted).toBe(false)
+    expect(parentMismatch.removed).toBe(false)
+    expect(typeof parentMismatch.error).toBe("string")
+    expect(existsSync(scratch.path)).toBe(true)
+    rmSync(scratch.path, { recursive: true, force: true })
+  })
+
+  test("FAIL/BLOCKED decisions never perform destructive cleanup", async () => {
+    const { runner } = await r7Api()
+    const scratch = scratchFixture(runner)
+    const failDecision = runner.decideScratchCleanup({
+      abruptMode: true,
+      scratchExists: true,
+      finalStatus: "FAIL",
+      containmentIncident: false,
+      reportPersistenceFailed: false,
+      reportPersistenceBlocked: false,
+      teardownProven: false,
+    })
+    const outcome = runner.applyScratchCleanup({
+      scratchRoot: scratch.path,
+      scratchIdentity: scratch.identity,
+      temporaryRoot: tmpdir(),
+      decision: failDecision,
+    })
+    expect(outcome.attempted).toBe(false)
+    expect(outcome.removed).toBe(false)
+    expect(existsSync(scratch.path)).toBe(true)
+    rmSync(scratch.path, { recursive: true, force: true })
+  })
+
+  function protocolTargets(): { evidencePath: string; terminalPath: string; root: string } {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-r7-protocol-"))
+    r7Roots.push(root)
+    const parent = join(root, "reports")
+    mkdirSync(parent, { mode: 0o700 })
+    return { evidencePath: join(parent, "evidence.json"), terminalPath: join(parent, "terminal.json"), root }
+  }
+
+  function protocolPlans(runner: any, target: { evidencePath: string; terminalPath: string }) {
+    const base = { abruptRestartRequested: true, repositoryRoot: process.cwd(), temporaryRoot: tmpdir(), defaultReportPath: "docs/evidence/x.json" }
+    return {
+      evidencePlan: runner.createReportPersistencePlan({ ...base, configuredReportPath: target.evidencePath, abruptReportPath: target.evidencePath }),
+      terminalPlan: runner.createAbruptTerminalReportPlan({ ...base, terminalReportPath: target.terminalPath }),
+    }
+  }
+
+  function evidenceFixture(): Record<string, unknown> {
+    return {
+      schemaVersion: 1,
+      status: "BLOCKED",
+      startedAt: new Date().toISOString(),
+      repository: { revision: repoSha, dirty: false },
+      versions: {},
+      sandbox: { isolated: true, removed: null },
+      stages: {
+        gateSummary: {
+          issue2Status: "PASS", auditorMarkdownStatus: "PASS", nativeSkillsStatus: "PASS", batchAuditStatus: "PASS",
+          nativeQuestionsStatus: "PASS", academicDecisionStatus: "PASS", crossProcessBatchAuditStatus: "PASS",
+          sourceDriftStatus: "PASS", abruptRestartStatus: "PASS", overallStatus: "PASS", exitCode: 0,
+        },
+        abruptRestart: { status: "PASS", probeExecuted: true, validationErrors: [] },
+        crossProcessBatchAudit: { status: "PASS", validationErrors: [] },
+        sourceDrift: { status: "PASS", validationErrors: [] },
+      },
+      failures: [],
+      limitations: [],
+    }
+  }
+
+  test("terminal protocol refuses cleanup when persisted evidence is invalid", async () => {
+    const { runner } = await r7Api()
+    const target = protocolTargets()
+    const { evidencePlan, terminalPlan } = protocolPlans(runner, target)
+    const scratch = scratchFixture(runner)
+    try {
+      const invalidReport = { ...evidenceFixture(), repository: { revision: "b".repeat(40), dirty: false } }
+      const result = runner.executeTerminalProtocol({
+        evidencePlan,
+        terminalPlan,
+        evidenceReport: invalidReport,
+        repositorySha: repoSha,
+        evidenceStatus: "PASS",
+        scratchRoot: scratch.path,
+        scratchIdentity: scratch.identity,
+        temporaryRoot: tmpdir(),
+        scratchIsolated: true,
+        containmentIncident: false,
+        teardownProven: true,
+        exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+      })
+      expect(result.finalStatus).toBe("FAIL")
+      expect(result.terminalState).toBe("evidence-invalid-before-cleanup")
+      expect(existsSync(scratch.path)).toBe(true)
+      const evidence = JSON.parse(readFileSync(target.evidencePath, "utf8"))
+      expect(evidence.status).toBe("BLOCKED")
+      expect(evidence.evidenceStatus).toBe("PASS")
+      const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+      expect(receipt.status).toBe("FAIL")
+      expect(receipt.sandbox.attempted).toBe(false)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
+  test("terminal protocol refuses cleanup when the scratch was replaced after creation", async () => {
+    const { runner } = await r7Api()
+    const target = protocolTargets()
+    const { evidencePlan, terminalPlan } = protocolPlans(runner, target)
+    const scratch = scratchFixture(runner, "original")
+    const aside = `${scratch.path}.aside`
+    renameSync(scratch.path, aside)
+    mkdirSync(scratch.path, { mode: 0o700 })
+    writeFileSync(join(scratch.path, "sentinel.txt"), "replacement\n", { mode: 0o600 })
+    try {
+      const result = runner.executeTerminalProtocol({
+        evidencePlan,
+        terminalPlan,
+        evidenceReport: evidenceFixture(),
+        repositorySha: repoSha,
+        evidenceStatus: "PASS",
+        scratchRoot: scratch.path,
+        scratchIdentity: scratch.identity,
+        temporaryRoot: tmpdir(),
+        scratchIsolated: true,
+        containmentIncident: false,
+        teardownProven: true,
+        exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+      })
+      expect(result.finalStatus).toBe("FAIL")
+      expect(result.terminalState).toBe("cleanup-failed")
+      expect(existsSync(scratch.path)).toBe(true)
+      expect(readFileSync(join(scratch.path, "sentinel.txt"), "utf8")).toBe("replacement\n")
+      expect(existsSync(aside)).toBe(true)
+      const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+      expect(receipt.status).toBe("FAIL")
+      expect(receipt.sandbox.removed).toBe(false)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+      rmSync(aside, { recursive: true, force: true })
+    }
+  })
+
+  test("terminal protocol refuses cleanup when the scratch path was deleted and recreated", async () => {
+    const { runner } = await r7Api()
+    const target = protocolTargets()
+    const { evidencePlan, terminalPlan } = protocolPlans(runner, target)
+    const scratch = scratchFixture(runner, "original")
+    rmSync(scratch.path, { recursive: true, force: true })
+    mkdirSync(scratch.path, { mode: 0o700 })
+    writeFileSync(join(scratch.path, "sentinel.txt"), "recreated\n", { mode: 0o600 })
+    try {
+      const result = runner.executeTerminalProtocol({
+        evidencePlan,
+        terminalPlan,
+        evidenceReport: evidenceFixture(),
+        repositorySha: repoSha,
+        evidenceStatus: "PASS",
+        scratchRoot: scratch.path,
+        scratchIdentity: scratch.identity,
+        temporaryRoot: tmpdir(),
+        scratchIsolated: true,
+        containmentIncident: false,
+        teardownProven: true,
+        exitCodeFor: (status: string) => status === "PASS" ? 0 : 1,
+      })
+      expect(result.finalStatus).toBe("FAIL")
+      expect(result.terminalState).toBe("cleanup-failed")
+      expect(existsSync(scratch.path)).toBe(true)
+      expect(readFileSync(join(scratch.path, "sentinel.txt"), "utf8")).toBe("recreated\n")
+      const receipt = JSON.parse(readFileSync(target.terminalPath, "utf8"))
+      expect(receipt.status).toBe("FAIL")
+      expect(receipt.sandbox.removed).toBe(false)
+    } finally {
+      rmSync(scratch.path, { recursive: true, force: true })
+    }
+  })
+
+  test("pair validation derives everything from the persisted bytes", async () => {
+    const { runner, contract } = await r7Api()
+    const goodReport = evidenceFixture()
+    // Valid persisted bytes for the good report (protocol projection).
+    const projected = {
+      ...goodReport,
+      reportKind: contract.abruptEvidenceReportKind,
+      evidenceStatus: "PASS",
+      terminalState: "pending-cleanup",
+      status: "BLOCKED",
+      stages: {
+        ...(goodReport.stages as Record<string, unknown>),
+        gateSummary: { ...((goodReport.stages as any).gateSummary), overallStatus: "pending-cleanup", exitCode: null },
+      },
+      sandbox: { isolated: true, removed: null },
+    }
+    const goodBytes = Buffer.from(`${JSON.stringify(projected, null, 2)}\n`, "utf8")
+    const goodDigest = createHash("sha256").update(goodBytes).digest("hex")
+    const receipt = {
+      kind: contract.abruptTerminalReceiptKind,
+      schemaVersion: 1,
+      status: "PASS",
+      evidenceReportSha256: goodDigest,
+      repositorySha: repoSha,
+      sandbox: { attempted: true, removed: true, observed: true },
+      exitCode: 0,
+      reason: null,
+      generatedAt: new Date().toISOString(),
+    }
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 })).toEqual([])
+    expect(contract.classifyAbruptEvidencePairStatus({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 })).toBe("PASS")
+
+    // Good object + independent bad bytes whose digest is correct must FAIL.
+    const badProjected = {
+      ...projected,
+      evidenceStatus: "FAIL",
+      terminalState: "failed-before-cleanup",
+      repository: { revision: "b".repeat(40), dirty: false },
+      stages: {},
+    }
+    const badBytes = Buffer.from(`${JSON.stringify(badProjected, null, 2)}\n`, "utf8")
+    const badDigest = createHash("sha256").update(badBytes).digest("hex")
+    const badReceipt = { ...receipt, evidenceReportSha256: badDigest }
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: badReceipt, evidenceReportSha256: badDigest, evidenceReportBytes: badBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.classifyAbruptEvidencePairStatus({ evidenceReport: projected, terminalReceipt: badReceipt, evidenceReportSha256: badDigest, evidenceReportBytes: badBytes, repositorySha: repoSha, observedExitCode: 0 })).toBe("FAIL")
+
+    // Bytes are mandatory for PASS.
+    expect(contract.classifyAbruptEvidencePairStatus({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: goodDigest, repositorySha: repoSha, observedExitCode: 0 })).toBe("BLOCKED")
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: goodDigest, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    // A separately supplied object is mandatory and must be a record/equal.
+    expect(contract.validateAbruptEvidencePair({ terminalReceipt: receipt, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: [], terminalReceipt: receipt, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    // Invalid JSON and wrong hash are rejected.
+    const notJson = Buffer.from("not-json", "utf8")
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: { ...receipt, evidenceReportSha256: createHash("sha256").update(notJson).digest("hex") }, evidenceReportSha256: createHash("sha256").update(notJson).digest("hex"), evidenceReportBytes: notJson, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: "c".repeat(64), evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+
+    // Coherence mutations on bytes that are hashed correctly must fail.
+    const mutations: Array<[string, (report: any) => void]> = [
+      ["initial status PASS", (report) => { report.status = "PASS" }],
+      ["initial status FAIL", (report) => { report.status = "FAIL" }],
+      ["gateSummary missing", (report) => { delete report.stages.gateSummary }],
+      ["gateSummary conclusive", (report) => { report.stages.gateSummary.overallStatus = "PASS" }],
+      ["gateSummary conclusive exit code", (report) => { report.stages.gateSummary.exitCode = 0 }],
+      ["mandatory gate failed", (report) => { report.stages.gateSummary.issue2Status = "FAIL" }],
+      ["#107 not executed", (report) => { report.stages.abruptRestart.probeExecuted = false }],
+      ["#107 validation errors", (report) => { report.stages.abruptRestart.validationErrors = ["x"] }],
+      ["internal revision diverges", (report) => { report.repository.revision = "b".repeat(40) }],
+      ["sandbox removed claimed", (report) => { report.sandbox.removed = null; report.sandbox.removed = true }],
+    ]
+    for (const [label, mutate] of mutations) {
+      const report = JSON.parse(goodBytes.toString("utf8"))
+      mutate(report)
+      const mutatedBytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`, "utf8")
+      const mutatedDigest = createHash("sha256").update(mutatedBytes).digest("hex")
+      const mutatedReceipt = { ...receipt, evidenceReportSha256: mutatedDigest }
+      expect(contract.validateAbruptEvidencePair({ evidenceReport: report, terminalReceipt: mutatedReceipt, evidenceReportSha256: mutatedDigest, evidenceReportBytes: mutatedBytes, repositorySha: repoSha, observedExitCode: 0 }).length, label).toBeGreaterThan(0)
+    }
+    // Receipt/cleanup/exit contradictions still fail.
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: { ...receipt, sandbox: { attempted: false, removed: false, observed: false } }, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: receipt, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 1 }).length).toBeGreaterThan(0)
+    expect(contract.validateAbruptEvidencePair({ evidenceReport: projected, terminalReceipt: { ...receipt, exitCode: 1 }, evidenceReportSha256: goodDigest, evidenceReportBytes: goodBytes, repositorySha: repoSha, observedExitCode: 0 }).length).toBeGreaterThan(0)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R8: the REAL runner module initialization must forward the
+// terminal report environment variable into the terminal persistence plan.
+// The negative test executes the real CLI with lifecycle explicitly NOT
+// authorized (no DSH, no Agent/Session, no signals) and verifies both
+// non-PASS artifacts are persisted through the actual wiring.
+// ---------------------------------------------------------------------------
+
+describe("R8 terminal report planner wiring", () => {
+  function privateParent(): { root: string; parent: string } {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-r8-"))
+    const parent = join(root, "private")
+    mkdirSync(parent, { mode: 0o700 })
+    return { root, parent }
+  }
+
+  function plansFromEnvironment(runner: any, environment: Record<string, string>, parent: string) {
+    return runner.createAbruptPersistencePlansFromEnvironment({
+      environment,
+      repositoryRoot: process.cwd(),
+      temporaryRoot: tmpdir(),
+      defaultReportPath: "docs/evidence/x.json",
+    })
+  }
+
+  test("real initialization forwards both environment destinations into authorized distinct plans", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.createAbruptPersistencePlansFromEnvironment).toBe("function")
+    const { root, parent } = privateParent()
+    try {
+      const evidencePath = join(parent, "evidence.json")
+      const terminalPath = join(parent, "terminal.json")
+      const environment: Record<string, string> = {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: terminalPath,
+      }
+      const plans = plansFromEnvironment(runner, environment, parent)
+      expect(plans.reportPersistencePlan).toMatchObject({ mode: "abrupt", authorized: true, path: evidencePath })
+      expect(plans.terminalReportPersistencePlan).toMatchObject({ mode: "abrupt", authorized: true, path: terminalPath })
+      expect(plans.reportPersistencePlan.path).not.toBe(plans.terminalReportPersistencePlan.path)
+      expect(runner.abruptReportPairAuthorized(plans.reportPersistencePlan, plans.terminalReportPersistencePlan)).toEqual({ authorized: true, reason: null })
+
+      // Missing terminal variable keeps the terminal plan unauthorized: no automatic authorization.
+      const missingTerminal = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+      }, parent)
+      expect(missingTerminal.terminalReportPersistencePlan.authorized).toBe(false)
+      expect(runner.abruptReportPairAuthorized(missingTerminal.reportPersistencePlan, missingTerminal.terminalReportPersistencePlan).authorized).toBe(false)
+
+      // Coincident destinations are refused as a pair even if each plan alone is valid.
+      const coincident = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: evidencePath,
+      }, parent)
+      expect(runner.abruptReportPairAuthorized(coincident.reportPersistencePlan, coincident.terminalReportPersistencePlan).authorized).toBe(false)
+
+      // Preexisting leaves and a symlinked parent remain unauthorized.
+      writeFileSync(join(parent, "existing.json"), "sentinel\n", { mode: 0o600 })
+      const preexisting = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: join(parent, "existing.json"),
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: join(parent, "existing.json"),
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: join(parent, "terminal2.json"),
+      }, parent)
+      expect(preexisting.reportPersistencePlan.authorized).toBe(false)
+      expect(preexisting.terminalReportPersistencePlan.authorized).toBe(true)
+
+      const symlinkParent = join(root, "linked")
+      symlinkSync(parent, symlinkParent, "dir")
+      const symlinked = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: join(symlinkParent, "symlink-evidence.json"),
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: join(symlinkParent, "symlink-evidence.json"),
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: join(symlinkParent, "symlink-terminal.json"),
+      }, parent)
+      expect(symlinked.reportPersistencePlan.mode).toBe("abrupt")
+      expect(symlinked.reportPersistencePlan.authorized).toBe(false)
+
+      // Terminal-only request still selects strict policy and keeps a preexisting terminal leaf unauthorized.
+      expect(runner.selectContainmentPolicy({ DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: terminalPath })).toBe("strict-direct-only")
+      writeFileSync(join(parent, "existing-terminal.json"), "sentinel\n", { mode: 0o600 })
+      const preexistingTerminal = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: join(parent, "existing-terminal.json"),
+      }, parent)
+      expect(preexistingTerminal.reportPersistencePlan.authorized).toBe(true)
+      expect(preexistingTerminal.terminalReportPersistencePlan.authorized).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("real CLI without lifecycle authorization persists evidence and terminal receipt as non-PASS", () => {
+    const { root, parent } = privateParent()
+    const evidencePath = join(parent, "evidence.json")
+    const terminalPath = join(parent, "terminal.json")
+    const beforeScratch = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("dshbanca-profile-e2e-")))
+    try {
+      const environment: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        TMPDIR: tmpdir(),
+        LANG: "C.UTF-8",
+        NO_COLOR: "1",
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: terminalPath,
+      }
+      const result = spawnSync(process.execPath, ["scripts/e2e-dsh-profile.ts"], {
+        cwd: process.cwd(),
+        env: environment,
+        encoding: "utf8",
+        timeout: 60_000,
+      })
+      // Lifecycle is NOT authorized: BLOCKED/exit 2 before any DSH invocation.
+      expect(result.status).toBe(2)
+      expect(existsSync(evidencePath)).toBe(true)
+      expect(existsSync(terminalPath)).toBe(true)
+      const evidenceBytes = readFileSync(evidencePath)
+      const evidence = JSON.parse(evidenceBytes.toString("utf8"))
+      expect(evidence.status).toBe("BLOCKED")
+      expect(evidence.evidenceStatus).toBe("BLOCKED")
+      expect(evidence.terminalState).toBe("blocked-before-cleanup")
+      expect(evidence.repository.revision).toMatch(/^[a-f0-9]{40}$/)
+      expect(typeof evidence.repository.dirty).toBe("boolean")
+      expect(evidence.sandbox).toMatchObject({ isolated: false, removed: null })
+      const evidenceDigest = createHash("sha256").update(evidenceBytes).digest("hex")
+      const receipt = JSON.parse(readFileSync(terminalPath, "utf8"))
+      expect(receipt.status).toBe("BLOCKED")
+      expect(receipt.exitCode).toBe(2)
+      expect(receipt.evidenceReportSha256).toBe(evidenceDigest)
+      expect(receipt.repositorySha).toBe(evidence.repository.revision)
+      expect(receipt.sandbox).toEqual({ attempted: false, removed: false, observed: false })
+      const afterScratch = readdirSync(tmpdir()).filter((name) => name.startsWith("dshbanca-profile-e2e-"))
+      expect(afterScratch.filter((name) => !beforeScratch.has(name))).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("pure early #107 preflight accepts only the fully authorized pair and exact SHA/scenario/environment", async () => {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    expect(typeof runner.abruptRestartAuthorizationBlocker).toBe("function")
+    const { root, parent } = privateParent()
+    try {
+      const evidencePath = join(parent, "evidence.json")
+      const terminalPath = join(parent, "terminal.json")
+      const environment: Record<string, string> = {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: terminalPath,
+      }
+      const plans = plansFromEnvironment(runner, environment, parent)
+      expect(plans.reportPersistencePlan.authorized).toBe(true)
+      expect(plans.terminalReportPersistencePlan.authorized).toBe(true)
+      const sha = "a".repeat(40)
+      const authorization = {
+        approved: "yes",
+        sha256: sha,
+        scenario: "durable-checkpoint-2-of-5-sigkill",
+        environment: "runner-owned-scratch-only",
+        reportPath: evidencePath,
+        terminalReportPath: terminalPath,
+      }
+      const baseline = {
+        abruptRestartRequested: true,
+        reportPersistencePlan: plans.reportPersistencePlan,
+        terminalReportPersistencePlan: plans.terminalReportPersistencePlan,
+        configuredReportPath: evidencePath,
+        abruptRestartTerminalReportPath: terminalPath,
+        currentSha: sha,
+        workingTreeStatus: "",
+        authorization,
+        platform: "linux" as const,
+      }
+      // Exactly the P1 wiring scenario: both plans authorized and authorized pair -> no preflight block.
+      expect(runner.abruptRestartAuthorizationBlocker(baseline)).toBeNull()
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, sha256: "b".repeat(40) } })).toContain("authorization SHA")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, scenario: "other" } })).toContain("scenario")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, approved: "no" } })).toContain("AUTHORIZED=yes")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, reportPath: join(parent, "other.json") } })).toContain("pre-cleanup evidence report path")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, authorization: { ...authorization, terminalReportPath: join(parent, "other-terminal.json") } })).toContain("terminal receipt path")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, workingTreeStatus: " M file" })).toContain("clean working tree")
+      expect(runner.abruptRestartAuthorizationBlocker({ ...baseline, platform: "darwin" })).toContain("Linux procfs")
+      const missingTerminalPlans = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+      }, parent)
+      expect(runner.abruptRestartAuthorizationBlocker({
+        ...baseline,
+        terminalReportPersistencePlan: missingTerminalPlans.terminalReportPersistencePlan,
+        abruptRestartTerminalReportPath: terminalPath,
+      })).toContain("destinations were refused")
+      const coincidentPlans = plansFromEnvironment(runner, {
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH: evidencePath,
+      }, parent)
+      expect(runner.abruptRestartAuthorizationBlocker({
+        ...baseline,
+        reportPersistencePlan: coincidentPlans.reportPersistencePlan,
+        terminalReportPersistencePlan: coincidentPlans.terminalReportPersistencePlan,
+        authorization: { ...authorization, terminalReportPath: evidencePath },
+        abruptRestartTerminalReportPath: evidencePath,
+      })).toContain("destinations were refused")
+      // The lifecycle must remain unauthorized in these hermetic checks: no DSH is booted.
+      expect(process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED ?? "").not.toBe("yes")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("real CLI blocks and writes no terminal receipt when the terminal destination variable is missing", () => {
+    const { root, parent } = privateParent()
+    const evidencePath = join(parent, "evidence.json")
+    const terminalPath = join(parent, "terminal.json")
+    try {
+      const environment: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        TMPDIR: tmpdir(),
+        LANG: "C.UTF-8",
+        NO_COLOR: "1",
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: evidencePath,
+        DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH: evidencePath,
+      }
+      const result = spawnSync(process.execPath, ["scripts/e2e-dsh-profile.ts"], {
+        cwd: process.cwd(),
+        env: environment,
+        encoding: "utf8",
+        timeout: 60_000,
+      })
+      expect(result.status).toBe(2)
+      expect(existsSync(terminalPath)).toBe(false)
+      expect(existsSync(evidencePath)).toBe(true)
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8"))
+      expect(evidence.status).toBe("BLOCKED")
+      expect(evidence.sandbox.removed).toBeNull()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R9: legitimate zero-PGID kernel threads in /proc must not turn a
+// positive process-group absence observation into a false negative, while every
+// invalid/ambiguous/unreadable row must still fail closed and no signal is sent.
+// ---------------------------------------------------------------------------
+
+describe("R9 procfs process-group interpretation", () => {
+  const pfKthread = 0x00200000
+
+  function procStat(
+    pid: number,
+    processGroupId: number | string,
+    flags: number | string = 4194304,
+    state = "S",
+    ppid = 1,
+    session = 1,
+    tty = 0,
+    tpgid = -1,
+  ): string {
+    return `${pid} (sanitized-worker ${pid}) ${state} ${ppid} ${processGroupId} ${session} ${tty} ${tpgid} ${flags} 4194304 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+  }
+
+  async function r9Api(): Promise<any> {
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    for (const name of [
+      "parseLinuxProcStatGroupMembership",
+      "parseLinuxProcStatProcessGroupId",
+      "processGroupAbsenceObservationFromRows",
+      "processGroupAbsenceAfterCloseObservation",
+      "classifyAbruptPhaseOneTransitionBlock",
+      "abruptPrivateProcessGroupIdMatchesChildPid",
+    ]) expect(typeof runner[name], name).toBe("function")
+    return runner
+  }
+
+  test("legitimate zero-PGID kernel threads are non-members and never block a positive-group absence", async () => {
+    const runner = await r9Api()
+    const target = 8101
+    const kernelRow = { pid: 7201, stat: procStat(7201, 0, pfKthread) }
+    expect(runner.parseLinuxProcStatGroupMembership(kernelRow.stat, 7201)).toMatchObject({ kind: "kernel-thread", pid: 7201 })
+    // Identity/PGID authority remains strictly positive: zero never authorizes.
+    expect(runner.parseLinuxProcStatProcessGroupId(kernelRow.stat)).toBeNull()
+
+    const otherPositive = { pid: 8202, stat: procStat(8202, 8203) }
+    expect(runner.processGroupAbsenceObservationFromRows(target, [otherPositive])).toMatchObject({ absent: true, reason: "absent" })
+    // The original defect: one legitimate kernel thread row made the scan false.
+    expect(runner.processGroupAbsenceObservationFromRows(target, [otherPositive, kernelRow])).toMatchObject({ absent: true, reason: "absent", kernelThreadRows: 1 })
+    const mixed = runner.processGroupAbsenceObservationFromRows(target, [
+      kernelRow,
+      otherPositive,
+      { pid: 7202, stat: procStat(7202, 0, pfKthread) },
+    ])
+    expect(mixed.absent).toBe(true)
+    expect(mixed.kernelThreadRows).toBe(2)
+    expect(mixed.positiveGroupRows).toBe(1)
+    // The previous pure scanner returned true for the same rows without kernel entries.
+    expect(runner.processGroupAbsentFromProcRows(target, [otherPositive])).toBe(true)
+  })
+
+  test("real member rows, including zombies, are never hidden by kernel-thread skipping", async () => {
+    const runner = await r9Api()
+    const target = 8101
+    const member = { pid: 8301, stat: procStat(8301, target) }
+    expect(runner.processGroupAbsenceObservationFromRows(target, [member])).toMatchObject({ absent: false, reason: "member-observed" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8302, stat: procStat(8302, target, 4194304, "Z") }]))
+      .toMatchObject({ absent: false, reason: "member-observed" })
+    // A kernel row does not mask a real member.
+    expect(runner.processGroupAbsenceObservationFromRows(target, [
+      { pid: 7201, stat: procStat(7201, 0, pfKthread) },
+      member,
+    ])).toMatchObject({ absent: false, reason: "member-observed" })
+    expect(runner.processGroupAbsentFromProcRows(target, [member])).toBe(false)
+  })
+
+  test("zero PGID without proven PF_KTHREAD and every ambiguous row fail closed", async () => {
+    const runner = await r9Api()
+    const target = 8101
+    const zeroWithoutKernel = { pid: 8401, stat: procStat(8401, 0, 4194304) }
+    expect(runner.parseLinuxProcStatGroupMembership(zeroWithoutKernel.stat, 8401)).toMatchObject({ kind: "invalid" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [zeroWithoutKernel])).toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8402, stat: "malformed" }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8403, stat: procStat(8403, 8101, "not-a-flag") }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8404, stat: procStat(8404, 8101).replace(/\) \S+ 1 8101 /, ") ") }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    // Row identity mismatch is ambiguous, never absence.
+    expect(runner.processGroupAbsenceObservationFromRows(target, [{ pid: 8405, stat: procStat(9999, 8102) }]))
+      .toMatchObject({ absent: false, reason: "invalid-proc-row" })
+    expect(runner.processGroupAbsenceObservationFromRows(0, [{ pid: 8406, stat: procStat(8406, 8102) }]))
+      .toMatchObject({ absent: false, reason: "invalid-target" })
+    expect(runner.processGroupAbsenceObservationFromRows(-1, [])).toMatchObject({ absent: false, reason: "invalid-target" })
+    expect(runner.processGroupAbsenceObservationFromRows(target, [])).toMatchObject({ absent: false, reason: "empty-inventory" })
+    expect(runner.processGroupAbsentFromProcRows(target, [zeroWithoutKernel])).toBe(false)
+  })
+
+  test("private PGID identity stays positive and the phase A/B transition depends on every proof", async () => {
+    const runner = await r9Api()
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, 8101)).toBe(true)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, 0)).toBe(false)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, null)).toBe(false)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(8101, 8102)).toBe(false)
+    expect(runner.abruptPrivateProcessGroupIdMatchesChildPid(0, 0)).toBe(false)
+
+    const healthy = {
+      parentBarrierArmed: true,
+      parentVerifiedPersistence: true,
+      controlCompleted: true,
+      controlFailed: false,
+      firstKillRequested: true,
+      exitCode: null,
+      signal: "SIGKILL",
+      timedOut: false,
+      exitObserved: true,
+      closeObserved: true,
+      targetAbsentAfterClose: true,
+      processGroupIdObserved: true,
+      processGroupAbsentAfterClose: true,
+      processGroupAbsenceReason: "absent",
+      nativeTeardownMarkerObserved: false,
+    }
+    expect(runner.classifyAbruptPhaseOneTransitionBlock(healthy)).toBeNull()
+    const blocks: Array<[string, Record<string, unknown>, string]> = [
+      ["close not observed", { closeObserved: false }, "close-not-observed"],
+      ["exit not observed", { exitObserved: false }, "exit-not-observed"],
+      ["control incomplete", { controlCompleted: false }, "control-not-completed"],
+      ["control failed", { controlFailed: true }, "control-failed"],
+      ["kill not requested", { firstKillRequested: false }, "kill-not-requested"],
+      ["unexpected exit", { exitCode: 0 }, "unexpected-exit-code"],
+      ["unexpected signal", { signal: null }, "unexpected-signal"],
+      ["timeout", { timedOut: true }, "timeout"],
+      ["target survives", { targetAbsentAfterClose: false }, "target-present-after-close"],
+      ["PGID identity missing", { processGroupIdObserved: false }, "private-process-group-identity-unproven"],
+      ["group member observed", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "member-observed" }, "process-group-member-observed"],
+      ["invalid proc row", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "invalid-proc-row" }, "process-group-invalid-entry"],
+      ["read error", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "read-error" }, "process-group-read-error"],
+      ["empty inventory", { processGroupAbsentAfterClose: false, processGroupAbsenceReason: "empty-inventory" }, "process-group-empty-inventory"],
+      ["native marker present", { nativeTeardownMarkerObserved: true }, "native-teardown-marker-observed"],
+      ["barrier missing", { parentBarrierArmed: false }, "parent-barrier-not-armed"],
+      ["persistence not parent verified", { parentVerifiedPersistence: false }, "persistence-not-parent-verified"],
+    ]
+    for (const [label, change, expected] of blocks) {
+      expect(runner.classifyAbruptPhaseOneTransitionBlock({ ...healthy, ...change }), label).toBe(expected)
+    }
+  })
+
+  test("hermetic real /proc observation: absence of an impossible positive group, member of own group, no signals", async () => {
+    if (process.platform !== "linux") return
+    const runner = await r9Api()
+    // Impossible positive group: legitimate zero-PGID kernel threads must not
+    // make the absence observation false.
+    const impossible = runner.processGroupAbsenceAfterCloseObservation(2147483647)
+    expect(impossible.absent).toBe(true)
+    expect(impossible.reason).toBe("absent")
+    expect(impossible.rowsScanned).toBeGreaterThan(0)
+    expect(JSON.stringify(impossible)).not.toMatch(/sanitized-worker|comm|\|"/)
+    // The runner's own process is a real member of its own positive group, so the
+    // same reader must refuse absence instead of hiding it.
+    const selfStat = readFileSync("/proc/self/stat", "utf8")
+    const selfMembership = runner.parseLinuxProcStatGroupMembership(selfStat, process.pid)
+    if (selfMembership.kind === "positive") {
+      const ownGroup = runner.processGroupAbsenceAfterCloseObservation(selfMembership.groupId)
+      expect(ownGroup.absent).toBe(false)
+      expect(ownGroup.reason).toBe("member-observed")
+    }
+    // A vanishing row (read error ENOENT) is handled inside the reader; invalid
+    // targets fail closed.
+    expect(runner.processGroupAbsenceAfterCloseObservation(0)).toMatchObject({ absent: false, reason: "invalid-target" })
+    expect(runner.processGroupAbsenceAfterCloseObservation(-1)).toMatchObject({ absent: false, reason: "invalid-target" })
   })
 })

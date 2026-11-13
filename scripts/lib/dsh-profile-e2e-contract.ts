@@ -2405,11 +2405,14 @@ export function validateCrossProcessPhaseOneEvidence(value: unknown): string[] {
  * digests computed from child_process.spawn PID plus Linux procfs start identity;
  * fixture values are never host observations.
  */
-export function validateCrossProcessBatchAuditEvidence(value: unknown): string[] {
+function validateCrossProcessBatchAuditEvidenceCore(value: unknown, firstProcessAbrupt = false): string[] {
   const errors: string[] = []
   if (!isRecord(value)) return ["cross-process batch audit evidence is missing"]
-  if (value.probeExecuted !== true || value.executionMode !== "cross-process-native-dsh") {
-    errors.push("cross-process batch audit probe must execute through two native DSH processes")
+  const expectedExecutionMode = firstProcessAbrupt ? "abrupt-restart-native-dsh" : "cross-process-native-dsh"
+  if (value.probeExecuted !== true || value.executionMode !== expectedExecutionMode) {
+    errors.push(firstProcessAbrupt
+      ? "abrupt restart must use the native DSH durable-checkpoint probe"
+      : "cross-process batch audit probe must execute through two native DSH processes")
   }
   if (value.syntheticProcessFixture !== false) {
     errors.push("synthetic process fixtures are not sufficient host process evidence")
@@ -2454,7 +2457,49 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
     ) {
       errors.push(`${label} DSH process identity is not corroborated by host spawn and kernel observations`)
     }
-    if (
+    if (firstProcessAbrupt && index === 0) {
+      if (
+        !isRecord(row) ||
+        row.exitObserved !== true ||
+        row.exitCode !== null ||
+        row.signal !== "SIGKILL" ||
+        row.timedOut !== false ||
+        row.forcedTermination !== true ||
+        row.naturalBeforeExitObserved !== false ||
+        row.nativeTeardownMarkerObserved !== false ||
+        row.runnerOwnedChild !== true ||
+        row.childIdentityRevalidatedBeforeSignal !== true ||
+        row.parentBarrierArmed !== true ||
+        row.killRequestedByParent !== true ||
+        row.killSignalRequested !== "SIGKILL" ||
+        row.targetAbsentAfterClose !== true ||
+        row.processGroupAbsentAfterClose !== true ||
+        Object.prototype.hasOwnProperty.call(row, "pid") ||
+        Object.prototype.hasOwnProperty.call(row, "processId")
+      ) {
+        errors.push("first DSH process must wait behind the parent barrier and be directly SIGKILLed after identity revalidation, with no surviving target or runner-owned process group")
+      }
+    } else if (firstProcessAbrupt && index === 1) {
+      if (
+        !isRecord(row) ||
+        row.runnerOwnedChild !== true ||
+        row.controlCompleted !== true ||
+        row.controlFailed !== false ||
+        row.exitObserved !== true ||
+        row.exitCode !== 0 ||
+        row.signal !== null ||
+        row.timedOut !== false ||
+        row.forcedTermination !== false ||
+        row.naturalBeforeExitObserved !== true ||
+        row.nativeTeardownMarkerObserved !== true ||
+        row.closeObserved !== true ||
+        row.processGroupIdObserved !== true ||
+        row.targetAbsentAfterClose !== true ||
+        row.processGroupAbsentAfterClose !== true
+      ) {
+        errors.push("recovery DSH process must be an independently owned child with validated exit and close, a private observed process group, and no surviving target or process-group member after close")
+      }
+    } else if (
       !isRecord(row) ||
       row.exitObserved !== true ||
       row.exitCode !== 0 ||
@@ -2841,9 +2886,88 @@ export function validateCrossProcessBatchAuditEvidence(value: unknown): string[]
   return errors
 }
 
+export function validateCrossProcessBatchAuditEvidence(value: unknown): string[] {
+  return validateCrossProcessBatchAuditEvidenceCore(value)
+}
+
 export function classifyCrossProcessBatchAuditEvidenceStatus(value: unknown): ProfileGateStatus {
   if (!isRecord(value) || value.probeExecuted === undefined) return "BLOCKED"
   return validateCrossProcessBatchAuditEvidence(value).length === 0 ? "PASS" : "FAIL"
+}
+
+/** Validate the distinct #107 abrupt-child boundary plus the full #103 recovery payload. */
+export function validateAbruptRestartEvidence(value: unknown): string[] {
+  const errors = validateCrossProcessBatchAuditEvidenceCore(value, true)
+  if (!isRecord(value)) return errors
+  const require = (condition: boolean, message: string) => { if (!condition) errors.push(message) }
+  const phaseOne = isRecord(value.phaseOne) ? value.phaseOne : undefined
+  const parent = isRecord(value.parentVerifiedPersistence) ? value.parentVerifiedPersistence : undefined
+  const parentHashes = parent?.persistence
+  require(
+    parent?.source === "parent-read-persisted-files" &&
+      parent.verifiedBeforeSignal === true &&
+      parent.checkpointFileParsed === true &&
+      parent.receiptFileParsed === true &&
+      parent.findingFileParsed === true,
+    "the parent must independently read and validate the persisted checkpoint, receipt, and finding files before signaling",
+  )
+  require(
+    isSha256Digest(parent?.workspaceInventorySha256) &&
+      parent.workspaceInventorySha256 === phaseOne?.workspaceInventorySha256 &&
+      parent.workspaceInventorySha256 === (isRecord(value.workspace) ? value.workspace.firstProcessEndInventorySha256 : undefined),
+    "parent-verified workspace inventory must match the durable phase-one boundary",
+  )
+  require(
+    restartPersistenceMatches(parentHashes, phaseOne?.persistence),
+    "parent-read checkpoint, receipt, finding, and analysis hashes must match phase one",
+  )
+  require(
+    restartCheckpointEvidenceEqual(parent?.checkpoint, phaseOne?.checkpoint),
+    "parent-parsed checkpoint must equal the exact phase-one 2/5 projection",
+  )
+  const receiptBatchIds = Array.isArray(parent?.receiptBatchIds) ? parent.receiptBatchIds : []
+  require(
+    parent?.receiptCount === 2 &&
+      receiptBatchIds.length === 2 &&
+      receiptBatchIds.every((batchId) => typeof batchId === "string" && batchId.length > 0) &&
+      new Set(receiptBatchIds).size === 2 &&
+      JSON.stringify(receiptBatchIds) === JSON.stringify(phaseOne?.persistedBatchIds),
+    "parent-parsed receipts must contain exactly the two unique ordered phase-one batch IDs",
+  )
+  const parentFinding = parent?.finding
+  const phaseOneFinding = phaseOne?.finding
+  require(
+    parent?.findingsCount === 1 &&
+      isBatchAuditFindingProjection(parentFinding) &&
+      isBatchAuditFindingProjection(phaseOneFinding) &&
+      batchAuditFindingProjectionsEqual(parentFinding, phaseOneFinding),
+    "parent-parsed findings must contain the original valid finding exactly once",
+  )
+  const teardown = isRecord(value.teardown) ? value.teardown : undefined
+  const secondBoundary = isRecord(value.processBoundary) && isRecord(value.processBoundary.second)
+    ? value.processBoundary.second
+    : undefined
+  require(
+    teardown?.firstExitObserved === true &&
+      teardown.firstCloseObserved === true &&
+      teardown.firstTargetAbsentAfterClose === true &&
+      teardown.firstProcessGroupAbsentAfterClose === true &&
+      teardown.secondExitObserved === true &&
+      teardown.secondCloseObserved === true &&
+      teardown.secondTargetAbsentAfterClose === true &&
+      teardown.secondProcessGroupAbsentAfterClose === true &&
+      teardown.secondTargetAbsentAfterClose === secondBoundary?.targetAbsentAfterClose &&
+      teardown.secondProcessGroupAbsentAfterClose === secondBoundary?.processGroupAbsentAfterClose &&
+      teardown.secondAgentSessionDisposed === true &&
+      teardown.teardownFailed === false,
+    "abrupt DSH child and runner-owned process group, independent recovery child target and private process group, Agent/Session, and teardown must all be observed without survivors; second-process absence must be present, true, and consistent with processBoundary.second",
+  )
+  return errors
+}
+
+export function classifyAbruptRestartEvidenceStatus(value: unknown): ProfileGateStatus {
+  if (!isRecord(value) || value.probeExecuted !== true) return "BLOCKED"
+  return validateAbruptRestartEvidence(value).length === 0 ? "PASS" : "FAIL"
 }
 
 export interface QuestionBehaviorEvidence {
@@ -3855,6 +3979,260 @@ export function validateAcademicDecisionEvidence(value: unknown): string[] {
 
   return errors
 }
+
+
+// ---------------------------------------------------------------------------
+// Issue #107 R6: two-artifact terminal evidence protocol.
+// The pre-cleanup evidence report is intentionally non-conclusive for PASS; the
+// terminal receipt is written only after observing the runner's own cleanup and
+// binds to the exact bytes of the persisted evidence report plus the checkout SHA.
+// ---------------------------------------------------------------------------
+
+export const abruptEvidenceReportKind = "dsh-abrupt-evidence-report-v1"
+export const abruptTerminalReceiptKind = "dsh-abrupt-terminal-receipt-v1"
+export const abruptTerminalReceiptSchemaVersion = 1
+
+export interface AbruptTerminalReceiptEvidence {
+  kind: typeof abruptTerminalReceiptKind
+  schemaVersion: 1
+  status: ProfileGateStatus
+  evidenceReportSha256: string
+  repositorySha: string
+  sandbox: { attempted: boolean; removed: boolean; observed: boolean }
+  exitCode: number
+  reason: string | null
+  generatedAt: string
+}
+
+function isRepositoryRevisionDigest(value: unknown): boolean {
+  return typeof value === "string" && /^[a-f0-9]{40}$/i.test(value)
+}
+
+export function validateAbruptTerminalReceipt(value: unknown): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) return ["terminal receipt is missing"]
+  if (value.kind !== abruptTerminalReceiptKind) errors.push("terminal receipt kind is not the canonical terminal receipt")
+  if (value.schemaVersion !== abruptTerminalReceiptSchemaVersion) errors.push("terminal receipt schema version is not supported")
+  if (value.status !== "PASS" && value.status !== "FAIL" && value.status !== "BLOCKED") errors.push("terminal receipt status must be PASS, FAIL, or BLOCKED")
+  if (!isSha256Digest(value.evidenceReportSha256)) errors.push("terminal receipt must bind the SHA-256 of the persisted evidence report bytes")
+  if (!isRepositoryRevisionDigest(value.repositorySha)) {
+    errors.push("terminal receipt must bind the audited checkout revision (40-hex git SHA)")
+  }
+  const sandbox = isRecord(value.sandbox) ? value.sandbox : undefined
+  if (!sandbox || typeof sandbox.attempted !== "boolean" || typeof sandbox.removed !== "boolean" || typeof sandbox.observed !== "boolean") {
+    errors.push("terminal receipt must record attempted/removed/observed cleanup evidence")
+  }
+  if (!Number.isSafeInteger(value.exitCode) || (value.exitCode as number) < 0) errors.push("terminal receipt must declare a non-negative exit code")
+  if (typeof value.generatedAt !== "string" || value.generatedAt.length === 0) errors.push("terminal receipt must record a generatedAt timestamp")
+  if (value.reason !== null && typeof value.reason !== "string") errors.push("terminal receipt reason must be a sanitized string or null")
+  if (value.status === "PASS") {
+    if (!sandbox || sandbox.attempted !== true || sandbox.removed !== true || sandbox.observed !== true) {
+      errors.push("terminal receipt PASS requires an attempted, observed, and successful cleanup")
+    }
+    if (value.exitCode !== 0) errors.push("terminal receipt PASS requires exit code 0")
+    if (value.reason !== null) errors.push("terminal receipt PASS cannot carry a failure reason")
+  }
+  return errors
+}
+
+function evidenceDeepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((entry, index) => evidenceDeepEqual(entry, right[index]))
+  }
+  if (!isRecord(left) || !isRecord(right)) return false
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && evidenceDeepEqual(left[key], right[key]))
+}
+
+function evidenceBytesBuffer(value: unknown): Buffer | null {
+  if (typeof value === "string") return Buffer.from(value, "utf8")
+  if (value instanceof Uint8Array) return Buffer.from(value)
+  return null
+}
+
+/**
+ * Decodes the persisted evidence bytes. Bytes are the single source of truth for
+ * the evidence content: the digest is computed over them, the JSON object comes
+ * from parsing them, and no independent object is trusted.
+ */
+export function decodeAbruptEvidenceReport(bytes: unknown): { report: Record<string, unknown> | null; errors: string[] } {
+  const errors: string[] = []
+  const buffer = evidenceBytesBuffer(bytes)
+  if (buffer === null) return { report: null, errors: ["persisted evidence report bytes are required"] }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(buffer.toString("utf8"))
+  } catch {
+    return { report: null, errors: ["persisted evidence report bytes are not valid JSON"] }
+  }
+  if (!isRecord(parsed)) return { report: null, errors: ["persisted evidence report JSON must decode to an object"] }
+  return { report: parsed, errors }
+}
+
+function abruptEvidenceProjectionErrors(
+  report: Record<string, unknown>,
+  repositorySha: unknown,
+): string[] {
+  const errors: string[] = []
+  if (report.reportKind !== abruptEvidenceReportKind) errors.push("evidence report kind is not the canonical pre-cleanup evidence report")
+  if (report.schemaVersion !== 1) errors.push("evidence report schema version is not supported")
+  if (report.status !== "BLOCKED") errors.push("pre-cleanup evidence report status must be exactly BLOCKED, never a conclusive result")
+  if (report.evidenceStatus !== "PASS") errors.push("pre-cleanup evidence must explicitly carry evidenceStatus PASS")
+  if (report.terminalState !== "pending-cleanup") errors.push("pre-cleanup evidence must be pending-cleanup")
+  const repository = isRecord(report.repository) ? report.repository : undefined
+  if (!repository || !isRepositoryRevisionDigest(repository.revision)) {
+    errors.push("pre-cleanup evidence must carry a 40-hex checkout revision")
+  } else if (!isRepositoryRevisionDigest(repositorySha) || repository.revision !== repositorySha) {
+    errors.push("pre-cleanup evidence checkout revision diverges from the expected audited SHA")
+  }
+  if (!repository || repository.dirty !== false) errors.push("pre-cleanup evidence must record a clean checkout")
+  const sandbox = isRecord(report.sandbox) ? report.sandbox : undefined
+  if (!sandbox || sandbox.removed !== null) errors.push("pre-cleanup evidence must leave sandbox.removed unknown (null)")
+  const stages = isRecord(report.stages) ? report.stages : undefined
+  const gateSummary = stages && isRecord(stages.gateSummary) ? stages.gateSummary : undefined
+  const abruptStage = stages && isRecord(stages.abruptRestart) ? stages.abruptRestart : undefined
+  const crossProcess = stages && isRecord(stages.crossProcessBatchAudit) ? stages.crossProcessBatchAudit : undefined
+  const drift = stages && isRecord(stages.sourceDrift) ? stages.sourceDrift : undefined
+  if (!gateSummary) {
+    errors.push("pre-cleanup evidence must carry the gate summary")
+  } else {
+    if (gateSummary.overallStatus !== "pending-cleanup") errors.push("pre-cleanup gate summary must be exactly pending-cleanup")
+    if (gateSummary.exitCode !== null) errors.push("pre-cleanup gate summary must not carry a conclusive exit code")
+    for (const field of ["issue2Status", "auditorMarkdownStatus", "nativeSkillsStatus", "batchAuditStatus", "nativeQuestionsStatus", "academicDecisionStatus", "crossProcessBatchAuditStatus", "sourceDriftStatus", "abruptRestartStatus"] as const) {
+      if (gateSummary[field] !== "PASS") errors.push(`pre-cleanup gate summary requires ${field} PASS`)
+    }
+  }
+  if (!abruptStage || abruptStage.status !== "PASS") errors.push("pre-cleanup evidence must carry the validated #107 subgate PASS evidence")
+  if (!abruptStage || abruptStage.probeExecuted !== true) errors.push("pre-cleanup evidence must record that #107 actually executed")
+  if (abruptStage && (!Array.isArray(abruptStage.validationErrors) || abruptStage.validationErrors.length !== 0)) {
+    errors.push("pre-cleanup #107 evidence must carry empty validation errors")
+  }
+  if (!crossProcess || crossProcess.status !== "PASS") errors.push("pre-cleanup evidence must carry #103 recovery PASS evidence")
+  if (crossProcess && (!Array.isArray(crossProcess.validationErrors) || crossProcess.validationErrors.length !== 0)) {
+    errors.push("pre-cleanup #103 evidence must carry empty validation errors")
+  }
+  if (!drift || drift.status !== "PASS") errors.push("pre-cleanup evidence must carry #105 source-drift PASS evidence")
+  if (drift && (!Array.isArray(drift.validationErrors) || drift.validationErrors.length !== 0)) {
+    errors.push("pre-cleanup #105 evidence must carry empty validation errors")
+  }
+  return errors
+}
+
+/**
+ * Validates the bytes actually persisted (and read back from the exclusive
+ * descriptor) before any destructive cleanup is allowed. The object model is
+ * never trusted independently from these bytes.
+ */
+export function validateAbruptEvidenceForCleanupEligibility(input: {
+  evidenceReportBytes: unknown
+  evidenceReportSha256: unknown
+  repositorySha: unknown
+}): string[] {
+  const decoded = decodeAbruptEvidenceReport(input.evidenceReportBytes)
+  if (!decoded.report) return decoded.errors
+  const errors = [...decoded.errors]
+  if (!isSha256Digest(input.evidenceReportSha256)) {
+    errors.push("persisted evidence digest must be the SHA-256 of the exact bytes")
+  } else {
+    const bytesHash = createHash("sha256").update(evidenceBytesBuffer(input.evidenceReportBytes)!).digest("hex")
+    if (bytesHash !== input.evidenceReportSha256) errors.push("persisted evidence digest does not match the exact bytes")
+  }
+  errors.push(...abruptEvidenceProjectionErrors(decoded.report, input.repositorySha))
+  return errors.map((error) => `persisted evidence: ${error}`)
+}
+
+/**
+ * Validates the pair as consumed by the maintainer. The persisted bytes are the
+ * single source of truth: the object is decoded from them, the digest is
+ * recomputed over them, and any separately supplied object must be identical.
+ * `observedExitCode` is the external observation of the runner exit code, never
+ * the receipt's own claim.
+ */
+export function validateAbruptEvidencePair(input: {
+  evidenceReport: unknown
+  terminalReceipt: unknown
+  evidenceReportSha256: unknown
+  evidenceReportBytes: unknown
+  repositorySha: unknown
+  observedExitCode: unknown
+}): string[] {
+  const errors: string[] = []
+  const decoded = decodeAbruptEvidenceReport(input.evidenceReportBytes)
+  if (!decoded.report) {
+    errors.push(...decoded.errors)
+  } else {
+    const bytes = evidenceBytesBuffer(input.evidenceReportBytes)!
+    if (!isSha256Digest(input.evidenceReportSha256)) {
+      errors.push("evidence report digest must be the SHA-256 of the persisted bytes")
+    } else if (createHash("sha256").update(bytes).digest("hex") !== input.evidenceReportSha256) {
+      errors.push("evidence report digest does not match the exact persisted bytes")
+    }
+    if (!isRecord(input.evidenceReport)) {
+      errors.push("supplied evidence report object is missing or not an object; bytes-only pair validation is not accepted")
+    } else if (!evidenceDeepEqual(input.evidenceReport, decoded.report)) {
+      errors.push("evidence report object diverges from the JSON decoded from the persisted bytes")
+    }
+    errors.push(...abruptEvidenceProjectionErrors(decoded.report, input.repositorySha))
+  }
+  const receipt = isRecord(input.terminalReceipt) ? input.terminalReceipt : undefined
+  if (!receipt) {
+    errors.push("terminal receipt is missing")
+  } else {
+    errors.push(...validateAbruptTerminalReceipt(receipt).map((error) => `terminal receipt: ${error}`))
+    if (receipt.evidenceReportSha256 !== input.evidenceReportSha256) {
+      errors.push("terminal receipt digest does not match the persisted evidence report bytes")
+    }
+    if (!isRepositoryRevisionDigest(input.repositorySha)) {
+      errors.push("expected audited checkout revision is missing or not a 40-hex git SHA")
+    } else if (receipt.repositorySha !== input.repositorySha) {
+      errors.push("terminal receipt checkout SHA diverges from the audited repository SHA")
+    }
+    const sandbox = isRecord(receipt.sandbox) ? receipt.sandbox : undefined
+    if (receipt.status === "PASS") {
+      if (input.observedExitCode !== 0) errors.push("integral PASS requires the externally observed runner exit code to be 0")
+      if (!sandbox || sandbox.attempted !== true || sandbox.removed !== true || sandbox.observed !== true) {
+        errors.push("integral PASS requires the runner's own cleanup to be attempted, observed, and successful")
+      }
+    }
+  }
+  return errors
+}
+
+export function classifyAbruptEvidencePairStatus(input: {
+  evidenceReport: unknown
+  terminalReceipt: unknown
+  evidenceReportSha256: unknown
+  evidenceReportBytes: unknown
+  repositorySha: unknown
+  observedExitCode: unknown
+}): ProfileGateStatus {
+  if (!isRecord(input.terminalReceipt)) return "BLOCKED"
+  if (!isRecord(input.evidenceReport)) return "BLOCKED"
+  if (evidenceBytesBuffer(input.evidenceReportBytes) === null) return "BLOCKED"
+  const errors = validateAbruptEvidencePair(input)
+  if (errors.length > 0) return "FAIL"
+  const receipt = input.terminalReceipt as Record<string, unknown>
+  return receipt.status === "PASS" && input.observedExitCode === 0 ? "PASS" : "FAIL"
+}
+
+/**
+ * Aggregates the regular controls with the #107 subgate. A #107 that was not
+ * requested is explicitly NOT_REQUESTED and never blocks a normal authorized
+ * control run; FAIL prevails over BLOCKED.
+ */
+export function aggregateProfileAndAbruptStatus(input: {
+  gateStatus: ProfileGateStatus
+  abruptStatus: "PASS" | "FAIL" | "BLOCKED" | "NOT_REQUESTED"
+}): ProfileGateStatus {
+  if (input.gateStatus === "FAIL" || input.abruptStatus === "FAIL") return "FAIL"
+  if (input.gateStatus === "BLOCKED") return "BLOCKED"
+  if (input.abruptStatus === "BLOCKED") return "BLOCKED"
+  return "PASS"
+}
+
+// createHash is used for byte-level evidence digest verification.
 
 export function missingHostExitCode(): number {
   return 2

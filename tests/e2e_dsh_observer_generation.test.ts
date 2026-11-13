@@ -161,13 +161,17 @@ test("actual generated observer module binds the control preset ID without runne
   const renderObserver = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
     "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+    "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "abruptParentDecisionToken",
+    "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${template}\`;`,
   ) as (...args: unknown[]) => string
   const generatedModuleSource = renderObserver(
     "dshbanca-e2e-observer", expectedTools, "source-sha256", "source-sha1",
     "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
-    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
+    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+    "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
+    "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json", "test-parent-decision-token", renderControlPresetSelector, e2eControlPresetId,
   )
   expect(generatedModuleSource).toContain('const e2eControlPresetId = "dshbanca-e2e-control-neutral";')
 
@@ -296,6 +300,17 @@ test("actual generated observer module binds the control preset ID without runne
     expect(generatedModule.crossProcessSynthesisRefusal(pendingDomainRefusal, { ...pendingCheckpoint, state: "running" })).toBeNull()
     expect(generatedModule.crossProcessSynthesisRefusal(successfulDomainRefusal, { ...incompleteCheckpoint, completedBatches: 5, state: "complete" })).toBeNull()
     expect(typeof generatedModule.crossProcessProcessIdentitySha256).toBe("function")
+    if (process.platform === "linux") {
+      const previousIdentityKey = process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
+      process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY = "a".repeat(64)
+      try {
+        const generatedIdentity = await generatedModule.crossProcessProcessIdentitySha256()
+        expect(generatedIdentity).toMatch(/^[a-f0-9]{64}$/)
+      } finally {
+        if (previousIdentityKey === undefined) delete process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
+        else process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY = previousIdentityKey
+      }
+    }
     expect(typeof generatedModule.runAcademicNativeQuestionsProbe).toBe("function")
     expect(runnerSource).toContain('child.once("spawn"')
     expect(runnerSource).toContain('const expectedCheckpointState = contextCheckpoint.completedBatches === 0 ? "pending" : "running";')
@@ -304,6 +319,9 @@ test("actual generated observer module binds the control preset ID without runne
     expect(generatedModuleSource).toContain('readFile("/proc/" + process.pid + "/stat"')
     expect(generatedModuleSource).toContain("analysis-audit-confirmations-store-v1")
     expect(generatedModuleSource).toContain("DSHBANCA_DSH_PROFILE_PHASE_ONE_EVIDENCE")
+    expect(generatedModuleSource).toContain('restartPhase === "abrupt-initial"')
+    expect(generatedModuleSource).toContain('restartPhase === "abrupt-resume"')
+    expect(generatedModuleSource).toContain("abruptRestartWorkspace")
     expect(generatedModuleSource).toContain('process.once("beforeExit"')
     expect(generatedModuleSource).toContain("process.exitCode = 86")
     expect(generatedModuleSource).toContain("nativeShutdownCompleted: process.exitCode === 0")
@@ -414,14 +432,18 @@ test("generated auditor evidence uses the strict session projection contract", a
   const renderObserver = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
     "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+    "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "abruptParentDecisionToken",
+    "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${template}\`;`,
   ) as (...args: unknown[]) => string
   const generatedModuleSource = renderObserver(
     "dshbanca-e2e-observer", expectedTools,
     canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
     "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
-    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json", renderControlPresetSelector, e2eControlPresetId,
+    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+    "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
+    "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json", "test-parent-decision-token", renderControlPresetSelector, e2eControlPresetId,
   )
 
   // Evaluate the exact object literal embedded in the generated observer module.
@@ -498,7 +520,9 @@ test("generated drift probe matches real local academic tools without loading th
   const render = new Function(
     "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
     "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
-    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "renderControlPresetSelector", "e2eControlPresetId",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+    "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "abruptParentDecisionToken",
+    "renderControlPresetSelector", "e2eControlPresetId",
     `return \`${runnerSource.slice(templateStart, templateEnd)}\`;`,
   )
   const directory = mkdtempSync(join(tmpdir(), "dshbanca-hermetic-drift-"))
@@ -511,7 +535,7 @@ test("generated drift probe matches real local academic tools without loading th
   for (let i = 1; i <= 5; i++) writeFileSync(join(workspace, "capitulos", `lote${i}.tex`), i === 2
     ? "\\section{Delineamento Amostral e Metodologia}\nA amostragem foi definida por conveniência em 30 participantes, com omissão de justificativa do critério amostral e confronto bibliográfico com synthetic2026.\nCapitulo sintetico 2 para analise academica exaustiva e2e.\n"
     : `Capitulo sintetico ${i} para analise academica exaustiva e2e.\n`)
-  const source = render("fixture-observer", expectedTools, "fixture-sha256", "fixture-sha1", workspace, "unused", workspace, "unused-a", "unused-b", "unused-c", "unused-d", renderControlPresetSelector, e2eControlPresetId)
+  const source = render("fixture-observer", expectedTools, "fixture-sha256", "fixture-sha1", workspace, "unused", workspace, "unused-a", "unused-b", "unused-c", "unused-d", workspace, "unused-abrupt-a", "unused-abrupt-b", "unused-abrupt-c", "unused-abrupt-d", "test-parent-decision-token", renderControlPresetSelector, e2eControlPresetId)
   const modulePath = join(directory, "observer.mjs")
   writeFileSync(modulePath, source)
   const oldKey = process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
@@ -806,4 +830,454 @@ test("selected DSH package dependency resolution supports both layouts without a
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test("abrupt restart is SHA-bound and terminates only the verified owned child after parent persistence checks", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const mainStart = source.indexOf("async function main(): Promise<void>")
+  const shaAuthorization = source.indexOf("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SHA256", mainStart)
+  const scenarioAuthorization = source.indexOf("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_SCENARIO", mainStart)
+  const firstSpawn = source.indexOf("const abruptFirstBoot = await runDsh", mainStart)
+  const persistenceCheck = source.indexOf("verifyParentAbruptRestartPersistence(", firstSpawn)
+  const ownershipCheck = source.indexOf("verifyOwnedDshChild(", persistenceCheck)
+  const kill = source.indexOf("terminateOwnedDshChild(", ownershipCheck)
+  const preSignalInventoryCheck = source.indexOf("preSignalWorkspaceInventorySha256", persistenceCheck)
+  const timeoutSignalGuard = source.indexOf("onControlTimeout:", kill)
+  const timeoutHardSignal = source.indexOf("onControlHardTimeout:", timeoutSignalGuard)
+  const phaseTwoGate = source.indexOf("if (!mayStartAbruptPhaseTwo({", kill)
+  const firstCloseCheck = source.indexOf("closeObserved: abruptFirstBoot.closeObserved === true", phaseTwoGate)
+  const secondSpawn = source.indexOf("const abruptSecondBoot = await runDsh", phaseTwoGate)
+  const secondOptionsEnd = source.indexOf("const abruptSecondSidecar", secondSpawn)
+  const secondOptions = source.slice(secondSpawn, secondOptionsEnd)
+  const parentHelperStart = source.indexOf("function verifyParentAbruptRestartPersistence(")
+  const parentHelperEnd = source.indexOf("\nasync function waitForObserverJson", parentHelperStart)
+  const parentHelper = source.slice(parentHelperStart, parentHelperEnd)
+
+  expect(mainStart).toBeGreaterThanOrEqual(0)
+  expect(shaAuthorization).toBeGreaterThan(mainStart)
+  expect(scenarioAuthorization).toBeGreaterThan(shaAuthorization)
+  expect(firstSpawn).toBeGreaterThan(scenarioAuthorization)
+  expect(persistenceCheck).toBeGreaterThan(firstSpawn)
+  expect(ownershipCheck).toBeGreaterThan(persistenceCheck)
+  expect(preSignalInventoryCheck).toBeGreaterThan(persistenceCheck)
+  expect(preSignalInventoryCheck).toBeLessThan(kill)
+  expect(parentHelperStart).toBeGreaterThanOrEqual(0)
+  expect(parentHelper).toContain("computeBatchFindingsDigest")
+  expect(parentHelper).toContain("computeAuditSubmissionId")
+  expect(parentHelper).toContain("canonicalPlan?.batchIds[2]")
+  expect(parentHelper).toContain("canonicalPlan?.batchIds.slice(0, 2)")
+  expect(kill).toBeGreaterThan(ownershipCheck)
+  expect(timeoutSignalGuard).toBeGreaterThan(kill)
+  expect(timeoutHardSignal).toBeGreaterThan(timeoutSignalGuard)
+  expect(phaseTwoGate).toBeGreaterThan(kill)
+  expect(firstCloseCheck).toBeGreaterThan(phaseTwoGate)
+  expect(secondSpawn).toBeGreaterThan(phaseTwoGate)
+  expect(secondOptionsEnd).toBeGreaterThan(secondSpawn)
+  expect(secondOptions).toContain("onSpawn:")
+  expect(secondOptions).toContain("verifyOwnedDshChild")
+  expect(secondOptions).toContain("terminateOwnedDshChild")
+  expect(secondOptions).toContain("onControlHardTimeout:")
+  expect(secondOptions).not.toContain("terminateProcessTree")
+  expect(source).toContain("process.kill(pid, requested)")
+  expect(source).toMatch(/report\.stages\.abruptRestart = \{\s*\n\s*status: "BLOCKED"/)
+  expect(source).toContain("targetAbsentAfterClose")
+  expect(source).toContain("processGroupAbsentAfterClose")
+  expect(source).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_AUTHORIZED")
+  expect(source).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_REPORT_PATH")
+  expect(source).toContain("lstatSync(target)")
+  expect(source).toContain("fsConstants.O_EXCL")
+  expect(source).toContain("fsConstants.O_NOFOLLOW")
+  expect(source).toContain("fstatSync(parentDescriptor)")
+  const observerInitialStart = source.indexOf('if (restartPhase === "abrupt-initial")')
+  const observerBarrierPoll = source.indexOf("waitForParentAcknowledgement(", observerInitialStart)
+  const readinessWrite = source.indexOf("await writeFile(abruptObserverResultOne", observerInitialStart)
+  const validationAckWait = source.indexOf("await parentValidationAcknowledgement", readinessWrite)
+  const signalBarrierPoll = source.indexOf("waitForParentAcknowledgement(", validationAckWait + 1)
+  const waitingSignalMarker = source.indexOf("writeFileSync(abruptParentAwaitingSignalPath", signalBarrierPoll)
+  const parentValidationAck = source.indexOf("writeFileSync(abruptParentAcknowledgementPath", firstSpawn)
+  const parentWaitingSignalRead = source.indexOf("waitForObserverJson(abruptParentAwaitingSignalPath", parentValidationAck)
+  const parentExperimentalKill = source.indexOf('"SIGKILL", mayContinue', parentWaitingSignalRead)
+  expect(observerInitialStart).toBeGreaterThanOrEqual(0)
+  expect(observerBarrierPoll).toBeLessThan(readinessWrite)
+  expect(readinessWrite).toBeLessThan(validationAckWait)
+  expect(validationAckWait).toBeLessThan(signalBarrierPoll)
+  expect(signalBarrierPoll).toBeLessThan(waitingSignalMarker)
+  expect(parentValidationAck).toBeGreaterThan(persistenceCheck)
+  expect(parentWaitingSignalRead).toBeGreaterThan(parentValidationAck)
+  expect(parentExperimentalKill).toBeGreaterThan(parentWaitingSignalRead)
+  const secondAbsenceStart = source.indexOf("abruptSecondProcessAbsenceDecision(", secondSpawn)
+  const secondProofStart = source.indexOf("const abruptSecondProof", secondSpawn)
+  const secondSpawnToProof = source.slice(secondSpawn, secondProofStart)
+  const secondProofEnd = source.indexOf("const phaseTwo =", secondProofStart)
+  const secondProof = source.slice(secondProofStart, secondProofEnd)
+  const teardownStart = source.indexOf("teardown: {", secondProofEnd)
+  const teardownEnd = source.indexOf("const abruptErrors", teardownStart)
+  const teardown = source.slice(teardownStart, teardownEnd)
+  expect(secondAbsenceStart).toBeGreaterThan(secondSpawn)
+  expect(secondAbsenceStart).toBeLessThan(secondProofStart)
+  expect(secondSpawnToProof).toContain("preserveScratchForSafety = true")
+  expect(secondSpawnToProof).toContain("linuxProcessGroupIdOfProcess(")
+  expect(secondSpawnToProof).toContain("abruptPrivateProcessGroupIdMatchesChildPid(")
+  for (const field of ["closeObserved", "processGroupIdObserved", "targetAbsentAfterClose", "processGroupAbsentAfterClose"]) {
+    expect(secondProof).toContain(`${field}:`)
+  }
+  expect(teardownStart).toBeGreaterThan(secondProofEnd)
+  expect(teardown).toContain("secondTargetAbsentAfterClose")
+  expect(teardown).toContain("secondProcessGroupAbsentAfterClose")
+  const readinessRetention = source.indexOf("abruptReadinessSidecar = sidecar", firstSpawn)
+  const barrierIdentityRetention = source.indexOf("abruptBarrierObserverIdentitySha256 =", firstSpawn)
+  const builderCallStart = source.indexOf("const abruptEvidence = buildAbruptRestartEvidence({", secondSpawn)
+  const builderCallEnd = source.indexOf("const abruptErrors", builderCallStart)
+  const builderCall = source.slice(builderCallStart, builderCallEnd)
+  expect(readinessRetention).toBeGreaterThan(firstSpawn)
+  expect(readinessRetention).toBeLessThan(secondSpawn)
+  expect(barrierIdentityRetention).toBeGreaterThan(persistenceCheck)
+  expect(barrierIdentityRetention).toBeLessThan(secondSpawn)
+  expect(builderCallStart).toBeGreaterThan(secondSpawn)
+  expect(builderCallEnd).toBeGreaterThan(builderCallStart)
+  expect(builderCall).toContain("phaseOneSidecar: abruptReadinessSidecar")
+  expect(builderCall).toContain("phaseTwoSidecar: abruptSecondSidecar")
+  expect(builderCall).toContain("parentObservedHostIdentitySha256:")
+  expect(builderCall).toContain("barrierObserverIdentitySha256: abruptBarrierObserverIdentitySha256")
+  expect(builderCall).toContain("firstProcess: firstProcessObservation")
+  expect(builderCall).toContain("secondProcess: abruptSecondProof")
+  expect(source).toContain("export function buildAbruptRestartEvidence(")
+  expect(source).toContain("export function abruptFirstProcessIdentityFields(")
+  expect(source).not.toContain("abruptPhaseOne?.observerProcessIdentitySha256")
+  const resumeExpectationStart = source.indexOf("const abruptResumeExpectation = buildAbruptResumeExpectation(", phaseTwoGate)
+  const resumeEnvStart = source.indexOf("const abruptResumeEnv", phaseTwoGate)
+  const resumeEnvEnd = source.indexOf("let abruptSecondChild", resumeEnvStart)
+  const resumeEnv = source.slice(resumeEnvStart, resumeEnvEnd)
+  expect(source).toContain("export function buildAbruptResumeExpectation(")
+  expect(resumeExpectationStart).toBeGreaterThan(phaseTwoGate)
+  expect(resumeExpectationStart).toBeLessThan(secondSpawn)
+  expect(resumeEnvStart).toBeGreaterThan(resumeExpectationStart)
+  expect(resumeEnvEnd).toBeGreaterThan(resumeEnvStart)
+  expect(resumeEnv).toContain('DSHBANCA_DSH_PROFILE_PHASE: "abrupt-resume"')
+  expect(resumeEnv).toContain("JSON.stringify(abruptResumeExpectation)")
+  expect(resumeEnv).not.toContain("phaseOne: abruptPhaseOne")
+  expect(resumeEnv).not.toContain("parentVerifiedPersistence,")
+  const killHelperStart = source.indexOf("export function terminateOwnedDshChild(")
+  const killHelperEnd = source.indexOf("\nfunction processTargetAbsentAfterClose", killHelperStart + 1)
+  const killHelper = source.slice(killHelperStart, killHelperEnd)
+  expect(killHelper).toContain("child.pid")
+  expect(killHelper).toContain("linuxProcessIdentitySha256")
+  expect(killHelper).not.toContain("process.kill(-")
+  expect(killHelper).not.toContain("terminateProcessTree")
+})
+
+test("every #107 subprocess class is wired to the verified-direct-child containment authority", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const mainStart = source.indexOf("async function main(): Promise<void>")
+  const runCliStart = source.indexOf("async function runCli(): Promise<void>")
+  expect(mainStart).toBeGreaterThanOrEqual(0)
+  expect(runCliStart).toBeGreaterThan(mainStart)
+  const mainSource = source.slice(mainStart, runCliStart)
+  // Every launch in main() must carry the strict policy stage label AND the
+  // parent-owned identity key; there is no raw launch without policy options.
+  const rawRunCalls = [...mainSource.matchAll(/await run\(/g)]
+  const rawDshCalls = [...mainSource.matchAll(/await runDsh\(/g)]
+  const rawPtyCalls = [...mainSource.matchAll(/await runDshWithPty\(/g)]
+  expect(rawRunCalls.length).toBe(2)
+  expect(rawDshCalls.length).toBe(8)
+  expect(rawPtyCalls.length).toBe(1)
+  const launchSlices = [...rawRunCalls, ...rawDshCalls, ...rawPtyCalls]
+    .map((match) => mainSource.slice(match.index!, match.index! + 900))
+  for (const launch of launchSlices) {
+    expect(launch).toContain("containmentStage:")
+    expect(launch).toContain("processIdentityKey")
+  }
+  const stagedClasses = [
+    "pnpm-preflight",
+    "profile-setup",
+    "repository-build",
+    "native-bundle-install",
+    "pty-dump-config",
+    "cross-process-first",
+    "cross-process-second",
+    "source-drift-first",
+    "source-drift-second",
+    "abrupt-phase-a",
+    "abrupt-phase-b",
+  ]
+  for (const stage of stagedClasses) {
+    const index = mainSource.indexOf(`"${stage}"`)
+    expect(index, stage).toBeGreaterThanOrEqual(0)
+    const launch = mainSource.slice(Math.max(0, index - 700), index + 200)
+    expect(launch, stage).toContain("processIdentityKey")
+  }
+  // Abrupt A/B keep the controlled onSpawn path with parent-owned identity.
+  const abruptCalls = rawDshCalls
+    .map((match) => mainSource.slice(match.index!, match.index! + 1200))
+    .filter((call) => call.includes("onSpawn:"))
+  expect(abruptCalls.length).toBe(2)
+  expect(abruptCalls.every((call) => call.includes("containmentStage: \"abrupt-phase-"))).toBe(true)
+  // Implicit spawnSync timeouts were replaced by the bounded policy-aware runner.
+  expect(source).not.toContain("spawnSync")
+  for (const helper of ["async function commandVersion(", "async function gitValue(", "async function repoStatus("]) {
+    expect(source).toContain(helper)
+  }
+  // Group/tree containment is legacy-only and its dependencies are injectable so
+  // a regression cannot emit a real negative-PID signal from the tests.
+  const legacyStart = source.indexOf("function terminateProcessTree(")
+  const legacyEnd = source.indexOf("\nfunction hashFile(", legacyStart)
+  const legacy = source.slice(legacyStart, legacyEnd)
+  expect(legacyStart).toBeGreaterThanOrEqual(0)
+  expect(legacy).toContain('runnerContainmentPolicy === "strict-direct-only"')
+  expect(legacy).toContain("dependencies.kill(-child.pid")
+  expect(legacy).toContain("dependencies.setTimeout(")
+  expect((source.match(/terminateProcessTree\(/g) ?? []).length).toBe(2)
+  expect(source).toContain("terminateProcessTree(child, {")
+  expect(source).toContain("if (!strictContainment)")
+  expect(source).toContain("beginStrictTimeoutContainment")
+  expect(source).toContain("const runnerContainmentPolicy: ContainmentPolicy = selectContainmentPolicy(process.env)")
+  expect(source).toContain("export function selectContainmentPolicy(")
+  expect(source).toContain("export function resolveCommandExecutableForIdentity(")
+  expect(source).toContain("export function verifyProcessExecutableIdentity(")
+  expect(source).toContain("error instanceof ContainmentAuthorityAbort")
+  expect(source).toContain("export class ContainmentAuthorityAbort")
+  expect(source).toContain("containmentRequiresScratchPreservation(")
+  expect(source).toContain("containmentAuthorityReportSnapshot()")
+})
+
+
+test("R5 terminal handling releases handles and preserves evidence before cleanup", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const errorStart = source.indexOf('child.once("error", (error) => {')
+  const errorEnd = source.indexOf('child.once("close", (code, signal) => {', errorStart)
+  const errorHandler = source.slice(errorStart, errorEnd)
+  expect(errorStart).toBeGreaterThanOrEqual(0)
+  // Generic post-spawn error uses the unified terminal-without-close path and
+  // never calls finish() directly (which would skip stream/unref release).
+  expect(errorHandler).toContain("if (!options.onSpawn) {")
+  const genericStart = errorHandler.indexOf("if (!options.onSpawn) {")
+  const genericBranch = errorHandler.slice(genericStart, errorHandler.indexOf("finish({", genericStart))
+  expect(genericBranch).toContain("finishWithoutClose()")
+  expect(genericBranch).not.toContain("finish({")
+  // The error branch records the sanitized incident before the terminal path.
+  expect(errorHandler.indexOf("recordStrictIncident(")).toBeLessThan(errorHandler.indexOf("finishWithoutClose()"))
+
+  const abruptStart = source.indexOf("function finalizeAbruptTerminal(): void {")
+  const legacyStart = source.indexOf("function finalizeLegacyTerminal(): void {", abruptStart)
+  const abruptFinalize = source.slice(abruptStart, legacyStart)
+  expect(abruptStart).toBeGreaterThanOrEqual(0)
+  // The finalizer delegates to the two-artifact terminal protocol and never
+  // removes the scratch itself.
+  expect(abruptFinalize).toContain("executeTerminalProtocol({")
+  expect(abruptFinalize).toContain("evidencePlan: reportPersistencePlan")
+  expect(abruptFinalize).toContain("terminalPlan: terminalReportPersistencePlan")
+  expect(abruptFinalize).not.toContain("applyScratchCleanup(")
+  expect(abruptFinalize).not.toContain("rmSync(")
+  const protocolStart = source.indexOf("export function executeTerminalProtocol(input: {")
+  const protocolEnd = source.indexOf("function finalizeAbruptTerminal(): void {", protocolStart)
+  const protocol = source.slice(protocolStart, protocolEnd)
+  expect(protocol).toContain("persist(input.evidencePlan, evidenceProjection)")
+  expect(protocol).toContain("cleanup({ scratchRoot: input.scratchRoot")
+  expect(protocol).toContain("persist(input.terminalPlan, receipt)")
+  expect(protocol).toContain("validateAbruptEvidencePair({")
+  // Evidence persistence precedes the runner-owned cleanup; the terminal receipt
+  // is written only after cleanup observation.
+  expect(protocol.indexOf("persist(input.evidencePlan")).toBeLessThan(protocol.indexOf("cleanup({ scratchRoot"))
+  expect(protocol.lastIndexOf("persist(input.terminalPlan")).toBeGreaterThan(protocol.indexOf("cleanup({ scratchRoot"))
+  expect(protocol).toContain('terminalState = "receipt-persistence-failed"')
+  expect(protocol).toContain('finalStatus = "FAIL"')
+  const runCliStart = source.indexOf("async function runCli(): Promise<void> {")
+  const runCliEnd = source.indexOf("\n}\n\nconst auditorMarkdownStatus", runCliStart)
+  const runCliFinally = source.slice(runCliStart, runCliEnd)
+  expect(runCliFinally).toContain('if (reportPersistencePlan.mode === "abrupt") finalizeAbruptTerminal()')
+  expect(runCliFinally).toContain("else finalizeLegacyTerminal()")
+  expect(source).toContain("export function decideScratchCleanup(")
+  expect(source).toContain("export function applyScratchCleanup(")
+  expect(source).toContain("export function executeTerminalProtocol(")
+})
+
+
+test("R6 two-artifact protocol is wired into destinations, aggregator, and finalizer", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  expect(source).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH")
+  expect(source).toContain("createAbruptTerminalReportPlan({")
+  expect(source).toContain("terminalReportPersistencePlan")
+  expect(source).toContain("abruptReportPairAuthorized(input.reportPersistencePlan, input.terminalReportPersistencePlan)")
+  expect(source).toContain("aggregateProfileAndAbruptStatus({")
+  expect(source).toContain('abruptRestartStatus = "NOT_REQUESTED"')
+  expect(source).toContain('status: "NOT_REQUESTED"')
+  expect(source).toContain("executeTerminalProtocol({")
+  expect(source).toContain("terminalPlan: terminalReportPersistencePlan")
+  // The abrupt evidence writer must hash the exact persisted bytes read back
+  // through the exclusive descriptor, never an in-memory projection.
+  const digestStart = source.indexOf("export function persistReportWithPlanAndDigest(")
+  const digestEnd = source.indexOf("export function persistReportWithPlan(plan", digestStart)
+  const digestWriter = source.slice(digestStart, digestEnd)
+  expect(digestWriter).toContain("readSync(descriptor, readBack, 0, contents.byteLength, 0)")
+  expect(digestWriter).toContain("evidenceReportDigest(readBack)")
+  expect(digestWriter).toContain("readBack.equals(contents)")
+  // Two distinct destinations are required; no suffix-derived authorization.
+  const blockerStart = source.indexOf("export function abruptRestartAuthorizationBlocker(")
+  const blockerEnd = source.indexOf("function ensureInside(", blockerStart)
+  const blocker = source.slice(blockerStart, blockerEnd)
+  expect(blocker).toContain("abruptReportPairAuthorized(")
+  expect(blocker).toContain("terminalReportPersistencePlan.authorized")
+  expect(blocker).toContain("destinations must be distinct")
+  // Pre-cleanup evidence must never be written as integral PASS.
+  const protocolStart = source.indexOf("export function executeTerminalProtocol(input: {")
+  const protocolEnd = source.indexOf("function finalizeAbruptTerminal(): void {", protocolStart)
+  const protocol = source.slice(protocolStart, protocolEnd)
+  expect(protocol).toContain('status: input.evidenceStatus === "PASS" ? "BLOCKED" : input.evidenceStatus')
+  expect(protocol).toContain('terminalState: input.evidenceStatus === "PASS"')
+  expect(protocol).toContain("removed: null")
+})
+
+
+test("R6 preflight validates both destinations and academic evidence before PASS", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const mainStart = source.indexOf("async function main(): Promise<void>")
+  const lifecycle = source.indexOf('process.env.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED !== "yes"', mainStart)
+  const earlyBlocker = source.indexOf("const earlyBlocker = abruptRestartPreflightBlocker(", lifecycle)
+  const firstScratch = source.indexOf("scratchRoot = mkdtempSync(", mainStart)
+  const firstDsh = source.indexOf("await runDsh(", mainStart)
+  expect(lifecycle).toBeGreaterThanOrEqual(0)
+  expect(earlyBlocker).toBeGreaterThan(lifecycle)
+  expect(earlyBlocker).toBeLessThan(firstScratch)
+  expect(earlyBlocker).toBeLessThan(firstDsh)
+  expect(source).toContain("both exclusive destinations")
+  // The non-conclusive evidence projection must remap nested aggregate status.
+  expect(source).toContain('overallStatus: "pending-cleanup"')
+  // Candidate pair must validate before a PASS receipt is persisted.
+  const protocolStart = source.indexOf("export function executeTerminalProtocol(input: {")
+  const protocolEnd = source.indexOf("function finalizeAbruptTerminal(): void {", protocolStart)
+  const protocol = source.slice(protocolStart, protocolEnd)
+  expect(protocol.indexOf("validateAbruptEvidencePair({")).toBeLessThan(protocol.lastIndexOf("persist(input.terminalPlan"))
+  expect(protocol).toContain('terminalState = "pair-validation-failed"')
+})
+
+
+test("R7 scratch identity and persisted-bytes binding are wired into the real finalizer", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const contract = readFileSync("scripts/lib/dsh-profile-e2e-contract.ts", "utf8")
+  // Identity captured at mkdtemp time and propagated to the terminal protocol.
+  const scratchCreation = source.indexOf('scratchRoot = mkdtempSync(join(tmpdir(), "dshbanca-profile-e2e-"))')
+  const identityCapture = source.indexOf("scratchRootIdentity = initializeScratchRootIdentity(scratchRoot)", scratchCreation)
+  expect(scratchCreation).toBeGreaterThanOrEqual(0)
+  expect(identityCapture).toBeGreaterThan(scratchCreation)
+  expect(source).toContain("export function initializeScratchRootIdentity(")
+  expect(source).toContain("tokenSha256")
+  expect(source).toContain("scratch creation token content diverged")
+  expect(source).toContain("cleanup decision did not authorize removal")
+  expect(source).toContain("scratchIdentity: scratchRootIdentity")
+  expect(source).toContain("scratchIdentity: input.scratchIdentity")
+  expect(source).toContain("!== input.identity.parentPath")
+  expect(source).toContain("basename(canonicalPath) !== input.identity.basename")
+  expect(source).toContain("targetStat.dev !== input.identity.device")
+  expect(source).toContain("targetStat.ino !== input.identity.inode")
+  expect(source).toContain("isSymbolicLink()")
+  // Bytes are the single source of truth: read-back bytes propagate to the
+  // pre-cleanup eligibility check and to pair validation before receipt persist.
+  const protocolStart = source.indexOf("export function executeTerminalProtocol(input: {")
+  const protocolEnd = source.indexOf("function finalizeAbruptTerminal(): void {", protocolStart)
+  const protocol = source.slice(protocolStart, protocolEnd)
+  expect(protocol).toContain("evidenceBytes = persisted.bytes")
+  expect(protocol).toContain("validateAbruptEvidenceForCleanupEligibility(")
+  expect(protocol.indexOf("validateAbruptEvidenceForCleanupEligibility(")).toBeLessThan(protocol.indexOf("cleanup({ scratchRoot"))
+  expect(protocol).toContain("decodeAbruptEvidenceReport(evidenceBytes)")
+  expect(protocol).toContain("evidenceReportBytes: evidenceBytes")
+  expect(protocol).toContain('exitCode: null')
+  expect(source).toContain("scratchRootIdentity = initializeScratchRootIdentity(scratchRoot) ?? undefined")
+  expect(contract).toContain("export function validateAbruptEvidenceForCleanupEligibility(")
+  expect(contract).toContain("const decoded = decodeAbruptEvidenceReport(input.evidenceReportBytes)")
+  expect(contract).toContain("evidence report object diverges from the JSON decoded from the persisted bytes")
+  expect(contract).toContain("pre-cleanup evidence must be pending-cleanup")
+  expect(contract).toContain("pre-cleanup gate summary must be exactly pending-cleanup")
+})
+
+
+test("R8 real module initialization derives both persistence plans from the environment", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  expect(source).toContain("createAbruptPersistencePlansFromEnvironment({")
+  const initStart = source.indexOf("createAbruptPersistencePlansFromEnvironment({")
+  expect(initStart).toBeGreaterThanOrEqual(0)
+  const initEnd = source.indexOf("})", initStart)
+  const init = source.slice(initStart, initEnd)
+  expect(init).toContain("createAbruptPersistencePlansFromEnvironment({")
+  expect(init).toContain("environment: process.env")
+  const planningStart = source.indexOf("export function createAbruptPersistencePlansFromEnvironment(")
+  const planningEnd = source.indexOf("export function createAbruptTerminalReportPlan(", planningStart)
+  const planning = source.slice(planningStart, planningEnd)
+  expect(planning).toContain("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_TERMINAL_REPORT_PATH")
+  expect(planning).toContain("terminalReportPath,")
+  const terminalPlannerStart = planningEnd
+  const terminalPlannerEnd = source.indexOf("export function abruptReportPairAuthorized(", terminalPlannerStart)
+  const terminalPlanner = source.slice(terminalPlannerStart, terminalPlannerEnd)
+  expect(terminalPlanner).toContain("terminalReportPath: string | undefined")
+  expect(source).toContain("export function abruptRestartAuthorizationBlocker(")
+  expect(source).toContain("abruptRestartPreflightBlocker(")
+  expect(source).toContain("abruptRestartAuthorizationBlocker({")
+  expect(source).toContain("platform: process.platform")
+  expect(source).toContain("abruptRestartRequested,")
+  expect(source).toContain("reportPersistencePlan,")
+  expect(source).toContain("configuredReportPath,")
+  expect(source).toContain("abruptRestartTerminalReportPath,")
+  expect(terminalPlanner).toContain("configuredReportPath: options.terminalReportPath")
+  expect(terminalPlanner).toContain("abruptReportPath: options.terminalReportPath")
+  expect(terminalPlanner).not.toContain("...options")
+})
+
+
+test("R9 procfs group interpretation and phase A/B PGID proofs are wired into the real runner", () => {
+  const source = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  // Kernel threads with a proven PF_KTHREAD flag are skipped; invalid rows and
+  // unproven zero PGIDs are never absence.
+  expect(source).toContain("PF_KTHREAD")
+  expect(source).toContain("linuxPfKthreadFlag = 0x00200000")
+  const membershipStart = source.indexOf("export function parseLinuxProcStatGroupMembership(")
+  const membershipEnd = source.indexOf("export type ProcessGroupAbsenceReason", membershipStart)
+  const membership = source.slice(membershipStart, membershipEnd)
+  expect(membership).toContain("kind: \"kernel-thread\"")
+  expect(membership).toContain("zero process-group id without proven PF_KTHREAD")
+  expect(membership).toContain("proc stat flags field is invalid")
+  expect(membership).toContain("proc stat pid does not match the enumerated row")
+  const scanStart = source.indexOf("export function processGroupAbsenceObservationFromRows(")
+  const scanEnd = source.indexOf("export function processGroupAbsentFromProcRows(", scanStart)
+  const scan = source.slice(scanStart, scanEnd)
+  expect(scan).toContain("membership.kind === \"invalid\"")
+  expect(scan).toContain("membership.kind === \"kernel-thread\"")
+  expect(scan).toContain("membership.groupId === groupId")
+  expect(scan).not.toContain("observedGroupId === null")
+  // Strict identity parser stays positive-only.
+  const strictParser = source.slice(
+    source.indexOf("export function parseLinuxProcStatProcessGroupId("),
+    source.indexOf("export function parseLinuxProcStatGroupMembership(", source.indexOf("export function parseLinuxProcStatProcessGroupId(")),
+  )
+  expect(strictParser).toContain('membership.kind === "positive"')
+  // Phase A captures its private PGID from the live child and revalidates it
+  // before the experimental SIGKILL; post-close absence uses that observed PGID.
+  const phaseAStart = source.indexOf("containmentStage: \"abrupt-phase-a\"")
+  const phaseAEnd = source.indexOf("const firstTargetAbsentAfterClose", phaseAStart)
+  const phaseA = source.slice(phaseAStart, phaseAEnd)
+  expect(phaseA).toContain("abruptFirstProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)")
+  expect(phaseA).toContain("abruptPrivateProcessGroupIdMatchesChildPid(child.pid, abruptFirstProcessGroupId)")
+  expect(phaseA).toContain("preSignalProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)")
+  expect(phaseA).toContain("preSignalProcessGroupId !== abruptFirstProcessGroupId")
+  const phaseAProofStart = source.indexOf("const firstProcessGroupIdObserved", phaseAStart)
+  const phaseAProof = source.slice(phaseAProofStart, source.indexOf("const firstProcessEndFilesystemIdentitySha256", phaseAProofStart))
+  expect(phaseAProof).toContain("processGroupAbsenceAfterCloseObservation(abruptFirstProcessGroupId ?? undefined)")
+  expect(phaseAProof).toContain("processGroupIdObserved: firstProcessGroupIdObserved")
+  expect(phaseAProof).toContain("processGroupAbsenceReason: firstGroupObservation.reason")
+  expect(phaseAProof).toContain("closeObserved: abruptFirstBoot.closeObserved === true")
+  expect(phaseAProof).toContain("controlCompleted: abruptFirstBoot.controlCompleted === true")
+  expect(phaseAProof).toContain("controlFailed: abruptFirstBoot.controlFailed === true")
+  expect(source).toContain("classifyAbruptPhaseOneTransitionBlock({")
+  expect(source).toContain("phase A termination proof failed (${transitionBlockReason})")
+  // Phase B uses the same strict observation of its observed private PGID.
+  const phaseBStart = source.indexOf("containmentStage: \"abrupt-phase-b\"")
+  const phaseBEnd = source.indexOf("const phaseTwo = abruptSecondSidecar?.crossProcessPhaseTwo", phaseBStart)
+  const phaseB = source.slice(phaseBStart, phaseBEnd)
+  expect(phaseB).toContain("abruptSecondProcessGroupId = linuxProcessGroupIdOfProcess(child.pid)")
+  expect(phaseB).toContain("processGroupAbsenceAfterCloseObservation(abruptSecondProcessGroupId ?? undefined)")
+  expect(phaseB).toContain("processGroupAbsenceReason: secondGroupObservation.reason")
+  // No group-query, kill(0), negative-PID or tree signal was introduced in the
+  // #107 phase A/B path (the pre-existing generic run containment is untouched).
+  const abruptPath = phaseA + phaseAProof + phaseB
+  expect(abruptPath).not.toContain("kill(-")
+  expect(abruptPath).not.toContain("process.kill(0")
+  expect(abruptPath).not.toContain("killProcessTree(")
 })
