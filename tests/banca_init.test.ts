@@ -12,6 +12,12 @@
  * synthetic PATH (controlled failing probes) so no real LaTeX binary or
  * manuscript is used. Refusals are asserted before any effect with recursive
  * inventory (names, kinds, link targets and SHA-256) before/after.
+ *
+ * R1 (issue #140, PR #142): the canonical path policy allows internal
+ * symlinks, so `project.json` and `state.json` can be the same physical file.
+ * The state preloaded by the #140 preflight must never be written back over the
+ * configuration just saved: the final scenarios require a collision-free
+ * refusal for symlink aliases in both directions and for hardlinks.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import { spawnSync } from "node:child_process"
@@ -19,6 +25,7 @@ import { createHash } from "node:crypto"
 import {
   chmodSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -26,6 +33,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -33,6 +41,7 @@ import { tmpdir } from "node:os"
 import { join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { bancaInit } from "../src/tools/banca_init"
+import { validateConfig } from "../src/lib/config"
 
 /** Synthetic token that must never reach a refusal diagnostic. */
 const SYNTHETIC_SECRET = "SEGREDO_ESTADO_SINTETICO_140"
@@ -121,6 +130,23 @@ const symlinksSupported = (() => {
 })()
 
 const stest = symlinksSupported ? test : test.skip
+
+const hardlinksSupported = (() => {
+  try {
+    const probe = mkdtempSync(join(tmpdir(), "dshbanca-init-140-hardlink-"))
+    try {
+      writeFileSync(join(probe, "a"), "probe\n", "utf-8")
+      linkSync(join(probe, "a"), join(probe, "b"))
+      return true
+    } finally {
+      rmSync(probe, { recursive: true, force: true })
+    }
+  } catch {
+    return false
+  }
+})()
+
+const htest = hardlinksSupported ? test : test.skip
 
 function findExecutable(name: string): string | null {
   for (const directory of (process.env.PATH ?? "").split(":")) {
@@ -618,6 +644,223 @@ describe("banca_init", () => {
       expect(inventory(project)).toEqual(before)
       expect(readFileSync(externalConfig, "utf-8")).toBe(JSON.stringify(SYNTHETIC_CONFIG, null, 2))
       expect(existsSync(dshDir())).toBe(false)
+    })
+  })
+
+  describe("issue #140 R1 — configuration/state physical aliases", () => {
+    type Identity = { dev: number; ino: number }
+
+    function physicalIdentity(path: string): Identity {
+      const stat = statSync(path)
+      return { dev: stat.dev, ino: stat.ino }
+    }
+
+    function prepareStateSymlinkToConfig(configContent: string): void {
+      mkdirSync(bancaDir(), { recursive: true })
+      writeFileSync(configFile(), configContent, "utf-8")
+      symlinkSync("project.json", stateFile())
+    }
+
+    function prepareConfigSymlinkToState(configContent: string): void {
+      mkdirSync(bancaDir(), { recursive: true })
+      writeFileSync(stateFile(), configContent, "utf-8")
+      symlinkSync("state.json", configFile())
+    }
+
+    function prepareHardlinks(configContent: string): void {
+      mkdirSync(bancaDir(), { recursive: true })
+      writeFileSync(configFile(), configContent, "utf-8")
+      linkSync(configFile(), stateFile())
+    }
+
+    /** Witness of both alias roles, captured immediately before the call. */
+    function witnessAlias() {
+      return {
+        before: inventory(project),
+        configHash: sha256(configFile()),
+        manuscriptHash: sha256(join(project, "main.tex")),
+        configIdentity: physicalIdentity(configFile()),
+        stateIdentity: physicalIdentity(stateFile()),
+        configLink: lstatSync(configFile()).isSymbolicLink() ? readlinkSync(configFile()) : null,
+        stateLink: lstatSync(stateFile()).isSymbolicLink() ? readlinkSync(stateFile()) : null,
+        validation: validateConfig(project),
+      }
+    }
+
+    function expectAliasRefused(output: string): void {
+      expectSanitizedRefusal(output, ["distinct physical files"])
+      expect(output).not.toContain(".banca/ + config + state")
+      expect(output).not.toContain("assets installed")
+    }
+
+    function expectAliasWitnessUnchanged(witness: ReturnType<typeof witnessAlias>): void {
+      expect(inventory(project)).toEqual(witness.before)
+      expect(sha256(configFile())).toBe(witness.configHash)
+      expect(sha256(join(project, "main.tex"))).toBe(witness.manuscriptHash)
+      expect(physicalIdentity(configFile())).toEqual(witness.configIdentity)
+      expect(physicalIdentity(stateFile())).toEqual(witness.stateIdentity)
+      // Both role names still resolve to the very same physical file and the
+      // alias target was not repaired, replaced or removed.
+      expect(physicalIdentity(configFile())).toEqual(physicalIdentity(stateFile()))
+      expect(lstatSync(configFile()).isSymbolicLink() ? readlinkSync(configFile()) : null).toBe(witness.configLink)
+      expect(lstatSync(stateFile()).isSymbolicLink() ? readlinkSync(stateFile()) : null).toBe(witness.stateLink)
+      expect(validateConfig(project)).toEqual(witness.validation)
+      expect(existsSync(dshDir())).toBe(false)
+      expect(existsSync(join(project, "banca-auditor.md"))).toBe(false)
+    }
+
+    stest("refuses force when state.json is an internal symlink to project.json", async () => {
+      prepareStateSymlinkToConfig(JSON.stringify(SYNTHETIC_CONFIG, null, 2))
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).toEqual(physicalIdentity(stateFile()))
+      const witness = witnessAlias()
+
+      const output = await runInit({ force: true })
+
+      expectAliasRefused(output)
+      expectAliasWitnessUnchanged(witness)
+    })
+
+    stest("refuses force when project.json is an internal symlink to state.json", async () => {
+      prepareConfigSymlinkToState(JSON.stringify(SYNTHETIC_CONFIG, null, 2))
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).toEqual(physicalIdentity(stateFile()))
+      const witness = witnessAlias()
+
+      const output = await runInit({ force: true })
+
+      expectAliasRefused(output)
+      expectAliasWitnessUnchanged(witness)
+    })
+
+    htest("refuses force when project.json and state.json are hardlinks", async () => {
+      prepareHardlinks(JSON.stringify(SYNTHETIC_CONFIG, null, 2))
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).toEqual(physicalIdentity(stateFile()))
+      const witness = witnessAlias()
+
+      const output = await runInit({ force: true })
+
+      expectAliasRefused(output)
+      expectAliasWitnessUnchanged(witness)
+    })
+
+    stest("refuses force for a malformed configuration sharing an inode through a symlink", async () => {
+      prepareStateSymlinkToConfig("{malformed\n")
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).toEqual(physicalIdentity(stateFile()))
+      const witness = witnessAlias()
+      expect(witness.validation.valid).toBe(false)
+
+      const output = await runInit({ force: true })
+
+      expectAliasRefused(output)
+      expectAliasWitnessUnchanged(witness)
+      expect(readFileSync(configFile(), "utf-8")).toBe("{malformed\n")
+    })
+
+    htest("refuses force for a malformed configuration sharing an inode through a hardlink", async () => {
+      prepareHardlinks("{malformed\n")
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).toEqual(physicalIdentity(stateFile()))
+      const witness = witnessAlias()
+      expect(witness.validation.valid).toBe(false)
+
+      const output = await runInit({ force: true })
+
+      expectAliasRefused(output)
+      expectAliasWitnessUnchanged(witness)
+      expect(readFileSync(configFile(), "utf-8")).toBe("{malformed\n")
+    })
+
+    test("allows force when config and state are distinct regular files", async () => {
+      writeSyntheticConfig()
+      writeFileSync(stateFile(), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).not.toEqual(physicalIdentity(stateFile()))
+
+      const output = await runInit({ force: true })
+
+      expect(output).toContain(".banca/ + config + state")
+      expect(output).toContain("assets installed")
+      const config = JSON.parse(readFileSync(configFile(), "utf-8"))
+      expect(config.targetScore).toBe(9)
+      expect(config.manuscript.main).toBe("main.tex")
+      expect(JSON.parse(readFileSync(stateFile(), "utf-8"))).toEqual(HISTORY_STATE)
+      expect(validateConfig(project).valid).toBe(true)
+    })
+
+    stest("allows force when state.json is an internal symlink to a distinct target", async () => {
+      writeSyntheticConfig()
+      mkdirSync(join(project, "estado-real"), { recursive: true })
+      writeFileSync(join(project, "estado-real", "state.json"), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+      symlinkSync(join(project, "estado-real", "state.json"), stateFile())
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).not.toEqual(physicalIdentity(stateFile()))
+
+      const output = await runInit({ force: true })
+
+      expect(output).toContain(".banca/ + config + state")
+      expect(JSON.parse(readFileSync(configFile(), "utf-8")).targetScore).toBe(9)
+      expect(JSON.parse(readFileSync(join(project, "estado-real", "state.json"), "utf-8"))).toEqual(HISTORY_STATE)
+      expect(lstatSync(stateFile()).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(stateFile())).toBe(join(project, "estado-real", "state.json"))
+    })
+
+    stest("allows force when project.json is an internal symlink to a distinct target", async () => {
+      mkdirSync(bancaDir(), { recursive: true })
+      mkdirSync(join(project, "config-real"), { recursive: true })
+      writeFileSync(join(project, "config-real", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
+      symlinkSync(join(project, "config-real", "project.json"), configFile())
+      writeFileSync(stateFile(), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).not.toEqual(physicalIdentity(stateFile()))
+
+      const output = await runInit({ force: true })
+
+      expect(output).toContain(".banca/ + config + state")
+      expect(JSON.parse(readFileSync(join(project, "config-real", "project.json"), "utf-8")).targetScore).toBe(9)
+      expect(JSON.parse(readFileSync(stateFile(), "utf-8"))).toEqual(HISTORY_STATE)
+      expect(lstatSync(configFile()).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(configFile())).toBe(join(project, "config-real", "project.json"))
+    })
+
+    stest("allows force when both role names are internal symlinks to distinct targets", async () => {
+      mkdirSync(bancaDir(), { recursive: true })
+      mkdirSync(join(project, "config-real"), { recursive: true })
+      mkdirSync(join(project, "state-real"), { recursive: true })
+      writeFileSync(join(project, "config-real", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
+      writeFileSync(join(project, "state-real", "state.json"), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+      symlinkSync(join(project, "config-real", "project.json"), configFile())
+      symlinkSync(join(project, "state-real", "state.json"), stateFile())
+      writeManuscripts()
+
+      const output = await runInit({ force: true })
+
+      expect(output).toContain(".banca/ + config + state")
+      expect(JSON.parse(readFileSync(join(project, "config-real", "project.json"), "utf-8")).targetScore).toBe(9)
+      expect(JSON.parse(readFileSync(join(project, "state-real", "state.json"), "utf-8"))).toEqual(HISTORY_STATE)
+      expect(lstatSync(configFile()).isSymbolicLink()).toBe(true)
+      expect(lstatSync(stateFile()).isSymbolicLink()).toBe(true)
+      expect(physicalIdentity(join(project, "config-real", "project.json"))).not.toEqual(
+        physicalIdentity(join(project, "state-real", "state.json")),
+      )
+    })
+
+    test("force reconstructs a valid configuration when it is malformed and state is distinct", async () => {
+      mkdirSync(bancaDir(), { recursive: true })
+      writeFileSync(configFile(), "{malformed\n", "utf-8")
+      writeFileSync(stateFile(), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+      writeManuscripts()
+      expect(physicalIdentity(configFile())).not.toEqual(physicalIdentity(stateFile()))
+
+      const output = await runInit({ force: true })
+
+      expect(output).toContain(".banca/ + config + state")
+      expect(output).toContain("assets installed")
+      expect(validateConfig(project).valid).toBe(true)
+      expect(JSON.parse(readFileSync(configFile(), "utf-8")).targetScore).toBe(9)
+      expect(JSON.parse(readFileSync(stateFile(), "utf-8"))).toEqual(HISTORY_STATE)
     })
   })
 })

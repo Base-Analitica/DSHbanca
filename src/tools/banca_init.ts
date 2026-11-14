@@ -1,13 +1,81 @@
-import { existsSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, lstatSync, type Stats } from "node:fs"
+import { join, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { ensureBancaDir, configPath, saveConfig } from "../lib/config"
-import { loadState, saveState } from "../lib/state"
+import { getStatePath, loadState, saveState } from "../lib/state"
 import { installAssets } from "../lib/install_assets"
 import { PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
 import type { ProjectConfig } from "../lib/config"
+
+/**
+ * Fixed, sanitized refusals for the initialization write-role conflict check.
+ * They never embed host paths, link targets, file content or raw filesystem
+ * messages.
+ */
+const INIT_CONFIG_STATE_COLLISION =
+  "configuration and state must use distinct physical files"
+const INIT_CONFIG_STATE_IDENTITY_REFUSED =
+  "configuration and state identity could not be inspected safely"
+
+function lstatIdentityOrNull(path: string): Stats | null {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw new PathTraversalError(INIT_CONFIG_STATE_IDENTITY_REFUSED)
+  }
+}
+
+/**
+ * Local conflict check between the two destinations `banca_init` writes through
+ * distinct roles: `.banca/project.json` (configuration) and `.banca/state.json`
+ * (academic state). The canonical path policy already authorizes internal
+ * symlinks, so two confined role names are not necessarily two files: an
+ * internal alias could make the state preflight and the configuration write
+ * share one destination, and `saveState` would then overwrite the configuration
+ * just saved (issue #140 R1).
+ *
+ * The project root is normalized exactly once before the canonical resolution,
+ * so a relative root is never applied twice. A collision is reported when the
+ * resolved destinations are equal or when two existing regular files share
+ * device/inode (hardlinks). A missing destination is legitimate absence;
+ * inspection failures are controlled refusals and are never degraded to
+ * "independent destinations". This is not a general file-identity API and does
+ * not change any other read/write policy.
+ */
+function assertDistinctConfigurationAndState(projectRoot: string): void {
+  const absoluteRoot = resolve(projectRoot)
+  let configDestination: string
+  let stateDestination: string
+  try {
+    configDestination = resolveRealInsideRoot(absoluteRoot, configPath(absoluteRoot))
+    stateDestination = resolveRealInsideRoot(absoluteRoot, getStatePath(absoluteRoot))
+  } catch (error) {
+    if (error instanceof PathTraversalError) {
+      throw new PathTraversalError(INIT_CONFIG_STATE_IDENTITY_REFUSED)
+    }
+    throw error
+  }
+  if (configDestination === stateDestination) {
+    throw new PathTraversalError(INIT_CONFIG_STATE_COLLISION)
+  }
+  // Canonical names differ here, but hardlinks still share a physical file.
+  const configStat = lstatIdentityOrNull(configDestination)
+  const stateStat = lstatIdentityOrNull(stateDestination)
+  if (
+    configStat !== null &&
+    stateStat !== null &&
+    configStat.isFile() &&
+    stateStat.isFile() &&
+    configStat.dev === stateStat.dev &&
+    configStat.ino === stateStat.ino
+  ) {
+    throw new PathTraversalError(INIT_CONFIG_STATE_COLLISION)
+  }
+}
+
 export const bancaInit = defineBancaTool({
   description: "Initialize banca project. Creates .banca/ + .dsh/ assets + state.json.",
   args: {
@@ -39,6 +107,20 @@ export const bancaInit = defineBancaTool({
       }
     } catch (err) {
       if (err instanceof PathTraversalError) return "blocked: project asset paths escape the workspace root"
+      throw err
+    }
+
+    // The two initialization write roles must be physically independent before
+    // anything is created or replaced. Canonical confinement alone allows an
+    // internal symlink/hardlink alias between `.banca/project.json` and
+    // `.banca/state.json`; in that case the state approved by the preflight
+    // would overwrite the configuration just saved (issue #140 R1). Refusing
+    // here happens before mkdir/config/state/assets and before any read of the
+    // aliased shared file.
+    try {
+      assertDistinctConfigurationAndState(root)
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: ${err.message}`
       throw err
     }
 
