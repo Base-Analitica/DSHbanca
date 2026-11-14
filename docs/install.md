@@ -23,10 +23,14 @@ Clone e resolução de dependências podem exigir rede. Este preparo não exige 
 
 ## Estado e próximo gate
 
-O pacote `dshbanca` é `private: true` e `UNLICENSED`, sem publicação oficial nem fluxo de instalação/uso final validado. Não há comando CLI DSH de instalação validado a recomendar.
+O pacote `dshbanca` é experimental (`0.1.0`), `private: true` e `UNLICENSED`, sem publicação oficial, release autorizada ou fluxo final de instalação/uso validado. **Não há comando CLI do DSH de instalação validado a recomendar.**
 
-A `master` declara export `./dsh`, patch Cordis e provider de skills. As 16 ferramentas nativas, o guard e o gate E2E são propostas da [PR #1](https://github.com/Base-Analitica/DSHbanca/pull/1), ainda **draft/CHANGES_REQUESTED**, não funcionalidades incorporadas. O consumo Markdown do auditor segue bloqueado na [issue #3](https://github.com/Base-Analitica/DSHbanca/issues/3); evidência de SHA anterior não comprova o HEAD final.
+A `master` incorpora a integração nativa: export `./dsh`, [patch Cordis](../cordis.patch.yml) com `dshbanca/dsh` e preset `banca-auditor`, 16 ferramentas registradas via `ctx.tools.register`, guard deny-only read-only do auditor, provider nativo das 8 skills e o script `e2e:dsh:profile`. A [PR #1](https://github.com/Base-Analitica/DSHbanca/pull/1) foi integrada (merge `820910f8cb0eb93e5bc0090040b9cde601de397e`, 29/10/2026) e a [issue #3](https://github.com/Base-Analitica/DSHbanca/issues/3) está encerrada; os estados de draft/`CHANGES_REQUESTED` e de bloqueio da #3 são **históricos e foram superados**.
+
+A evidência nativa sem modelo foi observada em SHAs específicos — `cb066a10d9bf88af0be5eb832eb794de44e0383d` (PR #1), `aa39d371962f8cb1349af19fbc6acba78f4f4a85` (PR #49) e os HEADs das verticais 01–05 (#99, #101, #104, #106, #108) — e não comprova o HEAD atual nem se transfere para um novo commit. Detalhes, SHAs e limites estão no [guia detalhado](installation.md#evidências-nativas-e-limites). CI convencional não substitui E2E DSH: a etapa nativa da CI só executa com `DSH_PROFILE_E2E_ENABLED=true` e, sem host provisionado, registra `BLOCKED`.
+
+O que continua ausente: canal oficial de distribuição e procedimento final de instalação para usuários; UX Web interativa; comportamento com modelo; e os gates próprios das [issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)/[#74](https://github.com/Base-Analitica/DSHbanca/issues/74)/[#75](https://github.com/Base-Analitica/DSHbanca/issues/75), [#62](https://github.com/Base-Analitica/DSHbanca/issues/62), [#23](https://github.com/Base-Analitica/DSHbanca/issues/23), [#50](https://github.com/Base-Analitica/DSHbanca/issues/50), [#102](https://github.com/Base-Analitica/DSHbanca/issues/102)/[PR #125](https://github.com/Base-Analitica/DSHbanca/pull/125) e [#124](https://github.com/Base-Analitica/DSHbanca/issues/124); a [issue-mãe #109](https://github.com/Base-Analitica/DSHbanca/issues/109) permanece aberta. O encerramento da #3 não desbloqueia esses itens.
 
 OpenBanca é outro projeto, voltado ao OpenCode; orientações desse legado **não são suportadas** aqui. Não use a suíte integral sem o preflight de segurança descrito no [guia detalhado](installation.md).
 
-Referências: [README](../README.md), [governança](../AGENTS.md) e [arquitetura](architecture.md).
+Referências: [README](../README.md), [governança](../AGENTS.md), [arquitetura](architecture.md), [gate E2E](dsh-profile-e2e.md) e [evidências nativas](installation.md#evidências-nativas-e-limites).
