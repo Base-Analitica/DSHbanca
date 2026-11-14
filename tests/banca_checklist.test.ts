@@ -27,6 +27,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -42,6 +43,7 @@ import { tmpdir } from "node:os"
 import { join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { bancaChecklist } from "../src/tools/banca_checklist"
+import { ChapterDiscoveryError } from "../src/lib/paths"
 import { PathTraversalError } from "../src/lib/safe_paths"
 
 // ---------------------------------------------------------------------------
@@ -66,6 +68,7 @@ function writeProjectConfig(overrides: {
   bib?: string
   chapters?: string[]
   root?: string
+  outputDir?: string
 } = {}): void {
   const config = {
     version: 1,
@@ -75,7 +78,7 @@ function writeProjectConfig(overrides: {
       main: overrides.main ?? "main.tex",
       bib: overrides.bib ?? "referencias.bib",
       chapters: overrides.chapters ?? ["capitulos/*.tex"],
-      outputDir: "trabalhos",
+      outputDir: overrides.outputDir ?? "trabalhos",
     },
     compile: { enabled: false, command: [] },
     allowedPaths: ["**/*.tex", "**/*.bib", "**/*.md"],
@@ -631,14 +634,14 @@ async function attemptChecklist(): Promise<ChecklistAttempt> {
  * error, sanitized message (no scratch/external absolute path and no synthetic
  * fixture content or checklist count) with no derived academic indicator.
  */
-function expectBlockedDestination(attempt: ChecklistAttempt): void {
+function expectBlockedDestination(attempt: ChecklistAttempt, extraForbidden: string[] = []): void {
   expect(attempt.ok).toBe(false)
   if (attempt.ok) return
   expect(attempt.error).toBeInstanceOf(PathTraversalError)
   const message = String((attempt.error as Error).message)
   expect(message.length).toBeGreaterThan(0)
   expect(message).not.toContain(base)
-  for (const fragment of FORBIDDEN_DIAGNOSTIC_FRAGMENTS) {
+  for (const fragment of [...FORBIDDEN_DIAGNOSTIC_FRAGMENTS, ...extraForbidden]) {
     expect(message).not.toContain(fragment)
   }
 }
@@ -927,6 +930,172 @@ describe("issue #132 read-only proof — full inventory before/after", () => {
     const before = snapshotTree(base)
     expect(header(await runChecklist())).toBe("Checklist: 6/6")
 
+    expect(snapshotTree(base)).toEqual(before)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #132 R1 — sanitized diagnostics for lexical refusals and read failures
+//
+// The mantenedor's independent review reproduced two information exposures at
+// the previously approved HEAD: (a) absolute/traversal values of manuscript
+// main/bib/outputDir still escaped through the lexical refusal produced by
+// `resolveManuscriptPaths`; (b) a regular internal main that the process cannot
+// read raised the raw Node error `EACCES: permission denied, open '/abs/path'`.
+// These scenarios require a controlled, sanitized refusal: no absolute
+// scratch/external path, no raw configured value, no system message or cause,
+// no derived checklist and no silent absence/partial result.
+// ---------------------------------------------------------------------------
+
+const unreadableTestSupported =
+  process.platform !== "win32" &&
+  typeof process.getuid === "function" &&
+  process.getuid() !== 0
+
+/** chmod 000 only denies reads for a non-privileged process. */
+const unreadableTest = unreadableTestSupported ? test : test.skip
+
+describe("issue #132 R1 RED — lexical refusal sanitization", () => {
+  test("absolute manuscript.main is refused without echoing the configured path", async () => {
+    const absoluteMain = join(base, "PRIVATE_SYNTHETIC_MAIN.tex")
+    writeProjectConfig({ main: absoluteMain })
+    writeBib()
+    writeChapter()
+
+    const before = snapshotTree(base)
+    const attempt = await attemptChecklist()
+
+    expectBlockedDestination(attempt, [
+      absoluteMain,
+      "PRIVATE_SYNTHETIC_MAIN",
+      "absolute paths are not allowed",
+    ])
+    if (!attempt.ok) {
+      expect(String((attempt.error as Error).message)).toContain("safe workspace-relative path")
+    }
+    expect(snapshotTree(base)).toEqual(before)
+  })
+
+  test("absolute manuscript.bib is refused without echoing the configured path", async () => {
+    const absoluteBib = join(base, "PRIVATE_SYNTHETIC_BIB.bib")
+    writeProjectConfig({ bib: absoluteBib })
+    writeMain(GENUINE_MAIN)
+    writeChapter()
+
+    expectBlockedDestination(await attemptChecklist(), [
+      absoluteBib,
+      "PRIVATE_SYNTHETIC_BIB",
+      "absolute paths are not allowed",
+    ])
+  })
+
+  test("absolute manuscript.outputDir is refused without echoing the configured path", async () => {
+    const absoluteOutputDir = join(base, "PRIVATE_SYNTHETIC_OUTPUT")
+    writeProjectConfig({ outputDir: absoluteOutputDir })
+    writeMain(GENUINE_MAIN)
+    writeBib()
+    writeChapter()
+
+    expectBlockedDestination(await attemptChecklist(), [
+      absoluteOutputDir,
+      "PRIVATE_SYNTHETIC_OUTPUT",
+      "absolute paths are not allowed",
+    ])
+  })
+
+  test("traversal in manuscript.main is refused without echoing the raw value", async () => {
+    writeProjectConfig({ main: "../PRIVATE_SYNTHETIC_TRAVERSAL.tex" })
+    writeBib()
+    writeChapter()
+
+    const attempt = await attemptChecklist()
+    expectBlockedDestination(attempt, ["PRIVATE_SYNTHETIC_TRAVERSAL", "path traversal segments", "../"])
+    if (!attempt.ok) {
+      expect(String((attempt.error as Error).message)).toContain("safe workspace-relative path")
+    }
+  })
+
+  test("traversal in manuscript.bib is refused without echoing the raw value", async () => {
+    writeProjectConfig({ bib: "../PRIVATE_SYNTHETIC_TRAVERSAL.bib" })
+    writeMain(GENUINE_MAIN)
+    writeChapter()
+
+    expectBlockedDestination(await attemptChecklist(), [
+      "PRIVATE_SYNTHETIC_TRAVERSAL",
+      "path traversal segments",
+      "../",
+    ])
+  })
+})
+
+describe("issue #132 R1 — preserved controlled diagnostics", () => {
+  test("absolute manuscript.root remains sanitized (approved behavior control)", async () => {
+    const absoluteRoot = join(base, "PRIVATE_SYNTHETIC_ROOT")
+    writeProjectConfig({ root: absoluteRoot })
+
+    const attempt = await attemptChecklist()
+    expectBlockedDestination(attempt, [
+      absoluteRoot,
+      "PRIVATE_SYNTHETIC_ROOT",
+      "absolute paths are not allowed",
+    ])
+    if (!attempt.ok) {
+      expect(String((attempt.error as Error).message)).toContain("manuscript root")
+    }
+  })
+
+  test("ChapterDiscoveryError and its safe diagnostics keep their own contract", async () => {
+    writeProjectConfig({ chapters: ["../fora/*.tex"] })
+    writeMain(GENUINE_MAIN)
+    writeBib()
+
+    const attempt = await attemptChecklist()
+    expect(attempt.ok).toBe(false)
+    if (attempt.ok) return
+    expect(attempt.error).toBeInstanceOf(ChapterDiscoveryError)
+    const error = attempt.error as ChapterDiscoveryError
+    expect(error.diagnostics.some((diagnostic) => diagnostic.code === "unsafe_pattern")).toBe(true)
+    const serialized = `${error.message}\n${JSON.stringify(error.diagnostics)}`
+    expect(serialized).not.toContain(base)
+    // It must not be mistaken for the generic normalized path refusal.
+    expect(serialized).not.toContain("safe workspace-relative path")
+  })
+})
+
+describe("issue #132 R1 RED — physical read failure sanitization", () => {
+  unreadableTest("a verified-present internal main that cannot be read fails closed sanitized", async () => {
+    writeProjectConfig()
+    const mainPath = writeMain(GENUINE_MAIN)
+    writeBib()
+    writeChapter()
+    const before = snapshotTree(base)
+
+    chmodSync(mainPath, 0o000)
+    try {
+      // Prove this environment really denies the read (non-root with no override).
+      let rawCode: string | undefined
+      try {
+        readFileSync(mainPath, "utf-8")
+      } catch (error) {
+        rawCode = (error as NodeJS.ErrnoException).code
+      }
+      expect(rawCode).toBe("EACCES")
+
+      const attempt = await attemptChecklist()
+      expectBlockedDestination(attempt, ["EACCES", "permission denied"])
+      if (!attempt.ok) {
+        const message = String((attempt.error as Error).message)
+        // Controlled read refusal, distinct from the boundary refusal and from
+        // the raw Node system message/path.
+        expect(message).toContain("could not be read")
+        expect(message).not.toContain(mainPath)
+        expect(message).not.toContain("open '")
+      }
+    } finally {
+      chmodSync(mainPath, 0o644)
+    }
+
+    // Nothing was read, written or left behind; original inventory is restored.
     expect(snapshotTree(base)).toEqual(before)
   })
 })

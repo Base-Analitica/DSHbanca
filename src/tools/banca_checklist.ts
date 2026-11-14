@@ -1,8 +1,8 @@
 import { lstatSync, readFileSync, type Stats } from "node:fs"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
-import { loadConfig } from "../lib/config"
-import { resolveManuscriptPaths } from "../lib/paths"
+import { loadConfig, type ProjectConfig } from "../lib/config"
+import { resolveManuscriptPaths, type ResolvedPaths } from "../lib/paths"
 import { PathTraversalError, resolveInsideRoot, resolveRealInsideRoot } from "../lib/safe_paths"
 
 /**
@@ -148,6 +148,11 @@ function scanStructuralMarkers(text: string): StructuralMarkers {
  * read: the guarantee holds for a filesystem that is not concurrently mutated
  * by another process. This is a read-boundary check on the configured paths,
  * not a sandbox, permission engine or host trust-model change.
+ *
+ * Diagnostics are sanitized too (issue #132 R1): the lexical refusals that the
+ * shared resolver raises with raw configured values, and the expected
+ * filesystem failures of the real read, are rethrown as fixed controlled
+ * messages without the absolute path, raw system message or cause.
  */
 type ConfiguredFileInspection =
   | { status: "present"; canonicalPath: string }
@@ -157,6 +162,63 @@ function blockedDestination(label: string, detail: string): PathTraversalError {
   // Fixed, sanitized messages: never echo the configured value, an absolute
   // host path or any external content.
   return new PathTraversalError(`banca_checklist refused the configured ${label}: ${detail}`)
+}
+
+/**
+ * Normalize the lexical refusals of `resolveManuscriptPaths` that propagate the
+ * raw configured value (absolute paths and `..` segments in main/bib/outputDir).
+ * The shared resolver is not modified: only its controlled PathTraversalError is
+ * rethrown with a fixed sanitized message. Every other error keeps its own
+ * contract — notably ChapterDiscoveryError and its safe diagnostics.
+ */
+function resolveManuscriptPathsSanitized(projectRoot: string, config: ProjectConfig): ResolvedPaths {
+  try {
+    return resolveManuscriptPaths(projectRoot, config)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw blockedDestination(
+        "manuscript paths",
+        "a configured manuscript path is not a safe workspace-relative path",
+      )
+    }
+    throw err
+  }
+}
+
+/**
+ * Filesystem errno values that are expected failures of reading an already
+ * inspected destination. They become a controlled sanitized refusal; unexpected
+ * errors (including programming defects) are rethrown unchanged.
+ */
+const EXPECTED_READ_FAILURE_CODES = new Set([
+  "EACCES",
+  "EPERM",
+  "ENOENT",
+  "EISDIR",
+  "ELOOP",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENAMETOOLONG",
+  "ESTALE",
+])
+
+/**
+ * Read the canonical main file. A verified-present regular file that can no
+ * longer be read (for example EACCES, or ENOENT after a concurrent change) is a
+ * controlled failure: it is never reported as absent, as a partial checklist or
+ * as success, and the raw system message/path is not exposed.
+ */
+function readConfiguredMainFile(canonicalPath: string): string {
+  try {
+    return readFileSync(canonicalPath, "utf-8")
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (typeof code === "string" && EXPECTED_READ_FAILURE_CODES.has(code)) {
+      throw blockedDestination("main file", "the verified destination could not be read")
+    }
+    throw err
+  }
 }
 
 /**
@@ -237,7 +299,7 @@ export const bancaChecklist = defineBancaTool({
     // Canonical boundary first: a redirected manuscript root must not become an
     // implicitly authorized root for discovery or reads.
     assertManuscriptRootConfined(root, config.manuscript.root)
-    const paths = resolveManuscriptPaths(root, config)
+    const paths = resolveManuscriptPathsSanitized(root, config)
     // Inspect both configured destinations before reading the main file or
     // emitting any existence/main-content signal.
     const main = inspectConfiguredFile(root, paths.main, "main file")
@@ -251,7 +313,7 @@ export const bancaChecklist = defineBancaTool({
 
     const markers: StructuralMarkers | null =
       main.status === "present"
-        ? scanStructuralMarkers(readFileSync(main.canonicalPath, "utf-8"))
+        ? scanStructuralMarkers(readConfiguredMainFile(main.canonicalPath))
         : null
     if (markers) {
       checks.push({ item: "documentclass", ok: markers.documentclass })
