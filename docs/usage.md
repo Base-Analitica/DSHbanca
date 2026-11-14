@@ -8,7 +8,7 @@ Essa divisão é normativa, não prova de funcionamento. Consulte o [README](../
 
 ## O que está disponível e o que falta provar
 
-Referência desta revisão: `origin/master` em `66049be57123ddd5ff7d0dec3c3cba2d5db36f4f`. Estados de PRs e issues abaixo são os consultados em 22/10/2026; revalide-os antes de usar uma revisão posterior.
+Referência desta revisão: `origin/master` em `66049be57123ddd5ff7d0dec3c3cba2d5db36f4f` para os estados operacionais desta página, consultados em 22/10/2026. O contrato de `banca_refs` foi reconciliado com o HEAD `f6786df972ac574d7a36eda99f43cdc6f42a38f9` (issue #122). Revalide estados de PRs e issues antes de usar uma revisão posterior.
 
 | Nível | Estado verificado | Limite |
 |---|---|---|
@@ -84,18 +84,38 @@ O **auditor é read-only quanto ao manuscrito**; persistir findings/contexto aca
 
 | Operação e fonte | Comportamento no código e pré-requisitos |
 |---|---|
-| [banca_refs](../src/tools/banca_refs.ts) | Lê BibTeX e usa cadeia MCP → REST → cache, registrando provedor/evidência no relatório. É implementação existente, **não integração MCP DSH validada**. Pode acessar rede/processos; não é orientação para configurar MCP externo. Lifecycle, autenticação e integrações gerais pertencem ao host. |
+| [banca_refs](../src/tools/banca_refs.ts) | Lê o BibTeX configurado e o interpreta com o parser local determinístico tudo-ou-nada (ver [gramática suportada e limitações](bibtex-parser-grammar.md)); reutiliza `.banca/cache/refs.json` por chave exata e por DOI (case-insensitive). Sem resultado positivo no cache, a referência é marcada `bloqueada` com `external_transport_blocked` e provider `none`: não há `fetch`, não se inicia `McpClient` nem subprocesso e não há fallback REST. Bloqueadas ficam fora da média (`N/A` se todas) e não contam como `nao_encontrada`; erro de parsing retorna `bib parse error:` sem gravar relatório. O resultado é evidência local, não certidão de fonte nem validação externa. |
 | [banca_ia](../src/tools/banca_ia.ts) | Triagem heurística não conclusiva. Executa o detector Python (`pt_ai_detector`) somente se ele já estiver instalado no ambiente, validando status, JSON, schema, score e contagens; caso contrário (ou com `forceRegex`, que não inicia subprocesso Python) usa a regex existente. Consolida entradas de caminho que resolvem para a mesma fonte canônica (por exemplo `main.tex` apontando para um capítulo), preservando os caminhos relativos configurados/aliases, e informa entradas descobertas, fontes canônicas distintas, aliases e fontes analisadas. Retorna e persiste em `.banca/reports/ia-*.md` o método efetivo por fonte, motivo de seleção/fallback, elegíveis/analisados/omitidos (limite de 50 parágrafos Python por fonte), truncamento e limitações. Não há confiança calibrada; agregados por método não são comparáveis entre si. Resultado **não comprova autoria**, não constitui nota/parecer/penalidade e não substitui a auditoria integral do manuscrito. |
 | [banca_plagio](../src/tools/banca_plagio.ts) | Interpreta relatório CopySpider existente (`reportPath` dentro de `projectRoot`); PDF depende de `pdftotext`. Classificações ENTREVISTAR/REESCREVER/PULAR são triagem de similaridade, não veredito de plágio nem autorização para reescrever. |
 | [banca_compile](../src/tools/banca_compile.ts) | Usa configuração de compilação habilitada, engines LaTeX/BibTeX permitidas e instaladas e arquivos válidos. Inicia processos externos; compilação real não foi validada de ponta a ponta no DSH nesta base. PDF compilado não prova conformidade ou mérito acadêmico. |
 
 As **8 skills empacotadas** são: `banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias` e `banca-revisor`. São instruções acadêmicas em [skills](../skills/), não oito fluxos DSH demonstrados. A entrevista da grille não comprova implementação de decisões por opções (issue #4).
 
+#### Como interpretar `banca_refs`
+
+A ferramenta combina o [parser BibTeX local](bibtex-parser-grammar.md) com o cache local `.banca/cache/refs.json`; a validação externa não está disponível nesta base DSH-only. Distinga os cenários:
+
+| Cenário | Significado |
+|---|---|
+| Resultado positivo cacheado | Evidência armazenada reutilizada (provider `cache`) |
+| Cache sem resultado positivo | Referência `bloqueada` para validação externa (provider `none`, `external_transport_blocked`) |
+| Cache parcial | Avaliação parcial: só as referências com cache positivo entram na média |
+| Todas bloqueadas | Nenhuma referência avaliada; média `N/A` |
+| Parsing inválido | Falha explícita de interpretação (`bib parse error:`), sem relatório |
+| Arquivo válido sem entradas | Nenhuma entrada encontrada (`no entries found in bib file`) |
+
+- `bloqueada` **não** significa `nao_encontrada`: o cache não produziu resultado positivo e o DSH observado (`0.2.0-rc.2`) não fornece provedor nativo de referências; a referência permanece pendente de validação, não é prova de referência falsa.
+- Bloqueios não entram na média nem no denominador de avaliadas; a média é `N/A` quando todas as referências estão bloqueadas e o resultado é parcial nos casos mistos (veredito de avaliação parcial).
+- Sintaxe BibTeX válida não comprova existência, atualidade ou autenticidade da publicação.
+- Cache positivo não comprova consulta externa atual: é evidência armazenada, não certidão de fonte.
+- O relatório `.banca/reports/refs-<timestamp>.md` registra total, avaliadas/total, média (ou `N/A`), verificadas, não encontradas, bloqueadas, providers usados (por exemplo `cache: 1 refs`, `none: 1 refs`), tabela de resultados, veredito e aviso de bloqueio: é registro de evidências e limitações, não certificado de validação externa.
+- A ferramenta não substitui avaliação humana de qualidade, pertinência ou autenticidade; erro de parsing não grava relatório de validação.
+
 ## 3. Interpretar resultados sem substituir a banca
 
 - Rubricas, índices de citação, notas/metas internas e heurísticas auxiliam revisão; **não equivalem à avaliação oficial**, nota, aprovação ou reprovação de banca. ABNT, citações, conteúdo e estilo são dimensões de revisão, não um resultado acadêmico automático de `banca_auditar`.
 - Exemplo apenas interpretativo: se há lotes pendentes ou diagnóstico `partial`/`blocked`, o resultado é **análise incompleta, sem parecer integral**; não se emite nota conclusiva. Mesmo uma entrada de síntese válida não é avaliação institucional.
-- Não invente referências, DOI, citações, findings, linhas ou evidências. Falha de rede, correspondência parcial ou ausência de confirmação devem permanecer explicitamente não verificadas.
+- Não invente referências, DOI, citações, findings, linhas ou evidências. Bloqueio externo de referência, correspondência parcial ou ausência de confirmação devem permanecer explicitamente não verificadas; no fluxo DSH-only de `banca_refs` não há tentativa de rede nem de MCP próprio, e uma referência bloqueada não prova que ela seja falsa.
 - Detector de IA e similaridade são sinais metodológicos sujeitos a revisão humana. Não inferir autoria, fraude ou mérito a partir deles.
 - Este guia não altera rubricas, critérios institucionais, scoring ou regras acadêmicas. Decisões e mudanças nessas áreas exigem autorização humana registrada.
 
@@ -107,7 +127,7 @@ As **8 skills empacotadas** são: `banca-avaliacao`, `banca-correcao`, `banca-de
 | Plano bloqueado, leitura incompleta ou fingerprint divergente | Interromper, preservar evidência e resolver a causa. Não fabricar findings nem marcar lotes como analisados para liberar síntese. |
 | Arquivo imutável ou caminho protegido | Preservar o bloqueio e pedir decisão ao responsável; não remover proteção para concluir a correção. |
 | Configuração já existente | Inspecionar e preservar o estado; não sobrescrever automaticamente com `force`. |
-| Referência não verificada ou provedor indisponível | Registrar a limitação e manter a referência pendente. Não configurar outro harness nem inventar DOI. |
+| Referência não verificada ou provedor indisponível | Conferir se o estado é `bloqueada` (cache sem resultado positivo e ausência de provedor nativo DSH) ou `nao_encontrada` (resultado de validação existente): são estados distintos. Bloqueadas ficam fora da média e podem deixá-la `N/A` ou parcial; não são prova de referência falsa. Registrar a limitação e manter a referência pendente; não configurar outro harness, não instalar nem iniciar MCP próprio, não ativar campos legados (`crossrefAcademicEnabled`, `OPENBANCA_ENABLE_CROSSREF_MCP`) e não inventar DOI. |
 | Engine LaTeX indisponível | Registrar compilação não executada; preparo TypeScript não instala TeX nem valida PDF. |
 | Tool/skill/agente não aparece no DSH | Não inferir disponibilidade pelos arquivos. Consultar instalação, PR #1 e issue #3; não há procedimento funcional validado neste guia. |
 

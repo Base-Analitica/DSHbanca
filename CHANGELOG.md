@@ -45,6 +45,7 @@ e este projeto adere ao [Semantic Versioning](https://semver.org/lang/pt-BR/).
 
 ### Alterado
 
+- Documentação de referências (`README.md`, `docs/usage.md`, `docs/configuration.md`, `docs/mcps.md`, `docs/workflows.md`, `docs/overview.md`, `docs/troubleshooting.md`): `banca_refs` passa a ser descrito pelo contrato DSH-only vigente — parsing BibTeX local, reutilização do cache `.banca/cache/refs.json` (chave e DOI) e bloqueio explícito de validação externa (`bloqueada`, provider `none`, `external_transport_blocked`) quando não há resultado positivo em cache e não há provedor nativo no DSH; bloqueadas ficam fora da média (média `N/A` quando todas), não são `nao_encontrada` nem prova de referência falsa, e o relatório registra evidências, providers e limitações. Campos `providers.references` e `mcp.crossrefAcademicEnabled` passam a ser documentados como compatibilidade legada preservada, sem habilitar transporte, e instruções de `opencode.json`/MCP próprio são delimitadas como históricas. Sem alteração de código, schema, defaults ou política de cache (#122).
 - `src/lib/latex.ts`: `execSync` substituído por `spawnSync` com interface `LatexCommand`
 - `src/tools/banca_compile.ts`: passos de compilação agora usam `LatexCommand[]` estruturado
 - `src/index.ts`: auto-registro MCP protegido por variável de ambiente
