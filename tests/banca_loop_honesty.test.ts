@@ -1316,9 +1316,10 @@ describe("banca_loop #120 R1 — integridade de apresentação de scores (F)", (
     expect(manifest.files).toEqual([])
     expect(reportFiles()).toEqual([`loop-${label}.md`])
 
-    // Nenhuma declaração introduzida e nenhuma restauração/correção executada.
+    // Nenhuma declaração introduzida pelos valores hostis; a menção a
+    // restauração é apenas a limitação negativa do marker.
     expect(result).not.toContain("## ")
     expectNoApprovalClaims(result)
-    expectNoRollbackClaim(result)
+    expect(result).toContain("does not enable restore or rollback")
   })
 })
