@@ -308,6 +308,66 @@ async function withFrozenNow<T>(now: number, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Freezes the timestamp emitted by the persisted report metadata
+ * (`generateReport` renders `new Date().toISOString()`) for the duration of
+ * `fn`. The original `Date.prototype.toISOString` is restored in `finally`, so
+ * no other test observes the frozen clock even when the assertion fails.
+ */
+async function withReportTimestamp<T>(iso: string, fn: () => Promise<T>): Promise<T> {
+  const original = Date.prototype.toISOString
+  Date.prototype.toISOString = () => iso
+  try {
+    return await fn()
+  } finally {
+    Date.prototype.toISOString = original
+  }
+}
+
+/**
+ * F2 regression clock: a legitimate ISO timestamp that contains the substring
+ * `8.5` (`…:58.573Z`). It is report metadata, not an echo of the academic score.
+ */
+const COLLIDING_REPORT_TIMESTAMP = "2026-11-14T03:32:58.573Z"
+
+/** Control timestamp without the `8.5` substring: legitimate metadata passes untouched. */
+const NON_COLLIDING_REPORT_TIMESTAMP = "2026-01-02T03:04:05.678Z"
+
+/**
+ * Canonical metadata line rendered by `generateReport`: exactly one
+ * `**Gerado em:**` line, immediately after the report title, with a canonical
+ * ISO-8601 UTC timestamp (millisecond precision, round-trip stable).
+ */
+const REPORT_TIMESTAMP_LINE = /^\*\*Gerado em:\*\* (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/
+
+/**
+ * Asserts `needle` is absent from the whole persisted Markdown except the one
+ * canonical report-timestamp line, which is validated by position, uniqueness
+ * and canonical ISO format. A forged, malformed, duplicated or displaced
+ * timestamp line is rejected instead of being excluded, so it can never hide
+ * the forbidden value.
+ */
+function expectNoEchoOutsideReportTimestamp(markdown: string, needle: string): void {
+  const lines = markdown.split("\n")
+  const timestampLines = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => line.startsWith("**Gerado em:**"))
+  expect(timestampLines).toHaveLength(1)
+  const timestamp = timestampLines[0]
+  if (!timestamp) throw new Error("report is missing the canonical timestamp metadata line")
+  // `generateReport` renders the title first and the timestamp right after it.
+  expect(timestamp.index).toBe(1)
+  const match = REPORT_TIMESTAMP_LINE.exec(timestamp.line)
+  expect(match).not.toBeNull()
+  const iso = match?.[1] ?? ""
+  // Validade e forma canônica: instante impossível vira NaN e uma representação
+  // não canônica não sobrevive ao round-trip inalterada.
+  expect(Number.isNaN(Date.parse(iso))).toBe(false)
+  expect(new Date(iso).toISOString()).toBe(iso)
+  const withoutTimestamp = lines.filter((_, index) => index !== timestamp.index).join("\n")
+  expect(withoutTimestamp).not.toContain(needle)
+}
+
 // ===========================================================================
 // Grupo A — limiar heurístico
 // ===========================================================================
@@ -1055,15 +1115,17 @@ describe("banca_loop #120 R1 — integridade de apresentação de scores (F)", (
     writeProjectConfig({ targetScore: 9 })
     writeRefsBib()
     writeMain(mainTex(5, 0))
-    writeStateJson({
+    const realToISOString = Date.prototype.toISOString
+    const invalidScoreState = {
       currentScore: "8.5",
       lastAudit: null,
       lastLoop: null,
       snapshots: [],
       iterations: [iteration("audit", null, 8, "ok", "2025-12-01T00:00:00.000Z")],
-    })
+    }
+    writeStateJson(invalidScoreState)
 
-    const result = await runLoop()
+    const result = await withReportTimestamp(COLLIDING_REPORT_TIMESTAMP, runLoop)
 
     expectExactLine(result, `Previous recorded score: ${INVALID_RECORDED_SCORE}`)
     expectExactLine(result, "Current heuristic citation score: 8")
@@ -1071,9 +1133,170 @@ describe("banca_loop #120 R1 — integridade de apresentação de scores (F)", (
     expectNoApprovalClaims(result)
 
     const report = reportForResult(result)
+    // O metadado legítimo colide com "8.5"; somente ele é excluído da negativa,
+    // nunca uma linha arbitrária que também contenha o valor.
+    expect(report).toContain(`**Gerado em:** ${COLLIDING_REPORT_TIMESTAMP}`)
+    expect(report).toContain("8.5")
     expectExactLine(report, `Previous recorded score: ${INVALID_RECORDED_SCORE}`)
     expectExactLine(report, "Current heuristic citation score: 8")
-    expect(report).not.toContain("8.5")
+    expectNoEchoOutsideReportTimestamp(report, "8.5")
+    expectNoApprovalClaims(report)
+
+    // Timestamp legítimo sem colisão continua aceito, sem exclusão indevida.
+    writeStateJson(invalidScoreState)
+    const nonColliding = await withReportTimestamp(NON_COLLIDING_REPORT_TIMESTAMP, runLoop)
+    expectExactLine(nonColliding, `Previous recorded score: ${INVALID_RECORDED_SCORE}`)
+    expectExactLine(nonColliding, "Current heuristic citation score: 8")
+    expect(nonColliding).not.toContain("8.5")
+    expectNoApprovalClaims(nonColliding)
+    const nonCollidingReport = reportForResult(nonColliding)
+    expect(nonCollidingReport).toContain(`**Gerado em:** ${NON_COLLIDING_REPORT_TIMESTAMP}`)
+    expect(nonCollidingReport).not.toContain("8.5")
+    expectNoEchoOutsideReportTimestamp(nonCollidingReport, "8.5")
+
+    // Fora do escopo do helper, o relógio real voltou a valer.
+    expect(Date.prototype.toISOString).toBe(realToISOString)
+  })
+
+  test("F2a. 8.5 ecoado na linha de score ou em outro campo real do relatório é rejeitado", async () => {
+    writeProjectConfig({ targetScore: 9 })
+    writeRefsBib()
+    writeMain(mainTex(5, 0))
+    // Um score numérico 8.5 é representado na linha "Previous recorded score":
+    // a exclusão do metadado não pode ignorar a linha de score.
+    writeStateJson({
+      currentScore: 8.5,
+      lastAudit: null,
+      lastLoop: null,
+      snapshots: [],
+      iterations: [iteration("audit", null, 8, "ok", "2025-12-01T00:00:00.000Z")],
+    })
+
+    const scoreResult = await withReportTimestamp(COLLIDING_REPORT_TIMESTAMP, runLoop)
+    const scoreReport = reportForResult(scoreResult)
+    expectExactLine(scoreReport, "Previous recorded score: 8.5")
+    expect(() => expectNoEchoOutsideReportTimestamp(scoreReport, "8.5")).toThrow()
+
+    // 8.5 em outro campo heurístico do relatório também é rejeitado.
+    writeProjectConfig({ targetScore: 8.5 })
+    writeStateJson({
+      currentScore: "8.5",
+      lastAudit: null,
+      lastLoop: null,
+      snapshots: [],
+      iterations: [iteration("audit", null, 8, "ok", "2025-12-01T00:00:00.000Z")],
+    })
+    const fieldResult = await withReportTimestamp(COLLIDING_REPORT_TIMESTAMP, runLoop)
+    const fieldReport = reportForResult(fieldResult)
+    expect(fieldReport).toContain("Local heuristic target: 8.5")
+    expect(() => expectNoEchoOutsideReportTimestamp(fieldReport, "8.5")).toThrow()
+  })
+
+  test("F2b. metadado temporal canônico: linha falsa, duplicada ou fora de posição não esconde o score", () => {
+    const markdownWith = (timestampLine: string, body: string[]): string =>
+      [
+        "# LOOP — loop-42",
+        timestampLine,
+        "",
+        "---",
+        "",
+        "## Context",
+        "",
+        ...body,
+        "",
+        "---",
+        "",
+        "## Marker",
+        "",
+        "Snapshot kind: marker (process milestone; non-restorable).",
+        "",
+        "---",
+        "",
+      ].join("\n")
+    const canonicalTimestamp = `**Gerado em:** ${COLLIDING_REPORT_TIMESTAMP}`
+
+    // Caminho feliz: único metadado canônico na posição esperada.
+    const canonical = markdownWith(canonicalTimestamp, [
+      "Previous recorded score: invalid or unavailable in shared state",
+      "Current heuristic citation score: 8",
+    ])
+    expect(() => expectNoEchoOutsideReportTimestamp(canonical, "8.5")).not.toThrow()
+
+    // Eco na linha de score e em parágrafo acadêmico fora do metadado.
+    expect(() =>
+      expectNoEchoOutsideReportTimestamp(
+        markdownWith(canonicalTimestamp, ["Previous recorded score: 8.5"]),
+        "8.5",
+      ),
+    ).toThrow()
+    expect(() =>
+      expectNoEchoOutsideReportTimestamp(
+        markdownWith(canonicalTimestamp, ["## Limitations", "Nota heurística 8.5 atribuída ao texto."]),
+        "8.5",
+      ),
+    ).toThrow()
+
+    // Payload com 8.5 tentando se disfarçar de metadado adicional: rejeitado.
+    expect(() =>
+      expectNoEchoOutsideReportTimestamp(
+        markdownWith(canonicalTimestamp, ["Previous recorded score: 8.5", canonicalTimestamp]),
+        "8.5",
+      ),
+    ).toThrow()
+
+    // Metadado malformado, duplicado ou fora da posição canônica: o contrato é
+    // rejeitado em vez de excluir a linha suspeita.
+    expect(() =>
+      expectNoEchoOutsideReportTimestamp(
+        markdownWith("**Gerado em:** 8.5", ["Previous recorded score: invalid or unavailable in shared state"]),
+        "8.5",
+      ),
+    ).toThrow()
+    expect(() =>
+      expectNoEchoOutsideReportTimestamp(
+        markdownWith("**Gerado em:** 2026-11-14T03:32:58Z", [
+          "Previous recorded score: invalid or unavailable in shared state",
+        ]),
+        "8.5",
+      ),
+    ).toThrow()
+    expect(() =>
+      expectNoEchoOutsideReportTimestamp(
+        markdownWith("", ["Previous recorded score: 8.5", canonicalTimestamp]),
+        "8.5",
+      ),
+    ).toThrow()
+    const duplicated = [
+      "# LOOP — loop-42",
+      canonicalTimestamp,
+      "",
+      "---",
+      "",
+      "## Context",
+      "",
+      "Previous recorded score: invalid or unavailable in shared state",
+      "",
+      "---",
+      "",
+      canonicalTimestamp,
+      "",
+    ].join("\n")
+    expect(() => expectNoEchoOutsideReportTimestamp(duplicated, "8.5")).toThrow()
+    // Metadado ausente: contrato rejeitado.
+    expect(() =>
+      expectNoEchoOutsideReportTimestamp(["# LOOP — loop-42", "", "---", ""].join("\n"), "8.5"),
+    ).toThrow()
+  })
+
+  test("F2c. relógio do relatório é restaurado mesmo quando o corpo do teste falha", async () => {
+    const realToISOString = Date.prototype.toISOString
+    await expect(
+      withReportTimestamp(COLLIDING_REPORT_TIMESTAMP, async () => {
+        expect(new Date().toISOString()).toBe(COLLIDING_REPORT_TIMESTAMP)
+        throw new Error("frozen-clock probe failure")
+      }),
+    ).rejects.toThrow("frozen-clock probe failure")
+    expect(Date.prototype.toISOString).toBe(realToISOString)
   })
 
   test("F3. currentScore objeto/array: conteúdo não ecoado, sem campos ou headings falsos", async () => {
