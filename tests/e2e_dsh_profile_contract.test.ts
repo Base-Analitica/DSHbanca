@@ -7239,3 +7239,235 @@ describe("Issue #110 R3 — cross-linked automatic capture evidence", () => {
     expect(validateEvidence(evidence)).toContain(R2_RESTORE_ERROR)
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// Issue #102: hermetic regression for the transparency contract of the native
+// DSH E2E report. The real CLI runs with the active lifecycle explicitly NOT
+// authorized: exit 2/BLOCKED proves that no DSH CLI process, Agent/Session,
+// academic synthetic project or scratch sandbox was started. The emitted JSON is
+// then read back so the report can never again claim that the active mode does
+// not create native Agents. This is a negative-path regression: it is NOT
+// evidence of an active DSH E2E PASS, and it neither proves nor requires the
+// absence of the synthetic Agent.send probes, turns or lifecycle events that
+// the active (authorized) path performs.
+// ---------------------------------------------------------------------------
+
+function issue102NormalizeLimitation(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function issue102IsActiveModeLimitation(normalizedText: string): boolean {
+  return /\b(?:agentes?|agents?)\b/.test(normalizedText) &&
+    /\b(?:modelos?|inferencia|turnos?)\b/.test(normalizedText)
+}
+
+// The legitimate unauthorized-path message describes THIS execution as blocked
+// without lifecycle authorization. It may legitimately mention that no
+// Agent/Session was created and that no model turn started, so it must not be
+// mistaken for the historical denial of the active mode capabilities.
+function issue102IsAuthorizationAbsenceMessage(normalizedText: string): boolean {
+  return /\bsem\s+(?:essa\s+)?autoriza/.test(normalizedText) ||
+    /\bnao\s+autoriza/.test(normalizedText) ||
+    /\bautorizacao\s+(?:ausente|pendente|necessaria|requerida)/.test(normalizedText) ||
+    /lifecycle_authorized/.test(normalizedText)
+}
+
+function issue102StatesNativeAgentCreation(normalizedText: string): boolean {
+  return /\b(?:cria|criam|criar|criados?|criadas?|criacao|instancia|instanciam|instanciar|instanciados?)\b/.test(normalizedText)
+}
+
+function issue102StatesModelTurnsNotStarted(normalizedText: string): boolean {
+  if (!/\bturnos?\s+de\s+modelo\b/.test(normalizedText)) return false
+  return /\bnao\s+(?:inicia|executa|aciona|dispara|realiza)\b[^.;]{0,40}\bturnos?\b/.test(normalizedText) ||
+    /\bsem\s+(?:iniciar|executar|acionar|disparar)\s+turnos?\b/.test(normalizedText) ||
+    /\bnenhum\s+turno\s+de\s+modelo\b/.test(normalizedText)
+}
+
+/**
+ * Semantic contract of report.limitations for the active DSH mode.
+ *
+ * The checks are keyword/semantic instead of exact-string comparisons so
+ * punctuation and harmless rewording remain allowed, while the historical
+ * statement that the active mode "não inicia agente" is rejected. An empty
+ * array means the emitted limitations keep the distinction between creating
+ * native Agents/Sessions and starting model turns, keep the human academic and
+ * inference-quality limits explicit, do not claim a global single-process run,
+ * do not deny the synthetic Agent.send probes, and do not reject the legitimate
+ * unauthorized-path message.
+ */
+function issue102LimitationViolations(limitations: unknown): string[] {
+  if (!Array.isArray(limitations)) return ["report.limitations is not an array"]
+  const violations: string[] = []
+  const normalized: string[] = []
+  for (const entry of limitations) {
+    if (typeof entry !== "string") {
+      violations.push("report.limitations contains a non-string entry")
+      continue
+    }
+    normalized.push(issue102NormalizeLimitation(entry))
+  }
+
+  // An "active mode capability" entry mentions both Agent/Session and model
+  // terms; that is where the historical false claim lived. Entries describing
+  // the unauthorized path are exempt: they can legitimately say that no
+  // Agent/Session was created and that no model turn started in that run.
+  const activeModeLimitations = normalized.filter((text) =>
+    issue102IsActiveModeLimitation(text) && !issue102IsAuthorizationAbsenceMessage(text))
+  if (activeModeLimitations.length === 0) {
+    violations.push("no limitation describes the active mode capabilities for Agents/Sessions and model turns")
+  }
+  for (const text of activeModeLimitations) {
+    // Historical regression (#102): claiming the active mode creates no Agent.
+    if (/\b(?:nao|jamais|nunca)\s+(?:se\s+)?(?:inicia|cria|instancia|abre|inicializa)\b[^.;]{0,60}\b(?:agentes?|agents?)\b/.test(text)) {
+      violations.push("active-mode limitation denies that native Agents/Sessions are created")
+    }
+    if (/\bnenhum\s+(?:agentes?|agents?|sessions?)\b[^.;]{0,40}\bcriad/.test(text)) {
+      violations.push("active-mode limitation claims that no Agent/Session was created")
+    }
+  }
+  if (activeModeLimitations.length > 0) {
+    // Corrected capability kept across the emitted set: native Agents/Sessions
+    // ARE created while model turns are NOT started (creation is not inference).
+    if (!activeModeLimitations.some(issue102StatesNativeAgentCreation)) {
+      violations.push("no active-mode limitation states that native Agents/Sessions are created")
+    }
+    if (!activeModeLimitations.some(issue102StatesModelTurnsNotStarted)) {
+      violations.push("no active-mode limitation states that model turns are not started")
+    }
+  }
+
+  const joined = normalized.join("\n")
+  if (!/\brespostas?\s+academicas?\s+humanas?\b/.test(joined)) {
+    violations.push("limitations no longer state that human academic responses are uncovered")
+  }
+  if (!/\bqualidade\s+de\s+inferencia\b/.test(joined)) {
+    violations.push("limitations no longer state that inference quality is uncovered")
+  }
+
+  for (const text of normalized) {
+    // No global single-process claim: recovery is observed across real processes.
+    for (const pattern of [
+      /\bem\s+(?:um\s+)?unico\s+processo\b/,
+      /\bexecucao\s+em\s+processo\s+unico\b/,
+      /\bprocesso\s+unico\s+global\b/,
+      /\bsingle[-\s]?process\b/,
+    ]) {
+      const match = pattern.exec(text)
+      if (match === null) continue
+      const prefix = text.slice(Math.max(0, match.index - 60), match.index)
+      if (!/\b(?:nao|nunca|jamais|sem|nem)\b/.test(prefix)) {
+        violations.push("limitations claim that every scenario runs in a single process")
+      }
+    }
+    // Inference absence must not become a denial of Agent.send/lifecycle.
+    if (
+      /\b(?:nao|jamais|nunca)\s+(?:se\s+)?(?:executa|envia|realiza|dispara|chama|faz)\b[^.;]{0,50}\bagent[.\s-]?send\b/.test(text) ||
+      /\bnenhum\s+agent[.\s-]?send\b/.test(text)
+    ) {
+      violations.push("limitations deny that the runner issues synthetic Agent.send probes")
+    }
+    if (/\bnao\s+(?:ha|existe|existem)\s+(?:nenhum\s+)?(?:turnos?|lifecycle)\b/.test(text)) {
+      violations.push("limitations claim that no turn/lifecycle event exists")
+    }
+  }
+  return violations
+}
+
+function issue102BlockedEnvironment(reportPath: string): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? "",
+    TMPDIR: tmpdir(),
+    LANG: "C.UTF-8",
+    NO_COLOR: "1",
+    DSHBANCA_DSH_PROFILE_REPORT_PATH: reportPath,
+  }
+}
+
+describe("Issue #102 — native DSH E2E report transparency regression", () => {
+  // The runner creates its scratch sandbox with mkdtempSync(join(tmpdir(),
+  // "dshbanca-profile-e2e-")), i.e. exactly six random characters. The stricter
+  // pattern avoids confusing unrelated fixture directories that share the
+  // prefix in other test files.
+  const runnerScratchEntries = (names: string[]): string[] =>
+    names.filter((name) => /^dshbanca-profile-e2e-[A-Za-z0-9]{6}$/.test(name))
+
+  test("real CLI without lifecycle authorization emits a BLOCKED report with no DSH boot and truthful limitations", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-issue102-"))
+    const reportPath = join(root, "report.json")
+    const beforeScratch = new Set(runnerScratchEntries(readdirSync(tmpdir())))
+    try {
+      const environment = issue102BlockedEnvironment(reportPath)
+      // Hermetic environment: no lifecycle/abrupt-restart opt-in, no DSH_BIN,
+      // no credential variable and no inherited opt-in from the host process.
+      expect(environment.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED).toBeUndefined()
+      expect(Object.keys(environment).filter((key) => key.startsWith("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_"))).toEqual([])
+      expect(environment.DSH_BIN).toBeUndefined()
+
+      const result = spawnSync(process.execPath, ["scripts/e2e-dsh-profile.ts"], {
+        cwd: process.cwd(),
+        env: environment,
+        encoding: "utf8",
+        timeout: 60_000,
+      })
+      // Lifecycle is NOT authorized: BLOCKED/exit 2 before any DSH invocation.
+      expect(result.error).toBeUndefined()
+      expect(result.signal).toBeNull()
+      expect(result.status).toBe(2)
+      expect(result.stdout).toContain("BLOCKED:")
+
+      expect(existsSync(reportPath)).toBe(true)
+      const report = JSON.parse(readFileSync(reportPath, "utf8"))
+      expect(report.status).toBe("BLOCKED")
+      expect(report.repository.revision).toMatch(/^[a-f0-9]{40}$/)
+      expect(Array.isArray(report.limitations)).toBe(true)
+
+      // Operational proof that the blocked path did not boot anything.
+      expect(report.stages.profileBoot).toMatchObject({
+        status: "BLOCKED",
+        started: false,
+        dshCliInvocations: 0,
+        agentHandlesCreated: 0,
+        sessionsCreated: 0,
+        academicProjectInitialized: false,
+      })
+      expect(report.stages.crossProcessBatchAudit).toMatchObject({ status: "BLOCKED", processLaunches: 0 })
+      expect(report.sandbox).toMatchObject({ isolated: false, removed: null })
+      expect(report.failures.length).toBeGreaterThan(0)
+      // No runner-owned scratch sandbox was created for this execution.
+      const afterScratch = runnerScratchEntries(readdirSync(tmpdir()))
+      expect(afterScratch.filter((name) => !beforeScratch.has(name))).toEqual([])
+
+      // Textual contract read from the report actually persisted by the CLI.
+      expect(issue102LimitationViolations(report.limitations)).toEqual([])
+
+      // The historical regression must fail the same contract with a precise reason.
+      const activeModeIndex = report.limitations.findIndex(
+        (entry: unknown) => typeof entry === "string" && issue102IsActiveModeLimitation(issue102NormalizeLimitation(entry)),
+      )
+      expect(activeModeIndex).toBeGreaterThanOrEqual(0)
+      const historicalLimitations = [...report.limitations]
+      historicalLimitations[activeModeIndex] = "Este gate não inicia agente nem chama modelo."
+      expect(issue102LimitationViolations(historicalLimitations)).toContain(
+        "active-mode limitation denies that native Agents/Sessions are created",
+      )
+
+      // The legitimate unauthorized-path messages ("no Agent/Session was created
+      // in that execution") must remain allowed, not mistaken for the historical
+      // denial, even when they mention model turns to describe the blocked run.
+      expect(issue102LimitationViolations([
+        ...report.limitations,
+        "Nenhum Agent/Session foi criado nesta execução não autorizada; o runner parou antes de invocar o CLI DSH.",
+        "Sem autorização de lifecycle, nenhum Agent/Session foi criado e nenhum turno de modelo foi iniciado.",
+      ])).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
