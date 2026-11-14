@@ -1095,7 +1095,9 @@ describe("banca_init", () => {
 
         // The decoy sits exactly where the pre-fix implementation applied the
         // relative root twice; it is the destination the bug used to overwrite.
-        expect(duplicatedRootPath(target, "decoy/project")).toBe(decoyDir)
+        // The path is written literally as an independent oracle for the
+        // duplicatedRootPath/writeDecoy pairing.
+        expect(decoyDir).toBe(join(target, "decoy", "project"))
 
         const result = await boundedInit("decoy/project", base)
         const output = expectSuccessfulInit(result, target)
