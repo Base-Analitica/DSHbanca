@@ -93,7 +93,7 @@ Camada acadêmica presente no código da `master`, com os limites acima:
 - guardrails de correção, snapshots e política de restore;
 - utilitários de referências/BibTeX ([gramática suportada e limitações](docs/bibtex-parser-grammar.md)), compilação LaTeX e relatórios.
 
-Validações LaTeX/BibTeX verificam estrutura, includes e referências. Análise heurística de IA e de similaridade produz **sinais metodológicos**. Nenhuma delas constitui avaliação acadêmica humana, nota, aprovação ou reprovação.
+Validações LaTeX/BibTeX verificam estrutura e includes. `banca_refs` confere o estado das referências apenas contra o cache local; a validação externa de referências está bloqueada nesta base DSH-only. Análise heurística de IA e de similaridade produz **sinais metodológicos**. Nenhuma delas constitui avaliação acadêmica humana, nota, aprovação ou reprovação.
 
 ## Para quem é
 
@@ -171,7 +171,7 @@ O repositório declara o bundle em `package.json` e `cordis.patch.yml` (id `dshb
 | `banca_auditar` | Auditoria por lotes canônicos |
 | `banca_sintese` | Entrada de síntese global (exige cobertura completa) |
 | `banca_corrigir` | Aplica correções com proteções |
-| `banca_refs` | Referências (cadeia MCP → REST → cache) |
+| `banca_refs` | Referências: parsing BibTeX local, cache local como evidência e bloqueio explícito da validação externa |
 | `banca_ia` | Triagem heurística de padrões de IA |
 | `banca_plagio` | Interpreta relatório CopySpider |
 | `banca_loop` | Etapa assistida/preparatória do loop |
@@ -206,7 +206,7 @@ Consulte [docs/ai-review-protocol.md](docs/ai-review-protocol.md) para o protoco
 - Nenhum modelo de IA real foi executado nesta base; avaliações de qualidade, estilo ou deliberação dependentes de modelo não são comprovadas por testes herméticos.
 - O detector de IA é heurístico e **não comprova autoria**; detecção de plágio e similaridade também são sinais metodológicos, não vereditos.
 - Um índice interno de auditoria **não representa aprovação ou reprovação acadêmica** nem substitui avaliação acadêmica humana institucional.
-- Compilação LaTeX (`lualatex`) real de ponta a ponta em documentos arbitrários de terceiros e validação com servidores MCP externos permanecem não exauridas.
+- Compilação LaTeX (`lualatex`) real de ponta a ponta em documentos arbitrários de terceiros permanece não exaurida. A validação externa de referências **não está disponível** nesta base DSH-only: [`banca_refs`](src/tools/banca_refs.ts) lê o BibTeX local, reutiliza o cache local (`.banca/cache/refs.json`) como evidência e marca `bloqueada`/`external_transport_blocked` toda referência sem resultado positivo, sem `fetch`, MCP próprio ou fallback REST; sintaxe BibTeX válida não comprova existência da publicação (ver [como interpretar `banca_refs`](docs/usage.md#como-interpretar-banca_refs)).
 - O projeto permanece `private: true` e `UNLICENSED` ([LICENSE_PENDING.md](LICENSE_PENDING.md)).
 
 ## Como contribuir
