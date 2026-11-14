@@ -90,6 +90,7 @@ function escapeUntrustedForDisplay(value: string): string {
       codePoint <= 0x1f ||
       codePoint === 0x7f ||
       (codePoint >= 0x80 && codePoint <= 0x9f) ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
       (codePoint >= 0x200b && codePoint <= 0x200f) ||
       (codePoint >= 0x202a && codePoint <= 0x202e) ||
       (codePoint >= 0x2066 && codePoint <= 0x2069) ||

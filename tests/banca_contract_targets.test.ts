@@ -1432,6 +1432,26 @@ describe("banca_contract R1 — integridade literal do relatório (A)", () => {
     expectReadOnly(baseline)
     expectNoReportFiles()
   })
+
+  test("A11. surrogate UTF-16 isolado em metadado é escapado e retorno == persistido", async () => {
+    writeProjectJson({ externalDependencies: ["metadado\ud800invalido"] })
+    writeFileAt("main.tex", "manuscrito sintetico com metadado invalido")
+    const baseline = captureProjectState()
+
+    const result = await runContract([correction("main.tex")], true)
+
+    // O surrogate isolado é codificado como sequência literal, sem caractere cru.
+    expect(headerField(result, "External deps")).toBe("`metadado\\ud800invalido`")
+    for (let index = 0; index < result.length; index++) {
+      const code = result.charCodeAt(index)
+      expect(code < 0xd800 || code > 0xdfff).toBe(true)
+    }
+    const savedContracts = reportFiles().filter((file) => file.startsWith("contract-"))
+    expect(savedContracts).toHaveLength(1)
+    const persisted = readFileSync(join(reportsDir(), savedContracts[0]), "utf-8")
+    expect(persisted).toBe(result)
+    expectReadOnly(baseline, (rel) => rel === `.banca/reports/${savedContracts[0]}`)
+  })
 })
 
 // ===========================================================================
