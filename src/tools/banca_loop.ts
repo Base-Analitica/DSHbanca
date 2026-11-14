@@ -34,7 +34,10 @@ export const bancaLoop = defineBancaTool({
       const scores = lastN.map((i) => i.scoreAfter)
       if (new Set(scores).size === 1 && scores[0] !== null) {
         addIteration(root, "loop-circuit-break", state.currentScore, state.currentScore, "failed")
-        return `🔴 circuit breaker: last 3 loops same score (${scores[0]}). Manual intervention required.`
+        return [
+          `🔴 circuit breaker: last 3 loops same score (${scores[0]}).`,
+          'Process interrupted with status "failed"; no manuscript restoration was executed. Manual intervention required.',
+        ].join("\n")
       }
     }
 
@@ -49,8 +52,12 @@ export const bancaLoop = defineBancaTool({
         s0 !== null && s1 !== null && s2 !== null &&
         s0 === s2 && s0 !== s1
       ) {
-        addIteration(root, "loop-oscillation", state.currentScore, state.currentScore, "rollback")
-        return `🔴 circuit breaker: score oscillation. Score ${s0} → ${s1} → ${s2}. Manual intervention required.`
+        addIteration(root, "loop-oscillation", state.currentScore, state.currentScore, "failed")
+        return [
+          `🔴 circuit breaker: score oscillation. Score ${s0} → ${s1} → ${s2}.`,
+          'Process interrupted with status "failed"; no manuscript restoration was executed and none should be inferred.',
+          "Additional evaluation/intervention is required before continuing.",
+        ].join("\n")
       }
     }
 
@@ -63,10 +70,16 @@ export const bancaLoop = defineBancaTool({
 
     // Phase: decide
     if (currentScore >= target) {
-      addIteration(root, "loop-approve", scoreBefore, currentScore, "ok")
+      addIteration(root, "loop-heuristic-threshold", scoreBefore, currentScore, "ok")
       return [
-        `Score: ${currentScore} ≥ target ${target}`,
-        "✓ Target reached. No corrections needed.",
+        `Heuristic citation score: ${currentScore}`,
+        `Local heuristic target: ${target}`,
+        "✓ Local heuristic citation threshold reached.",
+        "",
+        "Scope: main manuscript only (lexical citation-density heuristic).",
+        "This preparatory result is not a complete academic audit, not a grade and not an approval.",
+        "Bibliographic keys are not validated; a citation threshold does not prove reference validity or integral manuscript coverage.",
+        "Detailed audit (banca_auditar), findings and any authorized corrections remain necessary; this operation does not authorize corrections.",
       ].join("\n")
     }
 
@@ -99,20 +112,51 @@ export const bancaLoop = defineBancaTool({
     }
 
     const results: string[] = [
-      `Loop iteration`,
-      `Score: ${scoreBefore ?? "—"} → target ${target}`,
+      "Loop iteration",
+      `Heuristic citation score before: ${scoreBefore ?? "—"} (local citation-density heuristic; main manuscript only)`,
+      `Local heuristic target: ${target}`,
       `Snapshot: ${loopSnapshotLabel}`,
       `Citations: ${citation.citedParagraphs}/${citation.totalParagraphs} (${(100 - citation.percentWithoutCitation).toFixed(1)}%)`,
+      `Local heuristic gap: ${(target - currentScore).toFixed(1)} point(s) below the local heuristic target`,
+      "Marker (process milestone): non-restorable; no manuscript files were captured; this is not a recovery snapshot and does not enable restore or rollback.",
+      "Scope: main manuscript only; lexical citation-density heuristic.",
+      "Preparatory result: not a complete academic audit, grade or approval; bibliographic keys are not validated; integral coverage is not proven.",
+      "Next steps: run banca_auditar for detailed findings; corrections require explicit authorization; re-audit after authorized corrections.",
     ]
-
-    if (currentScore < target) {
-      results.push(`Need: ${(target - currentScore).toFixed(1)} more points`)
-    }
 
     // save report
     const report = generateReport(`LOOP — ${loopSnapshotLabel}`, [
-      { title: "Context", body: `Score before: ${scoreBefore ?? "—"}\nTarget: ${target}\nCitations: ${citation.citedParagraphs}/${citation.totalParagraphs}` },
-      { title: "Next Steps", body: "Run /banca:auditar for detailed findings, then /banca:corrigir with specific corrections." },
+      {
+        title: "Context",
+        body: [
+          `Heuristic citation score before: ${scoreBefore ?? "—"}`,
+          `Local heuristic target: ${target}`,
+          `Citations: ${citation.citedParagraphs}/${citation.totalParagraphs}`,
+          "Scope: main manuscript only (lexical citation-density heuristic).",
+          `Local heuristic gap: ${(target - currentScore).toFixed(1)} point(s) below the local heuristic target`,
+        ].join("\n"),
+      },
+      {
+        title: "Marker",
+        body: [
+          "Snapshot kind: marker (process milestone; non-restorable).",
+          "Restorable content: none — no manuscript files were captured.",
+          "This marker is not a recovery point and does not enable restore or rollback.",
+        ].join("\n"),
+      },
+      {
+        title: "Limitations",
+        body: [
+          "This preparatory result is not a complete academic audit, a grade or an approval.",
+          "Bibliographic keys are not validated; citation presence does not prove reference validity.",
+          "Integral manuscript coverage is not proven; chapters are not audited by this operation.",
+          "This operation does not authorize corrections.",
+        ].join("\n"),
+      },
+      {
+        title: "Next Steps",
+        body: "Run banca_auditar for detailed findings; corrections require explicit authorization; re-audit after authorized corrections.",
+      },
     ])
     saveReport(root, `loop-${loopSnapshotLabel}.md`, report)
 
