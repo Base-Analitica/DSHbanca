@@ -37,6 +37,8 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
+import { createSnapshot } from "../src/lib/snapshot"
+import { PathTraversalError } from "../src/lib/safe_paths"
 
 const symlinksSupported = (() => {
   try {
@@ -683,5 +685,61 @@ describe("integrated proof: synthetic LaTeX/BibTeX project", () => {
     const backup = await bancaRestore.execute({ projectRoot: project, snapshotId: backupLabel, confirm: true }, {} as any)
     expect(String(backup)).toContain(`restored from ${backupLabel}`)
     expect(readFileSync(join(project, "texto", "main.tex"), "utf8")).toContain("MODIFICADO")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #136 — snapshot registration must not consume an external state origin
+//
+// Snapshot creation reads the shared state (`loadState`) for label conflicts
+// before it claims the vault directory or registers the snapshot. A vulnerable
+// state reader could read an external registry; the canonical reader must
+// refuse before any vault directory, manifest or registration is created.
+// ---------------------------------------------------------------------------
+
+describe("issue #136 — snapshot creation refuses an external state origin", () => {
+  stest("createSnapshot refuses before claiming any vault directory", () => {
+    write(project, "main.tex", "MAIN SINTÉTICO 136\n")
+    const mainPath = join(project, "main.tex")
+    const mainHash = sha256(readFileSync(mainPath))
+    mkdirSync(join(project, ".banca"), { recursive: true })
+    write(external, "state.json", JSON.stringify({
+      currentScore: 7.3,
+      lastAudit: null,
+      lastLoop: null,
+      snapshots: [
+        {
+          id: "synthetic-id",
+          label: "SYNTHETIC_EXTERNAL_STATE_LABEL",
+          createdAt: "2026-01-01T00:00:00Z",
+          scoreBefore: null,
+        },
+      ],
+      iterations: [],
+    }))
+    symlinkSync(join(external, "state.json"), join(project, ".banca", "state.json"), "file")
+    const snapshotsDir = join(project, ".banca", "snapshots")
+
+    const before = snapshotTree(base)
+    let error: Error | undefined
+    try {
+      createSnapshot({
+        root: project,
+        snapshotsDir,
+        label: "s136",
+        candidates: [{ logical: "main.tex", abs: mainPath }],
+        labelPolicy: "strict",
+        register: true,
+        kind: "partial",
+      })
+    } catch (caught) {
+      error = caught as Error
+    }
+
+    expect(error).toBeInstanceOf(PathTraversalError)
+    expect(String(error?.message)).toContain("state refused")
+    expect(existsSync(snapshotsDir)).toBe(false)
+    expect(snapshotTree(base)).toEqual(before)
+    expect(sha256(readFileSync(mainPath))).toBe(mainHash)
   })
 })

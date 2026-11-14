@@ -1,5 +1,4 @@
 import {
-  existsSync,
   readFileSync,
   writeFileSync,
   mkdirSync,
@@ -9,7 +8,12 @@ import {
   type Stats,
 } from "node:fs"
 import { join, dirname, resolve } from "node:path"
-import { resolveInsideRoot, prepareRealPathForWrite } from "./safe_paths"
+import {
+  PathTraversalError,
+  prepareRealPathForWrite,
+  resolveInsideRoot,
+  resolveRealInsideRoot,
+} from "./safe_paths"
 import {
   AnalysisCheckpointError,
   type AnalysisCheckpoint,
@@ -55,13 +59,103 @@ export function getStatePath(projectRoot: string): string {
   return resolveInsideRoot(projectRoot, join(".banca", "state.json"))
 }
 
-export function loadState(projectRoot: string): ProjectState {
-  const p = getStatePath(projectRoot)
-  if (!existsSync(p)) return { currentScore: null, lastAudit: null, lastLoop: null, snapshots: [], iterations: [] }
+/** Fresh historical empty state (each call returns an independent object). */
+function emptyState(): ProjectState {
+  return { currentScore: null, lastAudit: null, lastLoop: null, snapshots: [], iterations: [] }
+}
+
+/**
+ * Fixed, sanitized refusals for a project state whose physical origin cannot be
+ * authorized or read. They never embed the host path, a link target, external
+ * state content or a raw filesystem message.
+ */
+const STATE_ORIGIN_REFUSED_UNSAFE =
+  "state refused: the configured origin is not a safe regular file inside the workspace"
+const STATE_ORIGIN_REFUSED_INSPECTION =
+  "state refused: the configured origin could not be inspected safely"
+const STATE_ORIGIN_REFUSED_READ =
+  "state refused: the present state could not be read"
+
+/**
+ * Expected failures of reading an already inspected regular file. They must
+ * surface as a controlled refusal; they are never degraded to an empty state.
+ */
+const EXPECTED_STATE_READ_FAILURES = new Set([
+  "EACCES",
+  "EPERM",
+  "EISDIR",
+  "ELOOP",
+  "ENOENT",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENAMETOOLONG",
+  "ESTALE",
+])
+
+type StateOrigin = { status: "absent" } | { status: "present"; content: string }
+
+/**
+ * Canonical origin preflight for `.banca/state.json` (issue #136).
+ *
+ * `getStatePath` already resolves an absolute path through `resolveInsideRoot`;
+ * the project root is normalised once as well so a relative root can never be
+ * applied twice (lesson from issue #134 R1). The workspace is the only
+ * authorized root: `.banca`, the target of a link or a configured path is never
+ * promoted to a trusted root. The approved destination is inspected with
+ * `lstatSync` and only a regular file is read — directories, FIFOs, sockets and
+ * devices are never opened.
+ *
+ * Categories are kept distinct: an internal regular file is read; a missing
+ * `state.json` is legitimate absence (historical empty state); an
+ * escaping/broken link, a non-directory ancestor, a non-regular destination or
+ * an inspection failure are controlled refusals; a present state that cannot be
+ * read is a controlled read refusal. A residual TOCTOU window remains between
+ * this inspection and the read, so the guarantee covers a filesystem not
+ * concurrently mutated by another process.
+ */
+function readStateOrigin(projectRoot: string): StateOrigin {
+  const absoluteRoot = resolve(projectRoot)
+  let canonicalPath: string
   try {
-    return JSON.parse(readFileSync(p, "utf-8"))
+    canonicalPath = resolveRealInsideRoot(absoluteRoot, getStatePath(absoluteRoot))
+  } catch (error) {
+    if (error instanceof PathTraversalError) throw new PathTraversalError(STATE_ORIGIN_REFUSED_UNSAFE)
+    throw error
+  }
+  let destination: Stats
+  try {
+    destination = lstatSync(canonicalPath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT") return { status: "absent" }
+    if (typeof code === "string") throw new PathTraversalError(STATE_ORIGIN_REFUSED_INSPECTION)
+    throw error
+  }
+  if (!destination.isFile()) throw new PathTraversalError(STATE_ORIGIN_REFUSED_UNSAFE)
+  let content: string
+  try {
+    content = readFileSync(canonicalPath, "utf-8")
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (typeof code === "string" && EXPECTED_STATE_READ_FAILURES.has(code)) {
+      throw new PathTraversalError(STATE_ORIGIN_REFUSED_READ)
+    }
+    throw error
+  }
+  return { status: "present", content }
+}
+
+export function loadState(projectRoot: string): ProjectState {
+  const origin = readStateOrigin(projectRoot)
+  if (origin.status === "absent") return emptyState()
+  try {
+    return JSON.parse(origin.content)
   } catch {
-    return { currentScore: null, lastAudit: null, lastLoop: null, snapshots: [], iterations: [] }
+    // Historical contract: invalid JSON in an internal, authorized regular file
+    // degrades to the empty state. Origin and read refusals are decided before
+    // this read and therefore never reach this catch.
+    return emptyState()
   }
 }
 
