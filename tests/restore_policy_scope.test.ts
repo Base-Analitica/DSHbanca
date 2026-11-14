@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
   existsSync,
@@ -13,6 +14,8 @@ import {
 } from "node:fs"
 import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
+import { pathToFileURL } from "node:url"
+import { PathTraversalError } from "../src/lib/safe_paths"
 
 type SnapshotEntry = { logical: string; content: string }
 
@@ -469,3 +472,187 @@ function setupProjectAt(root: string): void {
     }),
   )
 }
+
+// ---------------------------------------------------------------------------
+// Issue #136 — canonical `.banca/state.json` read boundary for banca_restore
+//
+// `banca_restore` reads the shared state before the configuration and lists the
+// snapshot registry before any restore guard. With an external `state.json`
+// symlink the vulnerable reader exposed external `id`/`label` metadata (and a
+// FIFO redirected read could block before the configuration preflight). The
+// canonical state reader must refuse before listing, planning or writing.
+// ---------------------------------------------------------------------------
+
+const RESTORE136_SECRET = "SEGREDO_ESTADO_EXTERNO_NAO_DEVE_VAZAR"
+
+const RESTORE136_EXTERNAL = JSON.stringify({
+  currentScore: 7.3,
+  lastAudit: null,
+  lastLoop: null,
+  snapshots: [
+    {
+      id: "synthetic-id",
+      label: "SYNTHETIC_EXTERNAL_STATE_LABEL",
+      createdAt: "2026-01-01T00:00:00Z",
+      scoreBefore: null,
+    },
+  ],
+  iterations: [],
+})
+
+const RESTORE136_RAW_DIAGNOSTIC_FRAGMENTS = [
+  "EACCES",
+  "ENOENT",
+  "ENOTDIR",
+  "EISDIR",
+  "ELOOP",
+  "permission denied",
+  "open '",
+]
+
+function writeExternalRestoreState(root: string): string {
+  const outsideDir = `${root}-external-state`
+  mkdirSync(outsideDir, { recursive: true })
+  const outside = join(outsideDir, "state.json")
+  writeFileSync(outside, RESTORE136_EXTERNAL, "utf-8")
+  rmSync(join(root, ".banca", "state.json"), { force: true })
+  symlinkSync(outside, join(root, ".banca", "state.json"), "file")
+  return outside
+}
+
+function cleanupExternalRestoreState(root: string): void {
+  rmSync(root, { recursive: true, force: true })
+  rmSync(`${root}-external-state`, { recursive: true, force: true })
+}
+
+async function executeRestore(args: Record<string, unknown>): Promise<string> {
+  const { bancaRestore } = await import("../src/tools/banca_restore")
+  return String(await bancaRestore.execute(args as any, {} as any))
+}
+
+describe("issue #136 — banca_restore refuses an external state origin", () => {
+  test("list is refused before presenting external snapshot metadata", async () => {
+    const root = setupProject()
+    try {
+      const outside = writeExternalRestoreState(root)
+      const before = readFileSync(join(root, "main.tex"), "utf-8")
+
+      await expect(
+        executeRestore({ projectRoot: root }),
+      ).rejects.toThrow(PathTraversalError)
+
+      expect(readFileSync(join(root, "main.tex"), "utf-8")).toBe(before)
+      expect(existsSync(join(root, ".banca", "snapshots"))).toBe(false)
+      expect(readFileSync(outside, "utf-8")).toBe(RESTORE136_EXTERNAL)
+    } finally {
+      cleanupExternalRestoreState(root)
+    }
+  })
+
+  test("external .banca ancestor state is refused before listing", async () => {
+    const root = setupProject()
+    try {
+      const outsideDir = `${root}-external-banca`
+      mkdirSync(outsideDir, { recursive: true })
+      writeFileSync(join(outsideDir, "state.json"), RESTORE136_EXTERNAL, "utf-8")
+      rmSync(join(root, ".banca"), { recursive: true, force: true })
+      symlinkSync(outsideDir, join(root, ".banca"), "dir")
+
+      await expect(
+        executeRestore({ projectRoot: root }),
+      ).rejects.toThrow(PathTraversalError)
+      expect(readFileSync(join(outsideDir, "state.json"), "utf-8")).toBe(RESTORE136_EXTERNAL)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(`${root}-external-banca`, { recursive: true, force: true })
+    }
+  })
+
+  test("dry-run with a synthetic external snapshot id is refused without writes", async () => {
+    const root = setupProject()
+    try {
+      writeExternalRestoreState(root)
+      const mainBefore = readFileSync(join(root, "main.tex"), "utf-8")
+
+      await expect(
+        executeRestore({ projectRoot: root, snapshotId: "synthetic-id" }),
+      ).rejects.toThrow(PathTraversalError)
+
+      expect(readFileSync(join(root, "main.tex"), "utf-8")).toBe(mainBefore)
+      expect(existsSync(join(root, ".banca", "snapshots"))).toBe(false)
+    } finally {
+      cleanupExternalRestoreState(root)
+    }
+  })
+
+  test("confirm:true with a synthetic external snapshot id is refused without writes", async () => {
+    const root = setupProject()
+    try {
+      writeExternalRestoreState(root)
+      const mainBefore = readFileSync(join(root, "main.tex"), "utf-8")
+
+      await expect(
+        executeRestore({ projectRoot: root, snapshotId: "synthetic-id", confirm: true }),
+      ).rejects.toThrow(PathTraversalError)
+
+      expect(readFileSync(join(root, "main.tex"), "utf-8")).toBe(mainBefore)
+      expect(existsSync(join(root, ".banca", "snapshots"))).toBe(false)
+    } finally {
+      cleanupExternalRestoreState(root)
+    }
+  })
+
+  test(
+    "external FIFO state is refused without a blocking read before the configuration preflight",
+    () => {
+      const root = setupProject()
+      try {
+        const outsideDir = `${root}-external-fifo`
+        mkdirSync(outsideDir, { recursive: true })
+        expect(spawnSync("mkfifo", [join(outsideDir, "state.json")]).status).toBe(0)
+        symlinkSync(join(outsideDir, "state.json"), join(root, ".banca", "state.json"), "file")
+
+        const workerPath = join(outsideDir, "restore-worker.mjs")
+        const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", "banca_restore.ts")).href
+        writeFileSync(
+          workerPath,
+          [
+            "const toolUrl = process.argv[2]",
+            "const project = process.argv[3]",
+            "try {",
+            "  const mod = await import(toolUrl)",
+            "  const out = await mod.bancaRestore.execute({ projectRoot: project }, { directory: project })",
+            '  console.log(JSON.stringify({ ok: true, output: String(out) }))',
+            "} catch (error) {",
+            '  console.log(JSON.stringify({ ok: false, name: String(error && error.name), message: String(error && error.message) }))',
+            "}",
+            "",
+          ].join("\n"),
+          "utf-8",
+        )
+        const outcome = spawnSync(process.execPath, [workerPath, toolUrl, root], {
+          timeout: 5000,
+          encoding: "utf-8",
+        })
+
+        expect(outcome.error).toBeUndefined()
+        expect(outcome.signal).toBeNull()
+        const parsed = JSON.parse(
+          (outcome.stdout ?? "").split("\n").reverse().find((line) => line.trim().startsWith("{")) as string,
+        ) as { ok: boolean; name?: string; message?: string }
+        expect(parsed.ok).toBe(false)
+        expect(parsed.name).toBe("PathTraversalError")
+        const message = String(parsed.message)
+        expect(message).toContain("state refused")
+        expect(message).not.toContain(root)
+        for (const fragment of [RESTORE136_SECRET, "SYNTHETIC_EXTERNAL_STATE_LABEL", ...RESTORE136_RAW_DIAGNOSTIC_FRAGMENTS]) {
+          expect(message).not.toContain(fragment)
+        }
+      } finally {
+        cleanupExternalRestoreState(root)
+        rmSync(`${root}-external-fifo`, { recursive: true, force: true })
+      }
+    },
+    20_000,
+  )
+})

@@ -31,6 +31,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { PathTraversalError } from "../src/lib/safe_paths"
 
 let base: string
@@ -1045,4 +1046,84 @@ describe("issue #134 — banca_corrigir refuses an external configuration origin
     expect(vaultInventory(project)).toEqual(vaultBefore)
     expect(sha256(readFileSync(outsideConfig))).toBe(outsideHash)
   })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #136 — banca_corrigir with a non-regular state destination
+//
+// The correction flow reads the shared state when creating its mandatory
+// pre-correction snapshot. A FIFO `state.json` used to block that read before
+// any configuration preflight completed. The canonical state reader must
+// refuse the FIFO without opening it, before snapshot/state/manuscript changes.
+// ---------------------------------------------------------------------------
+
+describe("issue #136 — banca_corrigir refuses a non-regular state destination", () => {
+  const mkfifoSupported136 = (() => {
+    if (process.platform === "win32") return false
+    const probeBase = mkdtempSync(join(tmpdir(), "dshbanca-136-corrigir-fifo-probe-"))
+    try {
+      return spawnSync("mkfifo", [join(probeBase, "fifo")]).status === 0
+    } finally {
+      rmSync(probeBase, { recursive: true, force: true })
+    }
+  })()
+
+  const fifoTest136 = mkfifoSupported136 ? test : test.skip
+
+  fifoTest136(
+    "FIFO state is refused without a blocking read and no manuscript change",
+    () => {
+      const originalMain = "ORIGINAL sintético 136\n"
+      writeManuscript("main.tex", originalMain)
+      const mainPath = join(project, "main.tex")
+      const mainHash = sha256(readFileSync(mainPath))
+      const fifoPath = join(project, ".banca", "state.json")
+      expect(spawnSync("mkfifo", [fifoPath]).status).toBe(0)
+
+      const workerPath = join(base, "corrigir-state-fifo-worker.mjs")
+      const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", "banca_corrigir.ts")).href
+      writeFileSync(
+        workerPath,
+        [
+          "const toolUrl = process.argv[2]",
+          "const project = process.argv[3]",
+          "try {",
+          "  const mod = await import(toolUrl)",
+          "  const out = await mod.bancaCorrigir.execute({",
+          '    projectRoot: project,',
+          '    corrections: [{ file: "main.tex", oldText: "ORIGINAL", newText: "ALTERADO", expectedOccurrences: 1 }],',
+          "  })",
+          '  console.log(JSON.stringify({ ok: true, output: String(out) }))',
+          "} catch (error) {",
+          '  console.log(JSON.stringify({ ok: false, name: String(error && error.name), message: String(error && error.message) }))',
+          "}",
+          "",
+        ].join("\n"),
+        "utf-8",
+      )
+
+      const outcome = spawnSync(process.execPath, [workerPath, toolUrl, project], {
+        timeout: 6000,
+        encoding: "utf-8",
+      })
+
+      // A vulnerable reader would block on the FIFO until the timeout.
+      expect(outcome.error).toBeUndefined()
+      expect(outcome.signal).toBeNull()
+      const parsed = JSON.parse(
+        (outcome.stdout ?? "").split("\n").reverse().find((line) => line.trim().startsWith("{")) as string,
+      ) as { ok: boolean; name?: string; message?: string; output?: string }
+      expect(parsed.ok).toBe(true)
+      expect(String(parsed.output)).toContain("blocked: pre-correction snapshot failed")
+      expect(String(parsed.output)).toContain("no manuscript file was modified")
+      expect(sha256(readFileSync(mainPath))).toBe(mainHash)
+      // The FIFO was never replaced by a written state file.
+      expect(lstatSync(fifoPath).isFIFO()).toBe(true)
+      const snapshotsDir = join(project, ".banca", "snapshots")
+      if (existsSync(snapshotsDir)) {
+        expect(readdirSync(snapshotsDir)).toEqual([])
+      }
+    },
+    20_000,
+  )
 })
