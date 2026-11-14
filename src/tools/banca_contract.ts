@@ -59,12 +59,66 @@ type TargetState = {
   immutableBy: string[]
   /** Padrões de `allowedPaths` que casaram no caminho canônico. */
   allowedBy: string[]
+  /** `stat.nlink` do destino regular validado (`null` para alvos inválidos). */
+  hardlinkCount: number | null
 }
 
-function sanitizeInlinePath(value: string): string {
-  // Caminhos não contêm novas linhas (já normalizados); crases são neutralizadas
-  // para não quebrar o inline code do Markdown.
-  return value.replace(/`/g, "'")
+/**
+ * Escapa, code point a code point, um valor não confiável para exibição em um
+ * inline code do Markdown. A saída nunca contém crase, quebra de linha ou
+ * caractere de controle: nomes, padrões e metadados não podem criar linhas
+ * estruturais nem campos falsos. O mapeamento é injetivo o suficiente para
+ * exibir valores distintos de forma distinguível (barra invertida é duplicada,
+ * logo uma sequência de escape literal difere do caractere real equivalente).
+ *
+ * A identidade usada em resolução/classificação/comparação continua sendo o
+ * valor original; esta função é aplicada apenas na fronteira de renderização.
+ */
+function escapeUntrustedForDisplay(value: string): string {
+  let escaped = ""
+  for (const char of value) {
+    const codePoint = char.codePointAt(0) as number
+    if (char === "\\") escaped += "\\\\"
+    else if (char === "`") escaped += "\\u0060"
+    else if (char === "<") escaped += "\\u003c"
+    else if (char === ">") escaped += "\\u003e"
+    else if (char === "&") escaped += "\\u0026"
+    else if (char === "\n") escaped += "\\n"
+    else if (char === "\r") escaped += "\\r"
+    else if (char === "\t") escaped += "\\t"
+    else if (
+      codePoint <= 0x1f ||
+      codePoint === 0x7f ||
+      (codePoint >= 0x80 && codePoint <= 0x9f) ||
+      (codePoint >= 0x200b && codePoint <= 0x200f) ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069) ||
+      codePoint === 0x2028 ||
+      codePoint === 0x2029 ||
+      codePoint === 0x2060 ||
+      codePoint === 0xfeff
+    ) {
+      escaped += `\\u${codePoint.toString(16).padStart(4, "0")}`
+    } else {
+      escaped += char
+    }
+  }
+  return escaped
+}
+
+function renderUntrusted(value: string): string {
+  return `\`${escapeUntrustedForDisplay(value)}\``
+}
+
+/**
+ * `loadState` lê JSON sem validação completa de tipo. Só um número finito é
+ * apresentado como score existente; ausência de score é `—` e qualquer outro
+ * valor é declarado inválido, sem inventar nota.
+ */
+function renderScoreBefore(score: unknown): string {
+  if (typeof score === "number" && Number.isFinite(score)) return String(score)
+  if (score === null || score === undefined) return "—"
+  return "não disponível (valor inválido no state)"
 }
 
 function patternMatches(pattern: string, canonicalRel: string): boolean {
@@ -95,6 +149,7 @@ function classifyCorrection(
     protectedBy: [],
     immutableBy: [],
     allowedBy: [],
+    hardlinkCount: null,
   }
 
   if (typeof rawFile !== "string" || rawFile.trim() === "") {
@@ -153,6 +208,7 @@ function classifyCorrection(
     state.invalidReason = "not-regular-file"
     return state
   }
+  state.hardlinkCount = stat.nlink
 
   // Mesmos globs e mesma identidade canônica usados por banca_corrigir.
   state.protectedBy = config.protectedPaths.filter((pattern) =>
@@ -189,7 +245,7 @@ function describeIdentityConflict(
 
 function stateValue(patterns: string[]): string {
   if (patterns.length === 0) return "não"
-  return `sim — ${patterns.map((pattern) => `\`${pattern}\``).join(", ")}`
+  return `sim — ${patterns.map((pattern) => renderUntrusted(pattern)).join(", ")}`
 }
 
 function targetBlocks(state: TargetState, valid: boolean): string {
@@ -205,7 +261,7 @@ function buildReport(
   root: string,
   config: ContractConfig,
   corrections: Array<{ file: string }>,
-  scoreBefore: number | null,
+  scoreBefore: unknown,
 ): string {
   // Mantém a validação de descoberta de capítulos usada historicamente pela
   // ferramenta; os alvos do contrato não dependem dela.
@@ -236,6 +292,9 @@ function buildReport(
   const protectedTargets = validTargets.filter((state) => state.protectedBy.length > 0).length
   const immutableTargets = validTargets.filter((state) => state.immutableBy.length > 0).length
   const outsideAllowlist = validTargets.filter((state) => state.allowedBy.length === 0).length
+  const hardlinkRestricted = validTargets.filter(
+    (state) => state.hardlinkCount !== null && state.hardlinkCount > 1,
+  ).length
   const immutableBlocked = immutableTargets > 0
 
   const validLogicals = validTargets
@@ -263,13 +322,22 @@ function buildReport(
   for (const [canonicalRel, logicals] of logicalsByCanonical) {
     if (logicals.length <= 1) continue
     aliasLines.push(
-      `- ${logicals.map((logical) => `\`${sanitizeInlinePath(logical)}\``).join(", ")} → \`${sanitizeInlinePath(canonicalRel)}\` (${logicals.length} alvos, 1 destino canônico)`,
+      `- ${logicals.map((logical) => renderUntrusted(logical)).join(", ")} → ${renderUntrusted(canonicalRel)} (${logicals.length} alvos, 1 destino canônico)`,
     )
   }
   for (const state of targets) {
     if (state.correctionIndices.length > 1 && state.logical !== null) {
       aliasLines.push(
-        `- \`${sanitizeInlinePath(state.logical)}\` recebido em ${state.correctionIndices.length} correção(ões) (mesmo alvo repetido)`,
+        `- ${renderUntrusted(state.logical)} recebido em ${state.correctionIndices.length} correção(ões) (mesmo alvo repetido)`,
+      )
+    }
+  }
+  for (const state of validTargets) {
+    if (state.logical === null) continue
+    const hardlinkCount = state.hardlinkCount
+    if (hardlinkCount !== null && hardlinkCount > 1) {
+      aliasLines.push(
+        `- ${renderUntrusted(state.logical)} possui nlink=${hardlinkCount} (outros nomes de hardlink não são conhecidos nem varridos; banca_corrigir recusaria o alvo)`,
       )
     }
   }
@@ -291,10 +359,11 @@ function buildReport(
     `**Protected targets:** ${protectedTargets}`,
     `**Immutable targets:** ${immutableTargets}`,
     `**Outside allowedPaths:** ${outsideAllowlist}`,
+    `**Hardlink-restricted targets:** ${hardlinkRestricted}`,
     `**Immutable blocked:** ${immutableBlocked}`,
     `**Identity conflict:** ${identityConflict}`,
-    `**Score before:** ${scoreBefore ?? "—"}`,
-    `**External deps:** ${config.externalDependencies.length > 0 ? config.externalDependencies.join(", ") : "—"}`,
+    `**Score before:** ${renderScoreBefore(scoreBefore)}`,
+    `**External deps:** ${config.externalDependencies.length > 0 ? config.externalDependencies.map((dependency) => renderUntrusted(String(dependency))).join(", ") : "—"}`,
     "",
     "## Alvos por correção",
   ]
@@ -303,20 +372,27 @@ function buildReport(
     const valid = state.invalidReason === null
     const heading =
       state.logical !== null
-        ? `### \`${sanitizeInlinePath(state.logical)}\``
+        ? `### ${renderUntrusted(state.logical)}`
         : `### ${state.display}`
+    const hardlinkRestriction =
+      !valid || state.hardlinkCount === null
+        ? "não avaliável"
+        : state.hardlinkCount > 1
+          ? `sim — nlink=${state.hardlinkCount} (banca_corrigir recusaria o alvo)`
+          : "não"
     lines.push(
       "",
       heading,
       `- Corrections: ${state.correctionIndices.length}`,
       `- Correction indices: ${state.correctionIndices.join(", ")}`,
-      `- Logical path: ${state.logical !== null ? `\`${sanitizeInlinePath(state.logical)}\`` : "não disponível (caminho inválido)"}`,
-      `- Canonical path: ${state.canonicalRel !== null ? `\`${sanitizeInlinePath(state.canonicalRel)}\`` : "não resolvido"}`,
+      `- Logical path: ${state.logical !== null ? renderUntrusted(state.logical) : "não disponível (caminho inválido)"}`,
+      `- Canonical path: ${state.canonicalRel !== null ? renderUntrusted(state.canonicalRel) : "não resolvido"}`,
       `- Valid target: ${valid ? "sim" : `não — ${INVALID_REASON_LABELS[state.invalidReason as InvalidReason]}`}`,
       `- Protected (protectedPaths): ${valid ? stateValue(state.protectedBy) : "não avaliável"}`,
       `- Immutable (immutableFacts): ${valid ? stateValue(state.immutableBy) : "não avaliável"}`,
       `- Allowed (allowedPaths): ${valid ? stateValue(state.allowedBy) : "não avaliável"}`,
       `- Path blocks: ${targetBlocks(state, valid)}`,
+      `- Identity restriction (hardlinks): ${hardlinkRestriction}`,
     )
   }
 
@@ -329,6 +405,7 @@ function buildReport(
     `- Proteção (protectedPaths): ${protectedTargets} alvo(s)`,
     `- Imutabilidade (immutableFacts): ${immutableTargets} alvo(s)`,
     `- Fora da allowlist (allowedPaths): ${outsideAllowlist} alvo(s)`,
+    `- Restrição de hardlink (nlink>1): ${hardlinkRestricted} alvo(s)`,
     `- Destino inválido: ${invalidTargets} alvo(s)`,
     `- Conflito de identidade de destino: ${identityConflictRaw !== null || duplicates > 0 || aliases > 0 ? "sim" : "não"}`,
     "",
@@ -337,6 +414,7 @@ function buildReport(
     "- Ausência de bloqueio de caminho não comprova aprovação humana, permissão do host, validade das substituições, contagem de ocorrências, existência de snapshot, preflight completo de `banca_corrigir` ou execução/sucesso de correção.",
     "- Proteção (`protectedPaths`), allowlist (`allowedPaths`) e imutabilidade (`immutableFacts`) usam a identidade canônica e os mesmos globs de `banca_corrigir`; proteção e imutabilidade são estados distintos.",
     "- Alvos repetidos, aliases e conflito de identidade física são contabilizados sem consolidação silenciosa; um conflito reportado indica que `banca_corrigir` recusaria o lote.",
+    "- Alvos regulares com múltiplos hardlinks (nlink>1) são reportados como restrição de identidade física; `banca_corrigir` recusa esses destinos antes de qualquer snapshot ou escrita. Outros nomes de hardlink podem existir fora da seleção e não são varridos nem inventados.",
     "- Nenhuma correção foi executada, nenhum snapshot foi criado e manuscrito/state não foram alterados.",
     "- `Score before` vem do state existente; nenhum score novo, impacto na nota ou diff é calculado.",
   )
