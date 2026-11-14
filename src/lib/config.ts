@@ -1,6 +1,6 @@
-import { readFileSync, existsSync, writeFileSync } from "node:fs"
+import { lstatSync, readFileSync, writeFileSync, type Stats } from "node:fs"
 import { join } from "node:path"
-import { ensureRealDirInsideRoot, prepareRealPathForWrite } from "./safe_paths"
+import { ensureRealDirInsideRoot, PathTraversalError, prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
 
 export interface ProjectConfig {
   version: number
@@ -91,16 +91,116 @@ function sanitizeAnalysis(rawAnalysis: any, defaults: Required<ProjectConfig>["a
   }
 }
 
-export function loadConfig(projectRoot: string): Required<ProjectConfig> {
-  const path = configPath(projectRoot)
+/**
+ * Fixed, sanitized refusals for a configuration whose physical origin cannot be
+ * authorized or read. They never embed the host path, a link target, external
+ * file content or a raw filesystem message.
+ */
+const CONFIG_ORIGIN_REFUSED_UNSAFE =
+  "config refused: the configured origin is not a safe regular file inside the workspace"
+const CONFIG_ORIGIN_REFUSED_INSPECTION =
+  "config refused: the configured origin could not be inspected safely"
+const CONFIG_ORIGIN_REFUSED_READ =
+  "config refused: the present configuration could not be read"
+
+/**
+ * Expected failures of reading an already inspected regular file. They must
+ * surface as a controlled refusal; they are never degraded to legitimate
+ * absence or to defaults.
+ */
+const EXPECTED_CONFIG_READ_FAILURES = new Set([
+  "EACCES",
+  "EPERM",
+  "EISDIR",
+  "ELOOP",
+  "ENOENT",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENAMETOOLONG",
+  "ESTALE",
+])
+
+/** Independent deep copy of the legitimate defaults (as before this fix). */
+function defaultConfig(): Required<ProjectConfig> {
   const defs = DEFAULTS as Required<ProjectConfig>
-  if (!existsSync(path)) return { ...defs, manuscript: { ...defs.manuscript }, compile: { ...defs.compile }, allowedPaths: [...defs.allowedPaths], protectedPaths: [...defs.protectedPaths], immutableFacts: [...defs.immutableFacts], externalDependencies: [...defs.externalDependencies], providers: { references: { ...defs.providers.references } }, mcp: { ...defs.mcp }, analysis: { ...defs.analysis } }
+  return {
+    ...defs,
+    manuscript: { ...defs.manuscript },
+    compile: { ...defs.compile },
+    allowedPaths: [...defs.allowedPaths],
+    protectedPaths: [...defs.protectedPaths],
+    immutableFacts: [...defs.immutableFacts],
+    externalDependencies: [...defs.externalDependencies],
+    providers: { references: { ...defs.providers.references } },
+    mcp: { ...defs.mcp },
+    analysis: { ...defs.analysis },
+  }
+}
+
+type ConfigOrigin = { status: "absent" } | { status: "present"; content: string }
+
+/**
+ * Canonical configuration preflight shared by `loadConfig` and
+ * `validateConfig` (issue #134).
+ *
+ * The project workspace is the only authorized root. `.banca`, the target of a
+ * link or a configured path is never promoted to a trusted root. The origin is
+ * resolved with the existing canonical policy (`resolveRealInsideRoot`), the
+ * approved destination is inspected with `lstatSync`, and only a regular file
+ * is read — directories, FIFOs, sockets and devices are never opened.
+ *
+ * Categories are kept distinct: an internal regular file is read; a missing
+ * `.banca/project.json` is legitimate absence; an escaping/broken link, a
+ * non-directory ancestor, a non-regular destination or an inspection failure
+ * are controlled refusals; a present file that cannot be read is a controlled
+ * read refusal. A residual TOCTOU window remains between this inspection and
+ * the read, so the guarantee covers a filesystem not concurrently mutated by
+ * another process.
+ */
+function readConfigOrigin(projectRoot: string): ConfigOrigin {
+  let canonicalPath: string
   try {
-    const raw = JSON.parse(readFileSync(path, "utf-8"))
+    canonicalPath = resolveRealInsideRoot(projectRoot, configPath(projectRoot))
+  } catch (error) {
+    if (error instanceof PathTraversalError) throw new PathTraversalError(CONFIG_ORIGIN_REFUSED_UNSAFE)
+    throw error
+  }
+  let destination: Stats
+  try {
+    destination = lstatSync(canonicalPath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT") return { status: "absent" }
+    if (typeof code === "string") throw new PathTraversalError(CONFIG_ORIGIN_REFUSED_INSPECTION)
+    throw error
+  }
+  if (!destination.isFile()) throw new PathTraversalError(CONFIG_ORIGIN_REFUSED_UNSAFE)
+  let content: string
+  try {
+    content = readFileSync(canonicalPath, "utf-8")
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (typeof code === "string" && EXPECTED_CONFIG_READ_FAILURES.has(code)) {
+      throw new PathTraversalError(CONFIG_ORIGIN_REFUSED_READ)
+    }
+    throw error
+  }
+  return { status: "present", content }
+}
+
+export function loadConfig(projectRoot: string): Required<ProjectConfig> {
+  const origin = readConfigOrigin(projectRoot)
+  if (origin.status === "absent") return defaultConfig()
+  try {
+    const raw = JSON.parse(origin.content)
     const migrated = migrate(raw)
     return sanitizeConfig(migrated)
   } catch {
-    return { ...defs, manuscript: { ...defs.manuscript }, compile: { ...defs.compile }, allowedPaths: [...defs.allowedPaths], protectedPaths: [...defs.protectedPaths], immutableFacts: [...defs.immutableFacts], externalDependencies: [...defs.externalDependencies], providers: { references: { ...defs.providers.references } }, mcp: { ...defs.mcp }, analysis: { ...defs.analysis } }
+    // Historical contract: invalid JSON in an internal, authorized regular file
+    // falls back to independent defaults. Origin and read refusals are decided
+    // before this read and therefore never reach this catch.
+    return defaultConfig()
   }
 }
 
@@ -141,10 +241,19 @@ function sanitizeConfig(raw: any): Required<ProjectConfig> {
 }
 
 export function validateConfig(projectRoot: string): { valid: boolean; errors: string[] } {
-  const path = configPath(projectRoot)
-  if (!existsSync(path)) return { valid: false, errors: ["config not found"] }
+  let origin: ConfigOrigin
   try {
-    const raw = JSON.parse(readFileSync(path, "utf-8"))
+    origin = readConfigOrigin(projectRoot)
+  } catch (error) {
+    // Public contract preserved: a present but unauthorized/unreadable origin
+    // is reported through the structured `{ valid, errors }` result with a
+    // fixed, sanitized diagnostic instead of a raw filesystem message.
+    if (error instanceof PathTraversalError) return { valid: false, errors: [error.message] }
+    throw error
+  }
+  if (origin.status === "absent") return { valid: false, errors: ["config not found"] }
+  try {
+    const raw = JSON.parse(origin.content)
     const errs: string[] = []
     if (typeof raw.version !== "number" || raw.version < 1) errs.push("version must be >= 1")
     if (raw.manuscript?.format && !["latex", "markdown", "docx"].includes(raw.manuscript.format)) errs.push("manuscript.format must be latex|markdown|docx")

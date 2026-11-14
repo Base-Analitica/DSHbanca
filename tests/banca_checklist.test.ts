@@ -1099,3 +1099,163 @@ describe("issue #132 R1 RED — physical read failure sanitization", () => {
     expect(snapshotTree(base)).toEqual(before)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Issue #134 — canonical origin boundary for `.banca/project.json`
+//
+// The mantenedor reproduction: a legitimate synthetic manuscript with an
+// external sibling JSON reached `bancaChecklist` through a symlinked
+// `.banca/project.json` and changed 6/6 into 2/3. The configuration origin is
+// inspected physically before any JSON is consumed, so the refusal happens
+// before any `Checklist:` header, count, marker evaluation or fallback.
+//
+// Fixtures are synthetic scratch trees; external files live beside the
+// workspace and are removed by the same `afterEach` teardown. No DSH host,
+// model, network, compilation or real manuscript is involved.
+// ---------------------------------------------------------------------------
+
+/** Synthetic token placed in the external configuration and never consumed. */
+const CONFIG134_SECRET = "SEGREDO_SINTETICO_EXTERNO_NAO_DEVE_VAZAR"
+
+/** External configuration that would redirect the checklist to `missing.tex`. */
+const CONFIG134_OUTSIDE = JSON.stringify(
+  {
+    version: 1,
+    manuscript: {
+      format: "latex",
+      root: ".",
+      main: "missing.tex",
+      bib: "referencias.bib",
+      chapters: ["capitulos/*.tex"],
+      outputDir: "trabalhos",
+    },
+    compile: { enabled: false, command: [] },
+    immutableFacts: [CONFIG134_SECRET],
+  },
+  null,
+  2,
+)
+
+describe("issue #134 — canonical project configuration origin", () => {
+  /** Internal manuscript only; the project configuration comes from elsewhere. */
+  function seedInternalManuscript(): void {
+    writeMain(GENUINE_MAIN)
+    writeBib()
+    writeChapter()
+  }
+
+  function linkExternalConfig(): string {
+    const external = writeExternal("outside-project.json", CONFIG134_OUTSIDE)
+    rmSync(join(project, ".banca", "project.json"), { force: true })
+    symlinkSync(external, join(project, ".banca", "project.json"), "file")
+    return external
+  }
+
+  stest("external project.json symlink is refused before any checklist output", async () => {
+    seedInternalManuscript()
+    const external = linkExternalConfig()
+    const before = snapshotTree(base)
+
+    const attempt = await attemptChecklist()
+
+    expectBlockedDestination(attempt, [CONFIG134_SECRET, "missing.tex", "2/3", "6/6"])
+    expect(snapshotTree(base)).toEqual(before)
+    expect(readFileSync(external, "utf-8")).toBe(CONFIG134_OUTSIDE)
+  })
+
+  stest("external .banca directory symlink is refused before any checklist output", async () => {
+    seedInternalManuscript()
+    writeExternal("outside-banca/project.json", CONFIG134_OUTSIDE)
+    rmSync(join(project, ".banca"), { recursive: true, force: true })
+    symlinkSync(join(base, "outside-banca"), join(project, ".banca"), "dir")
+
+    const attempt = await attemptChecklist()
+
+    expectBlockedDestination(attempt, [CONFIG134_SECRET, "missing.tex", "2/3", "6/6"])
+  })
+
+  stest("broken project.json symlink is refused instead of falling back to defaults", async () => {
+    seedInternalManuscript()
+    symlinkSync("../no-such-dir/project.json", join(project, ".banca", "project.json"), "file")
+
+    const attempt = await attemptChecklist()
+
+    // A broken link is not a legitimate absence: no defaults-based 6/6 output.
+    expectBlockedDestination(attempt, ["6/6"])
+  })
+
+  test("non-regular project.json destination is refused instead of falling back to defaults", async () => {
+    seedInternalManuscript()
+    mkdirSync(join(project, ".banca", "project.json"), { recursive: true })
+
+    const attempt = await attemptChecklist()
+
+    expectBlockedDestination(attempt, ["6/6"])
+  })
+
+  fifoTest(
+    "external FIFO configuration destination is refused without a blocking read",
+    async () => {
+      seedInternalManuscript()
+      mkdirSync(join(base, "outside-fifo"), { recursive: true })
+      const fifo = join(base, "outside-fifo", "project.json")
+      expect(spawnSync("mkfifo", [fifo]).status).toBe(0)
+      rmSync(join(project, ".banca", "project.json"), { force: true })
+      symlinkSync(fifo, join(project, ".banca", "project.json"), "file")
+
+      const workerPath = join(base, "config-fifo-worker.mjs")
+      writeFileSync(workerPath, WORKER_SOURCE, "utf-8")
+      const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", "banca_checklist.ts")).href
+      const outcome = spawnSync(process.execPath, [workerPath, toolUrl, project], {
+        timeout: 5000,
+        encoding: "utf-8",
+      })
+
+      // A vulnerable implementation would block reading the FIFO until timeout.
+      expect(outcome.error).toBeUndefined()
+      expect(outcome.signal).toBeNull()
+      const jsonLine = (outcome.stdout ?? "")
+        .split("\n")
+        .reverse()
+        .find((line) => line.trim().startsWith("{"))
+      expect(jsonLine).toBeDefined()
+      const parsed = JSON.parse(jsonLine as string) as { ok: boolean; name?: string; message?: string }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.name).toBe("PathTraversalError")
+      const message = String(parsed.message)
+      expect(message).not.toContain(base)
+      for (const fragment of [...FORBIDDEN_DIAGNOSTIC_FRAGMENTS, CONFIG134_SECRET, "2/3", "6/6"]) {
+        expect(message).not.toContain(fragment)
+      }
+    },
+    20_000,
+  )
+
+  stest("internal symlink to an internal configuration file remains allowed", async () => {
+    seedInternalManuscript()
+    writeFile(
+      "configs/project.json",
+      JSON.stringify({
+        version: 1,
+        manuscript: {
+          format: "latex",
+          root: ".",
+          main: "main.tex",
+          bib: "referencias.bib",
+          chapters: ["capitulos/*.tex"],
+          outputDir: "trabalhos",
+        },
+      }),
+    )
+    symlinkSync(join(project, "configs", "project.json"), join(project, ".banca", "project.json"), "file")
+
+    expect(header(await runChecklist())).toBe("Checklist: 6/6")
+  })
+
+  test("internal regular configuration keeps the historical 6/6 result", async () => {
+    writeProjectConfig()
+    seedInternalManuscript()
+
+    expect(header(await runChecklist())).toBe("Checklist: 6/6")
+  })
+})

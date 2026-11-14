@@ -31,6 +31,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { PathTraversalError } from "../src/lib/safe_paths"
 
 let base: string
 let project: string
@@ -987,5 +988,61 @@ describe("Issue #110 R1/P1-B — Unicode malformado rejeitado antes do snapshot"
     const label = loadState(project).snapshots[0].label
     await restoreAndVerify(label, { "main.tex": original })
     expect(sha256(readFileSync(join(project, "main.tex")))).toBe(originalHash)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #134 — canonical origin boundary for `.banca/project.json`
+//
+// A correction is the highest-impact existing consumer of the configuration:
+// the file controls protected paths, immutable facts and manuscript paths. With
+// an external `.banca/project.json` symlink the vulnerable reader accepted a
+// configuration read outside the workspace and could snapshot and write the
+// manuscript under those externally supplied rules. The canonical preflight
+// must refuse before any snapshot, state change or manuscript write.
+// ---------------------------------------------------------------------------
+
+describe("issue #134 — banca_corrigir refuses an external configuration origin", () => {
+  const symlinksSupported134 = (() => {
+    try {
+      const probeBase = mkdtempSync(join(tmpdir(), "dshbanca-134-corrigir-link-probe-"))
+      try {
+        symlinkSync(probeBase, join(probeBase, "link"))
+        return true
+      } finally {
+        rmSync(probeBase, { recursive: true, force: true })
+      }
+    } catch {
+      return false
+    }
+  })()
+
+  const stest134 = symlinksSupported134 ? test : test.skip
+
+  stest134("refuses before snapshot, state change or manuscript write", async () => {
+    const outsideConfig = join(base, "outside-project.json")
+    writeFileSync(outsideConfig, JSON.stringify(projectConfig()), "utf-8")
+    rmSync(join(project, ".banca", "project.json"))
+    symlinkSync(outsideConfig, join(project, ".banca", "project.json"), "file")
+
+    const originalMain = "Texto original sintético que não pode ser alterado.\n"
+    writeManuscript("main.tex", originalMain)
+    const manuscriptHash = sha256(originalMain)
+    const stateBefore = stateHash(project)
+    const vaultBefore = vaultInventory(project)
+    const outsideHash = sha256(readFileSync(outsideConfig))
+
+    await expect(
+      runCorrection({
+        corrections: [
+          { file: "main.tex", oldText: "Texto original", newText: "Texto alterado", expectedOccurrences: 1 },
+        ],
+      }),
+    ).rejects.toThrow(PathTraversalError)
+
+    expect(sha256(readFileSync(join(project, "main.tex")))).toBe(manuscriptHash)
+    expect(stateHash(project)).toBe(stateBefore)
+    expect(vaultInventory(project)).toEqual(vaultBefore)
+    expect(sha256(readFileSync(outsideConfig))).toBe(outsideHash)
   })
 })
