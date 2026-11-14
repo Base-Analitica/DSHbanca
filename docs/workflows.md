@@ -1,6 +1,6 @@
 # Workflows
 
-> **Delimitação histórica.** As seções abaixo preservam o desenho de fluxos do outro harness (OpenBanca/OpenCode) e **não descrevem os caminhos operacionais atuais do DSHbanca**. Os comandos `/banca:*` são referências históricas não suportadas. A documentação vigente está no [README](../README.md), na [arquitetura](architecture.md), na [instalação](installation.md) e no [guia de uso](usage.md). As exceções são as seções "Validação de Referências" e "Integração com MCPs", reconciliadas com o contrato DSH-only do HEAD `f6786df` (issue #122).
+> **Delimitação histórica.** As seções abaixo preservam o desenho de fluxos do outro harness (OpenBanca/OpenCode) e **não descrevem os caminhos operacionais atuais do DSHbanca**. Os comandos `/banca:*` são referências históricas não suportadas. A documentação vigente está no [README](../README.md), na [arquitetura](architecture.md), na [instalação](installation.md) e no [guia de uso](usage.md). As exceções são as seções "Validação de Referências" e "Integração com MCPs", reconciliadas com o contrato DSH-only do SHA `f6786df` (issue #122).
 
 ## Correção Contínua
 

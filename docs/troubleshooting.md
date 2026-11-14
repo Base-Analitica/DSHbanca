@@ -1,6 +1,6 @@
 # Solução de Problemas
 
-> **Página parcialmente histórica.** As menções a `/banca:*`, `opencode.json` e OpenCode nesta página são registro do outro harness (OpenBanca/OpenCode), **legado não suportado**; as ferramentas atuais são as tools nativas do DSHbanca no DSH, e não há slash commands nem CLI do host a recomendar. Os itens de referências, timeout e diagnóstico foram reconciliados com o contrato do HEAD `f6786df` (issue #122); nos demais itens, consulte o [guia de uso](usage.md), a [arquitetura](architecture.md) e [MCPs e integrações externas](mcps.md).
+> **Página parcialmente histórica.** As menções a `/banca:*`, `opencode.json` e OpenCode nesta página são registro do outro harness (OpenBanca/OpenCode), **legado não suportado**; as ferramentas atuais são as tools nativas do DSHbanca no DSH, e não há slash commands nem CLI do host a recomendar. Os itens de referências, timeout e diagnóstico foram reconciliados com o contrato do SHA `f6786df` (issue #122); nos demais itens, consulte o [guia de uso](usage.md), a [arquitetura](architecture.md) e [MCPs e integrações externas](mcps.md).
 
 ## Problemas Comuns
 
@@ -109,7 +109,7 @@ A ferramenta de referências do DSHbanca é [`banca_refs`](../src/tools/banca_re
 | `no entries found in bib file` | Sintaxe válida, sem entradas bibliográficas | Não é erro de parsing |
 | Resultado positivo em cache | Evidência armazenada reutilizada | Não comprova consulta externa atual nem autenticidade |
 | `bloqueada` / `external_transport_blocked` / `Blocked` | Sem cache positivo e sem provedor nativo no DSH observado | Fora da média; não é `nao_encontrada` nem prova de referência falsa |
-| `Partial evaluation: E/N evaluated (B blocked)` | Avaliação parcial | Só as avaliadas entram na média |
+| Veredito do relatório: `Partial evaluation: E/N evaluated (B blocked)` | Avaliação parcial | Só as avaliadas entram na média |
 
 O relatório fica em `.banca/reports/refs-<timestamp>.md` e registra providers, evidências e limitações. Se todas as referências estiverem bloqueadas, a média é `N/A` e o veredito informa que nenhuma referência pôde ser avaliada. Veja a [gramática do parser](bibtex-parser-grammar.md) e a interpretação por cenário no [guia de uso](usage.md).
 

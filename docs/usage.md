@@ -8,7 +8,7 @@ Essa divisão é normativa, não prova de funcionamento. Consulte o [README](../
 
 ## O que está disponível e o que falta provar
 
-Referência desta revisão: `origin/master` em `66049be57123ddd5ff7d0dec3c3cba2d5db36f4f` para os estados operacionais desta página, consultados em 22/10/2026. O contrato de `banca_refs` foi reconciliado com o HEAD `f6786df972ac574d7a36eda99f43cdc6f42a38f9` (issue #122). Revalide estados de PRs e issues antes de usar uma revisão posterior.
+Referência desta revisão: `origin/master` em `66049be57123ddd5ff7d0dec3c3cba2d5db36f4f` para os estados operacionais desta página, consultados em 22/10/2026. O contrato de `banca_refs` foi reconciliado com o SHA `f6786df972ac574d7a36eda99f43cdc6f42a38f9` (issue #122). Revalide estados de PRs e issues antes de usar uma revisão posterior.
 
 | Nível | Estado verificado | Limite |
 |---|---|---|

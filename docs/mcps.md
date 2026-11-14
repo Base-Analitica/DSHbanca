@@ -1,12 +1,12 @@
 # MCPs e integrações externas
 
-Página reconciliada com o contrato DSH-only do HEAD `f6786df` (issue #122). Ela descreve o lugar de MCPs e integrações com provedores externos no DSHbanca; não é guia de configuração de MCP.
+Página reconciliada com o contrato DSH-only do SHA `f6786df` (issue #122). Ela descreve o lugar de MCPs e integrações com provedores externos no DSHbanca; não é guia de configuração de MCP.
 
 ## Governança: o DSH é o único harness
 
 MCPs, rede, processos filhos e integrações com provedores externos pertencem ao **DSH (DeepSeek Harness)**, único harness do projeto, não ao plugin. Lifecycle, ambiente, credenciais e política de acesso dessas integrações são responsabilidade do host ([AGENTS.md](../AGENTS.md), [arquitetura](architecture.md)).
 
-O DSHbanca não empacota, não configura, não registra e não inicia cliente MCP, servidor próprio ou subprocesso de transporte. Não há auto-registro de MCP, fallback REST ou transporte externo implementado pela ferramenta de referências.
+O DSHbanca não registra nem inicia cliente MCP, servidor próprio ou subprocesso de transporte no fluxo de `banca_refs`. Não há auto-registro de MCP, fallback REST ou transporte externo implementado pela ferramenta de referências.
 
 ## O que `banca_refs` faz
 
@@ -31,6 +31,7 @@ Os itens abaixo são registro histórico do harness anterior (OpenCode/OpenBanca
 - lista de MCPs "recomendados" do protótipo (crossref-academic, semantic-scholar, pubmed, openalex);
 - campos preservados por compatibilidade em `.banca/project.json`, migrados por `loadConfig`: `providers.references` (defaults `primary: mcp:crossref-academic`, `fallbacks: ["rest:crossref", "cache"]`, `timeoutMs: 20000`) e `mcp.crossrefAcademicEnabled` (default `false`);
 - flags `OPENBANCA_ENABLE_CROSSREF_MCP` e `DSHBANCA_ENABLE_CROSSREF_MCP`, e o helper `getMcpCommand()` de [`config.ts`](../src/lib/config.ts), sem call site no fluxo atual;
-- o comando `uvx --from crossref-academic-mcp-server crossref-server` retornado por esse helper.
+- o comando `uvx --from crossref-academic-mcp-server crossref-server` retornado por esse helper;
+- código legado sem call site no fluxo atual: `src/lib/mcp_client.ts` (cliente MCP com `spawn`) e `validateRef` de `src/lib/academic.ts` (fetch REST), mantidos como helpers históricos e não inicializados por `banca_refs`.
 
 Esses campos existem apenas por compatibilidade com configurações antigas e não são consultados pelo fluxo atual. Nenhum deles registra MCP, inicia processo, aciona fallback REST ou altera o status `bloqueada`. A existência de código legado não o torna caminho recomendado; transporte externo, se vier a existir, pertence ao DSH.
