@@ -42,6 +42,22 @@ export const bancaInit = defineBancaTool({
       throw err
     }
 
+    // Read the academic state through the canonical reader approved in #136
+    // before any initialization effect. `loadState` decides origin safety,
+    // regularity and readability, and only a legitimately absent state or
+    // invalid JSON in an authorized internal file degrades to the historical
+    // empty state. A known refusal must happen here, before directories,
+    // configuration or assets are created or replaced (issue #140); its fixed
+    // sanitized diagnostic is returned instead of the generic asset-path
+    // message reserved for escaping destinations.
+    let state: ReturnType<typeof loadState>
+    try {
+      state = loadState(root)
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: ${err.message}`
+      throw err
+    }
+
     try {
       ensureBancaDir(root)
 
@@ -63,7 +79,8 @@ export const bancaInit = defineBancaTool({
 
       saveConfig(root, config)
 
-      const state = loadState(root)
+      // Reuse the state approved by the preflight above instead of reading it
+      // again after the side effects.
       saveState(root, state)
 
       const installed = installAssets(root, !!args.force)
