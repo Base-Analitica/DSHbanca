@@ -1259,3 +1259,108 @@ describe("issue #134 — canonical project configuration origin", () => {
     expect(header(await runChecklist())).toBe("Checklist: 6/6")
   })
 })
+
+// ---------------------------------------------------------------------------
+// Issue #134 R1 — relative project roots
+//
+// The R1 regression in `readConfigOrigin` made a relative root inspect
+// `<root>/<root>/.banca/project.json`, so `bancaChecklist` could consume an
+// internal duplicate instead of the true configuration. The real tool is run in
+// a bounded child process whose `cwd` is the scratch base, keeping the relative
+// resolution faithful to a real local caller. DSH dispatch normally normalizes
+// the root; this exercises the library/consumer contract directly.
+// ---------------------------------------------------------------------------
+
+describe("issue #134 R1 — relative project root configuration", () => {
+  function runChecklistFromRelativeRoot(baseDir: string, root: string): { ok: true; output: string } | { ok: false; name?: string; message?: string } {
+    const workerPath = join(baseDir, "checklist-relative-worker.mjs")
+    writeFileSync(workerPath, WORKER_SOURCE, "utf-8")
+    const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", "banca_checklist.ts")).href
+    const outcome = spawnSync(process.execPath, [workerPath, toolUrl, root], {
+      cwd: baseDir,
+      timeout: 10_000,
+      encoding: "utf-8",
+    })
+    expect(outcome.error).toBeUndefined()
+    expect(outcome.signal).toBeNull()
+    const jsonLine = (outcome.stdout ?? "")
+      .split("\n")
+      .reverse()
+      .find((line) => line.trim().startsWith("{"))
+    expect(jsonLine).toBeDefined()
+    return JSON.parse(jsonLine as string)
+  }
+
+  function seedRelativeWorkspace(relativeRoot: string, config?: string): string {
+    const workspace = join(base, relativeRoot)
+    mkdirSync(join(workspace, ".banca"), { recursive: true })
+    writeFileSync(
+      join(workspace, ".banca", "project.json"),
+      config ??
+        JSON.stringify({
+          version: 1,
+          manuscript: {
+            format: "latex",
+            root: ".",
+            main: "documento/principal.tex",
+            bib: "biblio/fontes.bib",
+            chapters: ["secoes/*.tex"],
+            outputDir: "trabalhos",
+          },
+        }),
+      "utf-8",
+    )
+    mkdirSync(join(workspace, "documento"), { recursive: true })
+    mkdirSync(join(workspace, "biblio"), { recursive: true })
+    mkdirSync(join(workspace, "secoes"), { recursive: true })
+    writeFileSync(join(workspace, "documento", "principal.tex"), GENUINE_MAIN, "utf-8")
+    writeFileSync(join(workspace, "biblio", "fontes.bib"), "@book{sintetica2026, title={Sintético}}\n", "utf-8")
+    writeFileSync(join(workspace, "secoes", "intro.tex"), "\\chapter{Sintético}\n", "utf-8")
+    return workspace
+  }
+
+  stest("relative root reads the true custom configuration and reports 6/6", () => {
+    seedRelativeWorkspace("workspace")
+
+    const outcome = runChecklistFromRelativeRoot(base, "workspace")
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) {
+      expect(header(outcome.output)).toBe("Checklist: 6/6")
+    }
+  })
+
+  stest("relative root refuses an external true origin despite an internal duplicate", () => {
+    seedRelativeWorkspace("workspace")
+    // Internal duplicate at the doubly-prefixed destination a broken R1 would read.
+    mkdirSync(join(base, "workspace", "workspace", ".banca"), { recursive: true })
+    writeFileSync(
+      join(base, "workspace", "workspace", ".banca", "project.json"),
+      JSON.stringify({
+        version: 1,
+        manuscript: { main: "missing.tex", bib: "referencias.bib", chapters: ["capitulos/*.tex"] },
+      }),
+      "utf-8",
+    )
+    const outside = writeExternal("outside-relative-project.json", CONFIG134_OUTSIDE)
+    rmSync(join(base, "workspace", ".banca", "project.json"))
+    symlinkSync(outside, join(base, "workspace", ".banca", "project.json"), "file")
+
+    // Materialize the bounded worker before the inventory snapshot so the
+    // harness file is part of the stable tree, not a post-snapshot artifact.
+    writeFileSync(join(base, "checklist-relative-worker.mjs"), WORKER_SOURCE, "utf-8")
+    const before = snapshotTree(base)
+    const outcome = runChecklistFromRelativeRoot(base, "workspace")
+
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      expect(outcome.name).toBe("PathTraversalError")
+      const message = String(outcome.message)
+      expect(message.length).toBeGreaterThan(0)
+      expect(message).not.toContain(base)
+      for (const fragment of [...FORBIDDEN_DIAGNOSTIC_FRAGMENTS, CONFIG134_SECRET, "nested-decoy", "2/3", "6/6"]) {
+        expect(message).not.toContain(fragment)
+      }
+    }
+    expect(snapshotTree(base)).toEqual(before)
+  })
+})

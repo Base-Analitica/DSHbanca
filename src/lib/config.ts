@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync, writeFileSync, type Stats } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { ensureRealDirInsideRoot, PathTraversalError, prepareRealPathForWrite, resolveRealInsideRoot } from "./safe_paths"
 
 export interface ProjectConfig {
@@ -159,9 +159,13 @@ type ConfigOrigin = { status: "absent" } | { status: "present"; content: string 
  * another process.
  */
 function readConfigOrigin(projectRoot: string): ConfigOrigin {
+  // `configPath` already embeds the project root. Normalize the root exactly
+  // once before building/inspecting the path, otherwise the root-relative
+  // helper would apply a relative root twice (issue #134 R1).
+  const absoluteRoot = resolve(projectRoot)
   let canonicalPath: string
   try {
-    canonicalPath = resolveRealInsideRoot(projectRoot, configPath(projectRoot))
+    canonicalPath = resolveRealInsideRoot(absoluteRoot, configPath(absoluteRoot))
   } catch (error) {
     if (error instanceof PathTraversalError) throw new PathTraversalError(CONFIG_ORIGIN_REFUSED_UNSAFE)
     throw error
