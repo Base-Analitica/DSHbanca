@@ -83,7 +83,14 @@ export const bancaInit = defineBancaTool({
     force: z.boolean().optional().describe("Overwrite existing config + assets"),
   },
   execute: async (args, ctx) => {
-    const root = args.projectRoot || ctx.directory
+    // Normalize the workspace root once at the tool boundary (issue #143).
+    // Downstream consumers build destinations with `join(root, ...)` and then
+    // resolve them again against the same root; a relative root would be
+    // applied twice, writing configuration/assets into a duplicated directory
+    // while state and the preflights used the true root. This is a lexical
+    // normalization only: the canonical confinement, symlink and physical
+    // identity preflights below are unchanged.
+    const root = resolve(args.projectRoot || ctx.directory)
     const cfgPath = configPath(root)
     if (existsSync(cfgPath) && !args.force) return "skipped — .banca/project.json exists. use --force."
 
