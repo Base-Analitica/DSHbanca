@@ -285,6 +285,7 @@ describe("banca_init", () => {
     rootArg: string,
     cwd: string,
     force = false,
+    mode: "projectRoot" | "ctxDirectory" = "projectRoot",
   ): { timedOut: boolean; parsed: { ok: boolean; result?: string; name?: string; message?: string } } {
     const worker = join(cwd, `banca-init-worker-${process.pid}-${Math.random().toString(16).slice(2)}.mjs`)
     const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", "banca_init.ts")).href
@@ -294,9 +295,11 @@ describe("banca_init", () => {
         "const toolUrl = process.argv[2]",
         "const root = process.argv[3]",
         "const force = process.argv[4] === '1'",
+        "const mode = process.argv[5] === 'ctx' ? 'ctx' : 'projectRoot'",
         "const { bancaInit } = await import(toolUrl)",
         "try {",
-        "  const result = await bancaInit.execute({ projectRoot: root, force }, { directory: root })",
+        "  const args = mode === 'ctx' ? { force } : { projectRoot: root, force }",
+        "  const result = await bancaInit.execute(args, { directory: root })",
         "  console.log(JSON.stringify({ ok: true, result: String(result) }))",
         "} catch (error) {",
         "  console.log(JSON.stringify({ ok: false, name: String(error && error.name), message: String(error && error.message) }))",
@@ -305,7 +308,7 @@ describe("banca_init", () => {
       ].join("\n"),
       "utf-8",
     )
-    const outcome = spawnSync(process.execPath, [worker, toolUrl, rootArg, force ? "1" : "0"], {
+    const outcome = spawnSync(process.execPath, [worker, toolUrl, rootArg, force ? "1" : "0", mode === "ctxDirectory" ? "ctx" : "projectRoot"], {
       cwd,
       env: { ...process.env, PATH: "" },
       timeout: 8000,
@@ -861,6 +864,516 @@ describe("banca_init", () => {
       expect(validateConfig(project).valid).toBe(true)
       expect(JSON.parse(readFileSync(configFile(), "utf-8")).targetScore).toBe(9)
       expect(JSON.parse(readFileSync(stateFile(), "utf-8"))).toEqual(HISTORY_STATE)
+    })
+  })
+
+  /**
+   * Issue #143 — the workspace root selected at the `banca_init` boundary is
+   * normalized exactly once before configuration, skip, preflight, state,
+   * directories and assets consume it. A relative root such as `project` used
+   * to be applied twice by helpers that receive `join(root, ...)`, writing the
+   * configuration and assets into `project/project` while the state landed in
+   * the true root and the installation finally failed with a raw ENOENT.
+   *
+   * The scenarios below run the real tool in a bounded subprocess whose cwd is
+   * the scratch base; no `process.chdir` is performed and no real LaTeX binary
+   * is reachable (PATH is cleared for the child). Every scenario uses its own
+   * fresh fixture and compares recursive inventories (kind, link target,
+   * SHA-256) before/after; a preexisting duplicated root is only ever a decoy.
+   */
+  describe("issue #143 — relative workspace root normalization", () => {
+    type BoundedResult = ReturnType<typeof boundedInit>
+
+    const MANUSCRIPT_143 = "manuscrito sintetico 143\n"
+    const DECOY_CONFIG_MARKER = "DECOY_143_CONFIG_MARKER"
+    const DECOY_STATE_MARKER = "DECOY_143_STATE_MARKER"
+    const DECOY_ASSET_MARKER = "DECOY_143_ASSET_MARKER"
+
+    const DECOY_CONFIG = {
+      ...SYNTHETIC_CONFIG,
+      targetScore: 3,
+      rubricProfile: DECOY_CONFIG_MARKER,
+    }
+    const DECOY_STATE = {
+      currentScore: 1.25,
+      lastAudit: null,
+      lastLoop: DECOY_STATE_MARKER,
+      snapshots: [],
+      iterations: [
+        {
+          date: "2026-02-01T00:00:00Z",
+          action: DECOY_STATE_MARKER,
+          scoreBefore: 1,
+          scoreAfter: 1.25,
+          status: "ok" as const,
+        },
+      ],
+    }
+
+    function makeProject(dir: string): string {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, "main.tex"), MANUSCRIPT_143, "utf-8")
+      return dir
+    }
+
+    /** Duplicated root (only ever a decoy): every file has a distinguishable marker. */
+    function writeDecoy(projectDir: string): string {
+      const decoy = join(projectDir, "project")
+      mkdirSync(join(decoy, ".banca"), { recursive: true })
+      mkdirSync(join(decoy, ".dsh", "agents"), { recursive: true })
+      mkdirSync(join(decoy, ".dsh", "commands"), { recursive: true })
+      writeFileSync(join(decoy, ".banca", "project.json"), JSON.stringify(DECOY_CONFIG, null, 2), "utf-8")
+      writeFileSync(join(decoy, ".banca", "state.json"), JSON.stringify(DECOY_STATE, null, 2), "utf-8")
+      writeFileSync(join(decoy, ".banca", "style-guide.md"), DECOY_ASSET_MARKER, "utf-8")
+      writeFileSync(join(decoy, ".dsh", "agents", "banca-auditor.md"), DECOY_ASSET_MARKER, "utf-8")
+      writeFileSync(join(decoy, ".dsh", "commands", "banca-init.md"), DECOY_ASSET_MARKER, "utf-8")
+      return decoy
+    }
+
+    function physicalIdentity(path: string): { dev: number; ino: number } {
+      const stat = statSync(path)
+      return { dev: stat.dev, ino: stat.ino }
+    }
+
+    function installedAssetCount(output: string): number {
+      const match = /✓ (\d+) assets installed/.exec(output)
+      expect(match).not.toBeNull()
+      return Number((match as RegExpExecArray)[1])
+    }
+
+    /** Success contract shared by every legitimate relative-root scenario. */
+    function expectSuccessfulInit(result: BoundedResult, target: string): string {
+      expect(result.timedOut).toBe(false)
+      expect(result.parsed.ok).toBe(true)
+      const output = String(result.parsed.result)
+      expect(output).toContain(".banca/ + config + state")
+      expect(output).toContain("assets installed")
+      expect(output).not.toContain("skipped")
+      for (const fragment of RAW_DIAGNOSTIC_FRAGMENTS) expect(output).not.toContain(fragment)
+
+      expect(existsSync(join(target, ".banca", "project.json"))).toBe(true)
+      expect(existsSync(join(target, ".banca", "state.json"))).toBe(true)
+      for (const sub of ["reports", "context", "snapshots", "cache"]) {
+        expect(existsSync(join(target, ".banca", sub))).toBe(true)
+      }
+      expect(existsSync(join(target, ".dsh", "agents", "banca-auditor.md"))).toBe(true)
+      expect(existsSync(join(target, ".dsh", "commands", "banca-init.md"))).toBe(true)
+      expect(existsSync(join(target, ".dsh", "skills", "banca-avaliacao", "SKILL.md"))).toBe(true)
+      expect(existsSync(join(target, "banca-auditor.md"))).toBe(true)
+      expect(existsSync(join(target, ".banca", "style-guide.md"))).toBe(true)
+      expect(validateConfig(target).valid).toBe(true)
+      return output
+    }
+
+    /** Deterministic refusal contract (sanitized, before effects). */
+    function expectBoundedRefusal(result: BoundedResult, fragments: string[] = []): string {
+      expect(result.timedOut).toBe(false)
+      expect(result.parsed.ok).toBe(true)
+      const output = String(result.parsed.result)
+      expectSanitizedRefusal(output, fragments)
+      expect(output).not.toContain(".banca/ + config + state")
+      expect(output).not.toContain("assets installed")
+      expect(output).not.toContain("skipped")
+      return output
+    }
+
+    /**
+     * Run the same initialization through an absolute reference root and the
+     * given relative representation; both must leave an equivalent inventory.
+     */
+    async function expectEquivalentToAbsolute(
+      relativeRootArg: string,
+      target: string,
+      reference: string,
+      mode: "projectRoot" | "ctxDirectory" = "projectRoot",
+    ): Promise<void> {
+      const referenceResult = await boundedInit(reference, base)
+      const referenceOutput = expectSuccessfulInit(referenceResult, reference)
+      expect(installedAssetCount(referenceOutput)).toBe(22)
+
+      const relativeResult = await boundedInit(relativeRootArg, base, false, mode)
+      const relativeOutput = expectSuccessfulInit(relativeResult, target)
+      expect(installedAssetCount(relativeOutput)).toBe(22)
+
+      expect(inventory(target)).toEqual(inventory(reference))
+      expect(existsSync(join(target, "project"))).toBe(false)
+      const config = JSON.parse(readFileSync(join(target, ".banca", "project.json"), "utf-8"))
+      expect(config.targetScore).toBe(9)
+      expect(config.rubricProfile).toBe("banca-rigorosa")
+      expect(JSON.parse(readFileSync(join(target, ".banca", "state.json"), "utf-8"))).toEqual(EMPTY_STATE)
+      expect(physicalIdentity(join(target, ".banca", "project.json"))).not.toEqual(
+        physicalIdentity(join(target, ".banca", "state.json")),
+      )
+      expect(validateConfig(target).errors).toEqual([])
+      expect(readFileSync(join(target, "main.tex"), "utf-8")).toBe(MANUSCRIPT_143)
+    }
+
+    describe("root representation equivalence", () => {
+      test("relative root 'project' initializes the true workspace, never a duplicated root", async () => {
+        const reference = makeProject(join(base, "reference", "project"))
+        const target = makeProject(join(base, "relative", "project"))
+
+        await expectEquivalentToAbsolute("relative/project", target, reference)
+
+        // The failure mode of issue #143: no duplicated root at all.
+        expect(existsSync(join(target, "project"))).toBe(false)
+        expect(existsSync(join(target, "project", ".banca", "project.json"))).toBe(false)
+        expect(existsSync(join(target, "project", ".dsh"))).toBe(false)
+      })
+
+      test("relative root with './' prefix initializes the same workspace", async () => {
+        const reference = makeProject(join(base, "reference", "project"))
+        const target = makeProject(join(base, "dot-prefix", "project"))
+
+        await expectEquivalentToAbsolute("./dot-prefix/project", target, reference)
+
+        expect(existsSync(join(target, "project"))).toBe(false)
+      })
+
+      test("nested relative root initializes the same workspace", async () => {
+        const reference = makeProject(join(base, "reference", "project"))
+        const target = makeProject(join(base, "nested", "parent", "project"))
+
+        await expectEquivalentToAbsolute("nested/parent/project", target, reference)
+
+        expect(existsSync(join(target, "project"))).toBe(false)
+      })
+
+      test("relative ctx.directory fallback initializes the same workspace", async () => {
+        const reference = makeProject(join(base, "reference", "project"))
+        const target = makeProject(join(base, "ctx-fallback", "project"))
+
+        // projectRoot is omitted by the worker; ctx.directory carries the
+        // relative representation selected by the caller.
+        await expectEquivalentToAbsolute("ctx-fallback/project", target, reference, "ctxDirectory")
+
+        expect(existsSync(join(target, "project"))).toBe(false)
+      })
+    })
+
+    describe("duplicated-root decoy", () => {
+      test("a decoy root never influences skip/config/state/assets and is never modified", async () => {
+        const target = makeProject(join(base, "decoy", "project"))
+        const decoyDir = writeDecoy(target)
+        const decoyBefore = inventory(decoyDir)
+        const manuscriptHash = sha256(join(target, "main.tex"))
+
+        const result = await boundedInit("decoy/project", base)
+        const output = expectSuccessfulInit(result, target)
+        expect(installedAssetCount(output)).toBe(22)
+
+        // The decoy configuration does not trigger the historical skip.
+        expect(output).not.toContain("skipped")
+        // The decoy is untouched: same names, kinds, link targets and hashes.
+        expect(inventory(decoyDir)).toEqual(decoyBefore)
+        // The true root received the real configuration, not the decoy one.
+        const config = JSON.parse(readFileSync(join(target, ".banca", "project.json"), "utf-8"))
+        expect(config.targetScore).toBe(9)
+        expect(config.rubricProfile).toBe("banca-rigorosa")
+        // The decoy academic history is not loaded into the true state.
+        expect(JSON.parse(readFileSync(join(target, ".banca", "state.json"), "utf-8"))).toEqual(EMPTY_STATE)
+        // Assets were installed on the true root; the decoy copies keep markers.
+        expect(readFileSync(join(target, ".dsh", "agents", "banca-auditor.md"), "utf-8")).not.toContain(DECOY_ASSET_MARKER)
+        expect(readFileSync(join(decoyDir, ".dsh", "agents", "banca-auditor.md"), "utf-8")).toBe(DECOY_ASSET_MARKER)
+        expect(readFileSync(join(decoyDir, ".banca", "style-guide.md"), "utf-8")).toBe(DECOY_ASSET_MARKER)
+        // Physical identity of the true destinations stays independent.
+        expect(physicalIdentity(join(target, ".banca", "project.json"))).not.toEqual(
+          physicalIdentity(join(target, ".banca", "state.json")),
+        )
+        expect(physicalIdentity(join(decoyDir, ".banca", "project.json"))).not.toEqual(
+          physicalIdentity(join(target, ".banca", "project.json")),
+        )
+        expect(sha256(join(target, "main.tex"))).toBe(manuscriptHash)
+      })
+    })
+
+    describe("unsafe true state with a safe decoy", () => {
+      function prepareUnsafeFixture(name: string): {
+        target: string
+        decoyDir: string
+        externalDir: string
+        manuscriptHash: string
+        decoyBefore: Record<string, string>
+        externalBefore: Record<string, string>
+      } {
+        const target = makeProject(join(base, name, "project"))
+        const decoyDir = writeDecoy(target)
+        mkdirSync(join(target, ".banca"), { recursive: true })
+        const externalDir = join(base, name, "external")
+        mkdirSync(externalDir, { recursive: true })
+        writeFileSync(join(externalDir, "state.json"), EXTERNAL_STATE, "utf-8")
+        return {
+          target,
+          decoyDir,
+          externalDir,
+          manuscriptHash: sha256(join(target, "main.tex")) as string,
+          decoyBefore: inventory(decoyDir),
+          externalBefore: inventory(externalDir),
+        }
+      }
+
+      function expectUnsafeRefused(
+        fixture: ReturnType<typeof prepareUnsafeFixture>,
+        before: Record<string, string>,
+        validationBefore: { valid: boolean; errors: string[] },
+        result: BoundedResult,
+        fragments: string[],
+      ): void {
+        const output = expectBoundedRefusal(result, fragments)
+        expect(output).not.toContain(".banca/ + config + state")
+        expect(inventory(fixture.target)).toEqual(before)
+        expect(inventory(fixture.decoyDir)).toEqual(fixture.decoyBefore)
+        expect(inventory(fixture.externalDir)).toEqual(fixture.externalBefore)
+        expect(readFileSync(join(fixture.externalDir, "state.json"), "utf-8")).toBe(EXTERNAL_STATE)
+        expect(sha256(join(fixture.target, "main.tex"))).toBe(fixture.manuscriptHash)
+        expect(validateConfig(fixture.target)).toEqual(validationBefore)
+        expect(existsSync(join(fixture.target, ".dsh"))).toBe(false)
+        expect(existsSync(join(fixture.target, "banca-auditor.md"))).toBe(false)
+      }
+
+      stest("refuses an external true state symlink even with a safe decoy state present", async () => {
+        const fixture = prepareUnsafeFixture("external-state")
+        symlinkSync("../external/state.json", join(fixture.target, ".banca", "state.json"), "file")
+        const before = inventory(fixture.target)
+        const validationBefore = validateConfig(fixture.target)
+
+        const result = await boundedInit("external-state/project", base)
+
+        expectUnsafeRefused(fixture, before, validationBefore, result, ["escape the workspace root"])
+      })
+
+      stest("refuses a broken true state symlink even with a safe decoy state present", async () => {
+        const fixture = prepareUnsafeFixture("broken-state")
+        symlinkSync("../missing/state.json", join(fixture.target, ".banca", "state.json"), "file")
+        const before = inventory(fixture.target)
+        const validationBefore = validateConfig(fixture.target)
+
+        const result = await boundedInit("broken-state/project", base)
+
+        expectUnsafeRefused(fixture, before, validationBefore, result, ["escape the workspace root"])
+      })
+
+      test("refuses a true state directory even with a safe decoy state present", async () => {
+        const fixture = prepareUnsafeFixture("state-directory")
+        mkdirSync(join(fixture.target, ".banca", "state.json"), { recursive: true })
+        const before = inventory(fixture.target)
+        const validationBefore = validateConfig(fixture.target)
+
+        const result = await boundedInit("state-directory/project", base)
+
+        expectUnsafeRefused(fixture, before, validationBefore, result, ["state refused", "safe regular file"])
+      })
+
+      fifoTest(
+        "refuses a true state FIFO without blocking and keeps the safe decoy state",
+        async () => {
+          const fixture = prepareUnsafeFixture("state-fifo")
+          expect(spawnSync(mkfifoBinary as string, [join(fixture.target, ".banca", "state.json")]).status).toBe(0)
+          const before = inventory(fixture.target)
+          const validationBefore = validateConfig(fixture.target)
+
+          const result = await boundedInit("state-fifo/project", base)
+
+          expectUnsafeRefused(fixture, before, validationBefore, result, ["state refused", "safe regular file"])
+          expect(lstatSync(join(fixture.target, ".banca", "state.json")).isFIFO()).toBe(true)
+        },
+        20_000,
+      )
+
+      unreadableTest("refuses an unreadable true state file with a safe decoy state present", async () => {
+        const fixture = prepareUnsafeFixture("unreadable-state")
+        writeFileSync(join(fixture.target, ".banca", "state.json"), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+        chmodSync(join(fixture.target, ".banca", "state.json"), 0o000)
+        try {
+          let rawCode: string | undefined
+          try {
+            readFileSync(join(fixture.target, ".banca", "state.json"), "utf-8")
+          } catch (error) {
+            rawCode = (error as NodeJS.ErrnoException).code
+          }
+          expect(rawCode).toBe("EACCES")
+
+          const before = inventory(fixture.target)
+          const validationBefore = validateConfig(fixture.target)
+
+          const result = await boundedInit("unreadable-state/project", base)
+
+          expectUnsafeRefused(fixture, before, validationBefore, result, ["state refused", "could not be read"])
+        } finally {
+          chmodSync(join(fixture.target, ".banca", "state.json"), 0o644)
+        }
+      })
+    })
+
+    describe("true configuration/state aliases with an independent decoy", () => {
+      stest("refuses a true symlink alias under a relative root and leaves the decoy untouched", async () => {
+        const target = makeProject(join(base, "alias-symlink", "project"))
+        const decoyDir = writeDecoy(target)
+        mkdirSync(join(target, ".banca"), { recursive: true })
+        writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
+        symlinkSync("project.json", join(target, ".banca", "state.json"))
+        const before = inventory(target)
+        const decoyBefore = inventory(decoyDir)
+        const validationBefore = validateConfig(target)
+        expect(physicalIdentity(join(target, ".banca", "project.json"))).toEqual(
+          physicalIdentity(join(target, ".banca", "state.json")),
+        )
+
+        const result = await boundedInit("alias-symlink/project", base, true)
+
+        expectBoundedRefusal(result, ["distinct physical files"])
+        expect(inventory(target)).toEqual(before)
+        expect(inventory(decoyDir)).toEqual(decoyBefore)
+        expect(validateConfig(target)).toEqual(validationBefore)
+        expect(validateConfig(target).valid).toBe(true)
+        expect(physicalIdentity(join(target, ".banca", "project.json"))).toEqual(
+          physicalIdentity(join(target, ".banca", "state.json")),
+        )
+        expect(existsSync(join(target, ".dsh"))).toBe(false)
+        expect(existsSync(join(target, "banca-auditor.md"))).toBe(false)
+      })
+
+      htest("refuses a true hardlink alias under a relative root and leaves the decoy untouched", async () => {
+        const target = makeProject(join(base, "alias-hardlink", "project"))
+        const decoyDir = writeDecoy(target)
+        mkdirSync(join(target, ".banca"), { recursive: true })
+        writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
+        linkSync(join(target, ".banca", "project.json"), join(target, ".banca", "state.json"))
+        const before = inventory(target)
+        const decoyBefore = inventory(decoyDir)
+        const validationBefore = validateConfig(target)
+        expect(physicalIdentity(join(target, ".banca", "project.json"))).toEqual(
+          physicalIdentity(join(target, ".banca", "state.json")),
+        )
+
+        const result = await boundedInit("alias-hardlink/project", base, true)
+
+        expectBoundedRefusal(result, ["distinct physical files"])
+        expect(inventory(target)).toEqual(before)
+        expect(inventory(decoyDir)).toEqual(decoyBefore)
+        expect(validateConfig(target)).toEqual(validationBefore)
+        expect(physicalIdentity(join(target, ".banca", "project.json"))).toEqual(
+          physicalIdentity(join(target, ".banca", "state.json")),
+        )
+        expect(existsSync(join(target, ".dsh"))).toBe(false)
+      })
+
+      stest("force with internal distinct configuration/state links preserves history and the decoy", async () => {
+        const target = makeProject(join(base, "distinct-links", "project"))
+        const decoyDir = writeDecoy(target)
+        mkdirSync(join(target, ".banca", "config-real"), { recursive: true })
+        mkdirSync(join(target, ".banca", "state-real"), { recursive: true })
+        writeFileSync(
+          join(target, ".banca", "config-real", "project.json"),
+          JSON.stringify(SYNTHETIC_CONFIG, null, 2),
+          "utf-8",
+        )
+        writeFileSync(join(target, ".banca", "state-real", "state.json"), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+        symlinkSync("config-real/project.json", join(target, ".banca", "project.json"))
+        symlinkSync("state-real/state.json", join(target, ".banca", "state.json"))
+        const decoyBefore = inventory(decoyDir)
+        const manuscriptHash = sha256(join(target, "main.tex"))
+
+        const result = await boundedInit("distinct-links/project", base, true)
+        const output = expectSuccessfulInit(result, target)
+        expect(installedAssetCount(output)).toBe(22)
+
+        // The R1 positive controls stay valid: distinct internal links are not
+        // treated as aliases, force replaces the configuration via the link and
+        // the academic state history is preserved.
+        expect(JSON.parse(readFileSync(join(target, ".banca", "config-real", "project.json"), "utf-8")).targetScore).toBe(9)
+        expect(JSON.parse(readFileSync(join(target, ".banca", "state-real", "state.json"), "utf-8"))).toEqual(HISTORY_STATE)
+        expect(lstatSync(join(target, ".banca", "project.json")).isSymbolicLink()).toBe(true)
+        expect(lstatSync(join(target, ".banca", "state.json")).isSymbolicLink()).toBe(true)
+        expect(readlinkSync(join(target, ".banca", "project.json"))).toBe("config-real/project.json")
+        expect(readlinkSync(join(target, ".banca", "state.json"))).toBe("state-real/state.json")
+        expect(physicalIdentity(join(target, ".banca", "config-real", "project.json"))).not.toEqual(
+          physicalIdentity(join(target, ".banca", "state-real", "state.json")),
+        )
+        expect(inventory(decoyDir)).toEqual(decoyBefore)
+        expect(sha256(join(target, "main.tex"))).toBe(manuscriptHash)
+        expect(validateConfig(target).valid).toBe(true)
+      })
+    })
+
+    describe("positive controls under a relative root", () => {
+      test("legitimate force reinitializes config/assets while preserving history and the decoy", async () => {
+        const target = makeProject(join(base, "force", "project"))
+        const decoyDir = writeDecoy(target)
+        mkdirSync(join(target, ".banca"), { recursive: true })
+        writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
+        writeFileSync(join(target, ".banca", "state.json"), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
+        const decoyBefore = inventory(decoyDir)
+        const manuscriptHash = sha256(join(target, "main.tex"))
+
+        const result = await boundedInit("force/project", base, true)
+        const output = expectSuccessfulInit(result, target)
+        expect(installedAssetCount(output)).toBe(22)
+
+        // Historical force policy replaces the configuration...
+        const config = JSON.parse(readFileSync(join(target, ".banca", "project.json"), "utf-8"))
+        expect(config.targetScore).toBe(9)
+        expect(config.manuscript.main).toBe("main.tex")
+        // ...and preserves the legitimate academic state history.
+        expect(JSON.parse(readFileSync(join(target, ".banca", "state.json"), "utf-8"))).toEqual(HISTORY_STATE)
+        expect(inventory(decoyDir)).toEqual(decoyBefore)
+        expect(sha256(join(target, "main.tex"))).toBe(manuscriptHash)
+        expect(validateConfig(target).valid).toBe(true)
+      })
+
+      test("legitimate skip under a relative root mutates neither the workspace nor the decoy", async () => {
+        const target = makeProject(join(base, "skip", "project"))
+        const decoyDir = writeDecoy(target)
+        mkdirSync(join(target, ".banca"), { recursive: true })
+        writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
+        const before = inventory(target)
+        const decoyBefore = inventory(decoyDir)
+
+        const result = await boundedInit("skip/project", base)
+
+        expect(result.timedOut).toBe(false)
+        expect(result.parsed.ok).toBe(true)
+        expect(String(result.parsed.result)).toContain("skipped")
+        expect(inventory(target)).toEqual(before)
+        expect(inventory(decoyDir)).toEqual(decoyBefore)
+        expect(existsSync(join(target, ".dsh"))).toBe(false)
+        expect(existsSync(join(target, "banca-auditor.md"))).toBe(false)
+      })
+
+      test("invalid internal JSON keeps the historical empty-state fallback under a relative root", async () => {
+        const target = makeProject(join(base, "invalid-state", "project"))
+        mkdirSync(join(target, ".banca"), { recursive: true })
+        writeFileSync(join(target, ".banca", "state.json"), "{ invalid }", "utf-8")
+
+        const result = await boundedInit("invalid-state/project", base)
+        const output = expectSuccessfulInit(result, target)
+
+        expect(installedAssetCount(output)).toBe(22)
+        expect(JSON.parse(readFileSync(join(target, ".banca", "state.json"), "utf-8"))).toEqual(EMPTY_STATE)
+        expect(existsSync(join(target, "project"))).toBe(false)
+        expect(validateConfig(target).valid).toBe(true)
+      })
+
+      stest("force refuses an escaping true configuration symlink under a relative root", async () => {
+        const target = makeProject(join(base, "escape-config", "project"))
+        const externalDir = join(base, "escape-config", "external")
+        mkdirSync(externalDir, { recursive: true })
+        const externalConfig = join(externalDir, "project.json")
+        writeFileSync(externalConfig, JSON.stringify(DECOY_CONFIG, null, 2), "utf-8")
+        mkdirSync(join(target, ".banca"), { recursive: true })
+        symlinkSync(externalConfig, join(target, ".banca", "project.json"), "file")
+        const before = inventory(target)
+        const externalBefore = inventory(externalDir)
+
+        const result = await boundedInit("escape-config/project", base, true)
+
+        expectBoundedRefusal(result, ["escape the workspace root"])
+        expect(inventory(target)).toEqual(before)
+        expect(inventory(externalDir)).toEqual(externalBefore)
+        expect(readFileSync(externalConfig, "utf-8")).toBe(JSON.stringify(DECOY_CONFIG, null, 2))
+        expect(existsSync(join(target, ".dsh"))).toBe(false)
+        expect(existsSync(join(target, "project"))).toBe(false)
+      })
     })
   })
 })
