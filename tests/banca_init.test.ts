@@ -916,9 +916,19 @@ describe("banca_init", () => {
       return dir
     }
 
+    /**
+     * Path where the pre-fix implementation applied a relative root twice:
+     * `join(root, ...)` is resolved again against `root`, so the duplicated
+     * destination is `<true root>/<relative root representation>`. Keeping this
+     * computation explicit prevents vacuous "no duplication" assertions.
+     */
+    function duplicatedRootPath(projectDir: string, relativeRootArg: string): string {
+      return join(projectDir, ...relativeRootArg.split("/").filter((part) => part !== "" && part !== "."))
+    }
+
     /** Duplicated root (only ever a decoy): every file has a distinguishable marker. */
-    function writeDecoy(projectDir: string): string {
-      const decoy = join(projectDir, "project")
+    function writeDecoy(projectDir: string, relativeRootArg: string): string {
+      const decoy = duplicatedRootPath(projectDir, relativeRootArg)
       mkdirSync(join(decoy, ".banca"), { recursive: true })
       mkdirSync(join(decoy, ".dsh", "agents"), { recursive: true })
       mkdirSync(join(decoy, ".dsh", "commands"), { recursive: true })
@@ -928,6 +938,30 @@ describe("banca_init", () => {
       writeFileSync(join(decoy, ".dsh", "agents", "banca-auditor.md"), DECOY_ASSET_MARKER, "utf-8")
       writeFileSync(join(decoy, ".dsh", "commands", "banca-init.md"), DECOY_ASSET_MARKER, "utf-8")
       return decoy
+    }
+
+    /**
+     * On a successful initialization the only legitimate paths under the true
+     * root are the expected true artifacts, the manuscript, the loader copy and
+     * the untouched decoy subtree. Anything else (e.g. a stray duplicated tree
+     * left by a regression) fails this invariant.
+     */
+    function expectNoUnexpectedPaths(target: string, decoyDir: string | null = null): void {
+      const decoyRelative = decoyDir === null ? null : relative(target, decoyDir).split(sep).join("/")
+      const decoyPrefixes = new Set<string>()
+      if (decoyRelative !== null) {
+        const parts = decoyRelative.split("/")
+        for (let i = 1; i <= parts.length; i++) decoyPrefixes.add(parts.slice(0, i).join("/"))
+      }
+      const unexpected = Object.keys(inventory(target)).filter((path) => {
+        if (path === "main.tex" || path === "banca-auditor.md") return false
+        if (path === ".banca" || path.startsWith(".banca/")) return false
+        if (path === ".dsh" || path.startsWith(".dsh/")) return false
+        if (decoyRelative !== null && (path === decoyRelative || path.startsWith(decoyRelative + "/"))) return false
+        if (decoyPrefixes.has(path)) return false
+        return true
+      })
+      expect(unexpected).toEqual([])
     }
 
     function physicalIdentity(path: string): { dev: number; ino: number } {
@@ -996,7 +1030,7 @@ describe("banca_init", () => {
       expect(installedAssetCount(relativeOutput)).toBe(22)
 
       expect(inventory(target)).toEqual(inventory(reference))
-      expect(existsSync(join(target, "project"))).toBe(false)
+      expect(existsSync(duplicatedRootPath(target, relativeRootArg))).toBe(false)
       const config = JSON.parse(readFileSync(join(target, ".banca", "project.json"), "utf-8"))
       expect(config.targetScore).toBe(9)
       expect(config.rubricProfile).toBe("banca-rigorosa")
@@ -1015,10 +1049,11 @@ describe("banca_init", () => {
 
         await expectEquivalentToAbsolute("relative/project", target, reference)
 
-        // The failure mode of issue #143: no duplicated root at all.
-        expect(existsSync(join(target, "project"))).toBe(false)
-        expect(existsSync(join(target, "project", ".banca", "project.json"))).toBe(false)
-        expect(existsSync(join(target, "project", ".dsh"))).toBe(false)
+        // The failure mode of issue #143: the duplicated root the pre-fix
+        // implementation would use for this representation does not exist.
+        expect(existsSync(duplicatedRootPath(target, "relative/project"))).toBe(false)
+        expect(existsSync(join(duplicatedRootPath(target, "relative/project"), ".banca", "project.json"))).toBe(false)
+        expect(existsSync(join(duplicatedRootPath(target, "relative/project"), ".dsh"))).toBe(false)
       })
 
       test("relative root with './' prefix initializes the same workspace", async () => {
@@ -1027,7 +1062,7 @@ describe("banca_init", () => {
 
         await expectEquivalentToAbsolute("./dot-prefix/project", target, reference)
 
-        expect(existsSync(join(target, "project"))).toBe(false)
+        expect(existsSync(duplicatedRootPath(target, "./dot-prefix/project"))).toBe(false)
       })
 
       test("nested relative root initializes the same workspace", async () => {
@@ -1036,7 +1071,7 @@ describe("banca_init", () => {
 
         await expectEquivalentToAbsolute("nested/parent/project", target, reference)
 
-        expect(existsSync(join(target, "project"))).toBe(false)
+        expect(existsSync(duplicatedRootPath(target, "nested/parent/project"))).toBe(false)
       })
 
       test("relative ctx.directory fallback initializes the same workspace", async () => {
@@ -1047,16 +1082,20 @@ describe("banca_init", () => {
         // relative representation selected by the caller.
         await expectEquivalentToAbsolute("ctx-fallback/project", target, reference, "ctxDirectory")
 
-        expect(existsSync(join(target, "project"))).toBe(false)
+        expect(existsSync(duplicatedRootPath(target, "ctx-fallback/project"))).toBe(false)
       })
     })
 
     describe("duplicated-root decoy", () => {
       test("a decoy root never influences skip/config/state/assets and is never modified", async () => {
         const target = makeProject(join(base, "decoy", "project"))
-        const decoyDir = writeDecoy(target)
+        const decoyDir = writeDecoy(target, "decoy/project")
         const decoyBefore = inventory(decoyDir)
         const manuscriptHash = sha256(join(target, "main.tex"))
+
+        // The decoy sits exactly where the pre-fix implementation applied the
+        // relative root twice; it is the destination the bug used to overwrite.
+        expect(duplicatedRootPath(target, "decoy/project")).toBe(decoyDir)
 
         const result = await boundedInit("decoy/project", base)
         const output = expectSuccessfulInit(result, target)
@@ -1066,6 +1105,8 @@ describe("banca_init", () => {
         expect(output).not.toContain("skipped")
         // The decoy is untouched: same names, kinds, link targets and hashes.
         expect(inventory(decoyDir)).toEqual(decoyBefore)
+        // No stray duplicated or unexpected tree exists under the true root.
+        expectNoUnexpectedPaths(target, decoyDir)
         // The true root received the real configuration, not the decoy one.
         const config = JSON.parse(readFileSync(join(target, ".banca", "project.json"), "utf-8"))
         expect(config.targetScore).toBe(9)
@@ -1097,7 +1138,7 @@ describe("banca_init", () => {
         externalBefore: Record<string, string>
       } {
         const target = makeProject(join(base, name, "project"))
-        const decoyDir = writeDecoy(target)
+        const decoyDir = writeDecoy(target, `${name}/project`)
         mkdirSync(join(target, ".banca"), { recursive: true })
         const externalDir = join(base, name, "external")
         mkdirSync(externalDir, { recursive: true })
@@ -1208,7 +1249,7 @@ describe("banca_init", () => {
     describe("true configuration/state aliases with an independent decoy", () => {
       stest("refuses a true symlink alias under a relative root and leaves the decoy untouched", async () => {
         const target = makeProject(join(base, "alias-symlink", "project"))
-        const decoyDir = writeDecoy(target)
+        const decoyDir = writeDecoy(target, "alias-symlink/project")
         mkdirSync(join(target, ".banca"), { recursive: true })
         writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
         symlinkSync("project.json", join(target, ".banca", "state.json"))
@@ -1235,7 +1276,7 @@ describe("banca_init", () => {
 
       htest("refuses a true hardlink alias under a relative root and leaves the decoy untouched", async () => {
         const target = makeProject(join(base, "alias-hardlink", "project"))
-        const decoyDir = writeDecoy(target)
+        const decoyDir = writeDecoy(target, "alias-hardlink/project")
         mkdirSync(join(target, ".banca"), { recursive: true })
         writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
         linkSync(join(target, ".banca", "project.json"), join(target, ".banca", "state.json"))
@@ -1260,7 +1301,7 @@ describe("banca_init", () => {
 
       stest("force with internal distinct configuration/state links preserves history and the decoy", async () => {
         const target = makeProject(join(base, "distinct-links", "project"))
-        const decoyDir = writeDecoy(target)
+        const decoyDir = writeDecoy(target, "distinct-links/project")
         mkdirSync(join(target, ".banca", "config-real"), { recursive: true })
         mkdirSync(join(target, ".banca", "state-real"), { recursive: true })
         writeFileSync(
@@ -1293,13 +1334,14 @@ describe("banca_init", () => {
         expect(inventory(decoyDir)).toEqual(decoyBefore)
         expect(sha256(join(target, "main.tex"))).toBe(manuscriptHash)
         expect(validateConfig(target).valid).toBe(true)
+        expectNoUnexpectedPaths(target, decoyDir)
       })
     })
 
     describe("positive controls under a relative root", () => {
       test("legitimate force reinitializes config/assets while preserving history and the decoy", async () => {
         const target = makeProject(join(base, "force", "project"))
-        const decoyDir = writeDecoy(target)
+        const decoyDir = writeDecoy(target, "force/project")
         mkdirSync(join(target, ".banca"), { recursive: true })
         writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
         writeFileSync(join(target, ".banca", "state.json"), JSON.stringify(HISTORY_STATE, null, 2), "utf-8")
@@ -1319,11 +1361,12 @@ describe("banca_init", () => {
         expect(inventory(decoyDir)).toEqual(decoyBefore)
         expect(sha256(join(target, "main.tex"))).toBe(manuscriptHash)
         expect(validateConfig(target).valid).toBe(true)
+        expectNoUnexpectedPaths(target, decoyDir)
       })
 
       test("legitimate skip under a relative root mutates neither the workspace nor the decoy", async () => {
         const target = makeProject(join(base, "skip", "project"))
-        const decoyDir = writeDecoy(target)
+        const decoyDir = writeDecoy(target, "skip/project")
         mkdirSync(join(target, ".banca"), { recursive: true })
         writeFileSync(join(target, ".banca", "project.json"), JSON.stringify(SYNTHETIC_CONFIG, null, 2), "utf-8")
         const before = inventory(target)
@@ -1350,7 +1393,7 @@ describe("banca_init", () => {
 
         expect(installedAssetCount(output)).toBe(22)
         expect(JSON.parse(readFileSync(join(target, ".banca", "state.json"), "utf-8"))).toEqual(EMPTY_STATE)
-        expect(existsSync(join(target, "project"))).toBe(false)
+        expect(existsSync(duplicatedRootPath(target, "invalid-state/project"))).toBe(false)
         expect(validateConfig(target).valid).toBe(true)
       })
 
@@ -1372,7 +1415,7 @@ describe("banca_init", () => {
         expect(inventory(externalDir)).toEqual(externalBefore)
         expect(readFileSync(externalConfig, "utf-8")).toBe(JSON.stringify(DECOY_CONFIG, null, 2))
         expect(existsSync(join(target, ".dsh"))).toBe(false)
-        expect(existsSync(join(target, "project"))).toBe(false)
+        expect(existsSync(duplicatedRootPath(target, "escape-config/project"))).toBe(false)
       })
     })
   })
