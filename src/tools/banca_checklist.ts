@@ -1,8 +1,9 @@
-import { existsSync, readFileSync } from "node:fs"
+import { lstatSync, readFileSync, type Stats } from "node:fs"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
-import { loadConfig } from "../lib/config"
-import { resolveManuscriptPaths } from "../lib/paths"
+import { loadConfig, type ProjectConfig } from "../lib/config"
+import { resolveManuscriptPaths, type ResolvedPaths } from "../lib/paths"
+import { PathTraversalError, resolveInsideRoot, resolveRealInsideRoot } from "../lib/safe_paths"
 
 /**
  * Lexical presence of the three fixed structural LaTeX markers checked by
@@ -132,6 +133,161 @@ function scanStructuralMarkers(text: string): StructuralMarkers {
   return markers
 }
 
+/**
+ * Canonical read confinement for issue #132.
+ *
+ * `resolveManuscriptPaths` is lexical: `existsSync`/`readFileSync` would follow
+ * a symbolic link planted at the configured main/bibliographic path (or in an
+ * ancestor directory) and read bytes from outside the workspace. Before any
+ * existence signal or read, every configured destination is re-resolved with
+ * the existing canonical helper `resolveRealInsideRoot`, rooted at the project
+ * workspace — never at the configured root's own target, so a redirected
+ * `manuscript.root` cannot become a new implicitly authorized root.
+ *
+ * A residual TOCTOU window remains between the canonical inspection and the
+ * read: the guarantee holds for a filesystem that is not concurrently mutated
+ * by another process. This is a read-boundary check on the configured paths,
+ * not a sandbox, permission engine or host trust-model change.
+ *
+ * Diagnostics are sanitized too (issue #132 R1): the lexical refusals that the
+ * shared resolver raises with raw configured values, and the expected
+ * filesystem failures of the real read, are rethrown as fixed controlled
+ * messages without the absolute path, raw system message or cause.
+ */
+type ConfiguredFileInspection =
+  | { status: "present"; canonicalPath: string }
+  | { status: "missing" }
+
+function blockedDestination(label: string, detail: string): PathTraversalError {
+  // Fixed, sanitized messages: never echo the configured value, an absolute
+  // host path or any external content.
+  return new PathTraversalError(`banca_checklist refused the configured ${label}: ${detail}`)
+}
+
+/**
+ * Normalize the lexical refusals of `resolveManuscriptPaths` that propagate the
+ * raw configured value (absolute paths and `..` segments in main/bib/outputDir).
+ * The shared resolver is not modified: only its controlled PathTraversalError is
+ * rethrown with a fixed sanitized message. Every other error keeps its own
+ * contract — notably ChapterDiscoveryError and its safe diagnostics.
+ */
+function resolveManuscriptPathsSanitized(projectRoot: string, config: ProjectConfig): ResolvedPaths {
+  try {
+    return resolveManuscriptPaths(projectRoot, config)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw blockedDestination(
+        "manuscript paths",
+        "a configured manuscript path is not a safe workspace-relative path",
+      )
+    }
+    throw err
+  }
+}
+
+/**
+ * Filesystem errno values that are expected failures of reading an already
+ * inspected destination. They become a controlled sanitized refusal; unexpected
+ * errors (including programming defects) are rethrown unchanged.
+ */
+const EXPECTED_READ_FAILURE_CODES = new Set([
+  "EACCES",
+  "EPERM",
+  "ENOENT",
+  "EISDIR",
+  "ELOOP",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENAMETOOLONG",
+  "ESTALE",
+])
+
+/**
+ * Read the canonical main file. A verified-present regular file that can no
+ * longer be read (for example EACCES, or ENOENT after a concurrent change) is a
+ * controlled failure: it is never reported as absent, as a partial checklist or
+ * as success, and the raw system message/path is not exposed.
+ */
+function readConfiguredMainFile(canonicalPath: string): string {
+  try {
+    return readFileSync(canonicalPath, "utf-8")
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (typeof code === "string" && EXPECTED_READ_FAILURE_CODES.has(code)) {
+      throw blockedDestination("main file", "the verified destination could not be read")
+    }
+    throw err
+  }
+}
+
+/**
+ * Validate the configured manuscript root physically before chapter discovery
+ * touches the filesystem. Missing roots keep their existing discovery
+ * behavior; redirects outside the workspace fail closed.
+ */
+function assertManuscriptRootConfined(workspaceRoot: string, configuredRoot: string): void {
+  let lexicalRoot: string
+  try {
+    lexicalRoot = resolveInsideRoot(workspaceRoot, configuredRoot)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw blockedDestination("manuscript root", "the configured path is not a safe workspace-relative path")
+    }
+    throw err
+  }
+  try {
+    resolveRealInsideRoot(workspaceRoot, lexicalRoot)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw blockedDestination(
+        "manuscript root",
+        "the physical destination is outside the workspace or follows an unsafe link",
+      )
+    }
+    throw err
+  }
+}
+
+/**
+ * Resolve one configured manuscript file to its canonical destination and
+ * report only whether it is a present regular file. Missing leaves stay
+ * missing (legitimate absent file); external, broken-link, ancestor-link,
+ * unreadable and non-regular destinations fail closed before `readFileSync`.
+ */
+function inspectConfiguredFile(
+  workspaceRoot: string,
+  configuredPath: string,
+  label: string,
+): ConfiguredFileInspection {
+  let canonicalPath: string
+  try {
+    canonicalPath = resolveRealInsideRoot(workspaceRoot, configuredPath)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw blockedDestination(
+        label,
+        "the physical destination is outside the workspace or follows an unsafe link",
+      )
+    }
+    throw err
+  }
+  let stat: Stats
+  try {
+    stat = lstatSync(canonicalPath)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR") return { status: "missing" }
+    throw blockedDestination(label, "the destination cannot be inspected")
+  }
+  // Directories, FIFOs, sockets and devices are never opened: a blocking read
+  // on a FIFO would hang the tool, and only regular files have manuscript bytes.
+  if (!stat.isFile()) {
+    throw blockedDestination(label, "the destination is not a regular file")
+  }
+  return { status: "present", canonicalPath }
+}
+
 export const bancaChecklist = defineBancaTool({
   description: "Verify delivery checklist.",
   args: {
@@ -140,18 +296,25 @@ export const bancaChecklist = defineBancaTool({
   execute: async (args, ctx) => {
     const root = args.projectRoot || ctx.directory
     const config = loadConfig(root)
-    const paths = resolveManuscriptPaths(root, config)
+    // Canonical boundary first: a redirected manuscript root must not become an
+    // implicitly authorized root for discovery or reads.
+    assertManuscriptRootConfined(root, config.manuscript.root)
+    const paths = resolveManuscriptPathsSanitized(root, config)
+    // Inspect both configured destinations before reading the main file or
+    // emitting any existence/main-content signal.
+    const main = inspectConfiguredFile(root, paths.main, "main file")
+    const bib = inspectConfiguredFile(root, paths.bib, "bibliography file")
 
-    const mainExists = existsSync(paths.main)
     const checks: Array<{ item: string; ok: boolean }> = [
-      { item: "Main file", ok: mainExists },
-      { item: "Bib file", ok: existsSync(paths.bib) },
+      { item: "Main file", ok: main.status === "present" },
+      { item: "Bib file", ok: bib.status === "present" },
       { item: "Chapters", ok: paths.chapters.length > 0 },
     ]
 
-    const markers: StructuralMarkers | null = mainExists
-      ? scanStructuralMarkers(readFileSync(paths.main, "utf-8"))
-      : null
+    const markers: StructuralMarkers | null =
+      main.status === "present"
+        ? scanStructuralMarkers(readConfiguredMainFile(main.canonicalPath))
+        : null
     if (markers) {
       checks.push({ item: "documentclass", ok: markers.documentclass })
       checks.push({ item: "abstract/resumo", ok: markers.abstract })
