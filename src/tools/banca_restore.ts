@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs"
-import { dirname, isAbsolute, join, relative } from "node:path"
+import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadState } from "../lib/state"
@@ -279,7 +279,15 @@ export const bancaRestore = defineBancaTool({
     confirm: z.boolean().optional().describe("Confirm restore (default: false, runs dry-run)"),
   },
   execute: async (args, ctx) => {
-    const root = args.projectRoot || ctx.directory
+    // Normalize the workspace root once at the tool boundary (issue #145).
+    // The vault was built as `resolveRealInsideRoot(root, join(root, ...))`:
+    // with a relative root the root was applied twice, so the selected state
+    // record (true workspace) and the vault content (duplicated directory)
+    // could belong to different workspaces — a confirmed restore then wrote a
+    // homonym snapshot's bytes into the true manuscript. This is a lexical
+    // normalization only; canonical confinement, manifest/hash validation,
+    // physical identity, backup, staging and rollback are unchanged.
+    const root = resolve(args.projectRoot || ctx.directory)
     const state = loadState(root)
     const config = loadConfig(root)
 
