@@ -241,7 +241,14 @@ export const bancaContext = defineBancaTool({
       ),
   },
   execute: async (args, ctx) => {
-    const root = args.projectRoot || ctx.directory
+    // Normalize the workspace root once at the tool boundary (issue #148).
+    // Downstream consumers build destinations with `join(root, ...)` and then
+    // resolve them again against this same root; a relative root would be
+    // applied twice, persisting the checkpoint in the true workspace while
+    // writing the context pack into a duplicated tree. This is a lexical
+    // normalization only: the canonical confinement, symlink refusals, #154
+    // auxiliary-origin preflight and output destination checks are unchanged.
+    const root = resolve(args.projectRoot || ctx.directory)
     const config = loadConfig(root)
     const maxCharactersPerBatch = config.analysis.maxCharactersPerBatch
 
@@ -275,8 +282,8 @@ export const bancaContext = defineBancaTool({
     // and validation: when an auxiliary refusal and a checkpoint/audit
     // diagnostic would both apply, the auxiliary refusal is reported first.
     // This is security-first and neither outcome changes persistent state.
-    const absoluteRoot = resolve(root)
-    const optionalState = preflightOptionalProjectState(absoluteRoot)
+    // `root` is already the normalized absolute workspace root.
+    const optionalState = preflightOptionalProjectState(root)
     if (optionalState.status === "refused") {
       return formatOptionalStateRefusal(optionalState.failures)
     }
