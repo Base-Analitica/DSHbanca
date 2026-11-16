@@ -699,6 +699,58 @@ describe("issue #145 — relative workspace root resolves the true snapshot vaul
     return join(trueRoot, ...rootArg.split("/").filter((part) => part !== "" && part !== "."))
   }
 
+  /**
+   * Issue #151 — deterministic snapshot identity for the homonym scenario.
+   *
+   * `addSnapshot` derives the ID from `Date.now()` and guarantees uniqueness
+   * only inside one workspace's state; two independent workspaces captured in
+   * the same millisecond legitimately receive the same ID. The previous fixture
+   * relied on the two real captures landing in different milliseconds, which is
+   * not guaranteed and flaked in CI (PR #150 and PR #155).
+   *
+   * These synthetic milliseconds are frozen only for the duration of each REAL
+   * capture (never for the restore, which runs in a child process with the real
+   * clock), then the original `Date.now` is restored in `finally`. The two
+   * values are one millisecond apart, so the true and decoy IDs are known and
+   * distinct by construction, independent of machine speed. Nothing else is
+   * mocked: state, manifest, vault and captured bytes remain the real product
+   * of the existing snapshot logic.
+   */
+  const FIXTURE_TRUE_SNAPSHOT_MS = 1_794_800_000_000
+  const FIXTURE_DECOY_SNAPSHOT_MS = FIXTURE_TRUE_SNAPSHOT_MS + 1
+
+  /**
+   * Freeze only `Date.now` while one real snapshot capture registers its
+   * recovery point, so production `addSnapshot` receives a controlled
+   * millisecond. The patch is process-global for the duration of that one real
+   * capture; it relies on this file having no `test.concurrent` and on the
+   * runner's file isolation (plain `bun test` runs files sequentially, while
+   * `--parallel` gives each file its own worker process). The original function
+   * is restored after every capture — success or failure — and the restoration
+   * is asserted, so a leaked patch fails the test instead of contaminating the
+   * rest of the suite.
+   */
+  async function withFixedSnapshotMillisecond<T>(
+    fixedNow: number,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const originalNow = Date.now
+    ;(Date as unknown as { now: () => number }).now = () => fixedNow
+    let captured: { ok: true; value: T } | { ok: false; error: unknown }
+    try {
+      captured = { ok: true, value: await run() }
+    } catch (error) {
+      captured = { ok: false, error }
+    } finally {
+      ;(Date as unknown as { now: () => number }).now = originalNow
+    }
+    // Restore first, then check: a failed capture still reports its own error
+    // instead of being masked by the clock-leak assertion.
+    expect(Date.now).toBe(originalNow)
+    if (captured.ok) return captured.value
+    throw captured.error
+  }
+
   interface Fixture145 {
     trueRoot: string
     trueMainSha: string
@@ -725,10 +777,17 @@ describe("issue #145 — relative workspace root resolves the true snapshot vaul
 
     const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
     const trueCapture = String(
-      await bancaSnapshot.execute({ projectRoot: options.trueRoot, label: "same" }, {} as any),
+      await withFixedSnapshotMillisecond(FIXTURE_TRUE_SNAPSHOT_MS, () =>
+        bancaSnapshot.execute({ projectRoot: options.trueRoot, label: "same" }, {} as any),
+      ),
     )
     expect(trueCapture).toContain("snapshot →")
     expect(trueCapture).toContain("restorable")
+    // Issue #151: the recovery-point ID is produced by the real registration
+    // logic under a controlled millisecond, so it is known by construction.
+    expect(
+      stateOf(options.trueRoot).snapshots.find((s: any) => s.label === "same").id,
+    ).toBe(`snap-${FIXTURE_TRUE_SNAPSHOT_MS}`)
     const trueManifest = manifestOf(options.trueRoot, "same")
     expect(trueManifest.kind).toBe("restorable")
     const trueMainEntry = trueManifest.files.find((entry: any) => entry.logical === "main.tex")
@@ -737,9 +796,19 @@ describe("issue #145 — relative workspace root resolves the true snapshot vaul
     let decoyMainSha: string | null = null
     if (decoyRoot !== null) {
       const decoyCapture = String(
-        await bancaSnapshot.execute({ projectRoot: decoyRoot, label: "same" }, {} as any),
+        await withFixedSnapshotMillisecond(FIXTURE_DECOY_SNAPSHOT_MS, () =>
+          bancaSnapshot.execute({ projectRoot: decoyRoot, label: "same" }, {} as any),
+        ),
       )
       expect(decoyCapture).toContain("snapshot →")
+      // Distinct ID deterministic by construction (one controlled ms apart),
+      // never dependent on the two captures taking different real milliseconds.
+      expect(
+        stateOf(decoyRoot).snapshots.find((s: any) => s.label === "same").id,
+      ).toBe(`snap-${FIXTURE_DECOY_SNAPSHOT_MS}`)
+      expect(`snap-${FIXTURE_DECOY_SNAPSHOT_MS}`).not.toBe(
+        `snap-${FIXTURE_TRUE_SNAPSHOT_MS}`,
+      )
       const decoyManifest = manifestOf(decoyRoot, "same")
       expect(decoyManifest.kind).toBe("restorable")
       const decoyMainEntry = decoyManifest.files.find((entry: any) => entry.logical === "main.tex")
@@ -865,6 +934,10 @@ describe("issue #145 — relative workspace root resolves the true snapshot vaul
     const decoyRecord = stateOf(decoyRoot).snapshots.find((s: any) => s.label === "same")
     expect(trueRecord.id).toBeTruthy()
     expect(decoyRecord.id).toBeTruthy()
+    // Issue #151: both IDs are known by construction (controlled milliseconds),
+    // not merely "probably different because the captures took more than 1ms".
+    expect(trueRecord.id).toBe(`snap-${FIXTURE_TRUE_SNAPSHOT_MS}`)
+    expect(decoyRecord.id).toBe(`snap-${FIXTURE_DECOY_SNAPSHOT_MS}`)
     expect(trueRecord.id).not.toBe(decoyRecord.id)
 
     const decoyBefore = inventoryTree(decoyRoot)
@@ -876,6 +949,48 @@ describe("issue #145 — relative workspace root resolves the true snapshot vaul
     expectRestoreSuccess(run, "same")
     expect(readFileSync(join(project, "main.tex"), "utf8")).toBe(TRUE_ORIGINAL)
     expect(inventoryTree(decoyRoot)).toEqual(decoyBefore)
+  })
+
+  test("snapshot IDs stay known and distinct even when the surrounding clock is frozen to one millisecond (issue #151)", async () => {
+    // Reproduce the exact former failure condition: the ambient wall clock does
+    // not advance between the two captures, so an unguarded fixture would give
+    // both independent workspaces the same `snap-<ms>` ID and fail the
+    // distinctness assertion before restoring. The fixture must control only
+    // the registration milliseconds and restore the clock afterwards.
+    const originalNow = Date.now
+    ;(Date as unknown as { now: () => number }).now = () => FIXTURE_TRUE_SNAPSHOT_MS
+    try {
+      const fixture = await prepareSnapshotFixture({
+        trueRoot: project,
+        rootArg: "project",
+        withDecoy: true,
+      })
+      const decoyRoot = fixture.decoyRoot as string
+      const trueRecord = stateOf(project).snapshots.find((s: any) => s.label === "same")
+      const decoyRecord = stateOf(decoyRoot).snapshots.find((s: any) => s.label === "same")
+
+      // Both remain REAL snapshots registered by the existing logic, with the
+      // same label and different captured bytes.
+      const trueManifest = manifestOf(project, "same")
+      const decoyManifest = manifestOf(decoyRoot, "same")
+      expect(trueManifest.kind).toBe("restorable")
+      expect(decoyManifest.kind).toBe("restorable")
+      expect(trueManifest.label).toBe("same")
+      expect(decoyManifest.label).toBe("same")
+      expect(
+        trueManifest.files.find((entry: any) => entry.logical === "main.tex").sha256,
+      ).toBe(sha256(TRUE_ORIGINAL))
+      expect(
+        decoyManifest.files.find((entry: any) => entry.logical === "main.tex").sha256,
+      ).toBe(sha256(DECOY_CONTENT))
+
+      expect(trueRecord.id).toBe(`snap-${FIXTURE_TRUE_SNAPSHOT_MS}`)
+      expect(decoyRecord.id).toBe(`snap-${FIXTURE_DECOY_SNAPSHOT_MS}`)
+      expect(trueRecord.id).not.toBe(decoyRecord.id)
+    } finally {
+      ;(Date as unknown as { now: () => number }).now = originalNow
+      expect(Date.now).toBe(originalNow)
+    }
   })
 
   // ------------------------------------------------- root representation matrix
