@@ -1041,7 +1041,7 @@ describe("Skills Validation", () => {
         "banca-grille": "9a861c773444a1fc537619202bb0818936bafd313efdd9438d3eb1985d0fc6e6",
         "banca-plagio": "1159f65153fad06086fa0debefe41a567cf895d251b1dd4f52a2849ae1146661",
         "banca-planejador": "d39405b0333e53eabd616104d4387dd0f77c26d505d63bed9094a8ae254eac64",
-        "banca-referencias": "b5b73abbbae029adc82980b2045c705b091b1629a44d14efab92aa731008d36b",
+        "banca-referencias": "ff2f4c0ab714923605cc4ffc37eccf5c199b67c43bde6cafaacd38ea45073da7",
         "banca-revisor": "deb90fe58a8d334bddd9f4dc66810cb5c57621cc63bad313c44c199c042de798",
       };
 

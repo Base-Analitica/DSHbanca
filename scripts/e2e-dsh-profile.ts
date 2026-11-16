@@ -2191,9 +2191,9 @@ const canonicalNativeSkillsMeta = {
   },
   "banca-referencias": {
     "sourcePath": "skills/banca-referencias/SKILL.md",
-    "sourceSha256": "b5b73abbbae029adc82980b2045c705b091b1629a44d14efab92aa731008d36b",
-    "bodySha256": "d41cad0de66968a7fc1d74e0b8223326e6f6e73ac965c3b31f93d65c8e7c3ed8",
-    "bodyLength": 1702
+    "sourceSha256": "ff2f4c0ab714923605cc4ffc37eccf5c199b67c43bde6cafaacd38ea45073da7",
+    "bodySha256": "53ef96410223ab08e48ec65b37ef832bf3273b449229617f93894793a76fcb22",
+    "bodyLength": 3206
   },
   "banca-revisor": {
     "sourcePath": "skills/banca-revisor/SKILL.md",
