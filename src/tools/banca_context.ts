@@ -1,5 +1,5 @@
-import { readFileSync, existsSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { lstatSync, readFileSync, writeFileSync, type Stats } from "node:fs"
+import { join, resolve } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
@@ -44,6 +44,190 @@ function formatCheckpointError(err: unknown): string {
   ].join("\n")
 }
 
+// ---------------------------------------------------------------------------
+// Optional auxiliary project state (issue #154)
+//
+// `.banca/scorecard.md` and `.banca/knowledge.md` are optional data included in
+// the context pack. They are read through the same canonical origin policy used
+// by the configuration (#134) and state (#136) boundaries: the project root is
+// normalized once, the destination is resolved with `resolveRealInsideRoot`,
+// inspected with `lstatSync`, and only a regular file is opened. The preflight
+// runs before the first checkpoint persistence/advance of a valid plan, so a
+// refused origin cannot create or advance academic state or produce a pack.
+//
+// Categories stay distinct: a truly missing file is legitimate absence; an
+// internal regular file (or an internal link allowed by the canonical policy)
+// is read; an escaping/broken link, a non-directory ancestor, a non-regular
+// destination or an inspection failure are controlled refusals; a present file
+// that cannot be read is a controlled read refusal. Messages never embed the
+// host path, a link target, external content or a raw filesystem diagnostic.
+// ---------------------------------------------------------------------------
+
+const OPTIONAL_STATE_FILES = ["scorecard.md", "knowledge.md"] as const
+
+const OPTIONAL_STATE_ORIGIN_REFUSED_UNSAFE =
+  "the auxiliary file origin is not an authorized regular file inside the workspace"
+const OPTIONAL_STATE_ORIGIN_REFUSED_INSPECTION =
+  "the auxiliary file origin could not be inspected safely"
+const OPTIONAL_STATE_ORIGIN_REFUSED_READ =
+  "the present auxiliary file could not be read"
+
+/**
+ * Expected failures of reading an already inspected regular file. They must
+ * surface as a controlled refusal, never as legitimate absence.
+ */
+const EXPECTED_OPTIONAL_STATE_READ_FAILURES = new Set([
+  "EACCES",
+  "EPERM",
+  "EISDIR",
+  "ELOOP",
+  "ENOENT",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENAMETOOLONG",
+  "ESTALE",
+])
+
+type OptionalStateOriginCode =
+  | "unsafe_origin"
+  | "inspection_failed"
+  | "unreadable_origin"
+
+type OptionalStateFailure = {
+  /** Public project-relative name; never an absolute host path. */
+  file: string
+  code: OptionalStateOriginCode
+  reason: string
+}
+
+type OptionalStateOrigin =
+  | { status: "absent" }
+  | { status: "present"; content: string }
+  | { status: "refused"; failure: OptionalStateFailure }
+
+type OptionalStatePreflight =
+  | { status: "ok"; parts: string[] }
+  | { status: "refused"; failures: OptionalStateFailure[] }
+
+/**
+ * Inspect and read one optional auxiliary file.
+ *
+ * `absoluteRoot` is already normalized by the caller (`resolve`), so a relative
+ * project root is never applied twice. The canonical destination is resolved by
+ * the shared policy; a linked ancestor that stays inside the workspace is
+ * allowed, while any link escaping it (or a broken/non-directory component) is
+ * refused before a byte is read. Only a regular destination is opened:
+ * directories, FIFOs, sockets and devices are never opened.
+ *
+ * Deterministic failures of the shared resolution (for example an unreadable or
+ * non-directory `.banca` ancestor) surface as `unsafe_origin`, because
+ * `resolveRealInsideRoot` wraps them in its own controlled error. The
+ * `inspection_failed` category covers an `lstat` failure of the already
+ * resolved destination, which is not deterministically reproducible without a
+ * concurrent change.
+ *
+ * A residual TOCTOU window remains between this inspection and the read, so the
+ * guarantee covers a filesystem not concurrently mutated by another process.
+ * Hardlinks and sub-mounts are not distinguished beyond the regular-file check.
+ */
+function readOptionalStateOrigin(
+  absoluteRoot: string,
+  name: (typeof OPTIONAL_STATE_FILES)[number],
+): OptionalStateOrigin {
+  const publicFile = `.banca/${name}`
+  const refused = (
+    code: OptionalStateOriginCode,
+    reason: string,
+  ): OptionalStateOrigin => ({
+    status: "refused",
+    failure: { file: publicFile, code, reason },
+  })
+
+  let canonicalPath: string
+  try {
+    canonicalPath = resolveRealInsideRoot(
+      absoluteRoot,
+      join(absoluteRoot, ".banca", name),
+    )
+  } catch (error) {
+    if (error instanceof PathTraversalError) {
+      return refused("unsafe_origin", OPTIONAL_STATE_ORIGIN_REFUSED_UNSAFE)
+    }
+    throw error
+  }
+
+  let destination: Stats
+  try {
+    destination = lstatSync(canonicalPath)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT") return { status: "absent" }
+    if (typeof code === "string") {
+      return refused(
+        "inspection_failed",
+        OPTIONAL_STATE_ORIGIN_REFUSED_INSPECTION,
+      )
+    }
+    throw error
+  }
+  if (!destination.isFile()) {
+    return refused("unsafe_origin", OPTIONAL_STATE_ORIGIN_REFUSED_UNSAFE)
+  }
+
+  let content: string
+  try {
+    content = readFileSync(canonicalPath, "utf-8")
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (
+      typeof code === "string" &&
+      EXPECTED_OPTIONAL_STATE_READ_FAILURES.has(code)
+    ) {
+      return refused("unreadable_origin", OPTIONAL_STATE_ORIGIN_REFUSED_READ)
+    }
+    throw error
+  }
+  return { status: "present", content }
+}
+
+/**
+ * Preflight both optional files for a valid plan. Absence is omitted; any
+ * refused origin produces a controlled refusal, even when the other file is
+ * readable (its content is then not included anywhere).
+ */
+function preflightOptionalProjectState(
+  absoluteRoot: string,
+): OptionalStatePreflight {
+  const parts: string[] = []
+  const failures: OptionalStateFailure[] = []
+  for (const name of OPTIONAL_STATE_FILES) {
+    const origin = readOptionalStateOrigin(absoluteRoot, name)
+    if (origin.status === "present") {
+      parts.push(`\n${origin.content}\n`)
+    } else if (origin.status === "refused") {
+      failures.push(origin.failure)
+    }
+  }
+  if (failures.length > 0) return { status: "refused", failures }
+  return { status: "ok", parts }
+}
+
+/** Explicit, sanitized tool response for a refused optional origin. */
+function formatOptionalStateRefusal(failures: OptionalStateFailure[]): string {
+  const lines = [
+    "context refused: auxiliary project state could not be read safely",
+  ]
+  for (const failure of failures) {
+    lines.push(
+      `file=${failure.file}`,
+      `code=${failure.code}`,
+      `reason=${failure.reason}`,
+    )
+  }
+  return lines.join("\n")
+}
+
 export const bancaContext = defineBancaTool({
   description:
     "Build context pack from the canonical manuscript plan and the persisted exhaustive-analysis checkpoint. Progress advances only when completedBatchId is supplied.",
@@ -80,6 +264,21 @@ export const bancaContext = defineBancaTool({
         `coveragePercent=0`,
         diagnostics.length > 0 ? `diagnostics: ${diagSummary}` : "diagnostics: (none)",
       ].join("\n")
+    }
+
+    // Preflight the optional project state before the first checkpoint
+    // persistence/advance of a valid plan (issue #154). A refused origin must
+    // not create or advance academic state nor produce a context pack. The
+    // blocked-plan path above keeps its existing precedence and result.
+    //
+    // For a valid plan this preflight intentionally precedes checkpoint loading
+    // and validation: when an auxiliary refusal and a checkpoint/audit
+    // diagnostic would both apply, the auxiliary refusal is reported first.
+    // This is security-first and neither outcome changes persistent state.
+    const absoluteRoot = resolve(root)
+    const optionalState = preflightOptionalProjectState(absoluteRoot)
+    if (optionalState.status === "refused") {
+      return formatOptionalStateRefusal(optionalState.failures)
     }
 
     let checkpoint: AnalysisCheckpoint
@@ -199,11 +398,6 @@ export const bancaContext = defineBancaTool({
       nextBatch = nextAnalysisBatch(plan, checkpoint)
     } catch (err) {
       return formatCheckpointError(err)
-    }
-
-    const optionalParts: string[] = []
-    for (const p of [join(root, ".banca", "scorecard.md"), join(root, ".banca", "knowledge.md")]) {
-      if (existsSync(p)) optionalParts.push(`\n${readFileSync(p, "utf-8")}\n`)
     }
 
     const batchMeta =
@@ -333,9 +527,9 @@ export const bancaContext = defineBancaTool({
     }
 
     // Optional project state; must not change batch identity or order.
-    if (optionalParts.length > 0) {
+    if (optionalState.parts.length > 0) {
       parts.push(`## Project state\n`)
-      parts.push(...optionalParts)
+      parts.push(...optionalState.parts)
     }
 
     let out = ""
