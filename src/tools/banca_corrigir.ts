@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync, writeFileSync } from "node:fs"
-import { join, relative } from "node:path"
+import { join, relative, resolve } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
@@ -182,7 +182,16 @@ export const bancaCorrigir = defineBancaTool({
     skipSnapshot: z.boolean().optional().describe("Skip snapshot creation"),
   },
   execute: async (args, ctx) => {
-    const root = args.projectRoot || ctx.directory
+    // Normalize the workspace root once at the tool boundary (issue #146). The
+    // mandatory pre-correction snapshot was created through
+    // `ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))`: with
+    // a relative root the root was applied twice, so the manuscript was really
+    // modified and the backup registered in the true state while its bytes were
+    // stored in the duplicated directory — a recovery point the corrected
+    // restore (#149) cannot reach. This is a lexical normalization only;
+    // canonical confinement, destination identity, backup verification and
+    // state registration are unchanged.
+    const root = resolve(args.projectRoot || ctx.directory)
     const config = loadConfig(root)
     const paths = resolveManuscriptPaths(root, config)
     const corrections = args.corrections || []

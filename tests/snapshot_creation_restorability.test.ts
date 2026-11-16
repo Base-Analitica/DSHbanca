@@ -22,6 +22,7 @@
  * `state.json` bytes before/after — never messages alone.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
   existsSync,
@@ -31,12 +32,15 @@ import {
   readFileSync,
   readlinkSync,
   readdirSync,
+  realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join, relative } from "node:path"
+import { pathToFileURL } from "node:url"
 import { createSnapshot } from "../src/lib/snapshot"
 import { PathTraversalError } from "../src/lib/safe_paths"
 
@@ -741,5 +745,618 @@ describe("issue #136 — snapshot creation refuses an external state origin", ()
     expect(existsSync(snapshotsDir)).toBe(false)
     expect(snapshotTree(base)).toEqual(before)
     expect(sha256(readFileSync(mainPath))).toBe(mainHash)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #146 — banca_snapshot must normalize the workspace root once
+//
+// `banca_snapshot` selected `args.projectRoot || ctx.directory` without
+// normalizing it and then built the vault as
+// `resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))`. With a
+// relative root (`project`) the root was applied twice: configuration, state
+// and manuscript came from the true workspace, while the manifest and payload
+// were written to `project/project/.banca/snapshots`; the snapshot was
+// registered in the true `state.json`, so the announced "verified restorable"
+// recovery point was unreachable through the corrected restore consumer
+// (#149).
+//
+// Every scenario uses synthetic projects and the real tools. Relative
+// representations run in bounded subprocesses with an explicit cwd (never
+// `process.chdir`); recursive inventories compare kinds, link targets and
+// SHA-256 before/after, so refusals and decoy guarantees never depend on
+// messages alone.
+// ---------------------------------------------------------------------------
+
+describe("issue #146 — banca_snapshot writes to the true workspace vault", () => {
+  const TRUE_MANUSCRIPT = "TRUE ORIGINAL"
+  const DECOY_MANUSCRIPT = "DECOY CONTENT"
+  const CURRENT_MANUSCRIPT = "CURRENT MANUSCRIPT"
+
+  const CONFIG_146 = {
+    version: 1,
+    manuscript: {
+      format: "latex",
+      root: ".",
+      main: "main.tex",
+      bib: "referencias.bib",
+      chapters: ["capitulos/*.tex"],
+      outputDir: "trabalhos",
+    },
+    compile: { enabled: false, command: [] },
+    allowedPaths: ["**/*.tex", "**/*.bib", "**/*.md"],
+    protectedPaths: ["dados/**", ".banca/snapshots/**", ".git/**"],
+    immutableFacts: [],
+    externalDependencies: [],
+    rubricProfile: "banca-rigorosa",
+    targetScore: 9,
+    providers: { references: { primary: "cache", fallbacks: [], timeoutMs: 1000 } },
+    mcp: { crossrefAcademicEnabled: false },
+  }
+
+  type BoundedResult = {
+    timedOut: boolean
+    parsed: { ok: boolean; result?: string; name?: string; message?: string }
+  }
+
+  function setupWorkspace(root: string, mainContent: string, config: unknown = CONFIG_146): void {
+    mkdirSync(join(root, ".banca"), { recursive: true })
+    write(root, ".banca/project.json", JSON.stringify(config))
+    write(root, "main.tex", mainContent)
+    write(root, "referencias.bib", "@book{sintetica, title={Referencia sintetica}}")
+    write(root, "capitulos/cap1.tex", "Capitulo sintetico 146")
+  }
+
+  function vaultOf(root: string): string {
+    return join(root, ".banca", "snapshots")
+  }
+
+  function snapDirOf(root: string, label: string): string {
+    return join(vaultOf(root), label)
+  }
+
+  function manifestOf(root: string, label: string): any {
+    return JSON.parse(readFileSync(join(vaultOf(root), `${label}.manifest.json`), "utf8"))
+  }
+
+  function stateOf(root: string): any | null {
+    const statePath = join(root, ".banca", "state.json")
+    if (!existsSync(statePath)) return null
+    return JSON.parse(readFileSync(statePath, "utf8"))
+  }
+
+  function stateLabels(root: string): string[] {
+    return (stateOf(root)?.snapshots ?? []).map((s: any) => s.label)
+  }
+
+  /** Complete recursive inventory: kind, symlink target or file SHA-256. */
+  function inventoryTree(root: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    const walk = (dir: string): void => {
+      if (!existsSync(dir)) return
+      for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+        a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+      )) {
+        const abs = join(dir, entry.name)
+        const rel = relative(root, abs).split("\\").join("/")
+        const st = lstatSync(abs)
+        if (st.isSymbolicLink()) out[rel] = `symlink:${readlinkSync(abs)}`
+        else if (st.isDirectory()) {
+          out[rel] = "dir"
+          walk(abs)
+        } else if (st.isFile()) out[rel] = `file:${sha256(readFileSync(abs))}`
+        else out[rel] = "special"
+      }
+    }
+    walk(root)
+    return out
+  }
+
+  /**
+   * Path where the pre-fix implementation applied a relative root twice:
+   * `<true root>/<relative representation>`. Kept as an independent oracle so
+   * the decoy and "no stray tree" assertions cannot be vacuous.
+   */
+  function duplicatedRootPath(trueRoot: string, relativeRootArg: string): string {
+    return join(trueRoot, ...relativeRootArg.split("/").filter((part) => part !== "" && part !== "."))
+  }
+
+  /** Run the real tool in a bounded subprocess with an explicit cwd. */
+  function boundedTool(
+    tool: "banca_snapshot" | "banca_restore",
+    cwd: string,
+    args: Record<string, unknown>,
+    ctxDirectory: string,
+  ): BoundedResult {
+    const worker = join(cwd, `${tool}-worker-146-${process.pid}-${Math.random().toString(16).slice(2)}.mjs`)
+    const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", `${tool}.ts`)).href
+    const exportName = tool === "banca_snapshot" ? "bancaSnapshot" : "bancaRestore"
+    writeFileSync(
+      worker,
+      [
+        "const toolUrl = process.argv[2]",
+        "const exportName = process.argv[3]",
+        "const args = JSON.parse(process.argv[4])",
+        "const ctxDirectory = process.argv[5]",
+        "const mod = await import(toolUrl)",
+        "const tool = mod[exportName]",
+        "try {",
+        "  const result = await tool.execute(args, { directory: ctxDirectory })",
+        "  console.log(JSON.stringify({ ok: true, result: String(result) }))",
+        "} catch (error) {",
+        "  console.log(JSON.stringify({ ok: false, name: String(error && error.name), message: String(error && error.message) }))",
+        "}",
+        "",
+      ].join("\n"),
+      "utf-8",
+    )
+    const outcome = spawnSync(
+      process.execPath,
+      [worker, toolUrl, exportName, JSON.stringify(args), ctxDirectory],
+      { cwd, env: { ...process.env, PATH: "" }, timeout: 20_000, encoding: "utf-8" },
+    )
+    const timedOut = outcome.error !== undefined || outcome.signal !== null
+    const jsonLine = (outcome.stdout ?? "")
+      .split("\n")
+      .reverse()
+      .find((line) => line.trim().startsWith("{"))
+    const parsed = jsonLine
+      ? (JSON.parse(jsonLine) as BoundedResult["parsed"])
+      : { ok: false, name: "NONE", message: "no JSON result from bounded worker" }
+    return { timedOut, parsed }
+  }
+
+  function expectCaptureSuccess(result: BoundedResult): string {
+    expect(result.timedOut).toBe(false)
+    expect(result.parsed.ok).toBe(true)
+    const text = String(result.parsed.result)
+    expect(text).toContain("snapshot →")
+    expect(text).toContain("Recovery point verified: restorable")
+    expect(text).not.toMatch(/blocked|failed/)
+    return text
+  }
+
+  function expectRestoreSuccess(result: BoundedResult, label: string): string {
+    expect(result.timedOut).toBe(false)
+    expect(result.parsed.ok).toBe(true)
+    const text = String(result.parsed.result)
+    expect(text).toContain(`restored from ${label}`)
+    expect(text).toContain("Safety backup created")
+    expect(text).not.toMatch(/blocked|failed|partial:/)
+    return text
+  }
+
+  function expectBoundedRefusal(result: BoundedResult, fragments: string[] = []): string {
+    expect(result.timedOut).toBe(false)
+    expect(result.parsed.ok).toBe(true)
+    const text = String(result.parsed.result)
+    expect(text).not.toContain("snapshot →")
+    expect(text).not.toContain("Recovery point verified")
+    expect(text).not.toContain("restored from")
+    expect(text).not.toContain("Safety backup created")
+    for (const fragment of fragments) expect(text).toContain(fragment)
+    return text
+  }
+
+  // ------------------------------------------------------- A. manual snapshot
+
+  test("absolute root: captured manifest/payload stay in the true vault and restore returns the exact bytes", async () => {
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    const { bancaRestore } = await import("../src/tools/banca_restore")
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+
+    const captureText = String(await bancaSnapshot.execute({ projectRoot: project, label: "same" }, {} as any))
+    expect(captureText).toContain("snapshot →")
+    expect(captureText).toContain("Recovery point verified: restorable")
+
+    const manifest = manifestOf(project, "same")
+    const mainEntry = manifest.files.find((f: any) => f.logical === "main.tex")
+    expect(manifest.kind).toBe("restorable")
+    expect(mainEntry.sha256).toBe(sha256(TRUE_MANUSCRIPT))
+    expect(mainEntry.size).toBe(Buffer.byteLength(TRUE_MANUSCRIPT))
+    expect(readFileSync(join(snapDirOf(project, "same"), "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+    // Manifest is the sibling of the claimed directory in the true vault.
+    expect(existsSync(join(vaultOf(project), "same.manifest.json"))).toBe(true)
+    // No duplicated root is ever created for an absolute root.
+    expect(existsSync(join(project, "project"))).toBe(false)
+    expect(stateLabels(project)).toEqual(["same"])
+
+    write(project, "main.tex", CURRENT_MANUSCRIPT)
+    const restoreText = String(
+      await bancaRestore.execute({ projectRoot: project, snapshotId: "same", confirm: true }, {} as any),
+    )
+    expect(restoreText).toContain("restored from same")
+    expect(readFileSync(join(project, "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+    expect(sha256(readFileSync(join(project, "main.tex")))).toBe(mainEntry.sha256)
+
+    const backupLabel = backupLabelFrom(restoreText)
+    expect(existsSync(join(snapDirOf(project, backupLabel), "main.tex"))).toBe(true)
+    expect(readFileSync(join(snapDirOf(project, backupLabel), "main.tex"), "utf8")).toBe(CURRENT_MANUSCRIPT)
+    expect(manifestOf(project, backupLabel).kind).toBe("restorable")
+  })
+
+  test("relative root: capture and restore use the true vault and never the duplicated destination", async () => {
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    const duplicated = duplicatedRootPath(project, "project")
+    // Independent oracle for the pre-fix destination: project/project.
+    expect(duplicated).toBe(join(project, "project"))
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const captureText = expectCaptureSuccess(capture)
+    expect(captureText).toContain(join(realpathSync(project), ".banca", "snapshots", "same"))
+    expect(existsSync(duplicated)).toBe(false)
+
+    const manifest = manifestOf(project, "same")
+    const mainEntry = manifest.files.find((f: any) => f.logical === "main.tex")
+    expect(manifest.kind).toBe("restorable")
+    expect(mainEntry.sha256).toBe(sha256(TRUE_MANUSCRIPT))
+    expect(mainEntry.size).toBe(Buffer.byteLength(TRUE_MANUSCRIPT))
+    expect(readFileSync(join(snapDirOf(project, "same"), "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+    expect(readdirSync(vaultOf(project)).sort()).toEqual(["same", "same.manifest.json"])
+    expect(stateLabels(project)).toEqual(["same"])
+
+    write(project, "main.tex", CURRENT_MANUSCRIPT)
+    const restore = boundedTool(
+      "banca_restore",
+      base,
+      { projectRoot: "project", snapshotId: "same", confirm: true },
+      "project",
+    )
+    const restoreText = expectRestoreSuccess(restore, "same")
+    expect(readFileSync(join(project, "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+    expect(sha256(readFileSync(join(project, "main.tex")))).toBe(mainEntry.sha256)
+
+    const backupLabel = backupLabelFrom(restoreText)
+    expect(existsSync(join(snapDirOf(project, backupLabel), "main.tex"))).toBe(true)
+    expect(readFileSync(join(snapDirOf(project, backupLabel), "main.tex"), "utf8")).toBe(CURRENT_MANUSCRIPT)
+    expect(existsSync(duplicated)).toBe(false)
+  })
+
+  test("relative capture is recoverable through an absolute root in an independent fixture", async () => {
+    const target = join(base, "cross", "project")
+    setupWorkspace(target, TRUE_MANUSCRIPT)
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "cross/project", label: "cross" }, "cross/project")
+    expectCaptureSuccess(capture)
+    expect(existsSync(duplicatedRootPath(target, "cross/project"))).toBe(false)
+    expect(stateLabels(target)).toEqual(["cross"])
+
+    write(target, "main.tex", CURRENT_MANUSCRIPT)
+    const { bancaRestore } = await import("../src/tools/banca_restore")
+    const restoreText = String(
+      await bancaRestore.execute({ projectRoot: target, snapshotId: "cross", confirm: true }, {} as any),
+    )
+    expect(restoreText).toContain("restored from cross")
+    expect(readFileSync(join(target, "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+  })
+
+  // ------------------------------------------- C. root representation matrix
+
+  async function expectRepresentationCapturesAndRestores(options: {
+    target: string
+    rootArg: string
+    ctxMode?: boolean
+  }): Promise<void> {
+    setupWorkspace(options.target, TRUE_MANUSCRIPT)
+
+    const captureArgs: Record<string, unknown> = { label: "rep" }
+    if (!options.ctxMode) captureArgs.projectRoot = options.rootArg
+    const capture = boundedTool("banca_snapshot", base, captureArgs, options.rootArg)
+    expectCaptureSuccess(capture)
+    expect(existsSync(duplicatedRootPath(options.target, options.rootArg))).toBe(false)
+    expect(existsSync(join(snapDirOf(options.target, "rep"), "main.tex"))).toBe(true)
+    expect(manifestOf(options.target, "rep").files.find((f: any) => f.logical === "main.tex").sha256).toBe(
+      sha256(TRUE_MANUSCRIPT),
+    )
+    expect(stateLabels(options.target)).toEqual(["rep"])
+
+    write(options.target, "main.tex", CURRENT_MANUSCRIPT)
+    const restoreArgs: Record<string, unknown> = { snapshotId: "rep", confirm: true }
+    if (!options.ctxMode) restoreArgs.projectRoot = options.rootArg
+    const restore = boundedTool("banca_restore", base, restoreArgs, options.rootArg)
+    expectRestoreSuccess(restore, "rep")
+    expect(readFileSync(join(options.target, "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+    expect(existsSync(duplicatedRootPath(options.target, options.rootArg))).toBe(false)
+  }
+
+  test("root matrix: './' prefixed relative root captures and restores in the true workspace", async () => {
+    await expectRepresentationCapturesAndRestores({
+      target: join(base, "dot-prefix", "project"),
+      rootArg: "./dot-prefix/project",
+    })
+  })
+
+  test("root matrix: nested relative root captures and restores in the true workspace", async () => {
+    await expectRepresentationCapturesAndRestores({
+      target: join(base, "nested", "parent", "project"),
+      rootArg: "nested/parent/project",
+    })
+  })
+
+  test("root matrix: relative ctx.directory fallback captures and restores in the true workspace", async () => {
+    await expectRepresentationCapturesAndRestores({
+      target: join(base, "ctx", "project"),
+      rootArg: "ctx/project",
+      ctxMode: true,
+    })
+  })
+
+  // -------------------------------------------------- D. duplicated-root decoy
+
+  stest("preexisting duplicated-root decoy with a homonym label is neither consulted nor modified", async () => {
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    const decoyRoot = join(project, "project")
+    // Literal oracle for the destination the vulnerable producer used.
+    expect(decoyRoot).toBe(duplicatedRootPath(project, "project"))
+    setupWorkspace(decoyRoot, DECOY_MANUSCRIPT)
+    write(decoyRoot, "notas/alvo.tex", "DECOY SYMLINK TARGET")
+    symlinkSync("notas/alvo.tex", join(decoyRoot, "nota.tex"))
+
+    // Legitimate homonym snapshot captured by the real tool with an absolute root.
+    const decoyCapture = String(await bancaSnapshot.execute({ projectRoot: decoyRoot, label: "same" }, {} as any))
+    expect(decoyCapture).toContain("snapshot →")
+    expect(manifestOf(decoyRoot, "same").files.find((f: any) => f.logical === "main.tex").sha256).toBe(
+      sha256(DECOY_MANUSCRIPT),
+    )
+    const decoyInventoryBefore = inventoryTree(decoyRoot)
+    const decoyStateBefore = readFileSync(join(decoyRoot, ".banca", "state.json"))
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    expectCaptureSuccess(capture)
+
+    // The true snapshot was created in the correct vault despite the decoy homonym.
+    expect(readFileSync(join(snapDirOf(project, "same"), "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+    expect(manifestOf(project, "same").files.find((f: any) => f.logical === "main.tex").sha256).toBe(
+      sha256(TRUE_MANUSCRIPT),
+    )
+    expect(stateLabels(project)).toEqual(["same"])
+
+    // Every artifact, hash, state byte and symlink target of the decoy is identical.
+    expect(inventoryTree(decoyRoot)).toEqual(decoyInventoryBefore)
+    expect(readFileSync(join(decoyRoot, ".banca", "state.json"))).toEqual(decoyStateBefore)
+    expect(readFileSync(join(snapDirOf(decoyRoot, "same"), "main.tex"), "utf8")).toBe(DECOY_MANUSCRIPT)
+
+    // Restoration uses the true workspace bytes and its backup stays in the true vault.
+    write(project, "main.tex", CURRENT_MANUSCRIPT)
+    const restore = boundedTool(
+      "banca_restore",
+      base,
+      { projectRoot: "project", snapshotId: "same", confirm: true },
+      "project",
+    )
+    const restoreText = expectRestoreSuccess(restore, "same")
+    expect(readFileSync(join(project, "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
+    const backupLabel = backupLabelFrom(restoreText)
+    expect(readFileSync(join(snapDirOf(project, backupLabel), "main.tex"), "utf8")).toBe(CURRENT_MANUSCRIPT)
+    expect(existsSync(join(vaultOf(decoyRoot), backupLabel))).toBe(false)
+    expect(inventoryTree(decoyRoot)).toEqual(decoyInventoryBefore)
+  })
+
+  // ------------------------------------------------- E. security negatives
+
+  stest("refuses an external true vault symlink instead of writing into a safe duplicated-root decoy", async () => {
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    const decoyRoot = join(project, "project")
+    setupWorkspace(decoyRoot, DECOY_MANUSCRIPT)
+    // A safe, legitimate decoy vault makes the duplicated destination usable.
+    await bancaSnapshot.execute({ projectRoot: decoyRoot, label: "decoy" }, {} as any)
+
+    const externalVault = join(base, "external-vault-146")
+    mkdirSync(vaultOf(project), { recursive: true })
+    renameSync(vaultOf(project), externalVault)
+    symlinkSync(externalVault, vaultOf(project), "dir")
+
+    const decoyBefore = inventoryTree(decoyRoot)
+    const externalBefore = inventoryTree(externalVault)
+    const manuscriptHash = sha256(readFileSync(join(project, "main.tex")))
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const text = expectBoundedRefusal(capture)
+    expect(text).toMatch(/blocked/)
+    // Sanitized refusal: no host path and no link target is echoed.
+    expect(text).not.toContain(base)
+    expect(text).not.toContain(externalVault)
+    // Nothing was captured or registered anywhere (true or decoy tree).
+    expect(stateOf(project)).toBeNull()
+    expect(inventoryTree(externalVault)).toEqual(externalBefore)
+    expect(inventoryTree(decoyRoot)).toEqual(decoyBefore)
+    expect(sha256(readFileSync(join(project, "main.tex")))).toBe(manuscriptHash)
+    expect(lstatSync(vaultOf(project)).isSymbolicLink()).toBe(true)
+  })
+
+  stest("refuses a broken true vault symlink instead of writing into a safe duplicated-root decoy", async () => {
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    const decoyRoot = join(project, "project")
+    setupWorkspace(decoyRoot, DECOY_MANUSCRIPT)
+    await bancaSnapshot.execute({ projectRoot: decoyRoot, label: "decoy" }, {} as any)
+
+    mkdirSync(vaultOf(project), { recursive: true })
+    renameSync(vaultOf(project), join(base, "moved-vault-146"))
+    symlinkSync(join(base, "missing-vault-146"), vaultOf(project), "dir")
+
+    const decoyBefore = inventoryTree(decoyRoot)
+    const movedBefore = inventoryTree(join(base, "moved-vault-146"))
+    const manuscriptHash = sha256(readFileSync(join(project, "main.tex")))
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const text = expectBoundedRefusal(capture)
+    expect(text).toMatch(/blocked/)
+    expect(text).not.toContain(base)
+    expect(stateOf(project)).toBeNull()
+    expect(inventoryTree(join(base, "moved-vault-146"))).toEqual(movedBefore)
+    expect(inventoryTree(decoyRoot)).toEqual(decoyBefore)
+    expect(sha256(readFileSync(join(project, "main.tex")))).toBe(manuscriptHash)
+  })
+
+  stest("refuses an unsafe true state origin instead of accepting the safe decoy state", async () => {
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    const decoyRoot = join(project, "project")
+    setupWorkspace(decoyRoot, DECOY_MANUSCRIPT)
+    await bancaSnapshot.execute({ projectRoot: decoyRoot, label: "decoy" }, {} as any)
+
+    const externalState = join(base, "external-state-146.json")
+    writeFileSync(
+      externalState,
+      JSON.stringify({ currentScore: 7.3, lastAudit: null, lastLoop: "DECOY", snapshots: [], iterations: [] }),
+      "utf8",
+    )
+    symlinkSync(externalState, join(project, ".banca", "state.json"), "file")
+
+    const externalBefore = readFileSync(externalState)
+    const decoyBefore = inventoryTree(decoyRoot)
+    const manuscriptHash = sha256(readFileSync(join(project, "main.tex")))
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const text = expectBoundedRefusal(capture)
+    expect(text).toMatch(/blocked/)
+    expect(text).not.toContain(base)
+    // No vault directory, capture or registration is created before the refusal.
+    expect(existsSync(join(project, ".banca", "snapshots"))).toBe(false)
+    expect(readFileSync(externalState)).toEqual(externalBefore)
+    expect(readlinkSync(join(project, ".banca", "state.json"))).toBe(externalState)
+    expect(inventoryTree(decoyRoot)).toEqual(decoyBefore)
+    expect(sha256(readFileSync(join(project, "main.tex")))).toBe(manuscriptHash)
+  })
+
+  test("refuses a label already occupied in the true vault; the decoy does not mask the conflict", async () => {
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    // Legitimate vault entry in the true vault, not registered in state.json.
+    write(project, ".banca/snapshots/same/main.tex", "LEGACY TRUE PAYLOAD")
+    const decoyRoot = join(project, "project")
+    setupWorkspace(decoyRoot, DECOY_MANUSCRIPT)
+    await bancaSnapshot.execute({ projectRoot: decoyRoot, label: "other" }, {} as any)
+
+    const trueBefore = inventoryTree(project)
+    const decoyBefore = inventoryTree(decoyRoot)
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const text = expectBoundedRefusal(capture)
+    expect(text).toContain('blocked: snapshot label "same" is not available')
+    expect(inventoryTree(project)).toEqual(trueBefore)
+    expect(inventoryTree(decoyRoot)).toEqual(decoyBefore)
+    expect(stateOf(project)).toBeNull()
+    expect(existsSync(join(vaultOf(project), "same.manifest.json"))).toBe(false)
+    expect(readFileSync(join(project, ".banca/snapshots/same/main.tex"), "utf8")).toBe("LEGACY TRUE PAYLOAD")
+  })
+
+  test("refuses a protected manuscript destination before capturing under a relative root", async () => {
+    const protectedConfig = {
+      ...CONFIG_146,
+      manuscript: { ...CONFIG_146.manuscript, main: "dados/main.tex" },
+      protectedPaths: ["dados/**", ".banca/snapshots/**", ".git/**"],
+    }
+    mkdirSync(join(project, ".banca"), { recursive: true })
+    write(project, ".banca/project.json", JSON.stringify(protectedConfig))
+    write(project, "dados/main.tex", "PROTECTED MANUSCRIPT")
+    const mainHash = sha256(readFileSync(join(project, "dados/main.tex")))
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const text = expectBoundedRefusal(capture)
+    expect(text).toMatch(/not restorable|protected/)
+    // The vulnerable duplicated destination was not even created.
+    expect(existsSync(duplicatedRootPath(project, "project"))).toBe(false)
+    expect(stateOf(project)).toBeNull()
+    expect(existsSync(join(vaultOf(project), "same"))).toBe(false)
+    expect(sha256(readFileSync(join(project, "dados/main.tex")))).toBe(mainHash)
+  })
+
+  stest("refuses an external main symlink before capturing under a relative root", async () => {
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    rmSync(join(project, "main.tex"))
+    write(external, "external-main-146.tex", "EXTERNAL MANUSCRIPT")
+    symlinkSync(join(external, "external-main-146.tex"), join(project, "main.tex"))
+
+    const externalBefore = inventoryTree(external)
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const text = expectBoundedRefusal(capture)
+    expect(text).toMatch(/not restorable|escapes/)
+    expect(existsSync(duplicatedRootPath(project, "project"))).toBe(false)
+    expect(stateOf(project)).toBeNull()
+    expect(inventoryTree(external)).toEqual(externalBefore)
+    expect(readlinkSync(join(project, "main.tex"))).toBe(join(external, "external-main-146.tex"))
+    expect(sha256(readFileSync(join(external, "external-main-146.tex")))).toBe(sha256("EXTERNAL MANUSCRIPT"))
+  })
+
+  stest("refuses a physical destination collision before capturing under a relative root", async () => {
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    rmSync(join(project, "main.tex"))
+    write(project, "capitulos/cap1.tex", "SHARED COLLISION CONTENT")
+    symlinkSync("capitulos/cap1.tex", join(project, "main.tex"))
+
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "same" }, "project")
+    const text = expectBoundedRefusal(capture)
+    expect(text).toMatch(/not restorable|collide/)
+    expect(readFileSync(join(project, "capitulos/cap1.tex"), "utf8")).toBe("SHARED COLLISION CONTENT")
+    expect(readFileSync(join(project, "main.tex"), "utf8")).toBe("SHARED COLLISION CONTENT")
+    expect(stateOf(project)).toBeNull()
+    // The vulnerable duplicated destination was not even created.
+    expect(existsSync(duplicatedRootPath(project, "project"))).toBe(false)
+    expect(existsSync(join(vaultOf(project), "same"))).toBe(false)
+  })
+
+  // ------------------------------------------- F. history and compatibility
+
+  test("historical snapshots stored only in the duplicated vault are not migrated or fallback-read", async () => {
+    const { bancaSnapshot } = await import("../src/tools/banca_snapshot")
+    const { addSnapshot } = await import("../src/lib/state")
+    setupWorkspace(project, TRUE_MANUSCRIPT)
+    const decoyRoot = join(project, "project")
+    setupWorkspace(decoyRoot, DECOY_MANUSCRIPT)
+
+    // Historical artifact: the vulnerable producer captured into the duplicated
+    // vault while registering the label in the TRUE state. The artifact is
+    // recreated with the real snapshot tool and the real state API, never guessed.
+    const historicalCapture = String(
+      await bancaSnapshot.execute({ projectRoot: decoyRoot, label: "legacy-146" }, {} as any),
+    )
+    expect(historicalCapture).toContain("snapshot →")
+    expect(manifestOf(decoyRoot, "legacy-146").kind).toBe("restorable")
+    addSnapshot(project, "legacy-146", null)
+    expect(stateLabels(project)).toEqual(["legacy-146"])
+
+    const decoyBefore = inventoryTree(decoyRoot)
+    const decoyStateBefore = readFileSync(join(decoyRoot, ".banca", "state.json"))
+
+    // A new relative capture goes to the true vault; nothing is migrated.
+    const capture = boundedTool("banca_snapshot", base, { projectRoot: "project", label: "new-146" }, "project")
+    expectCaptureSuccess(capture)
+    expect(existsSync(join(vaultOf(project), "new-146.manifest.json"))).toBe(true)
+    expect(existsSync(join(vaultOf(project), "legacy-146"))).toBe(false)
+    expect(existsSync(join(vaultOf(project), "legacy-146.manifest.json"))).toBe(false)
+    expect(inventoryTree(decoyRoot)).toEqual(decoyBefore)
+    expect(readFileSync(join(decoyRoot, ".banca", "state.json"))).toEqual(decoyStateBefore)
+    expect(stateLabels(project).sort()).toEqual(["legacy-146", "new-146"])
+
+    // The registered record is listed, but the true vault never resolves it.
+    const listing = boundedTool("banca_restore", base, { projectRoot: "project" }, "project")
+    expect(listing.timedOut).toBe(false)
+    expect(listing.parsed.ok).toBe(true)
+    expect(String(listing.parsed.result)).toContain("legacy-146")
+    const refused = boundedTool(
+      "banca_restore",
+      base,
+      { projectRoot: "project", snapshotId: "legacy-146", confirm: true },
+      "project",
+    )
+    const refusedText = expectBoundedRefusal(refused)
+    expect(refusedText).toContain("snapshot directory not found")
+    expect(inventoryTree(decoyRoot)).toEqual(decoyBefore)
+    expect(readFileSync(join(vaultOf(decoyRoot), "legacy-146", "main.tex"), "utf8")).toBe(DECOY_MANUSCRIPT)
+
+    // No fallback: the true capture restores the true bytes.
+    write(project, "main.tex", CURRENT_MANUSCRIPT)
+    const restore = boundedTool(
+      "banca_restore",
+      base,
+      { projectRoot: "project", snapshotId: "new-146", confirm: true },
+      "project",
+    )
+    expectRestoreSuccess(restore, "new-146")
+    expect(readFileSync(join(project, "main.tex"), "utf8")).toBe(TRUE_MANUSCRIPT)
   })
 })
