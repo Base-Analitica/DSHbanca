@@ -20,6 +20,26 @@ import {
   snapshotRestorePolicyError,
   type CreatedSnapshot,
 } from "../lib/snapshot"
+import { loadState } from "../lib/state"
+
+/**
+ * Issue #141 — controlled state-origin refusal.
+ *
+ * The canonical state reader (#136) already throws a sanitized
+ * `PathTraversalError` whose message carries no host path, link target,
+ * external content or raw filesystem error. Surfacing its fixed category keeps
+ * the diagnosis faithful: a state directory/unreadable/non-regular origin is a
+ * STATE refusal, not an escaping snapshot path and not an operational capture
+ * failure. It is distinct from the pre-existing vault-destination refusal
+ * below, which keeps using "snapshot path escapes project root".
+ */
+function formatStateOriginRefusal(err: PathTraversalError): string {
+  const prefix = "state refused: "
+  const detail = err.message.startsWith(prefix)
+    ? err.message.slice(prefix.length)
+    : "the state origin is not authorized"
+  return `blocked: project state origin refused — ${detail} — no snapshot artifact was created`
+}
 
 export const bancaSnapshot = defineBancaTool({
   description: "Create targeted snapshot of manuscript files. Registers in state.json.",
@@ -50,6 +70,25 @@ export const bancaSnapshot = defineBancaTool({
     try {
       realWorkspaceRoot(root)
       resolveRealInsideRoot(root, join(root, ".banca", "state.json"))
+    } catch (err) {
+      if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`
+      throw err
+    }
+
+    // Issue #141: authorize/read the state origin through the single secure
+    // reader (#136) BEFORE creating the snapshot vault. Otherwise a state
+    // directory/unreadable/non-regular origin is only refused later inside
+    // createSnapshot, after the empty vault already exists, and is reported as
+    // a generic path/capture failure. This preflight is additive: creation and
+    // registration still perform their own effective state read.
+    try {
+      loadState(root)
+    } catch (err) {
+      if (err instanceof PathTraversalError) return formatStateOriginRefusal(err)
+      throw err
+    }
+
+    try {
       snapshotsDir = ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))
     } catch (err) {
       if (err instanceof PathTraversalError) return `blocked: snapshot path escapes project root`

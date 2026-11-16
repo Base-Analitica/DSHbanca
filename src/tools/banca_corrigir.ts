@@ -19,9 +19,27 @@ import {
   SnapshotCaptureError,
   SnapshotConflictError,
 } from "../lib/snapshot"
-import { addIteration } from "../lib/state"
+import { addIteration, loadState } from "../lib/state"
 import { checkScoreNotDecreased } from "../lib/guards"
 import { analyzeCitationDensity } from "../lib/citation"
+
+/**
+ * Issue #141 — controlled state-origin refusal for the correction preflight.
+ *
+ * The canonical state reader (#136) throws a sanitized `PathTraversalError`
+ * whose message carries no host path, link target, external content or raw
+ * filesystem message. Surfacing its fixed category keeps the diagnosis
+ * faithful: a state directory/unreadable/non-regular origin is a STATE refusal,
+ * distinct from the pre-existing workspace-path refusal, from a label conflict
+ * and from an operational snapshot-capture failure.
+ */
+function formatStateOriginRefusal(err: PathTraversalError): string {
+  const prefix = "state refused: "
+  const detail = err.message.startsWith(prefix)
+    ? err.message.slice(prefix.length)
+    : "the state origin is not authorized"
+  return `blocked: project state origin refused — ${detail} — no manuscript file was modified`
+}
 
 const CorrectionSchema = z.object({
   file: z.string(),
@@ -263,6 +281,20 @@ export const bancaCorrigir = defineBancaTool({
       resolveRealInsideRoot(root, join(root, ".banca", "snapshots"))
     } catch {
       return `blocked: workspace state paths escape project root`
+    }
+
+    // Issue #141: authorize/read the state origin through the single secure
+    // reader (#136) BEFORE the mandatory pre-correction snapshot creates the
+    // vault. Otherwise a state directory/unreadable/non-regular origin is only
+    // refused later inside createSnapshot, after `.banca/snapshots` exists, and
+    // reported as a generic snapshot failure. This preflight is additive: the
+    // snapshot creation and registration still perform their own effective
+    // state read for label conflicts and registration.
+    try {
+      loadState(root)
+    } catch (err) {
+      if (err instanceof PathTraversalError) return formatStateOriginRefusal(err)
+      throw err
     }
 
     // immutableFacts guard: block edits to immutable files (whole batch).

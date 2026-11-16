@@ -1055,6 +1055,8 @@ describe("issue #134 — banca_corrigir refuses an external configuration origin
 // pre-correction snapshot. A FIFO `state.json` used to block that read before
 // any configuration preflight completed. The canonical state reader must
 // refuse the FIFO without opening it, before snapshot/state/manuscript changes.
+// Issue #141 additionally requires that refusal to happen before the vault
+// root is created, with a faithful state-origin diagnostic.
 // ---------------------------------------------------------------------------
 
 describe("issue #136 — banca_corrigir refuses a non-regular state destination", () => {
@@ -1114,15 +1116,16 @@ describe("issue #136 — banca_corrigir refuses a non-regular state destination"
         (outcome.stdout ?? "").split("\n").reverse().find((line) => line.trim().startsWith("{")) as string,
       ) as { ok: boolean; name?: string; message?: string; output?: string }
       expect(parsed.ok).toBe(true)
-      expect(String(parsed.output)).toContain("blocked: pre-correction snapshot failed")
+      // Issue #141: the state origin is refused by the secure reader in the
+      // preflight, before the mandatory snapshot vault is created.
+      expect(String(parsed.output)).toContain("blocked: project state origin refused")
       expect(String(parsed.output)).toContain("no manuscript file was modified")
+      expect(String(parsed.output)).not.toContain("pre-correction snapshot failed")
       expect(sha256(readFileSync(mainPath))).toBe(mainHash)
       // The FIFO was never replaced by a written state file.
       expect(lstatSync(fifoPath).isFIFO()).toBe(true)
       const snapshotsDir = join(project, ".banca", "snapshots")
-      if (existsSync(snapshotsDir)) {
-        expect(readdirSync(snapshotsDir)).toEqual([])
-      }
+      expect(existsSync(snapshotsDir)).toBe(false)
     },
     20_000,
   )
