@@ -709,10 +709,12 @@ describe("issue #137 — absolute and relative roots share one contract", () => 
   test("preserves the ctx.directory fallback when projectRoot is omitted", async () => {
     createProject()
     writeInternalConfig(JSON.stringify({ version: 1, targetScore: 7.5 }))
+    const before = config137TreeSnapshot(project)
 
     const output = String(await bancaStatus.execute({}, { directory: project } as never))
 
     expectCompleteStatus(output, 7.5, 0, 0)
+    expect(config137TreeSnapshot(project)).toEqual(before)
   })
 
   stest("preserves the ctx.directory fallback refusal for a broken configuration link", async () => {
