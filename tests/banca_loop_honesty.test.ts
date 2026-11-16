@@ -13,12 +13,14 @@
  * mutated behind the expected state bookkeeping.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readlinkSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -26,7 +28,8 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative, sep } from "node:path"
+import { pathToFileURL } from "node:url"
 import { loadSnapshotManifest } from "../src/lib/snapshot"
 
 // ---------------------------------------------------------------------------
@@ -1544,5 +1547,735 @@ describe("banca_loop #120 R1 — integridade de apresentação de scores (F)", (
     expect(result).not.toContain("## ")
     expectNoApprovalClaims(result)
     expect(result).toContain("does not enable restore or rollback")
+  })
+})
+
+// ===========================================================================
+// Issue #147 — coerência da raiz do marcador de processo
+//
+// Defeito: `banca_loop` selecionava a raiz como `args.projectRoot ||
+// ctx.directory` sem normalizar. No ramo abaixo do limiar, o vault é montado
+// como `ensureRealDirInsideRoot(root, join(root, ".banca", "snapshots"))`:
+// com raiz relativa `project`, a raiz era aplicada duas vezes e o manifesto do
+// marker era gravado em `project/project/.banca/snapshots`, enquanto o
+// registro no `state.json`, o relatório e o manuscrito permaneciam na raiz
+// verdadeira — um marco de processo anunciado, registrado e inalcançável.
+//
+// Contrato testado nesta seção: a raiz do workspace é normalizada uma única
+// vez na fronteira da tool, de modo que todas as representações válidas do
+// mesmo workspace produzam artefatos coerentes na raiz verdadeira. É
+// normalização lexical: o confinamento canônico de `safe_paths`, a semântica
+// de marker não restituível, a política de restore, o score heurístico, os
+// circuit breakers e o contrato acadêmico da #120 permanecem inalterados.
+//
+// Toda execução usa a tool real em subprocesso limitado (cwd explícito, PATH
+// vazio, sem mocks de caminhos/snapshot/estado/relatório), com manuscrito
+// LaTeX sintético; sem modelo, sem rede, sem compilação real e sem manuscrito
+// real. As asserções inspecionam os artefatos no filesystem e o livro-caixa
+// persistido, não apenas o texto retornado.
+// ===========================================================================
+describe("banca_loop #147 — raiz do workspace do marker de processo", () => {
+  type BoundedLoopResult = {
+    timedOut: boolean
+    parsed: { ok: boolean; result?: string; name?: string; message?: string }
+  }
+
+  const CONFIG_147 = {
+    version: 1,
+    manuscript: {
+      format: "latex" as const,
+      root: ".",
+      main: "main.tex",
+      bib: "refs.bib",
+      chapters: ["capitulos/*.tex"],
+      outputDir: "trabalhos",
+    },
+    compile: { enabled: false, command: [] as string[] },
+    allowedPaths: ["**/*.tex", "**/*.bib", "**/*.md"],
+    protectedPaths: ["dados/**", ".banca/snapshots/**", ".git/**"],
+    immutableFacts: [] as string[],
+    externalDependencies: [] as string[],
+    rubricProfile: "banca-rigorosa",
+    targetScore: 9,
+    providers: { references: { primary: "cache", fallbacks: [] as string[], timeoutMs: 1000 } },
+    mcp: { crossrefAcademicEnabled: false },
+  }
+
+  /**
+   * Destino que a implementação pré-correção usava para a raiz relativa
+   * `relativeRootArg`: `<raiz verdadeira>/<representação relativa>`. Oráculo
+   * independente, para que as asserções de ausência de árvore duplicada e de
+   * decoy não sejam vacuosas.
+   */
+  function duplicatedRootPath(trueRoot: string, relativeRootArg: string): string {
+    return join(
+      trueRoot,
+      ...relativeRootArg.split("/").filter((part) => part !== "" && part !== "."),
+    )
+  }
+
+  function vaultOf(root: string): string {
+    return join(root, ".banca", "snapshots")
+  }
+
+  function reportsOf(root: string): string {
+    return join(root, ".banca", "reports")
+  }
+
+  function stateFileOf(root: string): string {
+    return join(root, ".banca", "state.json")
+  }
+
+  function reportFilesOf(root: string): string[] {
+    if (!existsSync(reportsOf(root))) return []
+    return readdirSync(reportsOf(root)).filter((file) => file.endsWith(".md"))
+  }
+
+  function readStateOf(root: string): any {
+    return JSON.parse(readFileSync(stateFileOf(root), "utf-8"))
+  }
+
+  /** Inventário recursivo: diretórios, destino de symlinks e sha256 dos arquivos. */
+  function inventoryOf(root: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    const walk = (dir: string): void => {
+      if (!existsSync(dir)) return
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const absolute = join(dir, entry.name)
+        const rel = relative(root, absolute).split(sep).join("/")
+        const stat = lstatSync(absolute)
+        if (stat.isSymbolicLink()) {
+          out[rel] = `symlink:${readlinkSync(absolute)}`
+          continue
+        }
+        if (stat.isDirectory()) {
+          out[rel] = "dir"
+          walk(absolute)
+          continue
+        }
+        out[rel] = `file:${sha256OfFile(absolute)}`
+      }
+    }
+    walk(root)
+    return out
+  }
+
+  /** Manuscrito sintético abaixo do limiar: cinco parágrafos sem citação. */
+  function uncitedMain(tag: string): string {
+    const paragraphs = Array.from(
+      { length: 5 },
+      (_, index) =>
+        `${tag} parágrafo ${index + 1} apresenta a síntese parcial do capítulo sem qualquer chamada bibliográfica neste trecho sintético.`,
+    )
+    return paragraphs.join("\n\n") + "\n"
+  }
+
+  /**
+   * Workspace sintético completo (configuração legítima, estado regular e
+   * manuscrito). O estado começa sem snapshots; iterações históricas podem ser
+   * semeadas para exercitar circuit breakers sem depender da ordem dos testes.
+   */
+  function seedLoopWorkspace(
+    root: string,
+    options: {
+      targetScore?: number
+      currentScore?: number | null
+      iterations?: any[]
+      main?: string
+    } = {},
+  ): void {
+    mkdirSync(join(root, ".banca"), { recursive: true })
+    writeFileSync(
+      join(root, ".banca", "project.json"),
+      JSON.stringify({ ...CONFIG_147, targetScore: options.targetScore ?? 9 }, null, 2),
+      "utf-8",
+    )
+    writeFileSync(join(root, "main.tex"), options.main ?? mainTex(0, 5), "utf-8")
+    writeFileSync(
+      stateFileOf(root),
+      JSON.stringify(
+        {
+          currentScore: options.currentScore ?? null,
+          lastAudit: null,
+          lastLoop: null,
+          snapshots: [],
+          iterations: options.iterations ?? [],
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    )
+  }
+
+  /**
+   * Executa a tool real em subprocesso isolado com cwd explícito. O worker é
+   * descartável, roda sem PATH e devolve JSON; nenhum mecanismo de caminhos,
+   * snapshot, estado ou relatório é substituído por mock.
+   */
+  function boundedLoop(
+    cwd: string,
+    args: Record<string, unknown>,
+    ctxDirectory: string,
+  ): BoundedLoopResult {
+    const worker = join(
+      cwd,
+      `loop-worker-147-${process.pid}-${Math.random().toString(16).slice(2)}.mjs`,
+    )
+    const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", "banca_loop.ts")).href
+    writeFileSync(
+      worker,
+      [
+        "const toolUrl = process.argv[2]",
+        "const args = JSON.parse(process.argv[3])",
+        "const ctxDirectory = process.argv[4]",
+        "const mod = await import(toolUrl)",
+        "try {",
+        "  const result = await mod.bancaLoop.execute(args, { directory: ctxDirectory })",
+        "  console.log(JSON.stringify({ ok: true, result: String(result) }))",
+        "} catch (error) {",
+        "  console.log(JSON.stringify({ ok: false, name: String(error && error.name), message: String(error && error.message) }))",
+        "}",
+        "",
+      ].join("\n"),
+      "utf-8",
+    )
+    const outcome = spawnSync(process.execPath, [worker, toolUrl, JSON.stringify(args), ctxDirectory], {
+      cwd,
+      env: { ...process.env, PATH: "" },
+      timeout: 20_000,
+      encoding: "utf-8",
+    })
+    const timedOut = outcome.error !== undefined || outcome.signal !== null
+    const jsonLine = (outcome.stdout ?? "")
+      .split("\n")
+      .reverse()
+      .find((line) => line.trim().startsWith("{"))
+    const parsed = jsonLine
+      ? (JSON.parse(jsonLine) as BoundedLoopResult["parsed"])
+      : { ok: false, name: "NONE", message: "no JSON result from bounded worker" }
+    return { timedOut, parsed }
+  }
+
+  /** No ramo abaixo do limiar nada de snapshot/relatório pode existir na raiz. */
+  function expectNoMarkerArtifacts(root: string): void {
+    expect(existsSync(vaultOf(root))).toBe(false)
+    expect(reportFilesOf(root)).toEqual([])
+  }
+
+  /** Honestidade do marker preservada da #120: processo, não ponto de recuperação. */
+  function expectMarkerHonesty(text: string): void {
+    expect(text).toMatch(/marker/i)
+    expect(text).toMatch(/non-restorable/)
+    expect(text).toContain("not a recovery")
+    expect(text).toMatch(/does not enable restore/)
+    expect(text).toContain("main manuscript only")
+    expect(text).toContain("not a complete academic audit")
+    expectNoApprovalClaims(text)
+  }
+
+  /**
+   * Verificação completa da coerência de uma execução real no ramo abaixo do
+   * limiar: o label anunciado é o mesmo do manifesto persistido, do registro no
+   * estado e do nome do relatório; o marker mora no vault VERDADEIRO; estado e
+   * relatório pertencem à raiz VERDADEIRA; nada foi restaurado ou corrigido.
+   * Devolve o label anunciado.
+   */
+  function expectCoherentMarkerRun(options: {
+    text: string
+    target: string
+    mainHash: string
+    scoreBefore?: number | null
+  }): string {
+    const { text, target, mainHash } = options
+    expect(text).toContain("Loop iteration")
+    const label = matchLine(text, /^Snapshot: (loop-\S+)$/).replace("Snapshot: ", "")
+    expect(text).toContain(`Report: .banca/reports/loop-${label}.md`)
+    expectExactLine(text, "Current heuristic citation score: 4")
+    expectExactLine(text, "Local heuristic target: 9")
+    expect(text).toContain("non-restorable")
+
+    // Vault verdadeiro: única entrada é o marker anunciado + seu manifesto.
+    expect(existsSync(vaultOf(target))).toBe(true)
+    expect(readdirSync(vaultOf(target)).sort()).toEqual(
+      [label, `${label}.manifest.json`].sort(),
+    )
+    expect(lstatSync(join(vaultOf(target), label)).isDirectory()).toBe(true)
+    expect(readdirSync(join(vaultOf(target), label))).toEqual([])
+    const manifestState = loadSnapshotManifest(vaultOf(target), label)
+    expect(manifestState.kind).toBe("valid")
+    if (manifestState.kind !== "valid") {
+      throw new Error(`marker manifest for ${label} is not valid: ${manifestState.kind}`)
+    }
+    const manifest = manifestState.manifest
+    expect(manifest.label).toBe(label)
+    expect(manifest.kind).toBe("marker")
+    expect(manifest.files).toEqual([])
+    expect(manifest.missing).toEqual([])
+    expect(manifest.skipped).toEqual([])
+
+    // Estado verdadeiro: registro do marker e iteração real da operação.
+    const state = readStateOf(target)
+    expect(state.snapshots).toHaveLength(1)
+    expect(state.snapshots[0].label).toBe(label)
+    expect(state.snapshots[0].id).toMatch(/^snap-\d+/)
+    expect(state.currentScore).toBe(4)
+    const loops = state.iterations.filter((item: any) => item.action === "loop")
+    expect(loops).toHaveLength(1)
+    expect(loops[0].status).toBe("ok")
+    expect(loops[0].scoreAfter).toBe(4)
+    if (options.scoreBefore !== undefined) {
+      expect(loops[0].scoreBefore).toBe(options.scoreBefore)
+    }
+    expect(state.iterations.filter((item: any) => item.status === "rollback")).toEqual([])
+    expect(
+      state.iterations.filter((item: any) => item.action.startsWith("pre-")),
+    ).toEqual([])
+
+    // Relatório verdadeiro: mesmo label, escopo main-only e limitações do marker.
+    expect(reportFilesOf(target)).toEqual([`loop-${label}.md`])
+    const report = readFileSync(join(reportsOf(target), `loop-${label}.md`), "utf-8")
+    expect(report).toContain(`# LOOP — ${label}`)
+    expect(report).toContain("Citations: 0/5")
+    expect(report).toContain("Snapshot kind: marker (process milestone; non-restorable).")
+    expect(report).toContain("no manuscript files were captured")
+    expectMarkerHonesty(report)
+
+    // Manuscrito intocado.
+    expect(sha256OfFile(join(target, "main.tex"))).toBe(mainHash)
+    return label
+  }
+
+  /**
+   * Matriz de representações da raiz: as seis representações válidas do mesmo
+   * workspace devem produzir o mesmo resultado coerente. `duplicateOracle` é a
+   * representação relativa literal usada pelo destino pré-correção, ou null
+   * quando não existe (raiz absoluta).
+   */
+  async function expectRepresentationIsCoherent(options: {
+    target: string
+    rootArg: string
+    ctxMode?: boolean
+    duplicateOracle?: string | null
+    currentScore?: number | null
+  }): Promise<void> {
+    const { target } = options
+    const currentScore = options.currentScore ?? 6
+    seedLoopWorkspace(target, { currentScore })
+    const mainHash = sha256OfFile(join(target, "main.tex"))
+
+    const args: Record<string, unknown> = { targetScore: 9 }
+    if (!options.ctxMode) args.projectRoot = options.rootArg
+    const run = boundedLoop(base, args, options.ctxMode ? options.rootArg : base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    expectCoherentMarkerRun({ text, target, mainHash, scoreBefore: currentScore })
+
+    // Nenhuma árvore duplicada foi criada e nada inesperado surgiu na raiz.
+    if (options.duplicateOracle) {
+      expect(existsSync(duplicatedRootPath(target, options.duplicateOracle))).toBe(false)
+    }
+    expect(readdirSync(target).sort()).toEqual([".banca", "main.tex"])
+    expect(readdirSync(join(target, ".banca")).sort()).toEqual([
+      "project.json",
+      "reports",
+      "snapshots",
+      "state.json",
+    ])
+  }
+
+  // ------------------------------------------------------- A. matriz da raiz
+
+  test("matriz 1/6 — raiz absoluta: controle do comportamento já correto, artefatos na raiz verdadeira", async () => {
+    await expectRepresentationIsCoherent({
+      target: project,
+      rootArg: project,
+      duplicateOracle: null,
+    })
+  })
+
+  test("matriz 2/6 — raiz relativa simples 'project': marker, estado e relatório na raiz verdadeira", async () => {
+    await expectRepresentationIsCoherent({
+      target: project,
+      rootArg: "project",
+      duplicateOracle: "project",
+    })
+  })
+
+  test("matriz 3/6 — raiz relativa com './': marker, estado e relatório na raiz verdadeira", async () => {
+    const target = join(base, "dot-prefix", "project")
+    await expectRepresentationIsCoherent({
+      target,
+      rootArg: "./dot-prefix/project",
+      duplicateOracle: "./dot-prefix/project",
+    })
+  })
+
+  test("matriz 4/6 — raiz relativa aninhada: marker, estado e relatório na raiz verdadeira", async () => {
+    const target = join(base, "nested", "parent", "project")
+    await expectRepresentationIsCoherent({
+      target,
+      rootArg: "nested/parent/project",
+      duplicateOracle: "nested/parent/project",
+    })
+  })
+
+  test("matriz 5/6 — fallback de ctx.directory absoluto: marker, estado e relatório na raiz verdadeira", async () => {
+    await expectRepresentationIsCoherent({
+      target: project,
+      rootArg: project,
+      ctxMode: true,
+      duplicateOracle: null,
+    })
+  })
+
+  test("matriz 6/6 — fallback de ctx.directory relativo: marker, estado e relatório na raiz verdadeira", async () => {
+    await expectRepresentationIsCoherent({
+      target: project,
+      rootArg: "project",
+      ctxMode: true,
+      duplicateOracle: "project",
+    })
+  })
+
+  // ---------------------------------------------------- B. decoy duplicado
+
+  test("decoy na raiz duplicada: marker verdadeiro só no vault verdadeiro e decoy byte-idêntico", async () => {
+    seedLoopWorkspace(project, { currentScore: 6, main: uncitedMain("TRUE") })
+    const trueMainHash = sha256OfFile(join(project, "main.tex"))
+
+    // Destino literal da implementação pré-correção para a raiz "project".
+    const decoyRoot = join(project, "project")
+    expect(decoyRoot).toBe(duplicatedRootPath(project, "project"))
+    // Obra decoy legítima e distinguível, com vault/estado gerados pela tool
+    // real sob raiz absoluta (nunca artefatos fabricados à mão).
+    seedLoopWorkspace(decoyRoot, { currentScore: 3, main: uncitedMain("DECOY") })
+    const decoyBaseline = boundedLoop(
+      base,
+      { projectRoot: decoyRoot, targetScore: 9 },
+      decoyRoot,
+    )
+    expect(decoyBaseline.timedOut).toBe(false)
+    expect(decoyBaseline.parsed.ok).toBe(true)
+    const decoyBaselineText = String(decoyBaseline.parsed.result)
+    const decoyBaselineLabel = matchLine(decoyBaselineText, /^Snapshot: (loop-\S+)$/).replace(
+      "Snapshot: ",
+      "",
+    )
+    expect(existsSync(join(vaultOf(decoyRoot), decoyBaselineLabel))).toBe(true)
+
+    const decoyInventoryBefore = inventoryOf(decoyRoot)
+    const decoyStateBefore = readFileSync(stateFileOf(decoyRoot))
+    const decoyMainHash = sha256OfFile(join(decoyRoot, "main.tex"))
+    expect(readStateOf(decoyRoot).snapshots.map((item: any) => item.label)).toEqual([
+      decoyBaselineLabel,
+    ])
+
+    // Execução relativa na obra verdadeira; o decoy não pode ser consultado.
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 9 }, base)
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    const label = expectCoherentMarkerRun({
+      text,
+      target: project,
+      mainHash: trueMainHash,
+      scoreBefore: 6,
+    })
+    expect(readdirSync(project).sort()).toEqual([".banca", "main.tex", "project"].sort())
+
+    // O decoy permanece byte-idêntico: árvore, estado, manuscrito e vault.
+    expect(inventoryOf(decoyRoot)).toEqual(decoyInventoryBefore)
+    expect(readFileSync(stateFileOf(decoyRoot))).toEqual(decoyStateBefore)
+    expect(sha256OfFile(join(decoyRoot, "main.tex"))).toBe(decoyMainHash)
+    expect(readdirSync(vaultOf(decoyRoot)).sort()).toEqual(
+      [decoyBaselineLabel, `${decoyBaselineLabel}.manifest.json`].sort(),
+    )
+    // O label verdadeiro não foi gravado no vault/estado decoy.
+    if (label !== decoyBaselineLabel) {
+      expect(existsSync(join(vaultOf(decoyRoot), label))).toBe(false)
+    }
+    expect(sha256OfFile(join(project, "main.tex"))).toBe(trueMainHash)
+  })
+
+  // ------------------------------------- C. negativas de confinamento (decoy)
+
+  stest("vault verdadeiro inseguro (symlink externo) é recusado apesar do decoy seguro na raiz duplicada", async () => {
+    seedLoopWorkspace(project, { currentScore: 6, main: uncitedMain("TRUE") })
+    const trueMainHash = sha256OfFile(join(project, "main.tex"))
+    const decoyRoot = join(project, "project")
+    seedLoopWorkspace(decoyRoot, { currentScore: 3, main: uncitedMain("DECOY") })
+    const decoyBaseline = boundedLoop(base, { projectRoot: decoyRoot, targetScore: 9 }, decoyRoot)
+    expect(decoyBaseline.parsed.ok).toBe(true)
+    const decoyMainHash = sha256OfFile(join(decoyRoot, "main.tex"))
+
+    // Vault verdadeiro apontando para fora do workspace; decoy seguro existe,
+    // exatamente no destino que a implementação pré-correção usaria.
+    const external = join(base, "external-vault-147")
+    mkdirSync(external, { recursive: true })
+    writeFileSync(join(external, "keep.txt"), "conteudo externo sintetico 147", "utf-8")
+    symlinkSync(external, vaultOf(project), "dir")
+
+    const decoyBefore = inventoryOf(decoyRoot)
+    const externalBefore = inventoryOf(external)
+    const trueStateBefore = readFileSync(stateFileOf(project))
+
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 9 }, base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    expect(text).toContain("blocked")
+    expect(text).not.toContain("Loop iteration")
+    expect(text).not.toContain("Snapshot:")
+    // Recusa sanitizada: nem caminho do scratch nem destino do link são ecoados.
+    expect(text).not.toContain(base)
+    expect(text).not.toContain(external)
+
+    // Nenhum sucesso, registro ou relatório foi produzido em lugar nenhum.
+    expect(lstatSync(vaultOf(project)).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(vaultOf(project))).toBe(external)
+    expect(reportFilesOf(project)).toEqual([])
+    expect(readFileSync(stateFileOf(project))).toEqual(trueStateBefore)
+    expect(inventoryOf(external)).toEqual(externalBefore)
+    expect(inventoryOf(decoyRoot)).toEqual(decoyBefore)
+    expect(sha256OfFile(join(project, "main.tex"))).toBe(trueMainHash)
+    expect(sha256OfFile(join(decoyRoot, "main.tex"))).toBe(decoyMainHash)
+  })
+
+  stest("vault verdadeiro inseguro (symlink quebrado) é recusado apesar do decoy seguro na raiz duplicada", async () => {
+    seedLoopWorkspace(project, { currentScore: 6, main: uncitedMain("TRUE") })
+    const trueMainHash = sha256OfFile(join(project, "main.tex"))
+    const decoyRoot = join(project, "project")
+    seedLoopWorkspace(decoyRoot, { currentScore: 3, main: uncitedMain("DECOY") })
+    const decoyBaseline = boundedLoop(base, { projectRoot: decoyRoot, targetScore: 9 }, decoyRoot)
+    expect(decoyBaseline.parsed.ok).toBe(true)
+    const decoyMainHash = sha256OfFile(join(decoyRoot, "main.tex"))
+
+    mkdirSync(join(project, ".banca"), { recursive: true })
+    symlinkSync(join(base, "missing-vault-147"), vaultOf(project), "dir")
+
+    const decoyBefore = inventoryOf(decoyRoot)
+    const trueStateBefore = readFileSync(stateFileOf(project))
+
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 9 }, base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    expect(text).toContain("blocked")
+    expect(text).not.toContain("Loop iteration")
+    expect(text).not.toContain(base)
+    expect(lstatSync(vaultOf(project)).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(vaultOf(project))).toBe(join(base, "missing-vault-147"))
+    expect(reportFilesOf(project)).toEqual([])
+    expect(readFileSync(stateFileOf(project))).toEqual(trueStateBefore)
+    expect(inventoryOf(decoyRoot)).toEqual(decoyBefore)
+    expect(sha256OfFile(join(project, "main.tex"))).toBe(trueMainHash)
+    expect(sha256OfFile(join(decoyRoot, "main.tex"))).toBe(decoyMainHash)
+  })
+
+  stest("estado verdadeiro inseguro (symlink externo) é recusado pelo leitor seguro existente; decoy nunca é usado", async () => {
+    seedLoopWorkspace(project, { currentScore: 6, main: uncitedMain("TRUE") })
+    const trueMainHash = sha256OfFile(join(project, "main.tex"))
+    const decoyRoot = join(project, "project")
+    seedLoopWorkspace(decoyRoot, { currentScore: 3, main: uncitedMain("DECOY") })
+    const decoyMainHash = sha256OfFile(join(decoyRoot, "main.tex"))
+
+    // Estado verdadeiro substituído por symlink para arquivo externo válido: o
+    // decoy tem estado regular e próprio, mas não pode ser promovido a origem.
+    const externalState = join(base, "external-state-147.json")
+    writeFileSync(
+      externalState,
+      JSON.stringify({
+        currentScore: 7.3,
+        lastAudit: null,
+        lastLoop: "DECOY-STATE",
+        snapshots: [],
+        iterations: [],
+      }),
+      "utf-8",
+    )
+    rmSync(stateFileOf(project))
+    symlinkSync(externalState, stateFileOf(project), "file")
+
+    const decoyBefore = inventoryOf(decoyRoot)
+    const externalBefore = readFileSync(externalState)
+
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 9 }, base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(false)
+    expect(run.parsed.name).toBe("PathTraversalError")
+    expect(String(run.parsed.message)).toContain("state refused")
+    expect(String(run.parsed.message)).not.toContain(base)
+    expect(readlinkSync(stateFileOf(project))).toBe(externalState)
+    expect(readFileSync(externalState)).toEqual(externalBefore)
+    expect(existsSync(vaultOf(project))).toBe(false)
+    expect(reportFilesOf(project)).toEqual([])
+    expect(inventoryOf(decoyRoot)).toEqual(decoyBefore)
+    expect(sha256OfFile(join(project, "main.tex"))).toBe(trueMainHash)
+    expect(sha256OfFile(join(decoyRoot, "main.tex"))).toBe(decoyMainHash)
+  })
+
+  // --------------------------- D. preservação do contrato acadêmico da #120
+
+  test("ramo de limiar atingido com raiz relativa: ação heurística registrada sem marker, relatório ou raiz duplicada", async () => {
+    seedLoopWorkspace(project, { currentScore: null, main: mainTex(5, 0) })
+    const mainHash = sha256OfFile(join(project, "main.tex"))
+
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 8 }, base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    expectExactLine(text, "Heuristic citation score: 8")
+    expectExactLine(text, "Local heuristic target: 8")
+    expectExactLine(text, "✓ Local heuristic citation threshold reached.")
+    expectExactLine(
+      text,
+      "This preparatory result is not a complete academic audit, not a grade and not an approval.",
+    )
+    expect(text).toContain("main manuscript only")
+    expect(text).toContain("does not authorize corrections")
+    expectNoApprovalClaims(text)
+
+    const state = readStateOf(project)
+    expect(state.iterations).toHaveLength(1)
+    expect(state.iterations[0].action).toBe("loop-heuristic-threshold")
+    expect(state.iterations[0].status).toBe("ok")
+    expect(state.iterations[0].scoreBefore).toBeNull()
+    expect(state.iterations[0].scoreAfter).toBe(8)
+    expect(state.currentScore).toBe(8)
+    expect(state.snapshots).toEqual([])
+    expectNoMarkerArtifacts(project)
+    expect(existsSync(duplicatedRootPath(project, "project"))).toBe(false)
+    expect(readdirSync(join(project, ".banca")).sort()).toEqual(["project.json", "state.json"])
+    expect(sha256OfFile(join(project, "main.tex"))).toBe(mainHash)
+  })
+
+  test("estagnação com raiz relativa: circuit breaker failed sem marker, relatório, rollback ou raiz duplicada", async () => {
+    const history = [
+      iteration("audit", null, 4, "ok", "2026-01-01T00:00:00.000Z"),
+      iteration("loop", null, 4, "ok", "2026-01-02T00:00:00.000Z"),
+      iteration("loop", 4, 4, "ok", "2026-01-03T00:00:00.000Z"),
+      iteration("loop", 4, 4, "ok", "2026-01-04T00:00:00.000Z"),
+    ]
+    seedLoopWorkspace(project, { currentScore: 4, iterations: history, main: mainTex(5, 0) })
+    const historyBefore = JSON.parse(JSON.stringify(readStateOf(project).iterations))
+    const mainHash = sha256OfFile(join(project, "main.tex"))
+
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 9 }, base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    expectExactLine(text, "🔴 circuit breaker: last 3 loops same score (4).")
+    expectExactLine(
+      text,
+      'Process interrupted with status "failed"; no manuscript restoration was executed. Manual intervention required.',
+    )
+    expectNoRollbackClaim(text)
+    expectNoApprovalClaims(text)
+
+    const state = readStateOf(project)
+    expect(state.iterations).toHaveLength(historyBefore.length + 1)
+    expect(state.iterations.slice(0, historyBefore.length)).toEqual(historyBefore)
+    expect(state.iterations[historyBefore.length].action).toBe("loop-circuit-break")
+    expect(state.iterations[historyBefore.length].status).toBe("failed")
+    expect(state.iterations[historyBefore.length].status).not.toBe("rollback")
+    expect(state.currentScore).toBe(4)
+    expect(state.snapshots).toEqual([])
+    expectNoMarkerArtifacts(project)
+    expect(existsSync(duplicatedRootPath(project, "project"))).toBe(false)
+    expect(sha256OfFile(join(project, "main.tex"))).toBe(mainHash)
+  })
+
+  test("oscilação com raiz relativa: A–B–A interrompe com failed sem marker, relatório, rollback ou raiz duplicada", async () => {
+    const history = [
+      iteration("loop", null, 4, "ok", "2026-01-01T00:00:00.000Z"),
+      iteration("loop", 4, 6, "ok", "2026-01-02T00:00:00.000Z"),
+      iteration("loop", 6, 4, "ok", "2026-01-03T00:00:00.000Z"),
+    ]
+    seedLoopWorkspace(project, { currentScore: 4, iterations: history, main: mainTex(5, 0) })
+    const historyBefore = JSON.parse(JSON.stringify(readStateOf(project).iterations))
+    const mainHash = sha256OfFile(join(project, "main.tex"))
+
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 9 }, base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    expectExactLine(text, "🔴 circuit breaker: score oscillation. Score 4 → 6 → 4.")
+    expectExactLine(
+      text,
+      'Process interrupted with status "failed"; no manuscript restoration was executed and none should be inferred.',
+    )
+    expectNoRollbackClaim(text)
+    expectNoApprovalClaims(text)
+
+    const state = readStateOf(project)
+    expect(state.iterations).toHaveLength(historyBefore.length + 1)
+    expect(state.iterations.slice(0, historyBefore.length)).toEqual(historyBefore)
+    expect(state.iterations[historyBefore.length].action).toBe("loop-oscillation")
+    expect(state.iterations[historyBefore.length].status).toBe("failed")
+    expect(state.snapshots).toEqual([])
+    expectNoMarkerArtifacts(project)
+    expect(existsSync(duplicatedRootPath(project, "project"))).toBe(false)
+    expect(sha256OfFile(join(project, "main.tex"))).toBe(mainHash)
+  })
+
+  test("ramo do marker com raiz relativa: histórico, manuscrito, capítulo e bibliografia preservados", async () => {
+    const history = [
+      iteration("audit", null, 5, "ok", "2025-12-01T00:00:00.000Z"),
+      iteration("loop-approve", 5, 6, "ok", "2025-12-02T00:00:00.000Z"),
+    ]
+    seedLoopWorkspace(project, { currentScore: 6, iterations: history })
+    const refsPath = writeRefsBib()
+    const chapterPath = writeChapter("capitulos/extra.tex", chapterTex())
+    const mainPath = writeMain(mainTex(0, 5))
+    const hashes = {
+      main: sha256OfFile(mainPath),
+      chapter: sha256OfFile(chapterPath),
+      refs: sha256OfFile(refsPath),
+    }
+    const historyBefore = JSON.parse(JSON.stringify(readStateOf(project).iterations))
+
+    const run = boundedLoop(base, { projectRoot: "project", targetScore: 9 }, base)
+
+    expect(run.timedOut).toBe(false)
+    expect(run.parsed.ok).toBe(true)
+    const text = String(run.parsed.result)
+    const label = expectCoherentMarkerRun({
+      text,
+      target: project,
+      mainHash: hashes.main,
+      scoreBefore: 6,
+    })
+    expect(text).toContain("does not enable restore or rollback")
+    expectNoApprovalClaims(text)
+
+    const state = readStateOf(project)
+    expect(state.iterations).toHaveLength(historyBefore.length + 1)
+    expect(state.iterations.slice(0, historyBefore.length)).toEqual(historyBefore)
+    expect(state.iterations[historyBefore.length].action).toBe("loop")
+    expect(state.iterations[historyBefore.length].status).toBe("ok")
+    expect(state.iterations[historyBefore.length].scoreBefore).toBe(6)
+    expect(state.iterations[historyBefore.length].scoreAfter).toBe(4)
+    // Nenhuma ação nova de rollback, rollback fictício ou pré-correção.
+    const addedIterations = state.iterations.slice(historyBefore.length)
+    expect(addedIterations.filter((item: any) => item.status === "rollback")).toEqual([])
+    expect(addedIterations.filter((item: any) => item.action.startsWith("pre-"))).toEqual([])
+    expect(addedIterations.filter((item: any) => item.action === "loop-approve")).toEqual([])
+    // Marker não restituível: nenhum arquivo de manuscrito foi capturado.
+    expect(readdirSync(join(vaultOf(project), label))).toEqual([])
+
+    // Conteúdo acadêmico e histórico byte-idênticos.
+    expect(sha256OfFile(mainPath)).toBe(hashes.main)
+    expect(sha256OfFile(chapterPath)).toBe(hashes.chapter)
+    expect(sha256OfFile(refsPath)).toBe(hashes.refs)
+    expect(existsSync(duplicatedRootPath(project, "project"))).toBe(false)
   })
 })
