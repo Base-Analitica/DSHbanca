@@ -144,7 +144,7 @@ const mkfifoSupported = (() => {
   }
 })()
 
-const fifoTest = mkfifoSupported && symlinksSupported ? stest : test.skip
+const fifoTest = mkfifoSupported ? test : test.skip
 
 const unreadableSupported =
   process.platform !== "win32" &&
@@ -421,6 +421,9 @@ if (mode === "generic-config") {
 } else if (mode === "unrelated-traversal") {
   const { PathTraversalError } = await import(safePathsUrl)
   mock.module(configUrl, () => ({ loadConfig: () => { throw new PathTraversalError("unrelated internal path refusal") } }))
+} else if (mode === "unlisted-config-refusal") {
+  const { PathTraversalError } = await import(safePathsUrl)
+  mock.module(configUrl, () => ({ loadConfig: () => { throw new PathTraversalError("config refused: a synthetic unlisted refusal that is not part of the contract") } }))
 }
 const { bancaSintese } = await import(toolUrl)
 let payload
@@ -887,6 +890,21 @@ describe("issue #138 — classification fidelity and ordering", () => {
 
     const output = expectBoundedWorkerCompleted(
       runBoundedWorker(base, "synthesis-worker.mjs", "unrelated-traversal", project, timeoutMs),
+      timeoutMs,
+    )
+
+    assertUnexpected(output)
+  })
+
+  test("a path-refusal message with the config prefix but unlisted stays unexpected", () => {
+    // Exact-match contract: only the three fixed #134 messages are classified.
+    // A prefix-only classifier would wrongly turn this into a refusal.
+    writeManuscript(project)
+    writeProjectConfig(project)
+    const timeoutMs = 10_000
+
+    const output = expectBoundedWorkerCompleted(
+      runBoundedWorker(base, "synthesis-worker.mjs", "unlisted-config-refusal", project, timeoutMs),
       timeoutMs,
     )
 
