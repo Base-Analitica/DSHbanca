@@ -9,6 +9,17 @@ import { copyRequiredAcademicDecisionModule } from "../scripts/lib/dsh-profile-o
 const repositoryRoot = process.cwd()
 const runnerSource = readFileSync(join(repositoryRoot, "scripts/e2e-dsh-profile.ts"), "utf8")
 
+// The clean-checkout build below is bounded by its own kill budget. Measured
+// enclosing cost on the supported Bun 1.4.2 / Linux x64 environment is ~2.4 s
+// idle and ~12.4 s under CPU contention, which exceeds the runner's 5 s
+// per-test default (base preempted at 5014 ms), so the enclosing test needs its
+// own finite budget above the child budget instead of being preempted. A real
+// hang is still stopped by `buildChildTimeoutMs` and surfaces as
+// `build.error`; the margin only covers fixture copying and module loading
+// (measured < 100 ms).
+const buildChildTimeoutMs = 120_000
+const buildTestTimeoutMs = 125_000
+
 test("runner builds the required module before creating the scratch observer package", () => {
   const buildAt = runnerSource.indexOf('const build = await run(bunExecutable, ["run", "build"]')
   const observerPackageAt = runnerSource.indexOf("createObserverPackage(observerRoot")
@@ -61,7 +72,7 @@ test("builds and loads the academic decision module from a clean checkout into s
     const build = spawnSync(process.execPath, ["run", "build"], {
       cwd: cleanCheckoutRoot,
       encoding: "utf8",
-      timeout: 120_000,
+      timeout: buildChildTimeoutMs,
     })
     expect(build.error).toBeUndefined()
     expect(build.status).toBe(0)
@@ -78,4 +89,4 @@ test("builds and loads the academic decision module from a clean checkout into s
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true })
   }
-})
+}, buildTestTimeoutMs)
