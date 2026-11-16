@@ -410,6 +410,21 @@ describe("issue #137 — authorized configuration keeps historical status", () =
     expect(config137TreeSnapshot(project)).toEqual(before)
   })
 
+  test("does not classify a content error that begins like a refusal as an origin refusal", async () => {
+    createProject()
+    // Invalid JSON whose text starts with the refusal prefix: the parser error
+    // is a content error, never an origin refusal.
+    writeInternalConfig("config refused: this is invalid JSON content, not an origin")
+    const before = config137TreeSnapshot(project)
+
+    const output = await runStatus(project)
+
+    expect(output).not.toContain("blocked:")
+    expect(output).not.toContain(NOT_INITIALIZED)
+    expectCompleteStatus(output, 9, 0, 0)
+    expect(config137TreeSnapshot(project)).toEqual(before)
+  })
+
   stest("authorizes a symbolic link whose canonical destination stays inside the workspace", async () => {
     createProject()
     const internalTarget = join(project, "configs", "project-real.json")
@@ -577,6 +592,36 @@ describe("issue #137 — insecure configuration origins are refused, not reporte
     }
     expect(config137TreeSnapshot(project)).toEqual(before)
   })
+
+  unreadableTest("refuses an uninspectable .banca ancestor instead of reporting absence", async () => {
+    createProject()
+    writeInternalConfig(JSON.stringify({ version: 1, targetScore: 7.5 }))
+    const before = config137TreeSnapshot(project)
+    chmodSync(bancaDir(), 0o000)
+    let output: string
+    try {
+      let rawCode: string | undefined
+      try {
+        readFileSync(configFile(), "utf-8")
+      } catch (error) {
+        rawCode = (error as NodeJS.ErrnoException).code
+      }
+      expect(rawCode).toBe("EACCES")
+
+      output = await runStatus(project)
+    } finally {
+      chmodSync(bancaDir(), 0o755)
+    }
+
+    expect(output.startsWith("blocked: config refused:")).toBe(true)
+    expect(output).toContain("not a safe regular file inside the workspace")
+    expect(output).not.toContain(NOT_INITIALIZED)
+    expect(output).not.toContain("Score:")
+    for (const fragment of ["EACCES", "permission denied", base]) {
+      expect(output).not.toContain(fragment)
+    }
+    expect(config137TreeSnapshot(project)).toEqual(before)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -631,6 +676,7 @@ describe("issue #137 — absolute and relative roots share one contract", () => 
     const workspace = join(base, "workspace")
     createProject(workspace)
     writeFileSync(join(workspace, ".banca", "project.json"), JSON.stringify({ version: 1, targetScore: 7.5 }), "utf-8")
+    const before = config137TreeSnapshot(workspace)
 
     const absoluteOutput = await runStatus(workspace)
     const relativeRun = runBoundedWorker(base, "status-relative-worker.mjs", STATUS_WORKER_SOURCE, "workspace", 10_000)
@@ -640,12 +686,14 @@ describe("issue #137 — absolute and relative roots share one contract", () => 
     expect(payload.outcome).toBe("returned")
     expect(payload.output).toBe(absoluteOutput)
     expect(absoluteOutput).toContain("Score: — / 7.5")
+    expect(config137TreeSnapshot(workspace)).toEqual(before)
   })
 
   stest("relative root refuses a broken link exactly like the absolute root", async () => {
     const workspace = join(base, "workspace")
     createProject(workspace)
     symlinkSync("../no-such-dir/project.json", join(workspace, ".banca", "project.json"), "file")
+    const before = config137TreeSnapshot(workspace)
 
     const absoluteOutput = await runStatus(workspace)
     const relativeRun = runBoundedWorker(base, "status-relative-worker.mjs", STATUS_WORKER_SOURCE, "workspace", 10_000)
@@ -655,5 +703,26 @@ describe("issue #137 — absolute and relative roots share one contract", () => 
     expect(payload.outcome).toBe("returned")
     expectSanitizedConfigRefusal(String(payload.output), [base])
     expect(payload.output).toBe(absoluteOutput)
+    expect(config137TreeSnapshot(workspace)).toEqual(before)
+  })
+
+  test("preserves the ctx.directory fallback when projectRoot is omitted", async () => {
+    createProject()
+    writeInternalConfig(JSON.stringify({ version: 1, targetScore: 7.5 }))
+
+    const output = String(await bancaStatus.execute({}, { directory: project } as never))
+
+    expectCompleteStatus(output, 7.5, 0, 0)
+  })
+
+  stest("preserves the ctx.directory fallback refusal for a broken configuration link", async () => {
+    createProject()
+    symlinkSync("../no-such-dir/project.json", configFile(), "file")
+    const before = config137TreeSnapshot(project)
+
+    const output = String(await bancaStatus.execute({}, { directory: project } as never))
+
+    expectSanitizedConfigRefusal(output, [base])
+    expect(config137TreeSnapshot(project)).toEqual(before)
   })
 })

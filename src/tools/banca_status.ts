@@ -35,6 +35,12 @@ const BLOCKED_PREFIX = "blocked: "
  * Reusing this contract avoids `existsSync`/`lstat`/`realpath` duplication in
  * the tool and keeps the single canonical path policy in `src/lib/config.ts`.
  * Unexpected exceptions are not classified: they propagate as before.
+ *
+ * A residual TOCTOU window remains between this classification and the
+ * `loadConfig` read (the same class already documented by #134). `loadConfig`
+ * revalidates the origin and fails closed, so a concurrent mutation can never
+ * be consumed; it may surface as a sanitized `PathTraversalError` instead of
+ * the `blocked:` diagnostic.
  */
 function configOriginDiagnostic(root: string): string | null {
   const validation = validateConfig(root)
