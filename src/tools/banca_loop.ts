@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
@@ -37,7 +37,15 @@ export const bancaLoop = defineBancaTool({
     phase: z.string().optional().describe("Start from specific phase (preparatory loop, compatibility only)"),
   },
   execute: async (args, ctx) => {
-    const root = args.projectRoot || ctx.directory
+    // Normalize the workspace root once at the tool boundary (issue #147). The
+    // marker vault is built as `ensureRealDirInsideRoot(root, join(root, ...))`:
+    // with a relative root the root was applied twice, so the marker manifest
+    // was written to the duplicated directory while the snapshot was registered
+    // in the true state — an announced process milestone the canonical vault
+    // cannot serve. This is a lexical normalization only; canonical confinement,
+    // state origin checks, snapshot/marker semantics and registration are
+    // unchanged.
+    const root = resolve(args.projectRoot || ctx.directory)
     const config = loadConfig(root)
     const paths = resolveManuscriptPaths(root, config)
     const maxIter = args.maxIterations || config.targetScore >= 9 ? 5 : 3
