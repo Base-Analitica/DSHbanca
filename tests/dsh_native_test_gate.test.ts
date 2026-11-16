@@ -23,15 +23,15 @@ const fakeImportMarkerName = "host-imported.marker"
 const fakeWhichMarkerName = "which-called.marker"
 const fakeDshMarkerName = "dsh-executed.marker"
 
-// The hermetic cases below run a nested `bun test` file that rebuilds the
-// bundle. Measured enclosing cost on the supported Bun 1.4.2 / Linux x64
-// environment is ~2.8-3.4 s idle and ~7.9-12.7 s under CPU contention, so the
-// runner's 5 s per-test default preempts the legitimate child (observed SIGTERM
-// at 5005 ms) and produces false negatives. The enclosing budget sits above the
-// child's own kill budget so the child can finish, or report its own timeout,
-// instead of being preempted. A hang is still bounded by
-// `hermeticChildTimeoutMs`; the 5 s margin only covers fixture creation and
-// assertions (measured < 100 ms).
+// The five hermetic cases below that run `tests/dsh.test.ts` execute a nested
+// `bun test` file that rebuilds the bundle. Measured enclosing cost on the
+// supported Bun 1.4.2 / Linux x64 environment is ~2.8-3.4 s idle and
+// ~7.9-12.7 s under CPU contention, so the runner's 5 s per-test default
+// preempts the legitimate child (observed SIGTERM at 5005 ms) and produces
+// false negatives. The enclosing budget sits above the child's own kill budget
+// so the child can finish, or report its own timeout, instead of being
+// preempted. A hang is still bounded by `hermeticChildTimeoutMs`; the 5 s
+// margin only covers fixture creation and assertions (measured < 100 ms).
 const hermeticChildTimeoutMs = 120_000
 const hermeticTestTimeoutMs = 125_000
 
