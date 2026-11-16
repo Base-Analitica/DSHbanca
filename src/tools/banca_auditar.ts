@@ -15,6 +15,7 @@
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
+import { PathTraversalError } from "../lib/safe_paths"
 import { loadCanonicalLatexManuscript } from "../lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../lib/analysis_coverage"
 import { computePlanIdentity } from "../lib/analysis_checkpoint"
@@ -100,6 +101,41 @@ function formatError(code: string, message: string): string {
   ].join("\n")
 }
 
+/**
+ * Known, sanitized refusals of the canonical configuration-origin contract
+ * (`src/lib/config.ts`, issue #134), mapped to the existing public codes
+ * already used by `banca_context` for auxiliary origins (issue #154).
+ *
+ * Only these exact fixed messages are classified: an unrelated
+ * `PathTraversalError` raised later by planning or by any other component must
+ * remain `unexpected` (issue #138).
+ */
+const CONFIG_ORIGIN_REFUSAL_CODES: ReadonlyArray<readonly [string, string]> = [
+  [
+    "config refused: the configured origin is not a safe regular file inside the workspace",
+    "unsafe_origin",
+  ],
+  [
+    "config refused: the configured origin could not be inspected safely",
+    "inspection_failed",
+  ],
+  [
+    "config refused: the present configuration could not be read",
+    "unreadable_origin",
+  ],
+]
+
+/** Classify only the explicit configuration-refusal contract, never any traversal. */
+function configOriginRefusal(
+  err: unknown,
+): { code: string; message: string } | null {
+  if (!(err instanceof PathTraversalError)) return null
+  for (const [message, code] of CONFIG_ORIGIN_REFUSAL_CODES) {
+    if (err.message === message) return { code, message }
+  }
+  return null
+}
+
 export const bancaAuditar = defineBancaTool({
   description:
     "Validate and persist findings for one exhaustive canonical analysis batch. " +
@@ -129,12 +165,27 @@ export const bancaAuditar = defineBancaTool({
       )
     }
 
+    // Distinguish a configuration-origin refusal (explicit contract of
+    // `loadConfig`, issue #134) from a later manuscript/planning failure.
+    let config
+    try {
+      config = loadConfig(root)
+    } catch (err) {
+      const refusal = configOriginRefusal(err)
+      if (refusal !== null) return formatError(refusal.code, refusal.message)
+      return formatError(
+        "unexpected",
+        "an unexpected manuscript planning error occurred",
+      )
+    }
+
     let plan
     try {
-      const config = loadConfig(root)
-      const maxCharactersPerBatch = config.analysis.maxCharactersPerBatch
       const manuscript = loadCanonicalLatexManuscript(root, config)
-      plan = planExhaustiveAnalysisBatches(manuscript, maxCharactersPerBatch)
+      plan = planExhaustiveAnalysisBatches(
+        manuscript,
+        config.analysis.maxCharactersPerBatch,
+      )
     } catch {
       return formatError(
         "unexpected",
