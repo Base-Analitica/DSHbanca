@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
 import { loadConfig } from "../lib/config"
@@ -28,7 +28,15 @@ export const bancaSnapshot = defineBancaTool({
     projectRoot: z.string().optional().describe("Project root (default: cwd)"),
   },
   execute: async (args, ctx) => {
-    const root = args.projectRoot || ctx.directory
+    // Normalize the workspace root once at the tool boundary (issue #146). The
+    // vault was built as `resolveRealInsideRoot(root, join(root, ...))`: with a
+    // relative root the root was applied twice, so the manifest and payload
+    // were written to the duplicated directory while the snapshot was
+    // registered in the true state — an announced recovery point that the
+    // corrected restore (#149) cannot reach. This is a lexical normalization
+    // only; canonical confinement, destination policy, capture verification
+    // and registration are unchanged.
+    const root = resolve(args.projectRoot || ctx.directory)
     const rawLabel = args.label || `pre-${Date.now()}`
     if (rawLabel.includes("..") || rawLabel.includes("/") || rawLabel.includes("\\")) {
       return `blocked: snapshot path escapes project root`
