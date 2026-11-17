@@ -165,20 +165,33 @@ function buildManuscriptIdentities(
     const basenameWithExt = display.split("/").pop() ?? display
     identities.push({
       display,
-      relWithExt: display.toLowerCase(),
-      relNoExt: display.replace(/\.tex$/i, "").toLowerCase(),
-      basenameWithExt: basenameWithExt.toLowerCase(),
+      relWithExt: canonicalName(display),
+      relNoExt: canonicalName(display.replace(/\.tex$/i, "")),
+      basenameWithExt: canonicalName(basenameWithExt),
     })
   }
   return identities
 }
 
-const SOURCE_TOKEN_SEPARATOR = /[^A-Za-z0-9._/-]+/g
+/**
+ * Canonical comparison form: NFC composes the canonical composition forms of
+ * the same text (so `revisão` precomposed or `a` + combining tilde compare
+ * equal) and lowercase folds case. Compatibility characters are deliberately
+ * NOT folded (no NFKC): visually similar but distinct names stay distinct.
+ */
+function canonicalName(value: string): string {
+  return value.normalize("NFC").toLowerCase().normalize("NFC")
+}
+
+// A token is a whole filename/path-like run: Unicode letters, combining marks,
+// digits and the name separators `.`, `_`, `/`, `-`. An ASCII-only class used
+// to fragment `revisão.tex` into `revis` + `o.tex`, silently losing an exact
+// (and unambiguous) source/manuscript identification.
+const SOURCE_TOKEN_SEPARATOR = /[^\p{L}\p{M}\p{N}._/-]+/u
 
 /** Split an external source into filename/path-like tokens (conservative). */
 function sourceTokens(source: unknown): string[] {
-  return sanitizeExternalText(source, MAX_SOURCE_CHARS * 4)
-    .toLowerCase()
+  return canonicalName(sanitizeExternalText(source, MAX_SOURCE_CHARS * 4))
     .split(SOURCE_TOKEN_SEPARATOR)
     .map((token) => token.replace(/^\/+/, ""))
     .filter((token) => token.length > 0)

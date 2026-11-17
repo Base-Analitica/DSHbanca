@@ -571,6 +571,84 @@ describe("banca_plagio — conservative source mapping", () => {
     expect(markdown).not.toContain("- capitulos/capitulo2.tex:")
   })
 
+  // Unicode chapter names are common in Brazilian academic writing. The source
+  // tokenizer must keep whole Unicode names (letters, digits and combining
+  // marks) while still refusing substring/prefix/ambiguous association.
+  const REVISAO_NFC = "revisão.tex" // precomposed (NFC)
+  const REVISAO_NFD = "revisa\u0303o.tex" // decomposed (NFD)
+
+  test("maps an unequivocal Unicode chapter name from an identical source", async () => {
+    writeFile(`capitulos/${REVISAO_NFC}`, "\\section{Revisão}\nConteúdo.\n")
+    writeFile("relatorio.html", htmlReport([{ source: `capitulos/${REVISAO_NFC}`, sg: 10, si: 95 }]))
+    const markdown = await runPlagio({ reportPath: "relatorio.html" })
+    expect(markdown).toContain(`- capitulos/${REVISAO_NFC}: 1 matches, max Si=95.0%`)
+    expect(headings(markdown)).toEqual(EXPECTED_HEADINGS)
+  })
+
+  test("maps a Unicode chapter name across canonical composition forms", async () => {
+    // NFC filename, NFD source.
+    writeFile(`capitulos/${REVISAO_NFC}`, "\\section{Revisão}\nConteúdo.\n")
+    writeFile(
+      "relatorio_nfd_source.html",
+      htmlReport([{ source: `capitulos/${REVISAO_NFD}`, sg: 10, si: 95 }]),
+    )
+    const fromDecomposedSource = await runPlagio({ reportPath: "relatorio_nfd_source.html" })
+    expect(fromDecomposedSource).toContain(`- capitulos/${REVISAO_NFC}: 1 matches, max Si=95.0%`)
+
+    // NFD filename, NFC source.
+    rmSync(join(project, "capitulos", REVISAO_NFC))
+    writeFile(`capitulos/${REVISAO_NFD}`, "\\section{Revisão}\nConteúdo.\n")
+    writeFile(
+      "relatorio_nfc_source.html",
+      htmlReport([{ source: `capitulos/${REVISAO_NFC}`, sg: 10, si: 95 }]),
+    )
+    const fromComposedSource = await runPlagio({ reportPath: "relatorio_nfc_source.html" })
+    expect(fromComposedSource).toContain(`- capitulos/${REVISAO_NFD}: 1 matches, max Si=95.0%`)
+  })
+
+  test("maps a path-qualified Unicode source without extension", async () => {
+    writeFile(`capitulos/${REVISAO_NFC}`, "\\section{Revisão}\nConteúdo.\n")
+    writeFile(
+      "relatorio.html",
+      htmlReport([{ source: "https://site.example/capitulos/revisão", sg: 10, si: 95 }]),
+    )
+    const markdown = await runPlagio({ reportPath: "relatorio.html" })
+    expect(markdown).toContain(`- capitulos/${REVISAO_NFC}: 1 matches, max Si=95.0%`)
+  })
+
+  test("does not map unaccented, confusable or decorated Unicode variants", async () => {
+    writeFile(`capitulos/${REVISAO_NFC}`, "\\section{Revisão}\nConteúdo.\n")
+    const sources = [
+      "capitulos/revisao.tex", // unaccented spelling: a different name
+      "capitulos/revis\u0430o.tex", // Cyrillic 'а' (U+0430) homoglyph
+      "capitulos/ｒｅｖｉｓａｏ.tex", // fullwidth compatibility forms
+      "capitulos/revisa\u0303\u0338o.tex", // combining tilde + overlay mark
+    ]
+    writeFile("relatorio.html", htmlReport(sources.map((source) => ({ source, sg: 1, si: 95 }))))
+    const markdown = await runPlagio({ reportPath: "relatorio.html" })
+    expect(markdown).toContain("Nenhum mapeamento direto encontrado")
+    expect(sectionBody(markdown, "ENTREVISTAR")).toContain("revis")
+  })
+
+  test("does not map an ambiguous duplicate Unicode basename", async () => {
+    writeConfig({ manuscript: { ...BASE_CONFIG.manuscript, chapters: ["**/*.tex"] } })
+    writeFile(`capitulos/${REVISAO_NFC}`, "\\section{Revisão}\nConteúdo.\n")
+    writeFile(`anexos/${REVISAO_NFC}`, "\\section{Anexo}\nConteúdo.\n")
+    writeFile("relatorio.html", htmlReport([{ source: REVISAO_NFC, sg: 1, si: 95 }]))
+    const markdown = await runPlagio({ reportPath: "relatorio.html" })
+    expect(markdown).toContain("Nenhum mapeamento direto encontrado")
+    expect(markdown).not.toContain(`capitulos/${REVISAO_NFC}:`)
+    expect(markdown).not.toContain(`anexos/${REVISAO_NFC}:`)
+  })
+
+  test("does not map a deceptive Unicode prefix or longer name", async () => {
+    writeFile(`capitulos/${REVISAO_NFC}`, "\\section{Revisão}\nConteúdo.\n")
+    const sources = ["capitulos/revisão-extra.tex", "capitulos/revisão2.tex", "capitulos/revisões.tex"]
+    writeFile("relatorio.html", htmlReport(sources.map((source) => ({ source, sg: 1, si: 95 }))))
+    const markdown = await runPlagio({ reportPath: "relatorio.html" })
+    expect(markdown).toContain("Nenhum mapeamento direto encontrado")
+  })
+
   test("does not map a chapter from a longer deceptive source prefix", async () => {
     writeFile("capitulos/capitulo12.tex", "\\section{Doze}\nConteúdo.\n")
     writeFile("relatorio.html", htmlReport([{ source: "capitulos/capitulo12", sg: 10, si: 95 }]))
