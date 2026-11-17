@@ -1,14 +1,19 @@
-import { existsSync, readFileSync } from "node:fs"
+import { lstatSync, readFileSync, type Stats } from "node:fs"
 import { join, resolve } from "node:path"
 import { z } from "zod"
 import { defineBancaTool } from "../lib/tool"
-import { loadConfig } from "../lib/config"
+import { loadConfig, type ProjectConfig } from "../lib/config"
 import { resolveManuscriptPaths } from "../lib/paths"
 import { loadState, addIteration } from "../lib/state"
 import { createSnapshot, SnapshotCaptureError, SnapshotConflictError } from "../lib/snapshot"
 import { generateReport, saveReport } from "../lib/reports"
 import { analyzeCitationDensity } from "../lib/citation"
-import { ensureRealDirInsideRoot, PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
+import {
+  ensureRealDirInsideRoot,
+  PathTraversalError,
+  resolveInsideRoot,
+  resolveRealInsideRoot,
+} from "../lib/safe_paths"
 
 /**
  * Fronteira de apresentação dos scores lidos do state compartilhado.
@@ -26,6 +31,137 @@ function renderRecordedScore(score: unknown): string {
   if (typeof score === "number" && Number.isFinite(score)) return String(score)
   if (score === null || score === undefined) return "—"
   return "invalid or unavailable in shared state"
+}
+
+/**
+ * Canonical read confinement for issue #163 (same containment class as the
+ * #132 protection in `banca_checklist`).
+ *
+ * `resolveManuscriptPaths` is lexical: `existsSync`/`readFileSync` would follow
+ * a symbolic link planted at the configured main file (or in an ancestor /
+ * `manuscript.root`) and read bytes from outside the workspace. Before any
+ * read, iteration, marker or report, the configured manuscript root and the
+ * main destination are re-resolved with the existing canonical helper
+ * `resolveRealInsideRoot`, rooted at the project workspace — never at the
+ * configured root's own target, so a redirected root cannot become a new
+ * implicitly authorized root.
+ *
+ * A legitimate absent main file keeps its historical `main file not found`
+ * behavior. Broken links, escaping links, non-regular destinations and
+ * destinations that cannot be inspected fail closed with a fixed sanitized
+ * message that echoes no path, link target or file content.
+ *
+ * A residual TOCTOU window remains between the canonical inspection and the
+ * read: the guarantee holds for a filesystem that is not concurrently mutated
+ * by another process. This is a read-boundary check, not a sandbox, permission
+ * engine or host trust-model change.
+ */
+const MAIN_MANUSCRIPT_ORIGIN_REFUSAL =
+  "blocked: main manuscript origin is outside the workspace, follows an unsafe symbolic link, or is not a regular file; no score, iteration, marker or report was produced."
+
+const MAIN_MANUSCRIPT_READ_REFUSAL =
+  "blocked: main manuscript destination could not be read safely; no score, iteration, marker or report was produced."
+
+/**
+ * Filesystem errno values that are expected failures of reading an already
+ * inspected destination. They become a controlled sanitized refusal; unexpected
+ * errors (including programming defects) are rethrown unchanged.
+ */
+const EXPECTED_MAIN_READ_FAILURE_CODES = new Set([
+  "EACCES",
+  "EPERM",
+  "ENOENT",
+  "EISDIR",
+  "ELOOP",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENAMETOOLONG",
+  "ESTALE",
+])
+
+/**
+ * Read the canonical main file. A verified-present regular file that can no
+ * longer be read (for example EACCES, or ENOENT after a concurrent change) is a
+ * controlled failure: it never leaks the raw system message/path and never
+ * produces a partial score. No state mutation happens before this read
+ * (circuit breakers return early), so the refusal stays effect-free.
+ */
+function readMainManuscript(canonicalPath: string): string {
+  try {
+    return readFileSync(canonicalPath, "utf-8")
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (typeof code === "string" && EXPECTED_MAIN_READ_FAILURE_CODES.has(code)) {
+      throw new PathTraversalError("main manuscript destination could not be read")
+    }
+    throw err
+  }
+}
+
+type MainManuscriptPreflight =
+  | { status: "missing"; mainPath: string }
+  | { status: "present"; canonicalPath: string }
+
+/**
+ * Validate the configured manuscript root physically before chapter discovery
+ * touches the filesystem. A missing root keeps its existing discovery
+ * behavior; a redirect outside the workspace fails closed.
+ */
+function assertManuscriptRootConfined(workspaceRoot: string, configuredRoot: string): void {
+  let lexicalRoot: string
+  try {
+    lexicalRoot = resolveInsideRoot(workspaceRoot, configuredRoot)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw new PathTraversalError("manuscript root is not a safe workspace-relative path")
+    }
+    throw err
+  }
+  try {
+    resolveRealInsideRoot(workspaceRoot, lexicalRoot)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw new PathTraversalError("manuscript root physical destination is outside the workspace")
+    }
+    throw err
+  }
+}
+
+/**
+ * Resolve the configured main file to its canonical destination and report
+ * only whether it is a present regular file. Missing leaves stay missing
+ * (legitimate absence); external, broken-link, ancestor-link and non-regular
+ * destinations fail closed before `readFileSync`; a verified regular file that
+ * can no longer be read is refused by {@link readMainManuscript} with a
+ * sanitized diagnostic.
+ */
+function inspectMainManuscript(workspaceRoot: string, config: ProjectConfig): MainManuscriptPreflight {
+  assertManuscriptRootConfined(workspaceRoot, config.manuscript.root)
+  const paths = resolveManuscriptPaths(workspaceRoot, config)
+  let canonicalPath: string
+  try {
+    canonicalPath = resolveRealInsideRoot(workspaceRoot, paths.main)
+  } catch (err) {
+    if (err instanceof PathTraversalError) {
+      throw new PathTraversalError("main manuscript destination is outside the workspace")
+    }
+    throw err
+  }
+  let stat: Stats
+  try {
+    stat = lstatSync(canonicalPath)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR") return { status: "missing", mainPath: paths.main }
+    throw new PathTraversalError("main manuscript destination cannot be inspected")
+  }
+  // Directories, FIFOs, sockets and devices are never opened: a blocking read
+  // on a FIFO would hang the tool, and only regular files have manuscript bytes.
+  if (!stat.isFile()) {
+    throw new PathTraversalError("main manuscript destination is not a regular file")
+  }
+  return { status: "present", canonicalPath }
 }
 
 export const bancaLoop = defineBancaTool({
@@ -47,11 +183,20 @@ export const bancaLoop = defineBancaTool({
     // unchanged.
     const root = resolve(args.projectRoot || ctx.directory)
     const config = loadConfig(root)
-    const paths = resolveManuscriptPaths(root, config)
+    let main: MainManuscriptPreflight
+    try {
+      // Canonical read boundary (issue #163): the configured manuscript root
+      // and the main file are validated physically before any state read,
+      // iteration, marker or report. Refusals are sanitized and effect-free.
+      main = inspectMainManuscript(root, config)
+    } catch (err) {
+      if (err instanceof PathTraversalError) return MAIN_MANUSCRIPT_ORIGIN_REFUSAL
+      throw err
+    }
     const maxIter = args.maxIterations || config.targetScore >= 9 ? 5 : 3
     const target = args.targetScore ?? config.targetScore
 
-    if (!existsSync(paths.main)) return `main file not found: ${paths.main}`
+    if (main.status === "missing") return `main file not found: ${main.mainPath}`
 
     const state = loadState(root)
     const lastN = state.iterations.filter((i) => i.action === "loop").slice(-3)
@@ -97,7 +242,13 @@ export const bancaLoop = defineBancaTool({
     const scoreBefore = state.currentScore
 
     // Phase: audit (canonical citation-density heuristic)
-    const content = readFileSync(paths.main, "utf-8")
+    let content: string
+    try {
+      content = readMainManuscript(main.canonicalPath)
+    } catch (err) {
+      if (err instanceof PathTraversalError) return MAIN_MANUSCRIPT_READ_REFUSAL
+      throw err
+    }
     const citation = analyzeCitationDensity(content)
     const currentScore = citation.score
 
