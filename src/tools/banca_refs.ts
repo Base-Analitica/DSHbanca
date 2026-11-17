@@ -8,6 +8,15 @@ import { resolveRef } from "../lib/provider_chain"
 import { RefCache } from "../lib/cache"
 import { saveReport } from "../lib/reports"
 import { PathTraversalError, resolveRealInsideRoot } from "../lib/safe_paths"
+
+/**
+ * Fixed, sanitized refusal for a reference cache whose physical origin cannot
+ * be authorized or read (issue #165). It embeds no host path, link target,
+ * cache content or raw filesystem message, and never claims a cache state.
+ */
+const REFERENCE_CACHE_ORIGIN_REFUSAL =
+  "blocked: reference cache origin was refused as unsafe, broken, non-regular or unreadable; no reference result or report was produced."
+
 export const bancaRefs = defineBancaTool({
   description: "Validate references via local cache and verified DSH providers. External network and standalone MCP are blocked in DSH-only architecture.",
   args: {
@@ -60,25 +69,34 @@ export const bancaRefs = defineBancaTool({
       resultStatus: string
     }> = []
 
-    for (const entry of entries) {
-      const ref = bibEntryToRef(entry)
+    try {
+      for (const entry of entries) {
+        const ref = bibEntryToRef(entry)
 
-      // try provider chain: cache-first / fail-closed if no host provider
-      const { result, provider } = await resolveRef(ref, root)
-      const statusIcon =
-        result.status === "verificada" ? "✓" :
-        result.status === "parcial" ? "~" :
-        result.status === "suspeita" ? "?" :
-        result.status === "bloqueada" ? "⊘" : "✗"
+        // try provider chain: cache-first / fail-closed if no host provider
+        const { result, provider } = await resolveRef(ref, root)
+        const statusIcon =
+          result.status === "verificada" ? "✓" :
+          result.status === "parcial" ? "~" :
+          result.status === "suspeita" ? "?" :
+          result.status === "bloqueada" ? "⊘" : "✗"
 
-      results.push({
-        key: ref.key,
-        score: result.score,
-        status: `${statusIcon} ${result.status}`,
-        provider,
-        evidence: result.evidence || result.error || "",
-        resultStatus: result.status,
-      })
+        results.push({
+          key: ref.key,
+          score: result.score,
+          status: `${statusIcon} ${result.status}`,
+          provider,
+          evidence: result.evidence || result.error || "",
+          resultStatus: result.status,
+        })
+      }
+    } catch (error) {
+      // Issue #165: a reference-cache whose physical origin cannot be
+      // authorized or read is a controlled, sanitized refusal. It is never
+      // reported as an empty cache, a "not found" reference or a verified
+      // result, and no report is written. Other errors keep propagating.
+      if (error instanceof PathTraversalError) return REFERENCE_CACHE_ORIGIN_REFUSAL
+      throw error
     }
 
     const verified = results.filter((r) => r.resultStatus === "verificada").length
