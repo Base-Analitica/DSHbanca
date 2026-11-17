@@ -174,10 +174,15 @@ function buildManuscriptIdentities(
 }
 
 /**
- * Canonical comparison form: NFC composes the canonical composition forms of
- * the same text (so `revisão` precomposed or `a` + combining tilde compare
- * equal) and lowercase folds case. Compatibility characters are deliberately
- * NOT folded (no NFKC): visually similar but distinct names stay distinct.
+ * Canonical comparison form for conservative, case-insensitive identity
+ * checks: NFC composes canonically equivalent text (so `revisão` precomposed
+ * and `a` + combining tilde compare equal) and `toLowerCase()` folds case.
+ * NFKC is NOT applied, so fullwidth/homoglyph-compatible names stay distinct;
+ * the simple lowercase mappings do fold OHM/KELVIN/ANGSTROM signs to ω/k/å,
+ * which can associate such a single compatibility-named candidate (documented
+ * display heuristic; ambiguity still drops the mapping). Case folding is
+ * simple, not full, so a few false negatives remain (e.g. Greek final sigma or
+ * ß vs SS); those are conservative, never an ambiguous association.
  */
 function canonicalName(value: string): string {
   return value.normalize("NFC").toLowerCase().normalize("NFC")
