@@ -462,9 +462,9 @@ export const canonicalNativeSkills: Record<ExpectedNativeSkillName, CanonicalNat
   },
   "banca-referencias": {
     sourcePath: "skills/banca-referencias/SKILL.md",
-    sourceSha256: "ff2f4c0ab714923605cc4ffc37eccf5c199b67c43bde6cafaacd38ea45073da7",
-    bodySha256: "53ef96410223ab08e48ec65b37ef832bf3273b449229617f93894793a76fcb22",
-    bodyLength: 3206,
+    sourceSha256: "30d075ab948f4a0e37bf4b9a1746800a20ea491e9c39c82bfe71d50d5acfafbc",
+    bodySha256: "7a920350f2f8cf6154476ba674749bb3e5fb592e8a457119188686532242873d",
+    bodyLength: 3331,
   },
   "banca-revisor": {
     sourcePath: "skills/banca-revisor/SKILL.md",

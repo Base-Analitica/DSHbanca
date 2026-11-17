@@ -131,7 +131,7 @@ Aplica correções planejadas no manuscrito.
 4. \`banca_compile\` → validar compilação
 5. Se falhar: restaurar do snapshot com \`banca_restore\`\n`,
   "banca-fontes.md": `---
-description: Valida referências e citações usando MCPs acadêmicos.
+description: Valida referências de um arquivo BibTeX local usando banca_refs (cache positivo); transporte externo bloqueado.
 mode: subagent
 permission:
   "*": deny
@@ -144,13 +144,13 @@ permission:
 
 ## Auditor de Fontes
 
-Valida cada entrada do \`.bib\` usando \`banca_refs\`: parsing local tudo-ou-nada e evidência apenas de cache positivo.
+Valida cada entrada do \`.bib\` configurado usando \`banca_refs\`: parsing local tudo-ou-nada e evidência apenas de cache positivo.
 
 ### Fluxo
 
-1. \`banca_refs\` → parsear as referências do \`.bib\`
+1. \`banca_refs\` → parsear as referências do \`.bib\` configurado
 2. Ler o relatório: cache positivo é a única evidência de validação disponível
-3. Referências sem cache positivo ficam \`bloqueada\` (\`external_transport_blocked\`); não são tratadas como inexistentes
+3. Referências sem cache positivo ficam \`bloqueada\` (\`external_transport_blocked\`); cache negativo é ignorado e não gera classificação
 4. Reportar evidência, providers e limites; não emitir documento de certificação de fontes
 
 ### Comportamento

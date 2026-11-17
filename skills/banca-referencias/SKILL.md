@@ -1,19 +1,19 @@
 ---
 name: banca-referencias
-description: Valida referências bibliográficas do texto contra bases de dados acadêmicas.
+description: Valida referências de um arquivo BibTeX local com parsing tudo-ou-nada e evidência apenas de cache positivo; transporte externo bloqueado.
 ---
 # Skill: Banca Referências
 
-Valida referências do texto acadêmico com o contrato fail-closed do DSHbanca: parsing local completo e evidência apenas do cache positivo. Não há busca externa, transporte próprio nem rede.
+Valida referências do texto acadêmico com o contrato fail-closed do DSHbanca: parsing local completo do arquivo BibTeX e evidência apenas do cache positivo. Não há busca externa, transporte próprio nem rede.
 
 ## Quando usar
-Para extrair e classificar as referências de um arquivo `.bib` ou da seção de Referências do trabalho, de forma determinística e offline.
+Para extrair e classificar as referências do arquivo `.bib` configurado no projeto, de forma determinística e offline. A entrada é sempre o arquivo `.bib`; não há extração a partir do corpo do manuscrito.
 
 ## Quando NÃO usar
-Não use para afirmar existência em bases externas, autenticidade de fonte ou certificação de referências; não use para avaliar qualidade, pertinência temática ou adequação da referência ao estudo.
+Não use para afirmar existência em bases externas, autenticidade de fonte ou certificação de referências; não use para avaliar qualidade, pertinência temática ou adequação da referência ao estudo; não use como substituto do arquivo `.bib` configurado.
 
 ## Entradas necessárias
-- Caminho para o diretório ou arquivo `.bib` ou `Referências`.
+- Caminho para o diretório raiz do projeto e para o arquivo `.bib` configurado em `.banca/project.json`.
 - Cache local de referências com evidência positiva já armazenada (`.banca/cache`), quando existir.
 
 ## Ferramentas permitidas
@@ -23,9 +23,8 @@ Não use para afirmar existência em bases externas, autenticidade de fonte ou c
 1. Executar `banca_refs` para parsear as referências. O parsing é tudo-ou-nada: entrada malformada ou constructo não suportado interrompe a execução com erro de parsing, sem relatório parcial.
 2. Consultar somente o cache positivo local. Não iniciar MCP, REST, subprocesso ou qualquer transporte de rede.
 3. Classificar cada referência conforme a evidência disponível:
-   - `verificada`: existe cache positivo com metadados; é evidência armazenada, não validação externa realizada nesta execução.
-   - `bloqueada`: não há cache positivo. Registrar `external_transport_blocked`, sem tratar a referência como inexistente.
-   - `parcial` ou `nao_encontrada`: somente quando a própria evidência armazenada sustentar o estado; nunca inferir por ausência de rede.
+   - `verificada` ou `parcial`: existe cache positivo com metadados; é evidência armazenada, não validação externa realizada nesta execução.
+   - `bloqueada`: não há cache positivo. Registrar `external_transport_blocked`, sem tratar a referência como inexistente. Cache negativo (`found:false`) é ignorado e não gera classificação.
 4. Reportar `Evaluated: N/total`, `Verified`, `Blocked (no DSH provider)` e a média apenas das referências avaliadas; usar `N/A` quando nenhuma foi avaliada.
 5. Apresentar a contagem por provider (`cache`, `none`) e os limites da execução.
 
