@@ -28,6 +28,7 @@ interface CopySpiderRow {
 
 const MAX_SOURCE_CHARS = 300
 const MAX_TERM_CHARS = 200
+const MAX_PATH_DISPLAY_CHARS = 300
 const MAX_TERMS_DISPLAYED = 3
 const UNAVAILABLE_SOURCE_LABEL = "(fonte não identificada)"
 
@@ -36,11 +37,15 @@ const UNAVAILABLE_SOURCE_LABEL = "(fonte não identificada)"
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g
 // Invisible formatting characters used for spoofing/ordering.
 const INVISIBLE_FORMAT_CHARS = /[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g
+// Unpaired UTF-16 surrogates cannot round-trip through a UTF-8 file; drop them
+// so the returned report stays byte-identical to the persisted one.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
 // Characters that can start Markdown/HTML structure (headings, emphasis,
-// links, code, tables, entities). `-` and `+` are escaped only at the start of
-// a value: mid-line hyphens are common academic names and stay readable, while
-// a leading list marker would open a nested list inside the report bullet.
-const MARKDOWN_STRUCTURE_CHARS = /[\\`*_[\]<>#|~{}&]/g
+// links, code, tables, entities, autolinks). `-` and `+` are escaped only at
+// the start of a value: mid-line hyphens are common academic names and stay
+// readable, while a leading list marker would open a nested list inside the
+// report bullet.
+const MARKDOWN_STRUCTURE_CHARS = /[\\`*_[\]<>#|~{}&@]/g
 const LEADING_LIST_MARKER = /^[-+]/
 
 /** Collapse untrusted text to a bounded, single-line, control-free string. */
@@ -49,10 +54,14 @@ function sanitizeExternalText(value: unknown, maxChars: number): string {
   const collapsed = value
     .replace(CONTROL_CHARS, " ")
     .replace(INVISIBLE_FORMAT_CHARS, "")
+    .replace(LONE_SURROGATE, "")
     .replace(/\s+/g, " ")
     .trim()
-  if (collapsed.length <= maxChars) return collapsed
-  return `${collapsed.slice(0, maxChars).trimEnd()}…`
+  // Bound by Unicode code points: slicing UTF-16 units could split a surrogate
+  // pair and make the returned Markdown differ from the persisted report.
+  const codePoints = Array.from(collapsed)
+  if (codePoints.length <= maxChars) return collapsed
+  return `${codePoints.slice(0, maxChars).join("").trimEnd()}…`
 }
 
 /** Escape Markdown/HTML structure so external text is rendered literally. */
@@ -89,11 +98,21 @@ function displayTerms(terms: string[]): string[] {
 // Report path display (workspace-relative only, never host paths)
 // ---------------------------------------------------------------------------
 
+/**
+ * True when a `node:path` relative result leaves the root. A bare leading `..`
+ * segment is the only escape form; names that merely start with two dots
+ * (e.g. `..notes.tex`) are legitimate inside the workspace.
+ */
+function isOutsideRelativePath(rel: string): boolean {
+  if (rel.length === 0 || isAbsolute(rel)) return true
+  return rel.split(sep)[0] === ".."
+}
+
 function displayWorkspaceRelativePath(root: string, absolutePath: string): string | null {
   try {
     const canonicalRoot = realWorkspaceRoot(root)
     const rel = relative(canonicalRoot, absolutePath)
-    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null
+    if (isOutsideRelativePath(rel)) return null
     const posix = rel.split(sep).join("/")
     return posix.length > 0 ? posix : null
   } catch {
@@ -113,7 +132,7 @@ function displayManuscriptPath(root: string, absolutePath: string): string | nul
   try {
     const lexicalRoot = resolve(root)
     const rel = relative(lexicalRoot, absolutePath)
-    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null
+    if (isOutsideRelativePath(rel)) return null
     const posix = rel.split(sep).join("/")
     return posix.length > 0 ? posix : null
   } catch {
@@ -286,8 +305,8 @@ function probePdftotext(): ProbeOutcome {
   try {
     result = bancaPlagioInternals.spawn("pdftotext", ["-v"], {
       encoding: "utf-8",
-      timeout: PDFTOTEXT_PROBE_TIMEOUT_MS,
-      maxBuffer: PDFTOTEXT_PROBE_MAX_BUFFER_BYTES,
+      timeout: bancaPlagioInternals.probeTimeoutMs,
+      maxBuffer: bancaPlagioInternals.probeMaxBufferBytes,
     })
   } catch {
     return { ok: false, message: PDFTOTEXT_UNAVAILABLE_MESSAGE }
@@ -313,8 +332,8 @@ function parsePdfViaPdftotext(pdfPath: string): PdfParseOutcome {
   try {
     result = bancaPlagioInternals.spawn("pdftotext", [pdfPath, "-"], {
       encoding: "utf-8",
-      timeout: PDFTOTEXT_CONVERSION_TIMEOUT_MS,
-      maxBuffer: PDFTOTEXT_CONVERSION_MAX_BUFFER_BYTES,
+      timeout: bancaPlagioInternals.conversionTimeoutMs,
+      maxBuffer: bancaPlagioInternals.conversionMaxBufferBytes,
     })
   } catch {
     return { ok: false, message: PDFTOTEXT_CONVERSION_FAILED_MESSAGE }
@@ -371,7 +390,7 @@ function renderMapping(rows: CopySpiderRow[], identities: ManuscriptIdentity[]):
     // rows to exceed the argument limit of a spread call.
     const maxSi = sis.reduce((max, value) => (value > max ? value : max), sis[0])
     mapped.push(
-      `- ${escapeExternalForMarkdown(identity.display)}: ${sis.length} matches, max Si=${maxSi.toFixed(1)}%`,
+      `- ${safeExternal(identity.display, MAX_PATH_DISPLAY_CHARS)}: ${sis.length} matches, max Si=${maxSi.toFixed(1)}%`,
     )
   }
   return mapped
@@ -399,9 +418,12 @@ export const bancaPlagio = defineBancaTool({
     if (!reportIsRegularFile) return "report not found"
 
     const reportDisplay = displayWorkspaceRelativePath(root, finalReportPath)
+    // The report name is external data: normalize controls/newlines and bound
+    // its length before escaping, so a hostile filename cannot start a new
+    // Markdown line (thematic break, indented code, list) or leak controls.
     const reportLabel =
       reportDisplay !== null
-        ? escapeExternalForMarkdown(reportDisplay)
+        ? safeExternal(reportDisplay, MAX_PATH_DISPLAY_CHARS)
         : "(relatório validado no workspace)"
 
     const config = loadConfig(root)
