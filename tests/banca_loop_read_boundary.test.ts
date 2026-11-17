@@ -605,7 +605,7 @@ describe("issue #163 GREEN controls — legitimate internal main files", () => {
     expect(after["project/main.tex"]).toBe(before["project/main.tex"])
   })
 
-  test("relative projectRoot resolves inside the workspace and caps at 'main file not found' only when absent", async () => {
+  test("relative projectRoot resolves inside the workspace and is accepted", async () => {
     writeProjectConfig({ targetScore: 9 })
     writeFile("main.tex", mainTex(5, 0))
     const expected = analyzeCitationDensity(mainTex(5, 0))
