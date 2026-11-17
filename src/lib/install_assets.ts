@@ -131,7 +131,7 @@ Aplica correções planejadas no manuscrito.
 4. \`banca_compile\` → validar compilação
 5. Se falhar: restaurar do snapshot com \`banca_restore\`\n`,
   "banca-fontes.md": `---
-description: Valida referências e citações usando MCPs acadêmicos.
+description: Valida referências de um arquivo BibTeX local usando banca_refs (cache positivo); transporte externo bloqueado.
 mode: subagent
 permission:
   "*": deny
@@ -144,19 +144,21 @@ permission:
 
 ## Auditor de Fontes
 
-Valida cada entrada do \`.bib\` contra bases acadêmicas.
+Valida cada entrada do \`.bib\` configurado usando \`banca_refs\`: parsing local tudo-ou-nada e evidência apenas de cache positivo.
 
 ### Fluxo
 
-1. \`banca_refs\` → extrair referências do \`.bib\`
-2. Para cada referência, chamar MCP acadêmico para validar existência e metadados
-3. Calcular score de confiança (0-100)
-4. Reportar referências não encontradas ou suspeitas
+1. \`banca_refs\` → parsear as referências do \`.bib\` configurado
+2. Ler o relatório: cache positivo é a única evidência de validação disponível
+3. Referências sem cache positivo ficam \`bloqueada\` (\`external_transport_blocked\`); cache negativo é ignorado e não gera classificação
+4. Reportar evidência, providers e limites; não emitir documento de certificação de fontes
 
 ### Comportamento
 
-- Depende de MCPs: crossref-academic, pubmed, openalex, semantic-scholar
-- Se MCP estiver ausente, declarar limitação, não falhar\n`,
+- Não chama MCP, REST, \`fetch\` ou subprocesso: o DSH instalado não expõe provider nativo de referências
+- Não confunde bloqueio com inexistência e não aplica punição por ausência de cache
+- Não altera rubrica, scoring, nota ou parecer acadêmico; bloqueadas ficam fora da média
+- Se o cache estiver vazio, declarar a limitação explicitamente, sem interromper a entrega\n`,
   "banca-integrador.md": `---
 description: Integra pareceres dos 4 avaliadores, aplica travas e calcula nota final.
 mode: subagent

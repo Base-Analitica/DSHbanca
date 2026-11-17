@@ -1,41 +1,44 @@
 ---
 name: banca-referencias
-description: Valida referências bibliográficas do texto contra bases de dados acadêmicas.
+description: Valida referências de um arquivo BibTeX local com parsing tudo-ou-nada e evidência apenas de cache positivo; transporte externo bloqueado.
 ---
 # Skill: Banca Referências
 
-Valida referências contra bases acadêmicas.
+Valida referências do texto acadêmico com o contrato fail-closed do DSHbanca: parsing local completo do arquivo BibTeX e evidência apenas do cache positivo. Não há busca externa, transporte próprio nem rede.
 
 ## Quando usar
-Para verificar a autenticidade e validade das referências citadas ao final de um trabalho acadêmico.
+Para extrair e classificar as referências do arquivo `.bib` configurado no projeto, de forma determinística e offline. A entrada é sempre o arquivo `.bib`; não há extração a partir do corpo do manuscrito.
 
 ## Quando NÃO usar
-Não use para avaliar a qualidade ou aderência das referências ao tema estudado, apenas sua existência factual nas bases.
+Não use para afirmar existência em bases externas, autenticidade de fonte ou certificação de referências; não use para avaliar qualidade, pertinência temática ou adequação da referência ao estudo; não use como substituto do arquivo `.bib` configurado.
 
 ## Entradas necessárias
-- Caminho para o diretório ou arquivo `.bib` ou `Referências`.
+- Caminho para o diretório raiz do projeto e para o arquivo `.bib` configurado em `.banca/project.json`.
+- Cache local de referências com evidência positiva já armazenada (`.banca/cache`), quando existir.
 
 ## Ferramentas permitidas
 - `banca_refs`
 
 ## Protocolo
-1. Executar `banca_refs` para extrair a lista de referências.
-2. Para cada referência extraída, tentar validação contra bases de dados externas.
-3. Classificar cada referência: encontrada, não encontrada, ou suspeita.
-4. Calcular o score geral de saúde das referências.
-5. Gerar uma certidão formal de validação de fontes.
+1. Executar `banca_refs` para parsear as referências. O parsing é tudo-ou-nada: entrada malformada ou constructo não suportado interrompe a execução com erro de parsing, sem relatório parcial.
+2. Consultar somente o cache positivo local. Não iniciar MCP, REST, subprocesso ou qualquer transporte de rede.
+3. Classificar cada referência conforme a evidência disponível:
+   - `verificada` ou `parcial`: existe cache positivo com metadados; é evidência armazenada, não validação externa realizada nesta execução.
+   - `bloqueada`: não há cache positivo. Registrar `external_transport_blocked`, sem tratar a referência como inexistente. Cache negativo (`found:false`) é ignorado e não gera classificação.
+4. Reportar `Evaluated: N/total`, `Verified`, `Blocked (no DSH provider)` e a média apenas das referências avaliadas; usar `N/A` quando nenhuma foi avaliada.
+5. Apresentar a contagem por provider (`cache`, `none`) e os limites da execução.
 
 ## Formato da saída
-Um relatório Markdown em `.banca/reports/` com a "Certidão de Fontes" e a tabela de score.
+Um relatório Markdown em `.banca/reports/` com título "Reference Validation", tabela por referência (chave, score, status, provider, evidência) e resumo de avaliadas e bloqueadas. É um relatório de evidência e limites; não é documento de certificação de fontes nem parecer de integridade acadêmica.
 
 ## Limites e nível de confiança
-Depende de conectividade e disponibilidade das bases de dados, mas é rigoroso para referências do tipo DOI e ISBN. Fontes antigas ou obscuras podem ser marcadas falsamente como não encontradas.
+O cache positivo pode estar desatualizado ou ter sido validado em outro contexto; ele não prova existência atual em base externa. Ausência de cache é indisponibilidade de transporte, não indício de referência falsa. Não há verificação de DOI, ISBN ou metadados contra fonte externa enquanto o DSH instalado não oferecer provider nativo de referências.
 
 ## Situações que exigem confirmação humana
-Uma quantidade grande de referências não encontradas pode indicar problemas de conectividade, indisponibilidade da base de dados, ou falha no parser. O autor deve revisar manualmente e confirmar a validade.
+Muitas referências bloqueadas indicam ausência de provider nativo ou cache vazio, não problema acadêmico. O autor deve revisar manualmente qualquer decisão sobre validade; a skill não emite julgamento.
 
 ## Relação com a rubrica ativa
-Atua diretamente no Scorecard sob "Citações/Fontes", baseando as penalidades na tabela de impacto.
+Não altera rubrica, scoring, nota, aprovação ou reprovação. Referências bloqueadas ficam fora da média; não aplique punição por bloqueio nem por ausência de cache.
 
 ## Comportamento quando as evidências forem insuficientes
-A referência assume estado "Suspeita" se os metadados estiverem corrompidos e nenhuma busca puder ser realizada com sucesso.
+Sem cache positivo, a referência permanece `bloqueada` com `external_transport_blocked`. Nunca classifique como inexistente ou aplique punição sem evidência armazenada.
