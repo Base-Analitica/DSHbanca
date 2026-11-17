@@ -443,6 +443,10 @@ describe("banca_plagio — untrusted HTML content", () => {
     // Source bounded near MAX_SOURCE_CHARS and terms near MAX_TERM_CHARS.
     expect((detail as string).length).toBeLessThan(600)
     expect(markdown).not.toContain("t".repeat(500))
+    // The source tail ("z" run) is beyond the bound and must be dropped, so
+    // MAX_SOURCE_CHARS itself is pinned (not only MAX_TERM_CHARS).
+    expect(detail).not.toContain("z".repeat(50))
+    expect(detail).toContain("x".repeat(100))
     // No lone surrogate: truncation happens on Unicode code points, and the
     // UTF-8 persisted report must stay identical to the returned string.
     expect(markdown).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/)
@@ -529,6 +533,20 @@ describe("banca_plagio — displayed paths", () => {
       expect(headings(markdown)).toEqual(EXPECTED_HEADINGS)
     })
   }
+
+  test("bounds and truncates a very long displayed report path", async () => {
+    const deepDir = Array.from({ length: 60 }, (_, index) => `d${String(index).padStart(2, "0")}x`).join("/")
+    writeFile(`${deepDir}/relatorio.html`, htmlReport([{ source: "fonte", sg: 1, si: 5 }]))
+    const markdown = await runPlagio({ reportPath: `${deepDir}/relatorio.html` })
+
+    const header = markdown.split("\n").find((line) => line.startsWith("**Arquivo:**"))
+    expect(header).toBeDefined()
+    expect((header as string).length).toBeLessThanOrEqual(320)
+    expect(header as string).toContain("…")
+    expect(markdown).not.toMatch(CONTROL_CHARS)
+    expect(headings(markdown)).toEqual(EXPECTED_HEADINGS)
+    expect(readSavedReport()).toBe(markdown)
+  })
 
   test("does not echo an absolute reportPath given directly", async () => {
     writeFile("relatorio.html", htmlReport([{ source: "capitulo1.tex", sg: 1, si: 50 }]))
@@ -796,6 +814,33 @@ describe("banca_plagio — pdftotext boundary limits and sanitized diagnostics",
     expect(output).toContain("pdftotext")
     expect(output).not.toContain("/home/private-user")
     expect(savedReportNames()).toEqual([])
+  })
+
+  test("the seam limits are the production source of truth", async () => {
+    writeFile("relatorio.pdf", PDF)
+    await installSpawn(pdftotextHandler(pdfLine("capitulo1.tex", 10, 95)))
+    const original = {
+      probeTimeoutMs: activeInternals.probeTimeoutMs,
+      probeMaxBufferBytes: activeInternals.probeMaxBufferBytes,
+      conversionTimeoutMs: activeInternals.conversionTimeoutMs,
+      conversionMaxBufferBytes: activeInternals.conversionMaxBufferBytes,
+    }
+    try {
+      activeInternals.probeTimeoutMs = 1234
+      activeInternals.probeMaxBufferBytes = 1111
+      activeInternals.conversionTimeoutMs = 4321
+      activeInternals.conversionMaxBufferBytes = 4444
+      await runPlagio({ reportPath: "relatorio.pdf" })
+      expect(spawnRecords[0].options.timeout).toBe(1234)
+      expect(spawnRecords[0].options.maxBuffer).toBe(1111)
+      expect(spawnRecords[1].options.timeout).toBe(4321)
+      expect(spawnRecords[1].options.maxBuffer).toBe(4444)
+    } finally {
+      activeInternals.probeTimeoutMs = original.probeTimeoutMs
+      activeInternals.probeMaxBufferBytes = original.probeMaxBufferBytes
+      activeInternals.conversionTimeoutMs = original.conversionTimeoutMs
+      activeInternals.conversionMaxBufferBytes = original.conversionMaxBufferBytes
+    }
   })
 
   test("probe and conversion receive explicit timeout and maxBuffer limits", async () => {
