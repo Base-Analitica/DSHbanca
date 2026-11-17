@@ -7239,3 +7239,298 @@ describe("Issue #110 R3 — cross-linked automatic capture evidence", () => {
     expect(validateEvidence(evidence)).toContain(R2_RESTORE_ERROR)
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// Issue #102: hermetic regression for the transparency contract of the native
+// DSH E2E report. The real CLI runs with the active lifecycle explicitly NOT
+// authorized: exit 2/BLOCKED proves that no DSH CLI process, Agent/Session,
+// academic synthetic project or scratch sandbox was started. The emitted JSON is
+// then read back so the report can never again claim that the active mode does
+// not create native Agents. This is a negative-path regression: it is NOT
+// evidence of an active DSH E2E PASS, and it neither proves nor requires the
+// absence of the synthetic Agent.send probes, turns or lifecycle events that
+// the active (authorized) path performs.
+// ---------------------------------------------------------------------------
+
+function issue102NormalizeLimitation(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+// Canonical active-mode statement emitted by the runner at
+// scripts/e2e-dsh-profile.ts report.limitations[0]. Issue #102 protects this
+// statement as a whole: the active E2E mode effectively creates native DSH
+// Agents/Sessions, does not start model turns, and does not cover human
+// academic responses or inference quality. The regression normalizes Unicode,
+// case and whitespace only; semantically necessary words, especially the
+// negations, are preserved verbatim.
+const ISSUE102_CANONICAL_ACTIVE_LIMITATION =
+  "O E2E ativo cria Agents/Sessions nativos do DSH, mas não inicia turnos de modelo; respostas acadêmicas humanas e qualidade de inferência não são cobertas."
+
+/**
+ * Contract of report.limitations for the active DSH mode (issue #102).
+ *
+ * The canonical statement is pinned literally at limitations[0] (after Unicode,
+ * case and whitespace normalization) because that single statement carries all
+ * clauses the issue protects: it refers to the active E2E mode, states the
+ * effective creation of native DSH Agents/Sessions (not mocks, fictitious
+ * agents, discussion or planning), states that model turns are not started, and
+ * states that human academic responses and inference quality are NOT covered.
+ * Keyword checks were replaced by this anchored comparison (review R1) so no
+ * false claim can be accepted through disconnected words or compensated by
+ * another limitation entry.
+ *
+ * Additional guards reject limitations that deny runtime capabilities observed
+ * by the authorized path (synthetic Agent.send probes, turn/lifecycle events)
+ * or that claim a global single-process execution. The legitimate
+ * unauthorized-path messages remain accepted because they do not deny those
+ * capabilities: they describe that THIS unprivileged execution created no
+ * Agent/Session.
+ */
+function issue102LimitationViolations(limitations: unknown): string[] {
+  if (!Array.isArray(limitations)) return ["report.limitations is not an array"]
+  const violations: string[] = []
+  if (limitations.length === 0 || typeof limitations[0] !== "string") {
+    violations.push("report.limitations[0] is missing or is not a string")
+  } else if (
+    issue102NormalizeLimitation(limitations[0]) !==
+    issue102NormalizeLimitation(ISSUE102_CANONICAL_ACTIVE_LIMITATION)
+  ) {
+    violations.push(
+      "report.limitations[0] does not match the canonical active-mode statement (native DSH Agents/Sessions created, no model turns, human academic responses and inference quality not covered)",
+    )
+  }
+
+  for (const [index, entry] of limitations.entries()) {
+    if (typeof entry !== "string") {
+      violations.push(`report.limitations[${index}] is not a string`)
+      continue
+    }
+    const text = issue102NormalizeLimitation(entry)
+    // No global single-process claim: recovery is observed across real processes.
+    for (const pattern of [
+      /\bem\s+(?:um\s+)?unico\s+processo\b/,
+      /\bprocesso\s+unico\b/,
+      /\bexecucao\s+em\s+processo\s+unico\b/,
+      /\bprocesso\s+unico\s+global\b/,
+      /\bsingle[-\s]?process\b/,
+    ]) {
+      const match = pattern.exec(text)
+      if (match === null) continue
+      const prefix = text.slice(Math.max(0, match.index - 60), match.index)
+      if (!/\b(?:nao|nunca|jamais|sem|nem)\b/.test(prefix)) {
+        violations.push("limitations claim that every scenario runs in a single process")
+      }
+    }
+    // Inference absence must not become a denial of Agent.send/lifecycle.
+    if (
+      /\b(?:nao|jamais|nunca)\s+(?:se\s+)?(?:executa|envia|realiza|dispara|chama|faz)\b[^.;]{0,50}\bagent[.\s-]?send\b/.test(text) ||
+      /\bnenhum\s+agent[.\s-]?send\b/.test(text)
+    ) {
+      violations.push("limitations deny that the runner issues synthetic Agent.send probes")
+    }
+    const noTurnOrLifecycleClaim = /\bnao\s+(?:ha|existe|existem)\s+(?:nenhum\s+)?(?:turnos?|lifecycle)\b/.exec(text)
+    if (
+      noTurnOrLifecycleClaim !== null &&
+      !/\bnao\s+(?:ha|existe|existem)\s+(?:nenhum\s+)?turnos?\s+de\s+modelo\b/.test(text)
+    ) {
+      violations.push("limitations claim that no turn/lifecycle event exists")
+    }
+  }
+  return violations
+}
+
+function issue102BlockedEnvironment(options: {
+  reportPath: string
+  temporaryDir: string
+  homeDir: string
+}): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: options.homeDir,
+    TMPDIR: options.temporaryDir,
+    LANG: "C.UTF-8",
+    NO_COLOR: "1",
+    DSHBANCA_DSH_PROFILE_REPORT_PATH: options.reportPath,
+  }
+}
+
+describe("Issue #102 — native DSH E2E report transparency regression", () => {
+  const canonical = ISSUE102_CANONICAL_ACTIVE_LIMITATION
+
+  // Review R1 (PR #125): the previous keyword helper accepted false statements
+  // that invert the exact contract. These cases must all be rejected, and each
+  // one mutates or reorders the canonical statement instead of inventing a
+  // generic NLP scenario.
+  const rejectedLimitationShapes: Array<[string, string[]]> = [
+    [
+      "R1-A falsely claims human academic responses and inference quality are covered",
+      [canonical.replace("não são cobertas", "são cobertas")],
+    ],
+    [
+      "R1-A leaves only one of the two dimensions uncovered",
+      [canonical.replace(
+        "respostas acadêmicas humanas e qualidade de inferência não são cobertas",
+        "respostas acadêmicas humanas não são cobertas; qualidade de inferência é coberta",
+      )],
+    ],
+    [
+      "R1-A omits the coverage limitation entirely",
+      [canonical.replace("; respostas acadêmicas humanas e qualidade de inferência não são cobertas.", ".")],
+    ],
+    [
+      "R1-B declares fictitious Agents instead of native DSH Agents/Sessions",
+      [canonical.replace("cria Agents/Sessions nativos do DSH", "cria Agents fictícios")],
+    ],
+    [
+      "R1-B omits Sessions from the creation claim",
+      [canonical.replace("cria Agents/Sessions nativos do DSH", "cria Agents nativos do DSH")],
+    ],
+    [
+      "R1-B omits the native DSH identity from the creation claim",
+      [canonical.replace("cria Agents/Sessions nativos do DSH", "cria Agents/Sessions")],
+    ],
+    [
+      "R1-C merely discusses the creation instead of performing it",
+      [canonical.replace(
+        "cria Agents/Sessions nativos do DSH",
+        "discute a criação de Agents/Sessions nativos do DSH",
+      )],
+    ],
+    [
+      "R1-C only plans the creation instead of performing it",
+      [canonical.replace("cria Agents/Sessions nativos do DSH", "planeja criar Agents/Sessions nativos do DSH")],
+    ],
+    [
+      "R1-D compensates a wrong active-mode entry with another entry",
+      [
+        canonical.replace("mas não inicia turnos de modelo", "e inicia turnos de modelo"),
+        "Outro modo com Agents não inicia turnos de modelo.",
+      ],
+    ],
+    [
+      "R1-D compensates a wrong active-mode entry with a correct extra entry",
+      [
+        canonical.replace("não são cobertas", "são cobertas"),
+        canonical,
+      ],
+    ],
+    [
+      "historical disclaimer that denies Agent creation",
+      ["Este gate não inicia agente nem chama modelo."],
+    ],
+    [
+      "canonical statement placed at an index other than limitations[0]",
+      ["Nenhum Agent/Session foi criado nesta execução não autorizada.", canonical],
+    ],
+  ]
+
+  for (const [label, limitations] of rejectedLimitationShapes) {
+    test(`R1 rejects limitation shape: ${label}`, () => {
+      expect(issue102LimitationViolations(limitations).length).toBeGreaterThan(0)
+    })
+  }
+
+  test("R1 accepts the canonical active-mode statement and the legitimate unauthorized-path messages", () => {
+    expect(issue102LimitationViolations([canonical])).toEqual([])
+    expect(issue102LimitationViolations([
+      canonical,
+      "Nenhum Agent/Session foi criado nesta execução não autorizada; o runner parou antes de invocar o CLI DSH.",
+      "Sem autorização de lifecycle, nenhum Agent/Session foi criado e nenhum turno de modelo foi iniciado.",
+      "A execução ativa requer DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED=yes; sem essa autorização o runner para antes de invocar o CLI DSH, criar Agent/Session ou inicializar o projeto sintético.",
+      "A recuperação entre processos reais permanece um gate separado.",
+      // True statements about the authorized path must also stay accepted: the
+      // absence of inference does not deny Agent.send, turn events or lifecycle.
+      "A sonda ativa envia duas chamadas sintéticas de Agent.send, rejeitadas no hook nativo agent/pre-step antes de qualquer inferência.",
+      "turn/start e turn/end do agente de controle são observados no modo ativo.",
+    ])).toEqual([])
+  })
+
+  test("R1 keeps the runtime distinctions: no denial of Agent.send, turns/lifecycle or cross-process recovery", () => {
+    expect(issue102LimitationViolations([canonical, "O runner não executa Agent.send."]).length).toBeGreaterThan(0)
+    expect(issue102LimitationViolations([canonical, "Não há turnos nem lifecycle no runner."]).length).toBeGreaterThan(0)
+    expect(issue102LimitationViolations([canonical, "Todos os cenários ocorrem em processo único."]).length).toBeGreaterThan(0)
+  })
+
+  test("real CLI without lifecycle authorization emits a BLOCKED report with no DSH boot and truthful limitations", () => {
+    const root = mkdtempSync(join(tmpdir(), "dshbanca-issue102-"))
+    const temporaryDir = join(root, "tmp")
+    const homeDir = join(root, "home")
+    mkdirSync(temporaryDir, { mode: 0o700 })
+    mkdirSync(homeDir, { mode: 0o700 })
+    const reportPath = join(root, "report.json")
+    try {
+      const environment = issue102BlockedEnvironment({ reportPath, temporaryDir, homeDir })
+      // Hermetic environment: exclusive TMPDIR/HOME under this test's scratch,
+      // no lifecycle/abrupt-restart opt-in, no DSH_BIN, no credential variable
+      // and no inherited opt-in from the host process.
+      expect(environment.TMPDIR).toBe(temporaryDir)
+      expect(environment.HOME).toBe(homeDir)
+      expect(environment.DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED).toBeUndefined()
+      expect(Object.keys(environment).filter((key) => key.startsWith("DSHBANCA_DSH_PROFILE_ABRUPT_RESTART_"))).toEqual([])
+      expect(environment.DSH_BIN).toBeUndefined()
+      expect(readdirSync(temporaryDir)).toEqual([])
+
+      const result = spawnSync(process.execPath, ["scripts/e2e-dsh-profile.ts"], {
+        cwd: process.cwd(),
+        env: environment,
+        encoding: "utf8",
+        timeout: 60_000,
+      })
+      // Lifecycle is NOT authorized: BLOCKED/exit 2 before any DSH invocation.
+      expect(result.error).toBeUndefined()
+      expect(result.signal).toBeNull()
+      expect(result.status).toBe(2)
+      expect(result.stdout).toContain("BLOCKED:")
+
+      expect(existsSync(reportPath)).toBe(true)
+      const report = JSON.parse(readFileSync(reportPath, "utf8"))
+      expect(report.status).toBe("BLOCKED")
+      expect(report.repository.revision).toMatch(/^[a-f0-9]{40}$/)
+      expect(Array.isArray(report.limitations)).toBe(true)
+
+      // Operational proof that the blocked path did not boot anything.
+      expect(report.stages.profileBoot).toMatchObject({
+        status: "BLOCKED",
+        started: false,
+        dshCliInvocations: 0,
+        agentHandlesCreated: 0,
+        sessionsCreated: 0,
+        academicProjectInitialized: false,
+      })
+      expect(report.stages.crossProcessBatchAudit).toMatchObject({ status: "BLOCKED", processLaunches: 0 })
+      expect(report.sandbox).toMatchObject({ isolated: false, removed: null })
+      expect(report.failures.length).toBeGreaterThan(0)
+      // The exclusive TMPDIR stays empty: no runner-owned scratch sandbox and
+      // no recovery-process launch happened in this blocked execution.
+      expect(readdirSync(temporaryDir)).toEqual([])
+
+      // Textual contract read from the report actually persisted by the CLI.
+      expect(report.limitations[0]).toBe(ISSUE102_CANONICAL_ACTIVE_LIMITATION)
+      expect(issue102LimitationViolations(report.limitations)).toEqual([])
+
+      // The historical regression must fail the same contract with a precise reason.
+      const historicalLimitations = [...report.limitations]
+      historicalLimitations[0] = "Este gate não inicia agente nem chama modelo."
+      const historicalViolations = issue102LimitationViolations(historicalLimitations)
+      expect(historicalViolations.length).toBeGreaterThan(0)
+      expect(historicalViolations.some((violation) => violation.includes("limitations[0]"))).toBe(true)
+
+      // The legitimate unauthorized-path messages ("no Agent/Session was created
+      // in that execution") must remain allowed, not mistaken for the historical
+      // denial, even when they mention model turns to describe the blocked run.
+      expect(issue102LimitationViolations([
+        ...report.limitations,
+        "Nenhum Agent/Session foi criado nesta execução não autorizada; o runner parou antes de invocar o CLI DSH.",
+        "Sem autorização de lifecycle, nenhum Agent/Session foi criado e nenhum turno de modelo foi iniciado.",
+      ])).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
