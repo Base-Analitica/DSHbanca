@@ -41,6 +41,112 @@ function formatStateOriginRefusal(err: PathTraversalError): string {
   return `blocked: project state origin refused — ${detail} — no manuscript file was modified`
 }
 
+/**
+ * Issue #167 — canonical origin of the main manuscript used by the requested
+ * regression check.
+ *
+ * `resolveManuscriptPaths` is lexical, so before `previousScore` can be honored
+ * the configured main file must be resolved physically and proven to be a
+ * regular file inside the workspace. Only then may the mandatory pre-correction
+ * snapshot, the state registration or the manuscript write happen: a regression
+ * check that would read an external, broken, non-regular or unreadable origin
+ * is refused before any mutation.
+ *
+ * The messages are fixed and sanitized: they never echo a host path, a link
+ * target, external bytes or a raw filesystem message.
+ */
+const MAIN_MANUSCRIPT_ORIGIN_REFUSAL =
+  "blocked: main manuscript origin is outside the workspace, follows an unsafe symbolic link, or is not a regular file — regression check requested but could not be verified; no snapshot, state entry or manuscript file was written"
+
+const MAIN_MANUSCRIPT_ABSENT_REFUSAL =
+  "blocked: main manuscript not found — regression check requested but could not be verified; no snapshot, state entry or manuscript file was written"
+
+const MAIN_MANUSCRIPT_READ_REFUSAL =
+  "blocked: main manuscript destination could not be inspected or read safely — regression check requested but could not be verified; no snapshot, state entry or manuscript file was written"
+
+/**
+ * Expected read failures of an already inspected regular file. They become a
+ * controlled sanitized refusal; unexpected errors (including programming
+ * defects) are rethrown unchanged.
+ */
+const EXPECTED_MAIN_READ_FAILURE_CODES = new Set([
+  "EACCES",
+  "EPERM",
+  "ENOENT",
+  "EISDIR",
+  "ELOOP",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENAMETOOLONG",
+  "ESTALE",
+])
+
+type MainManuscriptInspection =
+  | { status: "absent" }
+  | { status: "unreadable" }
+  | {
+      status: "present"
+      /** Canonical (realpath) destination resolved from the configured path. */
+      canonicalPath: string
+      dev: number
+      ino: number
+      /** Bytes read from the canonical regular file. */
+      bytes: Buffer
+    }
+
+/**
+ * Resolve the configured main file to its canonical destination and report
+ * whether it is a present regular file. The resolution is rooted at the project
+ * workspace — never at the configured manuscript root's own target — so a
+ * redirected root cannot become an implicitly authorized root.
+ *
+ * Missing stays missing (legitimate absence); escaping links, broken links,
+ * ancestor links and non-regular destinations (directory, FIFO, socket, device)
+ * throw {@link PathTraversalError} without opening the file, so a FIFO is never
+ * opened for a blocking read.
+ */
+function inspectMainManuscript(root: string, lexicalMain: string): MainManuscriptInspection {
+  let canonicalPath: string
+  try {
+    canonicalPath = resolveRealInsideRoot(root, lexicalMain)
+  } catch (err) {
+    if (err instanceof PathTraversalError) throw err
+    throw new PathTraversalError("main manuscript destination cannot be inspected")
+  }
+
+  let stat
+  try {
+    stat = lstatSync(canonicalPath)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR") return { status: "absent" }
+    throw new PathTraversalError("main manuscript destination cannot be inspected")
+  }
+  if (!stat.isFile()) {
+    throw new PathTraversalError("main manuscript destination is not a regular file")
+  }
+
+  let bytes: Buffer
+  try {
+    bytes = readFileSync(canonicalPath)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (typeof code === "string" && EXPECTED_MAIN_READ_FAILURE_CODES.has(code)) {
+      return { status: "unreadable" }
+    }
+    throw err
+  }
+
+  return {
+    status: "present",
+    canonicalPath,
+    dev: stat.dev,
+    ino: stat.ino,
+    bytes,
+  }
+}
+
 const CorrectionSchema = z.object({
   file: z.string(),
   oldText: z.string(),
@@ -220,6 +326,26 @@ export const bancaCorrigir = defineBancaTool({
     // snapshot: a caller cannot opt out before any other validation runs.
     if (args.skipSnapshot) {
       return "blocked: skipSnapshot is not permitted in public correction workflow"
+    }
+
+    // Issue #167 — canonical main-manuscript preflight. When `previousScore`
+    // asks for a regression check, the configured main file must be proven to
+    // be a safe, readable regular file INSIDE the workspace before the
+    // mandatory snapshot, the state registration or any write. An unsafe or
+    // inaccessible origin is refused here, while the workspace is still
+    // byte-identical. Without `previousScore` this read is not requested, so
+    // the historical behavior is preserved untouched.
+    let mainPreflight: Extract<MainManuscriptInspection, { status: "present" }> | null = null
+    if (args.previousScore !== undefined) {
+      try {
+        const inspection = inspectMainManuscript(root, paths.main)
+        if (inspection.status === "absent") return MAIN_MANUSCRIPT_ABSENT_REFUSAL
+        if (inspection.status === "unreadable") return MAIN_MANUSCRIPT_READ_REFUSAL
+        mainPreflight = inspection
+      } catch (err) {
+        if (err instanceof PathTraversalError) return MAIN_MANUSCRIPT_ORIGIN_REFUSAL
+        throw err
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -539,8 +665,18 @@ export const bancaCorrigir = defineBancaTool({
     }
 
     // -----------------------------------------------------------------------
-    // Phase 5 — success bookkeeping (same contracts as before).
+    // Phase 5 — success bookkeeping and regression verification.
+    //
+    // The regression source is re-resolved and re-inspected immediately before
+    // the read (issue #167). A failure here happens after the writes, so it is
+    // reported as an honest partial outcome with the real recovery point — it
+    // never claims that the regression was verified nor that nothing changed.
     // -----------------------------------------------------------------------
+    const unverifiedRegression = (reason: string): string => {
+      const recorded = addFailedIteration(root, args.previousScore)
+      return `partial: the requested correction was applied, but the regression check could not be verified — ${reason}; no automatic rollback was performed; ${recoveryNote(snapshotLabel)} to recover the original bytes.${recorded}`
+    }
+
     const results = planned.map(
       (p) => `✓ ${p.file} (${p.count} replacement${p.count > 1 ? "s" : ""})`,
     )
@@ -549,18 +685,45 @@ export const bancaCorrigir = defineBancaTool({
     let curScore: number | null = null
     let regNote = ""
     if (args.previousScore !== undefined) {
-      let mainContent: string | null = null
-      try {
-        mainContent = readFileSync(paths.main, "utf-8")
-      } catch {
-        mainContent = null
+      if (mainPreflight === null) {
+        // Defensive invariant: the preflight above always runs when
+        // `previousScore` is defined. Reaching this point is a programming
+        // defect, never a user-facing condition.
+        throw new Error("main manuscript preflight missing for the regression check")
       }
-      if (mainContent !== null) {
-        curScore = analyzeCitationDensity(mainContent).score
-        const violation = checkScoreNotDecreased(args.previousScore, curScore)
-        if (violation) {
-          regNote = `\n⚠ ${violation.message}`
+      let inspected: MainManuscriptInspection
+      try {
+        inspected = inspectMainManuscript(root, paths.main)
+      } catch (err) {
+        if (err instanceof PathTraversalError) {
+          return unverifiedRegression("main manuscript origin is no longer authorized")
         }
+        throw err
+      }
+      if (inspected.status === "absent") {
+        return unverifiedRegression("main manuscript is no longer present")
+      }
+      if (inspected.status === "unreadable") {
+        return unverifiedRegression("main manuscript could not be read safely")
+      }
+      if (inspected.canonicalPath !== mainPreflight.canonicalPath) {
+        return unverifiedRegression("main manuscript origin changed after the preflight")
+      }
+      if (inspected.dev !== mainPreflight.dev || inspected.ino !== mainPreflight.ino) {
+        return unverifiedRegression("main manuscript destination changed after the preflight")
+      }
+      // A main file that is itself an authorized correction target changes
+      // legitimately; every other main file must still match the preflight
+      // bytes, otherwise the score would be computed over a source that changed
+      // between the preflight and the read.
+      const mainIsCorrected = planned.some((p) => p.abs === inspected.canonicalPath)
+      if (!mainIsCorrected && sha256Of(inspected.bytes) !== sha256Of(mainPreflight.bytes)) {
+        return unverifiedRegression("main manuscript content changed after the preflight")
+      }
+      curScore = analyzeCitationDensity(inspected.bytes.toString("utf-8")).score
+      const violation = checkScoreNotDecreased(args.previousScore, curScore)
+      if (violation) {
+        regNote = `\n⚠ ${violation.message}`
       }
     }
 
