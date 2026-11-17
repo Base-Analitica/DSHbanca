@@ -30,7 +30,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { PathTraversalError } from "../src/lib/safe_paths"
 
@@ -1128,5 +1128,435 @@ describe("issue #136 — banca_corrigir refuses a non-regular state destination"
       expect(existsSync(snapshotsDir)).toBe(false)
     },
     20_000,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Issue #167 — canonical origin of main.tex for the requested regression check
+//
+// `resolveManuscriptPaths` is lexical. When `previousScore` is supplied, the
+// configured main file must be proven to be a safe, readable regular file
+// inside the workspace BEFORE the mandatory pre-correction snapshot, the state
+// registration or any write. The same origin is revalidated immediately before
+// the post-correction read; a change after the mutation must be reported as an
+// honest partial outcome that keeps the recovery point available — never as an
+// apparent success with an unverified regression.
+// ---------------------------------------------------------------------------
+
+const symlinksSupported167 = (() => {
+  try {
+    const probeBase = mkdtempSync(join(tmpdir(), "dshbanca-167-corrigir-link-probe-"))
+    try {
+      symlinkSync(probeBase, join(probeBase, "link"))
+      return true
+    } finally {
+      rmSync(probeBase, { recursive: true, force: true })
+    }
+  } catch {
+    return false
+  }
+})()
+
+const stest167 = symlinksSupported167 ? test : test.skip
+
+const mkfifoSupported167 = (() => {
+  if (process.platform === "win32") return false
+  const probeBase = mkdtempSync(join(tmpdir(), "dshbanca-167-corrigir-fifo-probe-"))
+  try {
+    return spawnSync("mkfifo", [join(probeBase, "fifo")]).status === 0
+  } finally {
+    rmSync(probeBase, { recursive: true, force: true })
+  }
+})()
+
+const MAIN_UNCITED_167 =
+  [
+    "Primeiro parágrafo sintético sem qualquer citação acadêmica.",
+    "Segundo parágrafo sintético sem qualquer citação acadêmica.",
+    "Terceiro parágrafo sintético sem qualquer citação acadêmica.",
+  ].join("\n\n") + "\n"
+
+const CHAPTER_167 = "Marcador sintético ORIGINAL que deve ser corrigido.\n"
+
+const CHAPTER_CORRECTION_167 = {
+  file: "capitulos/cap1.tex",
+  oldText: "ORIGINAL",
+  newText: "CORRIGIDO",
+  expectedOccurrences: 1,
+}
+
+const MAIN_ORIGIN_REFUSAL_167 =
+  "blocked: main manuscript origin is outside the workspace, follows an unsafe symbolic link, or is not a regular file"
+
+const NO_MUTATION_NOTE_167 = "no snapshot, state entry or manuscript file was written"
+
+function writeChapter167(content = CHAPTER_167): void {
+  writeManuscript("capitulos/cap1.tex", content)
+}
+
+function configureMain167(main: string): void {
+  writeFileSync(
+    join(project, ".banca", "project.json"),
+    JSON.stringify(
+      projectConfig({
+        manuscript: {
+          format: "latex",
+          root: ".",
+          main,
+          bib: "referencias.bib",
+          chapters: ["capitulos/*.tex"],
+          outputDir: "trabalhos",
+        },
+      }),
+    ),
+    "utf-8",
+  )
+}
+
+describe("issue #167 — main manuscript origin for the regression check", () => {
+  stest167(
+    "RED/GREEN — external leaf symlink at main.tex is refused before snapshot, state or write",
+    async () => {
+      const outsideMain = join(base, "outside-main-167.tex")
+      writeFileSync(outsideMain, MAIN_UNCITED_167, "utf-8")
+      symlinkSync(outsideMain, join(project, "main.tex"), "file")
+      writeChapter167()
+      const before = captureBefore(["capitulos/cap1.tex"])
+      const outsideHash = sha256(readFileSync(outsideMain))
+
+      // Relative workspace root: the canonical check must not depend on the
+      // caller-provided lexical form.
+      const result = await runCorrection({
+        projectRoot: relative(process.cwd(), project),
+        corrections: [CHAPTER_CORRECTION_167],
+        previousScore: 6,
+      })
+
+      expectFailClosed(result, before)
+      expect(result).toContain(MAIN_ORIGIN_REFUSAL_167)
+      expect(result).toContain(NO_MUTATION_NOTE_167)
+      expect(result).not.toContain("⚠")
+      expect(sha256(readFileSync(outsideMain))).toBe(outsideHash)
+    },
+  )
+
+  stest167(
+    "RED/GREEN — external symlink in an ancestor directory of main is refused",
+    async () => {
+      configureMain167("secoes/main.tex")
+      const externalDir = join(base, "external-sections-167")
+      mkdirSync(externalDir, { recursive: true })
+      writeFileSync(join(externalDir, "main.tex"), MAIN_UNCITED_167, "utf-8")
+      symlinkSync(externalDir, join(project, "secoes"), "dir")
+      writeChapter167()
+      const before = captureBefore(["capitulos/cap1.tex"])
+      const outsideHash = sha256(readFileSync(join(externalDir, "main.tex")))
+
+      const result = await runCorrection({
+        corrections: [CHAPTER_CORRECTION_167],
+        previousScore: 6,
+      })
+
+      expectFailClosed(result, before)
+      expect(result).toContain(MAIN_ORIGIN_REFUSAL_167)
+      expect(result).toContain(NO_MUTATION_NOTE_167)
+      expect(sha256(readFileSync(join(externalDir, "main.tex")))).toBe(outsideHash)
+    },
+  )
+
+  stest167("RED/GREEN — broken symlink at main.tex is refused", async () => {
+    symlinkSync(join(base, "missing-target-167.tex"), join(project, "main.tex"), "file")
+    writeChapter167()
+    const before = captureBefore(["capitulos/cap1.tex"])
+
+    const result = await runCorrection({
+      corrections: [CHAPTER_CORRECTION_167],
+      previousScore: 6,
+    })
+
+    expectFailClosed(result, before)
+    expect(result).toContain(MAIN_ORIGIN_REFUSAL_167)
+    expect(result).toContain(NO_MUTATION_NOTE_167)
+  })
+
+  test("RED/GREEN — a directory at main.tex is refused", async () => {
+    mkdirSync(join(project, "main.tex"))
+    writeChapter167()
+    const before = captureBefore(["capitulos/cap1.tex"])
+
+    const result = await runCorrection({
+      corrections: [CHAPTER_CORRECTION_167],
+      previousScore: 6,
+    })
+
+    expectFailClosed(result, before)
+    expect(result).toContain(MAIN_ORIGIN_REFUSAL_167)
+    expect(result).toContain(NO_MUTATION_NOTE_167)
+  })
+
+  const fifoTest167 = mkfifoSupported167 ? test : test.skip
+
+  fifoTest167(
+    "RED/GREEN — FIFO at main.tex is refused without a blocking read and without mutation",
+    () => {
+      const mainPath = join(project, "main.tex")
+      expect(spawnSync("mkfifo", [mainPath]).status).toBe(0)
+      writeChapter167()
+      const chapterPath = join(project, "capitulos", "cap1.tex")
+      const chapterHash = sha256(readFileSync(chapterPath))
+
+      const workerPath = join(base, "corrigir-main-fifo-worker.mjs")
+      const toolUrl = pathToFileURL(join(import.meta.dir, "..", "src", "tools", "banca_corrigir.ts")).href
+      writeFileSync(
+        workerPath,
+        [
+          "const toolUrl = process.argv[2]",
+          "const project = process.argv[3]",
+          "try {",
+          "  const mod = await import(toolUrl)",
+          "  const out = await mod.bancaCorrigir.execute({",
+          "    projectRoot: project,",
+          '    corrections: [{ file: "capitulos/cap1.tex", oldText: "ORIGINAL", newText: "CORRIGIDO", expectedOccurrences: 1 }],',
+          "    previousScore: 6,",
+          "  })",
+          '  console.log(JSON.stringify({ ok: true, output: String(out) }))',
+          "} catch (error) {",
+          '  console.log(JSON.stringify({ ok: false, name: String(error && error.name), message: String(error && error.message) }))',
+          "}",
+          "",
+        ].join("\n"),
+        "utf-8",
+      )
+
+      const outcome = spawnSync(process.execPath, [workerPath, toolUrl, project], {
+        timeout: 6000,
+        encoding: "utf-8",
+      })
+
+      // A vulnerable reader opens the FIFO and blocks until the timeout.
+      expect(outcome.error).toBeUndefined()
+      expect(outcome.signal).toBeNull()
+      const parsed = JSON.parse(
+        (outcome.stdout ?? "").split("\n").reverse().find((line) => line.trim().startsWith("{")) as string,
+      ) as { ok: boolean; output?: string }
+      expect(parsed.ok).toBe(true)
+      const output = String(parsed.output)
+      expect(output).toContain(MAIN_ORIGIN_REFUSAL_167)
+      expect(output).toContain(NO_MUTATION_NOTE_167)
+      expect(output).not.toContain("pre-correction snapshot failed")
+      expect(sha256(readFileSync(chapterPath))).toBe(chapterHash)
+      expect(lstatSync(mainPath).isFIFO()).toBe(true)
+      expect(stateHash(project)).toBeNull()
+      expect(existsSync(join(project, ".banca", "snapshots"))).toBe(false)
+    },
+    20_000,
+  )
+
+  test("RED/GREEN — an unreadable regular main.tex is refused before mutation", async () => {
+    const mainPath = join(project, "main.tex")
+    writeFileSync(mainPath, MAIN_UNCITED_167, "utf-8")
+    chmodSync(mainPath, 0o000)
+    try {
+      writeChapter167()
+      const before = captureBefore(["capitulos/cap1.tex"])
+
+      const result = await runCorrection({
+        corrections: [CHAPTER_CORRECTION_167],
+        previousScore: 6,
+      })
+
+      expectFailClosed(result, before)
+      expect(result).toContain(
+        "blocked: main manuscript destination could not be inspected or read safely",
+      )
+      expect(result).toContain(NO_MUTATION_NOTE_167)
+      expect(result).not.toContain("⚠")
+    } finally {
+      chmodSync(mainPath, 0o644)
+    }
+  })
+
+  test("RED/GREEN — absent main.tex requested for the regression check is refused", async () => {
+    writeChapter167()
+    const before = captureBefore(["capitulos/cap1.tex"])
+
+    const result = await runCorrection({
+      corrections: [CHAPTER_CORRECTION_167],
+      previousScore: 6,
+    })
+
+    expectFailClosed(result, before)
+    expect(result).toContain("blocked: main manuscript not found")
+    expect(result).toContain(NO_MUTATION_NOTE_167)
+  })
+
+  test("GREEN — regular internal main: regression computed, history coherent, snapshot restorable", async () => {
+    const mainPath = join(project, "main.tex")
+    writeFileSync(mainPath, MAIN_UNCITED_167, "utf-8")
+    const mainHash = sha256(readFileSync(mainPath))
+    writeChapter167()
+
+    const result = await runCorrection({
+      corrections: [CHAPTER_CORRECTION_167],
+      previousScore: 6,
+    })
+
+    expect(result).toContain("✓ capitulos/cap1.tex (1 replacement)")
+    expect(result).toContain("⚠ score dropped from 6.0 to 4.0")
+    expect(readFileSync(join(project, "capitulos", "cap1.tex"), "utf-8")).toContain("CORRIGIDO")
+    // The regression source itself was never rewritten.
+    expect(sha256(readFileSync(mainPath))).toBe(mainHash)
+
+    const { loadState } = await import("../src/lib/state")
+    const state = loadState(project)
+    expect(state.iterations).toHaveLength(1)
+    expect(state.iterations[0]).toMatchObject({
+      action: "correction",
+      scoreBefore: 6,
+      scoreAfter: 4,
+      status: "failed",
+    })
+    expect(state.currentScore).toBe(4)
+    expect(state.snapshots).toHaveLength(1)
+    const label = state.snapshots[0].label
+    expect(vaultInventory(project)).toContain(label)
+
+    const { bancaRestore } = await import("../src/tools/banca_restore")
+    const restored = String(
+      await bancaRestore.execute({ projectRoot: project, snapshotId: label, confirm: true } as any, {} as any),
+    )
+    expect(restored).toContain(`restored from ${label}`)
+    expect(readFileSync(join(project, "capitulos", "cap1.tex"), "utf-8")).toBe(CHAPTER_167)
+  })
+
+  stest167("GREEN — internal symlink to an internal regular main is accepted", async () => {
+    const target = join(project, "manuscrito-real.tex")
+    writeFileSync(target, MAIN_UNCITED_167, "utf-8")
+    symlinkSync(target, join(project, "main.tex"), "file")
+    writeChapter167()
+
+    const result = await runCorrection({
+      corrections: [CHAPTER_CORRECTION_167],
+      previousScore: 6,
+    })
+
+    expect(result).toContain("✓ capitulos/cap1.tex (1 replacement)")
+    expect(result).toContain("⚠ score dropped from 6.0 to 4.0")
+    expect(readFileSync(join(project, "capitulos", "cap1.tex"), "utf-8")).toContain("CORRIGIDO")
+    expect(readFileSync(target, "utf-8")).toBe(MAIN_UNCITED_167)
+  })
+
+  stest167("GREEN — a safe internal symlink ancestor of main is accepted", async () => {
+    configureMain167("secoes/main.tex")
+    const realDir = join(project, "manuscrito")
+    mkdirSync(realDir, { recursive: true })
+    writeFileSync(join(realDir, "main.tex"), MAIN_UNCITED_167, "utf-8")
+    symlinkSync(realDir, join(project, "secoes"), "dir")
+    writeChapter167()
+
+    const result = await runCorrection({
+      corrections: [CHAPTER_CORRECTION_167],
+      previousScore: 6,
+    })
+
+    expect(result).toContain("✓ capitulos/cap1.tex (1 replacement)")
+    expect(result).toContain("⚠ score dropped from 6.0 to 4.0")
+    expect(readFileSync(join(realDir, "main.tex"), "utf-8")).toBe(MAIN_UNCITED_167)
+  })
+
+  test("GREEN — absolute, relative and ./-prefixed workspace roots accept a valid main", async () => {
+    writeFileSync(join(project, "main.tex"), MAIN_UNCITED_167, "utf-8")
+    const rel = relative(process.cwd(), project)
+    const roots = [project, rel, `./${rel}`]
+    const targets = ["capitulos/cap1.tex", "capitulos/cap2.tex", "capitulos/cap3.tex"]
+
+    for (let i = 0; i < roots.length; i++) {
+      writeManuscript(targets[i], `Marcador ORIGINAL ${i} do capítulo que deve ser corrigido.\n`)
+      const result = await runCorrection({
+        projectRoot: roots[i],
+        corrections: [
+          { file: targets[i], oldText: "ORIGINAL", newText: "CORRIGIDO", expectedOccurrences: 1 },
+        ],
+        previousScore: 6,
+      })
+      expect(result).toContain(`✓ ${targets[i]} (1 replacement)`)
+      expect(result).toContain("⚠")
+    }
+  })
+
+  stest167("GREEN — without previousScore the main origin is not read (legitimate behavior preserved)", async () => {
+    const outsideMain = join(base, "outside-main-noprev-167.tex")
+    writeFileSync(outsideMain, MAIN_UNCITED_167, "utf-8")
+    symlinkSync(outsideMain, join(project, "main.tex"), "file")
+    writeChapter167()
+    const outsideHash = sha256(readFileSync(outsideMain))
+
+    const result = await runCorrection({ corrections: [CHAPTER_CORRECTION_167] })
+
+    expect(result).toContain("✓ capitulos/cap1.tex (1 replacement)")
+    expect(result).not.toContain("⚠")
+    expect(readFileSync(join(project, "capitulos", "cap1.tex"), "utf-8")).toContain("CORRIGIDO")
+    expect(sha256(readFileSync(outsideMain))).toBe(outsideHash)
+    expect(vaultInventory(project).length).toBeGreaterThan(0)
+  })
+
+  stest167(
+    "PARTIAL — a regression source that changes after the mutation is reported honestly with recovery",
+    async () => {
+      // Deterministic interleaving with the tool's own mandatory snapshot
+      // registration: the canonical target of `main.tex` is the workspace's
+      // state file, which the snapshot registration rewrites between the
+      // preflight and the post-correction regression read.
+      const statePath = join(project, ".banca", "state.json")
+      writeFileSync(
+        statePath,
+        JSON.stringify(
+          { currentScore: null, lastAudit: null, lastLoop: null, snapshots: [], iterations: [] },
+          null,
+          2,
+        ),
+        "utf-8",
+      )
+      symlinkSync(statePath, join(project, "main.tex"), "file")
+      writeChapter167()
+      const chapterPath = join(project, "capitulos", "cap1.tex")
+      const chapterHash = sha256(readFileSync(chapterPath))
+
+      const result = await runCorrection({
+        corrections: [CHAPTER_CORRECTION_167],
+        previousScore: 6,
+      })
+
+      // The write already happened: the response must not claim the regression
+      // was verified, nor that nothing was modified.
+      expect(result.startsWith("partial:")).toBe(true)
+      expect(result).toContain("the regression check could not be verified")
+      expect(result).toContain("main manuscript content changed after the preflight")
+      expect(result).toContain("no automatic rollback was performed")
+      expect(result).toContain("can be inspected with banca_restore")
+      expect(result).not.toContain("✓")
+      expect(result).not.toContain("⚠")
+      expect(sha256(readFileSync(chapterPath))).not.toBe(chapterHash)
+
+      const { loadState } = await import("../src/lib/state")
+      const state = loadState(project)
+      expect(state.iterations).toHaveLength(1)
+      expect(state.iterations[0].status).toBe("failed")
+      expect(state.iterations[0].scoreAfter).toBeNull()
+      expect(state.snapshots).toHaveLength(1)
+      const label = state.snapshots[0].label
+      expect(existsSync(join(project, ".banca", "snapshots", `${label}.manifest.json`))).toBe(true)
+
+      // Recovery remains available and restores the original chapter bytes.
+      const { bancaRestore } = await import("../src/tools/banca_restore")
+      const restored = String(
+        await bancaRestore.execute(
+          { projectRoot: project, snapshotId: label, confirm: true } as any,
+          {} as any,
+        ),
+      )
+      expect(restored).toContain(`restored from ${label}`)
+      expect(sha256(readFileSync(chapterPath))).toBe(chapterHash)
+    },
   )
 })
