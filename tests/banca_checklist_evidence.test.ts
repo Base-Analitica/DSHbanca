@@ -474,6 +474,11 @@ describe("issue #169 genuine markers keep lexical recognition and provenance", (
     expect(header(output)).toMatch(/^Checklist: \d+\/\d+$/)
     // The clarification is immediate: right after the historical header.
     expect(secondLine(output).toLowerCase()).toContain("local checks")
+    // The denominator decomposition is derived from the local checks and does
+    // not read as an equation for the satisfied count (issue #169 F2).
+    expect(secondLine(output)).toContain(
+      "the denominator counts local checks = 3 configured-file/chapter-discovery checks + 3 lexical marker observations in the configured main file; 6/6 local checks satisfied",
+    )
     expect(lines.join("\n").toLowerCase()).toContain("not a score")
     expect(lines.join("\n").toLowerCase()).toContain("approval")
     expect(lines.join("\n").toLowerCase()).toContain("institutional compliance")
@@ -591,6 +596,11 @@ describe("issue #169 main-only scope never supports global conclusions", () => {
     expect(header(output)).toBe("Checklist: 3/6")
     expect(objectiveFailureItems(output)).toEqual([])
     expect(notObservedMarkerLabels(output)).toEqual(ALL_MARKERS)
+    // The three marker checks remain in the denominator even when unobserved,
+    // and the count is explicitly 3/6 local checks satisfied.
+    expect(secondLine(output)).toContain(
+      "3 configured-file/chapter-discovery checks + 3 lexical marker observations in the configured main file; 3/6 local checks satisfied",
+    )
     expect(output).not.toContain("✗ documentclass")
     expect(output).not.toContain("✗ abstract/resumo")
     expect(output).not.toContain("✗ toc")
@@ -734,6 +744,11 @@ describe("issue #169 file failures remain objective and distinct", () => {
     expect(output).toContain("abstract/resumo")
     expect(output).toContain("toc")
     expect(output).toContain("absence was not established")
+    // Main absent keeps the reduced denominator with zero marker checks, and
+    // the three markers are declared not evaluated instead of absent.
+    expect(secondLine(output)).toContain(
+      "the denominator counts local checks = 3 configured-file/chapter-discovery checks + 0 lexical marker observations in the configured main file (main file missing: markers not evaluated); 2/3 local checks satisfied",
+    )
     expect(output).not.toContain("✗ documentclass")
     expect(output).not.toContain("✗ abstract/resumo")
     expect(output).not.toContain("✗ toc")
