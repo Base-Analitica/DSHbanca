@@ -40,8 +40,6 @@ describe("analyzeCitationDensity", () => {
     expect(result.paragraphsWithoutCitation).toBe(0)
     expect(result.percentWithoutCitation).toBeNull()
     expect(result.score).toBeNull()
-    expect(Number.isNaN(result.score as any)).toBe(false)
-    expect(Number.isNaN(result.percentWithoutCitation as any)).toBe(false)
   })
 
   test("handles \\citeonline variants", () => {

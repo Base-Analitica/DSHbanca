@@ -7,11 +7,15 @@ consumida por `banca_loop` e `banca_corrigir` (verificação de regressão quand
 um parser LaTeX completo e não valida bibliografia, autoria ou qualidade
 acadêmica.
 
-## Contrato público preservado
+## Contrato do analisador (shape preservado para dados avaliados)
 
 - `CitationAnalysis` mantém `totalParagraphs`, `citedParagraphs`,
   `paragraphsWithoutCitation`, `percentWithoutCitation` e `score`, e acrescenta
   o discriminante aditivo `status` (`"evaluated"` | `"insufficient_data"`).
+  No ramo avaliado o shape e os valores são os históricos; no ramo de
+  insuficiência `percentWithoutCitation` e `score` são `null` (união
+  discriminada; o módulo não é reexportado pelo entrypoint nem exposto pelos
+  `exports` do pacote).
 - `analyzeCitationDensity(content)` particiona o texto em blocos por
   `/\n\s*\n/` e mantém somente blocos com mais de 20 caracteres após `trim()`.
 - Várias citações no mesmo parágrafo continuam contando como **um** parágrafo
@@ -48,15 +52,21 @@ Consumidores operacionais:
   limiar, não calcula escore, não registra iteração, marker, snapshot ou
   relatório, e devolve o diagnóstico fixo e sanitizado
   `Dados insuficientes — análise restrita ao arquivo principal; cobertura global não comprovada.`
-  O histórico, os circuit breakers e o confinamento canônico de leitura
-  permanecem inalterados.
+  Os circuit breakers canônicos mantêm a precedência histórica: eles são
+  avaliados sobre o histórico registrado antes da leitura/análise e, quando
+  disparam, a interrupção `failed` é a resposta autoritativa (sem novo escore
+  fabricado); o diagnóstico de insuficiência é alcançado quando nenhum breaker
+  dispara. O confinamento canônico de leitura permanece inalterado.
 - `banca_corrigir`: quando `previousScore` é informado e o arquivo principal
   pré-correção não tem parágrafo elegível, a operação é recusada **antes** de
   snapshot, estado ou escrita. Se uma correção válida zerar o denominador
   depois da escrita, o resultado é declarado `partial`: a verificação de
   regressão está indisponível, a mutação e a ausência de rollback automático
   são informadas, e o snapshot real de recuperação permanece registrado e
-  restaurável. Sem `previousScore`, o comportamento histórico é preservado.
+  restaurável. A iteração é registrada com `scoreAfter: null` e o `status`
+  pré-existente `failed` (convenção de "verificação indisponível", pois o
+  contrato de state não é alterado nesta issue). Sem `previousScore`, o
+  comportamento histórico é preservado.
 
 Nenhuma dessas saídas é avaliação de qualidade científica, nota ou aprovação;
 a ausência de evidência nunca é apresentada como evidência de qualidade.

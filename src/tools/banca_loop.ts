@@ -258,10 +258,13 @@ export const bancaLoop = defineBancaTool({
     // no citation evidence at all. The historical `citationScore(0) = 8.0`
     // fabricated a measured value, so a target at or below 8 was announced as
     // "reached" and the state/report recorded a score and a successful
-    // iteration. Here the tool stops before any target comparison, iteration,
-    // marker, snapshot or report and returns a fixed sanitized diagnostic that
-    // never echoes a path or manuscript content. Circuit breakers, historical
-    // reads and the #163 canonical read confinement above are untouched.
+    // iteration. This branch stops before any target comparison and records no
+    // iteration, marker, snapshot or report of its own. The canonical circuit
+    // breakers above intentionally keep their historical precedence: when the
+    // recorded history already triggers one, that failed interruption is
+    // authoritative and is reported before this diagnostic (no new evaluation
+    // score is fabricated in either case). The #163 canonical read confinement
+    // above is untouched. The diagnostic never echoes a path or content.
     if (citation.status === "insufficient_data") {
       return [
         "Dados insuficientes — análise restrita ao arquivo principal; cobertura global não comprovada.",

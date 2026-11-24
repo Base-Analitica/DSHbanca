@@ -323,12 +323,8 @@ describe("issue #168 — analyzeCitationDensity reports insufficient data instea
     expect(result.percentWithoutCitation).toBeNull()
     // Absence of evidence is not a heuristic score.
     expect(result.score).toBeNull()
-    // No NaN and no Infinity: the insufficient branch reports `null` explicitly
-    // instead of a non-finite number.
-    expect(result.percentWithoutCitation).not.toBe(Number.POSITIVE_INFINITY)
-    expect(result.score).not.toBe(Number.POSITIVE_INFINITY)
-    expect(Number.isNaN(result.percentWithoutCitation as any)).toBe(false)
-    expect(Number.isNaN(result.score as any)).toBe(false)
+    // No NaN and no Infinity: the insufficient branch reports `null`
+    // explicitly instead of a non-finite or fabricated number.
   })
 
   test("a main file with one eligible paragraph keeps the evaluated contract", () => {
@@ -439,7 +435,57 @@ describe("issue #168 — banca_loop refuses to evaluate zero eligible paragraphs
     expect(reportFiles()).toEqual([])
   })
 
-  test("modular main with external academic chapter: coverage explicitly not proven", async () => {
+})
+
+
+  // MINOR-1 (revisão adversarial): the canonical circuit breakers are evaluated
+  // before the main manuscript read/analysis and remain authoritative. With a
+  // historical stagnation they interrupt the process and record their own
+  // `failed` interruption based on the PREVIOUS scores, so the insufficiency
+  // diagnostic is not reached. This test fixes that preserved precedence; it
+  // fabricates no new score and produces no marker/report/snapshot.
+  test("preserved circuit breaker precedence: stagnation interrupts before the insufficient-data diagnostic", async () => {
+    writeConfig({ targetScore: 8 })
+    writeMain(MAIN_EMPTY)
+    writeChapter("capitulos/cap1.tex", externalChapterAcademic())
+    seedState(8.0, {
+      iterations: [1, 2, 3].map((index) => ({
+        date: `2026-01-0${index}T00:00:00.000Z`,
+        action: "loop",
+        scoreBefore: index === 1 ? null : 8,
+        scoreAfter: 8,
+        status: "ok",
+      })),
+    })
+    const before = captureBefore()
+
+    const result = await runLoop()
+
+    expect(result).toContain("circuit breaker: last 3 loops same score")
+    expect(result).not.toContain(INSUFFICIENT_DIAGNOSTIC)
+    const state = readStateJson()
+    expect(state.iterations).toHaveLength(4)
+    const interruption = state.iterations[3]
+    expect(interruption.action).toBe("loop-circuit-break")
+    expect(interruption.status).toBe("failed")
+    // Only the historical recorded score is echoed; no new evaluation value.
+    expect(interruption.scoreAfter).toBe(8)
+    expect(state.currentScore).toBe(8)
+    // Still no manuscript/report/vault artifact for an evaluation.
+    expect(fileHash("main.tex")).toBe(before.main)
+    expect(fileHash("capitulos/cap1.tex")).toBe(before.chapter)
+    expect(vaultInventory()).toEqual([])
+    expect(reportFiles()).toEqual([])
+  })
+
+// ===========================================================================
+// 2b. Preserved behavior (NOT a #168 RED case): realistic modular main files
+// whose include commands are themselves eligible text keep the pre-existing
+// main-only caveat. The scope of #168 is the zero-denominator case only; these
+// assertions pass on the base commit too and exist to keep the caveat honest.
+// ===========================================================================
+describe("issue #168 — realistic modular main keeps the pre-existing main-only caveat", () => {
+  test("external academic chapter is neither scanned nor claimed as covered", async () => {
     writeConfig({ targetScore: 8 })
     writeMain(MAIN_INCLUDE_REALISTIC)
     writeChapter("capitulos/cap1.tex", externalChapterAcademic())

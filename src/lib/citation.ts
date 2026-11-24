@@ -372,6 +372,11 @@ function paragraphHasCitation(paragraph: string): boolean {
 /**
  * Map percent of paragraphs without citations to the heuristic score.
  * > 30% → 4.0; > 20% → 6.0; otherwise 8.0.
+ *
+ * Only meaningful for a measured denominator: do not call it with a
+ * synthesized `0` for a manuscript without eligible paragraphs.
+ * `analyzeCitationDensity` reports that case as `insufficient_data` with
+ * `score: null` precisely to avoid turning 0/0 into 8.0 (issue #168).
  */
 export function citationScore(percentWithoutCitation: number): number {
   if (percentWithoutCitation > 30) return 4.0

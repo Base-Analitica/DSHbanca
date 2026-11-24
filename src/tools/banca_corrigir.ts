@@ -750,6 +750,12 @@ export const bancaCorrigir = defineBancaTool({
         // the real recovery point. The historical fabricated 8.0 is never
         // recorded as the new score, as a verified regression or as an
         // improvement, and no automatic rollback is claimed.
+        //
+        // The iteration is recorded through `addFailedIteration` because
+        // `state.ts` (out of scope for #168) only defines ok/rollback/failed;
+        // "failed" here follows the pre-existing `unverifiedRegression`
+        // convention for "verification unavailable", not for "correction
+        // failed". `scoreAfter` stays null, so `currentScore` is preserved.
         const recorded = addFailedIteration(root, args.previousScore)
         return [
           ...results,
