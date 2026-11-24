@@ -6,19 +6,37 @@ import { resolveManuscriptPaths, type ResolvedPaths } from "../lib/paths"
 import { PathTraversalError, resolveInsideRoot, resolveRealInsideRoot } from "../lib/safe_paths"
 
 /**
- * Lexical presence of the three fixed structural LaTeX markers checked by
- * `banca_checklist`. Recognition is intentionally shallow: it only distinguishes
- * real control words outside unescaped `%` comments from look-alikes such as
- * commented commands or longer command names with the same prefix. It does not
- * expand macros, interpret verbatim/literal environments or custom catcodes,
- * follow includes, or validate the manuscript structure.
+ * Lexical observation of one fixed structural LaTeX marker in the configured
+ * main file (issue #169). Recognition is intentionally shallow: it only
+ * distinguishes real control words outside unescaped `%` comments from
+ * look-alikes such as commented commands or longer command names with the same
+ * prefix. It does not expand macros, interpret verbatim/literal environments or
+ * custom catcodes, follow includes, or validate the manuscript structure.
+ *
+ * `line` is the 1-based line of the first genuine occurrence actually found in
+ * the scanned text (computed from the real offset, never invented); it is null
+ * when the marker was not observed. A non-observation is scoped to the main
+ * file: it does not establish absence from the whole work, because includes,
+ * macros and other files are not read.
  */
-interface StructuralMarkers {
-  documentclass: boolean
-  /** `\begin{abstract}` (with normal TeX trivia before the argument) or `\resumo`. */
-  abstract: boolean
-  tableofcontents: boolean
+interface StructuralMarkerObservation {
+  observed: boolean
+  line: number | null
 }
+
+interface StructuralMarkers {
+  documentclass: StructuralMarkerObservation
+  /** `\begin{abstract}` (with normal TeX trivia before the argument) or `\resumo`. */
+  abstract: StructuralMarkerObservation
+  tableofcontents: StructuralMarkerObservation
+}
+
+/** Fixed marker presentation order: evidence key plus the historical label. */
+const MARKER_ENTRIES: ReadonlyArray<{ key: keyof StructuralMarkers; label: string }> = [
+  { key: "documentclass", label: "documentclass" },
+  { key: "abstract", label: "abstract/resumo" },
+  { key: "tableofcontents", label: "toc" },
+]
 
 /** ASCII letters, the characters a TeX control word is made of. */
 function isControlWordLetter(char: string): boolean {
@@ -60,6 +78,34 @@ function skipTrivia(text: string, start: number): number {
   return index
 }
 
+/** 1-based line of a real offset in the scanned text (`\n` delimits; CR is trivia). */
+function lineAtOffset(text: string, offset: number): number {
+  let line = 1
+  for (let index = 0; index < offset; index += 1) {
+    if (text[index] === "\n") line += 1
+  }
+  return line
+}
+
+/**
+ * Record the first genuine occurrence of a marker together with the line where
+ * it really appears in the scanned text. Later occurrences never overwrite the
+ * provenance of the first one.
+ */
+function observeMarker(
+  markers: StructuralMarkers,
+  key: keyof StructuralMarkers,
+  text: string,
+  offset: number,
+): void {
+  if (markers[key].observed) return
+  markers[key] = { observed: true, line: lineAtOffset(text, offset) }
+}
+
+function notObserved(): StructuralMarkerObservation {
+  return { observed: false, line: null }
+}
+
 /**
  * Scan LaTeX source for the three structural markers, single-pass and lexical.
  *
@@ -78,9 +124,9 @@ function skipTrivia(text: string, start: number): number {
  */
 function scanStructuralMarkers(text: string): StructuralMarkers {
   const markers: StructuralMarkers = {
-    documentclass: false,
-    abstract: false,
-    tableofcontents: false,
+    documentclass: notObserved(),
+    abstract: notObserved(),
+    tableofcontents: notObserved(),
   }
 
   let index = 0
@@ -114,17 +160,17 @@ function scanStructuralMarkers(text: string): StructuralMarkers {
     const name = text.slice(next, wordEnd)
 
     if (name === "documentclass") {
-      markers.documentclass = true
+      observeMarker(markers, "documentclass", text, index)
     } else if (name === "tableofcontents") {
-      markers.tableofcontents = true
+      observeMarker(markers, "tableofcontents", text, index)
     } else if (name === "resumo") {
-      markers.abstract = true
-    } else if (name === "begin" && !markers.abstract) {
+      observeMarker(markers, "abstract", text, index)
+    } else if (name === "begin" && !markers.abstract.observed) {
       // `\begin{abstract}` is the environment alternative of the abstract
       // check. The environment name is matched exactly as `{abstract}`; normal
       // trivia (spaces/comments) may separate the command from its argument.
       const argument = skipTrivia(text, wordEnd)
-      if (text.startsWith("{abstract}", argument)) markers.abstract = true
+      if (text.startsWith("{abstract}", argument)) observeMarker(markers, "abstract", text, index)
     }
 
     index = wordEnd
@@ -305,36 +351,71 @@ export const bancaChecklist = defineBancaTool({
     const main = inspectConfiguredFile(root, paths.main, "main file")
     const bib = inspectConfiguredFile(root, paths.bib, "bibliography file")
 
-    const checks: Array<{ item: string; ok: boolean }> = [
+    const fileChecks: Array<{ item: string; ok: boolean }> = [
       { item: "Main file", ok: main.status === "present" },
       { item: "Bib file", ok: bib.status === "present" },
       { item: "Chapters", ok: paths.chapters.length > 0 },
     ]
 
+    // Structural evidence is main-only by design (issue #169): includes are not
+    // followed, macros are not expanded, and files discovered by
+    // `paths.chapters` are not read as structural evidence.
     const markers: StructuralMarkers | null =
       main.status === "present"
         ? scanStructuralMarkers(readConfiguredMainFile(main.canonicalPath))
         : null
-    if (markers) {
-      checks.push({ item: "documentclass", ok: markers.documentclass })
-      checks.push({ item: "abstract/resumo", ok: markers.abstract })
-      checks.push({ item: "toc", ok: markers.tableofcontents })
-    }
 
+    const markerChecks: Array<{ item: string; ok: boolean }> = markers
+      ? MARKER_ENTRIES.map(entry => ({ item: entry.label, ok: markers[entry.key].observed }))
+      : []
+    const checks = [...fileChecks, ...markerChecks]
     const ok = checks.filter(c => c.ok).length
-    const fail = checks.filter(c => !c.ok)
+    const failedFileChecks = fileChecks.filter(c => !c.ok)
+
     const lines = [
       `Checklist: ${ok}/${checks.length}`,
-      ...fail.map(c => `  ✗ ${c.item}`),
+      // The historical `Checklist: N/M` header is preserved for consumers, but
+      // the count is declared immediately as local checks so it cannot be read
+      // as a score, approval or coverage of the whole work (issue #169).
+      `Local checks only: ${ok}/${checks.length} local checks satisfied = 3 configured-file/chapter-discovery checks + ${markers ? "3" : "0"} lexical marker observations in the configured main file${markers ? "" : " (main file missing: markers not evaluated)"}; this count is not a score, approval, institutional compliance, or coverage of the whole work.`,
+      // Objective failures of the configured files/discovery keep the
+      // historical `  ✗ ` presentation, separate from lexical observations.
+      ...failedFileChecks.map(c => `  ✗ ${c.item}`),
     ]
-    if (!markers) {
-      // The reduced denominator must not be presented as full coverage.
+
+    if (markers) {
       lines.push(
-        "LaTeX markers not evaluated: documentclass, abstract/resumo, toc (main file missing).",
+        "LaTeX markers (lexical scan of the configured main file only; includes, macros and other files are not read or expanded):",
+      )
+      for (const entry of MARKER_ENTRIES) {
+        const observation = markers[entry.key]
+        if (observation.observed) {
+          // Provenance is the configured main file plus the real occurrence
+          // line; no absolute path and no manuscript content is echoed.
+          lines.push(
+            `  ✓ ${entry.label}: lexical presence observed in the configured main file (line ${observation.line}).`,
+          )
+        } else {
+          // Non-observation is scoped: it must never become a global absence
+          // claim about the whole work.
+          lines.push(
+            `  – ${entry.label}: not observed in the configured main file; presence in the whole work is indeterminate/not evaluated.`,
+          )
+        }
+      }
+      lines.push(
+        "  Marker note: lexical recognition does not imply LaTeX execution, macro expansion, or presence/absence in other files or includes.",
+      )
+    } else {
+      // A missing main file is an objective absence of the configured file and
+      // an impossibility to evaluate its markers; neither is a structural claim.
+      lines.push(
+        "LaTeX markers not evaluated: documentclass, abstract/resumo, toc (main file missing). Their presence in the whole work is unknown; absence was not established.",
       )
     }
+
     lines.push(
-      "Scope: structural lexical checklist of configured manuscript files and fixed LaTeX markers in the main file only; no macro expansion, verbatim environments, includes, or full TeX interpretation.",
+      "Scope: structural lexical checklist of configured manuscript files and fixed LaTeX markers in the main file only; chapter discovery counts matched files and does not prove LaTeX inclusion or execution; no macro expansion, verbatim environments, includes, or full TeX interpretation.",
       "Limits: not LaTeX compilation, not an exhaustive manuscript audit, not ABNT compliance, and not approval, institutional delivery, or scientific quality.",
     )
     return lines.join("\n")

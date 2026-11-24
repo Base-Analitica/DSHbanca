@@ -1,14 +1,20 @@
 /**
- * Focal tests for issue #130 — lexical integrity of `banca_checklist`.
+ * Focal tests for the evidence contract of `banca_checklist`.
  *
- * Contract of record: issue #130 (leaf of the external audit #109). The tool
- * must only count the three fixed structural markers when they are real LaTeX
- * control words outside unescaped `%` comments. It must keep the historical
- * `Checklist: N/M` header, the failure-item presentation and the six checks
- * (three file/structure checks + three main-file markers), and it must state
- * its own limits: a structural lexical checklist of configured files and fixed
- * markers in the main file only, not compilation, not an exhaustive audit, not
- * ABNT compliance and not academic approval.
+ * Contract of record: issues #130 and #169 (leaves of the external audit
+ * #109). The tool must only count the three fixed structural markers when they
+ * are real LaTeX control words outside unescaped `%` comments. It keeps the
+ * historical `Checklist: N/M` header and the six local checks (three
+ * file/structure checks + three main-file marker observations). Since issue
+ * #169 the `  ✗ ` presentation is reserved for objective failures of the
+ * configured files/discovery: a marker not observed in the main file is
+ * qualified scoped evidence ("not observed in the configured main file;
+ * presence in the whole work is indeterminate/not evaluated") and never a
+ * global absence claim, and the count is declared as local checks, not a
+ * score, approval or whole-work coverage. The tool still states its own
+ * limits: a structural lexical checklist of configured files and fixed markers
+ * in the main file only, not compilation, not an exhaustive audit, not ABNT
+ * compliance and not academic approval.
  *
  * Every scenario runs the REAL tool (`bancaChecklist.execute`) over synthetic
  * LaTeX/BibTeX under `mkdtempSync(tmpdir())`, removed in `afterEach`. No DSH
@@ -136,7 +142,12 @@ function header(output: string): string {
   return output.split("\n")[0] ?? ""
 }
 
-/** Failure lines keep the historical `  ✗ item` presentation. */
+/**
+ * Objective failure lines of the configured files/discovery keep the
+ * historical `  ✗ item` presentation. Lexical marker observations live in
+ * their own qualified section and are never collected here (issue #169): a
+ * marker that was not examined cannot become an unqualified failure.
+ */
 function failureItems(output: string): string[] {
   return output
     .split("\n")
@@ -145,6 +156,29 @@ function failureItems(output: string): string[] {
 }
 
 const ALL_MARKERS = ["documentclass", "abstract/resumo", "toc"]
+
+/** Qualified lexical evidence lines: `  ✓ ` observed, `  – ` not observed in main. */
+function markerEvidenceLines(output: string): string[] {
+  return output
+    .split("\n")
+    .filter((line) => line.startsWith("  ✓ ") || line.startsWith("  – "))
+}
+
+function markerLabel(line: string): string {
+  return line.slice("  ✓ ".length).split(":")[0]?.trim() ?? ""
+}
+
+function observedMarkers(output: string): string[] {
+  return markerEvidenceLines(output)
+    .filter((line) => line.startsWith("  ✓ "))
+    .map(markerLabel)
+}
+
+function notObservedMarkers(output: string): string[] {
+  return markerEvidenceLines(output)
+    .filter((line) => line.startsWith("  – "))
+    .map(markerLabel)
+}
 
 /** Genuine, unambiguous LaTeX structure for the main file. */
 const GENUINE_MAIN = [
@@ -192,7 +226,10 @@ describe("issue #130 RED reproductions", () => {
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 3/6")
-    expect(failureItems(output)).toEqual(ALL_MARKERS)
+    // Lexical non-observation is qualified evidence, not an objective failure.
+    expect(failureItems(output)).toEqual([])
+    expect(observedMarkers(output)).toEqual([])
+    expect(notObservedMarkers(output)).toEqual(ALL_MARKERS)
     expect(output).not.toContain("6/6")
   })
 
@@ -204,7 +241,9 @@ describe("issue #130 RED reproductions", () => {
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 3/6")
-    expect(failureItems(output)).toEqual(ALL_MARKERS)
+    expect(failureItems(output)).toEqual([])
+    expect(observedMarkers(output)).toEqual([])
+    expect(notObservedMarkers(output)).toEqual(ALL_MARKERS)
     expect(output).not.toContain("6/6")
   })
 })
@@ -304,7 +343,9 @@ describe("issue #130 negative lexical cases", () => {
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 4/6")
-    expect(failureItems(output)).toEqual(["abstract/resumo", "toc"])
+    expect(failureItems(output)).toEqual([])
+    expect(observedMarkers(output)).toEqual(["documentclass"])
+    expect(notObservedMarkers(output)).toEqual(["abstract/resumo", "toc"])
   })
 
   test("prefixed command names are not counted for any marker", async () => {
@@ -315,7 +356,8 @@ describe("issue #130 negative lexical cases", () => {
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 3/6")
-    expect(failureItems(output)).toEqual(ALL_MARKERS)
+    expect(failureItems(output)).toEqual([])
+    expect(notObservedMarkers(output)).toEqual(ALL_MARKERS)
   })
 
   test("a control symbol followed by text is not the expected command", async () => {
@@ -324,7 +366,8 @@ describe("issue #130 negative lexical cases", () => {
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 3/6")
-    expect(failureItems(output)).toEqual(ALL_MARKERS)
+    expect(failureItems(output)).toEqual([])
+    expect(notObservedMarkers(output)).toEqual(ALL_MARKERS)
   })
 
   test("plain text without any marker does not produce a false positive", async () => {
@@ -333,7 +376,8 @@ describe("issue #130 negative lexical cases", () => {
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 3/6")
-    expect(failureItems(output)).toEqual(ALL_MARKERS)
+    expect(failureItems(output)).toEqual([])
+    expect(notObservedMarkers(output)).toEqual(ALL_MARKERS)
   })
 
   test("commented markers in CRLF files are not counted", async () => {
@@ -360,7 +404,8 @@ describe("issue #130 negative lexical cases", () => {
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 5/6")
-    expect(failureItems(output)).toEqual(["abstract/resumo"])
+    expect(failureItems(output)).toEqual([])
+    expect(notObservedMarkers(output)).toEqual(["abstract/resumo"])
   })
 })
 
@@ -368,20 +413,17 @@ describe("issue #130 negative lexical cases", () => {
 // Count, failure items and the three existence checks are preserved
 // ---------------------------------------------------------------------------
 describe("issue #130 preserved counting contract", () => {
-  test("partial document keeps the historical denominator and failure list", async () => {
+  test("partial document keeps the historical denominator and objective failure list", async () => {
     writeProjectConfig()
     writeMain("% \\documentclass{article}\n% \\begin{abstract}\n% \\tableofcontents\n")
 
     const output = await runChecklist()
 
     expect(header(output)).toBe("Checklist: 1/6")
-    expect(failureItems(output)).toEqual([
-      "Bib file",
-      "Chapters",
-      "documentclass",
-      "abstract/resumo",
-      "toc",
-    ])
+    // Only objective file/discovery failures keep the `  ✗ ` presentation.
+    expect(failureItems(output)).toEqual(["Bib file", "Chapters"])
+    expect(observedMarkers(output)).toEqual([])
+    expect(notObservedMarkers(output)).toEqual(ALL_MARKERS)
   })
 
   test("genuine markers with missing bib and chapters score 4/6 with only file failures", async () => {

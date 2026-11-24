@@ -51,7 +51,7 @@ Os nomes `banca_*` abaixo identificam **ferramentas acadêmicas registradas nati
 | [banca_init](../src/tools/banca_init.ts) | Cria configuração/estado acadêmico sob `.banca/`, procura engines LaTeX e chama o instalador de assets **legado não suportado**. Não é instalador DSH validado. `force` permite sobrescrita no código, não concede autorização humana. |
 | [banca_validate](../src/tools/banca_validate.ts) | Valida a configuração do projeto contra seu schema; não valida integração nem qualidade acadêmica. |
 | [banca_status](../src/tools/banca_status.ts) | Mostra configuração, arquivos, relatórios e estado persistido. Score/estado não são prova de cobertura ou aprovação. |
-| [banca_checklist](../src/tools/banca_checklist.ts) | Confere presença de arquivos e marcadores LaTeX, como resumo e sumário. Não certifica entrega institucional. |
+| [banca_checklist](../src/tools/banca_checklist.ts) | Confere os arquivos configurados/descoberta e faz uma varredura **lexical e main-only** dos marcadores `documentclass`, `abstract/resumo` e `toc` no arquivo principal. A contagem `Checklist: N/M` é de verificações locais: marcador não observado no principal permanece indeterminado na obra integral (includes, macros e demais arquivos não são lidos), e `✗` é reservado a falhas objetivas de arquivo/descoberta. Não certifica entrega institucional, compilação ou cobertura integral. |
 
 ### Auditoria por lotes e entrada de síntese
 
@@ -95,6 +95,15 @@ O **auditor é read-only quanto ao manuscrito**; persistir findings/contexto aca
 | [banca_compile](../src/tools/banca_compile.ts) | Usa configuração de compilação habilitada, engines LaTeX/BibTeX permitidas e instaladas e arquivos válidos. Inicia processos externos; compilação real não foi validada de ponta a ponta no DSH nesta base. PDF compilado não prova conformidade ou mérito acadêmico. |
 
 As **8 skills empacotadas** são: `banca-avaliacao`, `banca-correcao`, `banca-detector-ia`, `banca-grille`, `banca-plagio`, `banca-planejador`, `banca-referencias` e `banca-revisor`. São instruções acadêmicas em [skills](../skills/), não oito fluxos DSH demonstrados. A descoberta e o carregamento íntegro das oito foram observados no DSH real em `aa39d37`; isso não comprova aplicação das instruções por modelo nem substitui a fonte canônica em consolidação ([issue #23](https://github.com/Base-Analitica/DSHbanca/issues/23)). A entrevista da grille não comprova implementação de decisões por opções ([issue #4](https://github.com/Base-Analitica/DSHbanca/issues/4)).
+
+#### Como interpretar `banca_checklist`
+
+`banca_checklist` executa três verificações dos arquivos configurados/descoberta (arquivo principal, bibliografia e descoberta de capítulos por `manuscript.chapters`) e, quando o arquivo principal configurado é legível, três observações lexicais dos marcadores fixos `documentclass`, `abstract/resumo` e `toc` **somente nesse arquivo**. O prefixo histórico `Checklist: N/M` é preservado, mas M/N são contagens de **verificações locais** — não nota, aprovação, conformidade institucional nem cobertura da obra integral. Com o principal ausente, a contagem cai para as três verificações aplicáveis e os três marcadores são declarados **não avaliados**.
+
+- **Marcador encontrado:** presença **lexical** observada no arquivo principal configurado, com a linha da primeira ocorrência real no texto. Reconhecimento lexical não prova execução ou expansão pelo LaTeX, nem presença do elemento na obra completa.
+- **Marcador não observado:** o resultado declara “não observado no arquivo principal” e “presença na obra indeterminada/não avaliada”; não é falha objetiva nem ausência acadêmica. O resumo pode estar em `pretextual/resumo.tex` incluído por `\input`, e um ambiente de classe específica (por exemplo `\begin{resumo}` do abntex2) não reconhecido pelo scanner também não autoriza concluir ausência.
+- **Includes e arquivos descobertos:** a ferramenta não lê nem segue `\input`/`\include`, não expande macros e permanece read-only. Arquivos encontrados por `manuscript.chapters` são apenas descoberta configurada; isso não prova inclusão nem execução pelo LaTeX.
+- **Falhas objetivas e recusas:** `✗` permanece reservado a falhas objetivas dos arquivos configurados/descoberta. Configuração insegura, caminho externo/symlink não confinado, destino não regular ou descoberta incompleta produzem erro controlado e sanitizado (`PathTraversalError`/`ChapterDiscoveryError`), nunca um checklist parcial aparentemente válido.
 
 #### Como interpretar `banca_refs`
 
