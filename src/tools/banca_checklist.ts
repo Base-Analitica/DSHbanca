@@ -78,11 +78,16 @@ function skipTrivia(text: string, start: number): number {
   return index
 }
 
-/** 1-based line of a real offset in the scanned text (`\n` delimits; CR is trivia). */
+/**
+ * 1-based line of a real offset in the scanned text. TeX treats LF, CRLF and a
+ * bare CR as line endings, so a bare CR delimits a line while the CR of a CRLF
+ * pair never counts twice.
+ */
 function lineAtOffset(text: string, offset: number): number {
   let line = 1
   for (let index = 0; index < offset; index += 1) {
-    if (text[index] === "\n") line += 1
+    const char = text[index]
+    if (char === "\n" || (char === "\r" && text[index + 1] !== "\n")) line += 1
   }
   return line
 }
@@ -376,8 +381,9 @@ export const bancaChecklist = defineBancaTool({
       `Checklist: ${ok}/${checks.length}`,
       // The historical `Checklist: N/M` header is preserved for consumers, but
       // the count is declared immediately as local checks so it cannot be read
-      // as a score, approval or coverage of the whole work (issue #169).
-      `Local checks only: ${ok}/${checks.length} local checks satisfied = 3 configured-file/chapter-discovery checks + ${markers ? "3" : "0"} lexical marker observations in the configured main file${markers ? "" : " (main file missing: markers not evaluated)"}; this count is not a score, approval, institutional compliance, or coverage of the whole work.`,
+      // as a score, approval or coverage of the whole work (issue #169). The
+      // denominator is decomposed explicitly; N/M are the local checks satisfied.
+      `Local checks only: the denominator counts local checks = ${fileChecks.length} configured-file/chapter-discovery checks + ${markerChecks.length} lexical marker observations in the configured main file${markers ? "" : " (main file missing: markers not evaluated)"}; ${ok}/${checks.length} local checks satisfied. This count is not a score, approval, institutional compliance, or coverage of the whole work.`,
       // Objective failures of the configured files/discovery keep the
       // historical `  ✗ ` presentation, separate from lexical observations.
       ...failedFileChecks.map(c => `  ✗ ${c.item}`),

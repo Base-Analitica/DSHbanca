@@ -277,6 +277,13 @@ const symlinksSupported = (() => {
 
 const stest = symlinksSupported ? test : test.skip
 
+/** chmod 000 only denies reads for a non-privileged process. */
+const unreadableTestSupported =
+  process.platform !== "win32" &&
+  typeof process.getuid === "function" &&
+  process.getuid() !== 0
+const unreadableTest = unreadableTestSupported ? test : test.skip
+
 /** Write a synthetic fixture beside the workspace (outside the project root). */
 function writeExternal(relativePath: string, content: string): string {
   const path = join(base, relativePath)
@@ -433,6 +440,21 @@ describe("issue #169 genuine markers keep lexical recognition and provenance", (
   test("line numbers remain accurate for CRLF main files", async () => {
     seedBookSkeleton(
       "\\documentclass{article}\r\n\\begin{abstract}\r\nResumo.\r\n\\end{abstract}\r\n\\tableofcontents\r\n",
+    )
+
+    const output = await runChecklist()
+
+    expect(header(output)).toBe("Checklist: 6/6")
+    expect(reportedLine(output, "documentclass")).toBe(1)
+    expect(reportedLine(output, "abstract/resumo")).toBe(2)
+    expect(reportedLine(output, "toc")).toBe(5)
+  })
+
+  test("line numbers remain accurate for CR-only line endings", async () => {
+    // TeX treats a bare CR as a line ending; the reported provenance line must
+    // match the real logical line instead of collapsing every marker to line 1.
+    seedBookSkeleton(
+      "\\documentclass{article}\r\\begin{abstract}\rResumo.\r\\end{abstract}\r\\tableofcontents\r",
     )
 
     const output = await runChecklist()
@@ -642,6 +664,34 @@ describe("issue #169 included content is never read, followed or exposed", () =>
     expect(output).not.toContain(base)
     expect(sha256Of(external)).toBe(before)
     expect(snapshotTree(base)).toEqual(inventoryBefore)
+  })
+
+  unreadableTest("an unreadable include cannot affect the evidence or be required", async () => {
+    seedBookSkeleton(MODULAR_ABSTRACT_MAIN)
+    const includePath = writeFile("pretextual/resumo.tex", INCLUDED_ABSTRACT)
+    chmodSync(includePath, 0o000)
+    try {
+      // Prove this environment really denies the read before asserting the tool.
+      let rawCode: string | undefined
+      try {
+        readFileSync(includePath, "utf-8")
+      } catch (error) {
+        rawCode = (error as NodeJS.ErrnoException).code
+      }
+      expect(rawCode).toBe("EACCES")
+
+      const output = await runChecklist()
+
+      // Unreadable includes are never a refusal nor a failed check: they are
+      // simply outside the examined scope, so the lexical evidence is unchanged.
+      expect(header(output)).toBe("Checklist: 5/6")
+      expect(markerEvidenceLine(output, "abstract/resumo").toLowerCase()).toContain("indeterminate")
+      expect(observedMarkerLabels(output)).toEqual(["documentclass", "toc"])
+      expect(output).not.toContain("SENTINELA_RESUMO_INCLUDE_169")
+      expect(output).not.toContain(base)
+    } finally {
+      chmodSync(includePath, 0o644)
+    }
   })
 
   test("main content and synthetic sentinels are never echoed by the result", async () => {
@@ -864,13 +914,9 @@ describe("issue #169 preserved security refusals", () => {
     expect(readFileSync(outsideMain, "utf-8")).toContain("abstract")
   })
 
-  test("unreadable main file fails closed instead of producing partial evidence", async () => {
-    const supported =
-      process.platform !== "win32" &&
-      typeof process.getuid === "function" &&
-      process.getuid() !== 0
-    if (!supported) return // chmod 000 only denies reads for a non-privileged process.
-
+  unreadableTest("unreadable main file fails closed instead of producing partial evidence", async () => {
+    // chmod 000 only denies reads for a non-privileged process; the guard above
+    // skips this scenario on root/Windows instead of passing vacuously.
     writeProjectConfig()
     const mainPath = writeMain(GENUINE_MAIN)
     writeBib()
