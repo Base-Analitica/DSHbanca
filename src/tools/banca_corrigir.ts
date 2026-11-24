@@ -65,6 +65,19 @@ const MAIN_MANUSCRIPT_READ_REFUSAL =
   "blocked: main manuscript destination could not be inspected or read safely — regression check requested but could not be verified; no snapshot, state entry or manuscript file was written"
 
 /**
+ * Issue #168 — the requested regression check needs a measured denominator.
+ *
+ * A main manuscript without any eligible paragraph has no citation evidence
+ * (0/0): the historical analyzer fabricated `8.0` and the correction could
+ * mutate the workspace while announcing a verified (or improved) regression.
+ * The refusal is fixed and sanitized (no path, link target, manuscript content
+ * or raw filesystem message) and happens before the mandatory snapshot, the
+ * state registration or any manuscript write.
+ */
+const MAIN_MANUSCRIPT_INSUFFICIENT_REFUSAL =
+  "blocked: main manuscript has no eligible paragraph for the lexical citation-density heuristic — dados insuficientes (insufficient data; main-only, global coverage not proven); regression check requested but could not be verified; no snapshot, state entry or manuscript file was written"
+
+/**
  * Expected read failures of an already inspected regular file. They become a
  * controlled sanitized refusal; unexpected errors (including programming
  * defects) are rethrown unchanged.
@@ -341,6 +354,15 @@ export const bancaCorrigir = defineBancaTool({
         const inspection = inspectMainManuscript(root, paths.main)
         if (inspection.status === "absent") return MAIN_MANUSCRIPT_ABSENT_REFUSAL
         if (inspection.status === "unreadable") return MAIN_MANUSCRIPT_READ_REFUSAL
+        // Issue #168 — a verified regular main file with zero eligible
+        // paragraphs provides no pre-correction citation evidence. The
+        // regression check is refused here, still before snapshot/state/write.
+        if (
+          analyzeCitationDensity(inspection.bytes.toString("utf-8")).status ===
+          "insufficient_data"
+        ) {
+          return MAIN_MANUSCRIPT_INSUFFICIENT_REFUSAL
+        }
         mainPreflight = inspection
       } catch (err) {
         if (err instanceof PathTraversalError) return MAIN_MANUSCRIPT_ORIGIN_REFUSAL
@@ -720,7 +742,27 @@ export const bancaCorrigir = defineBancaTool({
       if (!mainIsCorrected && sha256Of(inspected.bytes) !== sha256Of(mainPreflight.bytes)) {
         return unverifiedRegression("main manuscript content changed after the preflight")
       }
-      curScore = analyzeCitationDensity(inspected.bytes.toString("utf-8")).score
+      const postAnalysis = analyzeCitationDensity(inspected.bytes.toString("utf-8"))
+      if (postAnalysis.status === "insufficient_data") {
+        // Issue #168 — the correction was already applied, but the
+        // post-correction main file no longer has any eligible paragraph. The
+        // regression is genuinely unavailable: report a partial outcome with
+        // the real recovery point. The historical fabricated 8.0 is never
+        // recorded as the new score, as a verified regression or as an
+        // improvement, and no automatic rollback is claimed.
+        //
+        // The iteration is recorded through `addFailedIteration` because
+        // `state.ts` (out of scope for #168) only defines ok/rollback/failed;
+        // "failed" here follows the pre-existing `unverifiedRegression`
+        // convention for "verification unavailable", not for "correction
+        // failed". `scoreAfter` stays null, so `currentScore` is preserved.
+        const recorded = addFailedIteration(root, args.previousScore)
+        return [
+          ...results,
+          `partial: the requested correction was applied, but the regression check could not be verified — main manuscript has no eligible paragraph for the lexical citation-density heuristic after the correction (dados insuficientes / insufficient data; main-only, global coverage not proven); no automatic rollback was performed; ${recoveryNote(snapshotLabel)} to recover the original bytes.${recorded}`,
+        ].join("\n")
+      }
+      curScore = postAnalysis.score
       const violation = checkScoreNotDecreased(args.previousScore, curScore)
       if (violation) {
         regNote = `\n⚠ ${violation.message}`
