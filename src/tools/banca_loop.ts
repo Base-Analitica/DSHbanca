@@ -250,6 +250,30 @@ export const bancaLoop = defineBancaTool({
       throw err
     }
     const citation = analyzeCitationDensity(content)
+
+    // Issue #168 — absence of eligible paragraphs is not a score.
+    //
+    // A zero denominator (empty main.tex, comments/fragments only, an
+    // include-only main whose academic text lives in external chapters) carries
+    // no citation evidence at all. The historical `citationScore(0) = 8.0`
+    // fabricated a measured value, so a target at or below 8 was announced as
+    // "reached" and the state/report recorded a score and a successful
+    // iteration. Here the tool stops before any target comparison, iteration,
+    // marker, snapshot or report and returns a fixed sanitized diagnostic that
+    // never echoes a path or manuscript content. Circuit breakers, historical
+    // reads and the #163 canonical read confinement above are untouched.
+    if (citation.status === "insufficient_data") {
+      return [
+        "Dados insuficientes — análise restrita ao arquivo principal; cobertura global não comprovada.",
+        "Reason: the configured main manuscript has no eligible paragraph for the lexical citation-density heuristic.",
+        "No citation score was computed and the local heuristic target was not compared.",
+        "No iteration, snapshot, marker or report was recorded; no manuscript or project state was modified.",
+        "Scope: main manuscript only; external chapters, included files and the rest of the project were not evaluated.",
+        "This is not an assessment of academic quality and does not establish that the work is satisfactory or free of required corrections.",
+        "Detailed audit (banca_auditar) remains necessary; this operation does not authorize corrections.",
+      ].join("\n")
+    }
+
     const currentScore = citation.score
 
     // Phase: decide

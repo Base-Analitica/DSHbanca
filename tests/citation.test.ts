@@ -31,12 +31,17 @@ describe("analyzeCitationDensity", () => {
     expect(result.percentWithoutCitation).toBe(0)
   })
 
-  test("empty content yields zero paragraphs and no NaN", () => {
+  test("empty content yields zero paragraphs and typed insufficiency, not a score", () => {
+    // Issue #168 — 0/0 is absence of evidence, never 0% / score 8.0.
     const result = analyzeCitationDensity("")
+    expect(result.status).toBe("insufficient_data")
     expect(result.totalParagraphs).toBe(0)
     expect(result.citedParagraphs).toBe(0)
-    expect(result.percentWithoutCitation).toBe(0)
-    expect(Number.isNaN(result.score)).toBe(false)
+    expect(result.paragraphsWithoutCitation).toBe(0)
+    expect(result.percentWithoutCitation).toBeNull()
+    expect(result.score).toBeNull()
+    expect(Number.isNaN(result.score as any)).toBe(false)
+    expect(Number.isNaN(result.percentWithoutCitation as any)).toBe(false)
   })
 
   test("handles \\citeonline variants", () => {

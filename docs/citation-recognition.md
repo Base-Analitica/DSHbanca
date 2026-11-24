@@ -10,16 +10,56 @@ acadêmica.
 ## Contrato público preservado
 
 - `CitationAnalysis` mantém `totalParagraphs`, `citedParagraphs`,
-  `paragraphsWithoutCitation`, `percentWithoutCitation` e `score`.
+  `paragraphsWithoutCitation`, `percentWithoutCitation` e `score`, e acrescenta
+  o discriminante aditivo `status` (`"evaluated"` | `"insufficient_data"`).
 - `analyzeCitationDensity(content)` particiona o texto em blocos por
   `/\n\s*\n/` e mantém somente blocos com mais de 20 caracteres após `trim()`.
 - Várias citações no mesmo parágrafo continuam contando como **um** parágrafo
-  citado; o denominador, o tratamento de conteúdo vazio e a regra de corte de
-  20 caracteres não mudaram.
+  citado; o denominador e a regra de corte de 20 caracteres não mudaram.
 - `citationScore(percentWithoutCitation)` preserva a fórmula:
   - acima de 30% sem citação: 4,0;
   - acima de 20% e até 30%: 6,0;
   - até 20%: 8,0.
+- Para todo `totalParagraphs > 0`, os campos numéricos e o resultado da fórmula
+  são exatamente os históricos (`status: "evaluated"`), incluindo os limiares de
+  20%, 30% e acima de 30%.
+
+### Ausência de parágrafos elegíveis (issue #168)
+
+Quando `totalParagraphs === 0` não existe denominador: `0/0` não é "0% sem
+citação" nem um escore. O resultado é a insuficiência tipada:
+
+- `status: "insufficient_data"`;
+- `totalParagraphs`, `citedParagraphs` e `paragraphsWithoutCitation` iguais a
+  zero (contagens reais);
+- `percentWithoutCitation: null` e `score: null` — nenhum valor substituto,
+  `NaN` ou `Infinity` é inventado.
+
+Isso cobre `main.tex` vazio, conteúdo apenas com comentários/blocos curtos que
+não atingem o corte de 20 caracteres e arquivos principais que só contêm
+comandos de inclusão sem texto elegível. A análise continua **restrita ao
+arquivo principal**: capítulos externos, arquivos incluídos e o restante do
+projeto **não** são varridos, expandidos ou avaliados, e a cobertura global
+permanece **não comprovada**.
+
+Consumidores operacionais:
+
+- `banca_loop`: ao receber `insufficient_data`, não compara o resultado com o
+  limiar, não calcula escore, não registra iteração, marker, snapshot ou
+  relatório, e devolve o diagnóstico fixo e sanitizado
+  `Dados insuficientes — análise restrita ao arquivo principal; cobertura global não comprovada.`
+  O histórico, os circuit breakers e o confinamento canônico de leitura
+  permanecem inalterados.
+- `banca_corrigir`: quando `previousScore` é informado e o arquivo principal
+  pré-correção não tem parágrafo elegível, a operação é recusada **antes** de
+  snapshot, estado ou escrita. Se uma correção válida zerar o denominador
+  depois da escrita, o resultado é declarado `partial`: a verificação de
+  regressão está indisponível, a mutação e a ausência de rollback automático
+  são informadas, e o snapshot real de recuperação permanece registrado e
+  restaurável. Sem `previousScore`, o comportamento histórico é preservado.
+
+Nenhuma dessas saídas é avaliação de qualidade científica, nota ou aprovação;
+a ausência de evidência nunca é apresentada como evidência de qualidade.
 
 ## Comandos reconhecidos
 
@@ -109,7 +149,14 @@ citado**, nunca como citação.
 ## Evidência
 
 - `tests/citation.test.ts` — gramática positiva/negativa, comentários, escapes,
-  balanceamento, controles de limiar e de denominador.
+  balanceamento, controles de limiar e de denominador, e a insuficiência
+  tipada para entrada sem parágrafo elegível.
+- `tests/citation_zero_evidence.test.ts` — regressão focal da issue #168: entrada
+  vazia, comentários/blocos curtos, `\input`/`\include` sem texto elegível e
+  capítulo externo não examinado; `banca_loop` sem comparação de limiar, escore,
+  iteração, marker ou relatório; `banca_corrigir` fail-closed antes da mutação e
+  `partial` honesto após zerar o denominador, com hashes/inventários antes e
+  depois e restauração do snapshot real.
 - `tests/citation_consumers.test.ts` e `tests/integration.test.ts` — regressões
   herméticas dos consumidores `banca_loop` e `banca_corrigir` com workspace
   sintético, incluindo a verificação de regressão por `previousScore` e a

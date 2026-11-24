@@ -14,15 +14,45 @@
  * docs/citation-recognition.md for the supported grammar and its limits.
  */
 
-export interface CitationAnalysis {
+/**
+ * Issue #168 — zero-denominator evidence contract.
+ *
+ * `totalParagraphs === 0` is not "0% of paragraphs without citation": it is the
+ * absence of any eligible paragraph, i.e. an unmeasured quantity. Reporting
+ * `citationScore(0) = 8.0` in that case presented absence of evidence as
+ * evidence of quality. The additive `status` discriminant lets every consumer
+ * distinguish a measured result from an insufficient one without inventing a
+ * substitute score, NaN or Infinity.
+ *
+ * For `totalParagraphs > 0` the historical fields, formula and results are
+ * preserved exactly (`status: "evaluated"`). The insufficient branch keeps the
+ * same field names so existing callers keep their shape, but
+ * `percentWithoutCitation` and `score` are explicitly `null`: there is nothing
+ * measured to report.
+ */
+interface CitationAnalysisBase {
   totalParagraphs: number
   citedParagraphs: number
   paragraphsWithoutCitation: number
+}
+
+export interface CitationAnalysisEvaluated extends CitationAnalysisBase {
+  status: "evaluated"
   /** Percent of meaningful paragraphs without a citation, 0-100, unrounded. */
   percentWithoutCitation: number
   /** Heuristic citation score on the 0-10 rubric scale. */
   score: number
 }
+
+export interface CitationAnalysisInsufficient extends CitationAnalysisBase {
+  status: "insufficient_data"
+  /** No eligible paragraph: 0/0 has no measured percentage. */
+  percentWithoutCitation: null
+  /** No eligible paragraph: absence of evidence is not a score. */
+  score: null
+}
+
+export type CitationAnalysis = CitationAnalysisEvaluated | CitationAnalysisInsufficient
 
 const PARAGRAPH_SPLIT_RE = /\n\s*\n/
 
@@ -365,12 +395,26 @@ export function analyzeCitationDensity(content: string): CitationAnalysis {
   }
 
   const paragraphsWithoutCitation = paragraphs.length - citedParagraphs
-  const percentWithoutCitation =
-    paragraphs.length > 0
-      ? (paragraphsWithoutCitation / paragraphs.length) * 100
-      : 0
+
+  // 0/0 is not a percentage and not a score. The typed insufficiency keeps the
+  // historical formula untouched for every non-zero denominator while refusing
+  // to fabricate a value (no 8.0, no NaN, no Infinity) when there is no
+  // eligible paragraph to measure.
+  if (paragraphs.length === 0) {
+    return {
+      status: "insufficient_data",
+      totalParagraphs: 0,
+      citedParagraphs: 0,
+      paragraphsWithoutCitation: 0,
+      percentWithoutCitation: null,
+      score: null,
+    }
+  }
+
+  const percentWithoutCitation = (paragraphsWithoutCitation / paragraphs.length) * 100
 
   return {
+    status: "evaluated",
     totalParagraphs: paragraphs.length,
     citedParagraphs,
     paragraphsWithoutCitation,
