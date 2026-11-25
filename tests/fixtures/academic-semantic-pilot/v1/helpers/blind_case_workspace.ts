@@ -10,21 +10,23 @@
  *   qualquer código de produção.
  *
  * O que ele faz:
- * 1. Carrega **somente** o manifesto de apresentação validado e resolve um
- *    `caseId` exato.
- * 2. Valida a allowlist exata de arquivos do caso, os SHA-256 declarados, a
- *    ausência de arquivos extras, symlinks, aliases, hardlinks e realpaths
- *    fora da raiz do caso.
+ * 1. Carrega **somente** o manifesto de apresentação validado — regular,
+ *    independente (`nlink === 1`) e confinado à raiz autorizada, sem links em
+ *    qualquer componente — e resolve um `caseId` exato.
+ * 2. Valida a allowlist exata de arquivos **e diretórios** do caso, os SHA-256
+ *    declarados, a ausência de extras, symlinks, aliases, hardlinks e realpaths
+ *    fora da raiz do caso, inclusive componentes intermediários.
  * 3. Materializa um scratch novo (sem sobrescrever nada) com os arquivos do
  *    caso e um `.banca/project.json` derivado de `buildProjectConfig`.
  * 4. Recarrega a configuração com `validateConfig`/`loadConfig` de produção e
  *    recusa qualquer divergência (inclusive fallback silencioso para defaults).
  * 5. Compara o workspace materializado com o caso original usando o loader e o
  *    planejador reais: fingerprint, fontes ordenadas, chunks, lotes,
- *    personagens, cobertura e `planId`.
- * 6. Produz um relatório de controle sanitizado (sem caminhos absolutos e sem
- *    hash de gabarito) e o prompt neutro proposto, ambos separados do
- *    workspace.
+ *    caracteres, cobertura e `planId`; todo arquivo do workspace precisa ser
+ *    regular, com `nlink === 1` e sem link em componente algum.
+ * 6. Valida estrutura, identidade e campos permitidos do relatório de controle
+ *    contra o workspace e grava uma reconstrução sanitizada (nunca o objeto
+ *    recebido), junto do prompt neutro proposto, ambos separados do workspace.
  *
  * Limites explícitos (não são PASS):
  * - não comprova isolamento de leitura no host, mount namespace, read-only
@@ -74,6 +76,7 @@ import {
   type ProjectConfig,
 } from "../../../../../src/lib/config"
 import {
+  MANUSCRIPT_FINGERPRINT_VERSION,
   loadCanonicalLatexManuscript,
   type CanonicalLatexManuscriptResult,
 } from "../../../../../src/lib/latex_loader"
@@ -260,6 +263,42 @@ function assertPlainRelativeEntry(relativePath: string): void {
   }
 }
 
+/**
+ * Recusa symlinks em qualquer componente **existente** do caminho absoluto,
+ * inclusive ancestrais intermediários. Componentes ausentes (por exemplo a
+ * folha de um destino ainda não criado) são ignorados aqui; a checagem de
+ * existência/regularidade do alvo é feita pelo chamador.
+ *
+ * A política é lexical e conservadora: a raiz autorizada, o manifesto, o caso,
+ * o workspace, o staging, o destino e o controle não podem depender de links.
+ * Isso não comprova ausência de montagens ou de mutação concorrente (TOCTOU).
+ */
+function assertNoSymlinkComponents(absolutePath: string, code: string): void {
+  const resolved = path.resolve(absolutePath)
+  const root = path.parse(resolved).root
+  const segments = resolved
+    .slice(root.length)
+    .split(path.sep)
+    .filter((segment) => segment !== "")
+  let current = root
+  for (const segment of segments) {
+    current = path.join(current, segment)
+    let stat: Stats
+    try {
+      stat = lstatSync(current)
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") return
+      fail(code, "a path component could not be inspected safely")
+    }
+    if (stat.isSymbolicLink()) {
+      fail(code, "path must not contain symbolic link components")
+    }
+    if (current !== resolved && !stat.isDirectory()) {
+      fail(code, "path must not contain non-directory components")
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Carga do corpus de apresentação (sem gabarito, sem cenários)
 // ---------------------------------------------------------------------------
@@ -281,23 +320,52 @@ export interface PresentationCorpus {
  */
 export function loadPresentationCorpus(corpusRoot: string = PILOT_CORPUS_ROOT): PresentationCorpus {
   const lexicalRoot = path.resolve(corpusRoot)
-  let realRoot: string
+  // A raiz autorizada e todos os componentes do manifesto precisam ser reais:
+  // links (inclusive internos) e aliases não são aceitos como proveniência.
+  assertNoSymlinkComponents(lexicalRoot, "corpus_path_symlink")
+  let rootStat: Stats
   try {
-    realRoot = realpathSync(lexicalRoot)
+    rootStat = lstatSync(lexicalRoot)
   } catch {
     fail("corpus_not_found", "presentation corpus root is not accessible")
   }
-  let rootStat: Stats
-  try {
-    rootStat = lstatSync(realRoot)
-  } catch {
-    fail("corpus_not_found", "presentation corpus root is not accessible")
+  if (rootStat.isSymbolicLink()) {
+    fail("corpus_path_symlink", "presentation corpus root is a symbolic link")
   }
   if (!rootStat.isDirectory()) {
     fail("corpus_not_directory", "presentation corpus root is not a directory")
   }
 
-  const manifestPath = path.join(realRoot, MANIFEST_RELATIVE_PATH)
+  const manifestPath = path.join(lexicalRoot, MANIFEST_RELATIVE_PATH)
+  assertNoSymlinkComponents(manifestPath, "manifest_symlink")
+  let manifestStat: Stats
+  try {
+    manifestStat = lstatSync(manifestPath)
+  } catch {
+    fail("manifest_missing", "presentation manifest is missing or unreadable")
+  }
+  if (manifestStat.isSymbolicLink()) {
+    fail("manifest_symlink", "presentation manifest is a symbolic link")
+  }
+  if (!manifestStat.isFile()) {
+    fail("manifest_not_regular", "presentation manifest is not a regular file")
+  }
+  if (manifestStat.nlink !== 1) {
+    fail(
+      "manifest_hardlink",
+      `presentation manifest has ${manifestStat.nlink} hardlinks and cannot be proven independent`,
+    )
+  }
+  let manifestReal: string
+  try {
+    manifestReal = realpathSync(manifestPath)
+  } catch {
+    fail("manifest_missing", "presentation manifest is missing or unreadable")
+  }
+  if (manifestReal !== manifestPath) {
+    fail("manifest_alias", "presentation manifest resolves through a link or alias")
+  }
+
   let manifestRaw: string
   try {
     manifestRaw = readFileSync(manifestPath, "utf8")
@@ -313,7 +381,7 @@ export function loadPresentationCorpus(corpusRoot: string = PILOT_CORPUS_ROOT): 
   validatePilotManifest(parsed)
 
   return {
-    corpusRoot: realRoot,
+    corpusRoot: lexicalRoot,
     manifest: parsed,
     manifestRawSha256: sha256Hex(manifestRaw),
   }
@@ -344,23 +412,32 @@ function resolveCaseDirectory(corpus: PresentationCorpus, caseDef: PilotCorpusCa
     `case ${caseDef.id} path`,
   )
   const lexical = path.join(corpus.corpusRoot, ...relativeCasePath.split("/"))
+  // Componentes do caminho do caso (inclusive intermediários) não podem ser
+  // symlinks, mesmo que apontem para dentro do corpus.
+  assertNoSymlinkComponents(lexical, "case_path_symlink")
+  let caseStat: Stats
+  try {
+    caseStat = lstatSync(lexical)
+  } catch {
+    fail("case_dir_missing", `case directory is missing: ${caseDef.id}`)
+  }
+  if (caseStat.isSymbolicLink()) {
+    fail("case_path_symlink", `case directory is a symbolic link: ${caseDef.id}`)
+  }
+  if (!caseStat.isDirectory()) {
+    fail("case_dir_not_directory", `case path is not a directory: ${caseDef.id}`)
+  }
   let realCaseDir: string
   try {
     realCaseDir = realpathSync(lexical)
   } catch {
     fail("case_dir_missing", `case directory is missing: ${caseDef.id}`)
   }
+  if (realCaseDir !== lexical) {
+    fail("case_dir_alias", `case directory resolves through a link or alias: ${caseDef.id}`)
+  }
   if (!isStrictlyInside(corpus.corpusRoot, realCaseDir)) {
     fail("case_dir_outside_corpus", `case directory resolves outside the presentation corpus: ${caseDef.id}`)
-  }
-  let caseStat: Stats
-  try {
-    caseStat = lstatSync(realCaseDir)
-  } catch {
-    fail("case_dir_missing", `case directory is missing: ${caseDef.id}`)
-  }
-  if (!caseStat.isDirectory()) {
-    fail("case_dir_not_directory", `case path is not a directory: ${caseDef.id}`)
   }
   return realCaseDir
 }
@@ -468,6 +545,25 @@ function validateCaseSources(
       fail(
         "unexpected_source_file",
         `case ${caseDef.id} contains a file outside the validated allowlist: ${foundPath}`,
+      )
+    }
+  }
+  // Diretórios são derivados exclusivamente da allowlist de arquivos: diretório
+  // extra (inclusive vazio ou aninhado) também expõe conteúdo fora do contrato.
+  const expectedDirs = expectedWorkspaceDirs(declaredPaths)
+  for (const expectedDir of expectedDirs) {
+    if (!scan.dirs.includes(expectedDir)) {
+      fail(
+        "source_missing_directory",
+        `case ${caseDef.id} is missing an allowlisted directory: ${expectedDir}`,
+      )
+    }
+  }
+  for (const foundDir of scan.dirs) {
+    if (!expectedDirs.includes(foundDir)) {
+      fail(
+        "unexpected_source_directory",
+        `case ${caseDef.id} contains a directory outside the validated allowlist: ${foundDir}`,
       )
     }
   }
@@ -700,6 +796,7 @@ function preflightDestination(destinationRoot: string, corpusRoot: string): Dest
     fail("invalid_destination", "destination root must name a new scratch directory")
   }
 
+  assertNoSymlinkComponents(parent, "destination_symlink")
   let parentStat: Stats
   try {
     parentStat = lstatSync(parent)
@@ -718,6 +815,9 @@ function preflightDestination(destinationRoot: string, corpusRoot: string): Dest
     parentReal = realpathSync(parent)
   } catch {
     fail("destination_inspection_failed", "could not resolve the destination parent directory")
+  }
+  if (parentReal !== parent) {
+    fail("destination_symlink", "destination parent directory resolves through a link or alias")
   }
   const canonical = path.join(parentReal, base)
 
@@ -763,6 +863,7 @@ interface DestinationState {
 }
 
 function recheckDestination(plan: DestinationPlan): DestinationState {
+  assertNoSymlinkComponents(plan.destinationRoot, "destination_symlink")
   let stat: Stats | null = null
   try {
     stat = lstatSync(plan.destinationRoot)
@@ -1013,6 +1114,7 @@ function loadPersistedBlindWorkspaceConfig(
   }
 
   const configFile = path.join(workspaceRoot, ...BLIND_WORKSPACE_CONFIG_RELATIVE_PATH.split("/"))
+  assertNoSymlinkComponents(configFile, "config_symlink")
   let configStat: Stats
   try {
     configStat = lstatSync(configFile)
@@ -1027,6 +1129,12 @@ function loadPersistedBlindWorkspaceConfig(
   }
   if (!configStat.isFile()) {
     fail("config_not_regular", "the persisted project configuration is not a regular file")
+  }
+  if (configStat.nlink !== 1) {
+    fail(
+      "config_hardlink",
+      `the persisted project configuration has ${configStat.nlink} hardlinks and cannot be proven independent`,
+    )
   }
 
   let raw: string
@@ -1089,9 +1197,11 @@ interface WorkspaceInventory {
 }
 
 function assertWorkspaceRootPresent(workspaceRoot: string): void {
+  const resolved = path.resolve(workspaceRoot)
+  assertNoSymlinkComponents(resolved, "workspace_root_symlink")
   let rootStat: Stats
   try {
-    rootStat = lstatSync(workspaceRoot)
+    rootStat = lstatSync(resolved)
   } catch {
     fail("workspace_missing", "materialized workspace root does not exist")
   }
@@ -1100,6 +1210,15 @@ function assertWorkspaceRootPresent(workspaceRoot: string): void {
   }
   if (!rootStat.isDirectory()) {
     fail("workspace_not_directory", "materialized workspace root is not a directory")
+  }
+  let rootReal: string
+  try {
+    rootReal = realpathSync(resolved)
+  } catch {
+    fail("workspace_missing", "materialized workspace root does not exist")
+  }
+  if (rootReal !== resolved) {
+    fail("workspace_root_symlink", "materialized workspace root resolves through a link or alias")
   }
 }
 
@@ -1128,9 +1247,32 @@ function walkWorkspace(workspaceRoot: string): WorkspaceInventory {
         continue
       }
       if (entry.isFile()) {
+        const absolute = path.join(current, entry.name)
+        let fileStat: Stats
+        try {
+          fileStat = lstatSync(absolute)
+        } catch {
+          fail("workspace_inspection_failed", "could not inspect a materialized workspace file")
+        }
+        if (fileStat.isSymbolicLink()) {
+          unsafe.push(relative)
+          continue
+        }
+        if (!fileStat.isFile()) {
+          unsafe.push(relative)
+          continue
+        }
+        // Hardlink compartilha inode com outra árvore e não é fisicamente
+        // independente: recusar antes de ler/hashear.
+        if (fileStat.nlink !== 1) {
+          fail(
+            "workspace_hardlink",
+            `materialized workspace file has ${fileStat.nlink} hardlinks and cannot be proven independent: ${relative}`,
+          )
+        }
         let bytes: Buffer
         try {
-          bytes = readFileSync(path.join(current, entry.name))
+          bytes = readFileSync(absolute)
         } catch {
           fail("workspace_inspection_failed", "could not read a materialized workspace file")
         }
@@ -1658,10 +1800,297 @@ export function verifyBlindCaseWorkspace(
 // Artefatos de controle (fora do workspace)
 // ---------------------------------------------------------------------------
 
+/**
+ * Campos exatos do relatório de controle sanitizado. Qualquer campo extra é
+ * recusado e o relatório gravado é reconstruído a partir dos valores validados,
+ * nunca serializando o objeto recebido.
+ */
+const CONTROL_REPORT_KEYS = [
+  "reportVersion",
+  "workspaceVersion",
+  "caseId",
+  "corpusVersion",
+  "manifestSha256",
+  "configSha256",
+  "promptVersion",
+  "promptSha256",
+  "files",
+  "manuscriptFingerprint",
+  "fingerprintVersion",
+  "planId",
+  "batchCount",
+  "totalCharacters",
+  "coveragePercent",
+  "workspaceFiles",
+  "bancaFiles",
+  "status",
+] as const
+
+const CONTROL_REPORT_FILE_KEYS = ["path", "sha256"] as const
+const CONTROL_REPORT_CODE = "invalid_control_report"
+
+function assertReportObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(CONTROL_REPORT_CODE, "control report must be a non-null object")
+  }
+  return value as Record<string, unknown>
+}
+
+function assertReportString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    fail(CONTROL_REPORT_CODE, `${label} must be a non-empty string`)
+  }
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    fail(CONTROL_REPORT_CODE, `${label} must not contain control characters`)
+  }
+  return value
+}
+
+function assertReportHexSha256(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    fail(CONTROL_REPORT_CODE, `${label} must be a lowercase SHA-256 hex digest`)
+  }
+  return value
+}
+
+function assertReportPositiveInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    fail(CONTROL_REPORT_CODE, `${label} must be a positive integer`)
+  }
+  return value
+}
+
+function assertReportAllowedKeys(record: Record<string, unknown>): void {
+  const actual = Object.keys(record).sort()
+  const allowed = [...CONTROL_REPORT_KEYS].sort()
+  if (actual.length !== allowed.length || actual.some((key, index) => key !== allowed[index])) {
+    fail(CONTROL_REPORT_CODE, "control report contains missing or unexpected fields")
+  }
+}
+
+function validateControlReportPaths(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    fail(CONTROL_REPORT_CODE, `${label} must be a non-empty array of relative POSIX paths`)
+  }
+  const paths: string[] = []
+  for (const entry of value) {
+    const relativePath = assertSafeRelativePath(entry, CONTROL_REPORT_CODE, `${label}[]`)
+    paths.push(relativePath)
+  }
+  for (let index = 1; index < paths.length; index += 1) {
+    if (!(paths[index - 1] < paths[index])) {
+      fail(CONTROL_REPORT_CODE, `${label} must be sorted and unique`)
+    }
+  }
+  return paths
+}
+
+function assertPlainRelativeEntryForReport(relativePath: string): void {
+  const first = relativePath.split("/")[0]
+  if (first === BLIND_WORKSPACE_CONFIG_DIR || first === ".git") {
+    fail(
+      CONTROL_REPORT_CODE,
+      `control report path must not use the reserved directory ${first}: ${relativePath}`,
+    )
+  }
+}
+
+function validateControlReportFiles(value: unknown): ManuscriptFileHash[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    fail(CONTROL_REPORT_CODE, "files must be a non-empty array")
+  }
+  const files: ManuscriptFileHash[] = []
+  for (const entry of value) {
+    const record = assertReportObject(entry)
+    const keys = Object.keys(record).sort()
+    const allowed = [...CONTROL_REPORT_FILE_KEYS].sort()
+    if (keys.length !== allowed.length || keys.some((key, index) => key !== allowed[index])) {
+      fail(CONTROL_REPORT_CODE, "each file entry must contain exactly path and sha256")
+    }
+    const relativePath = assertSafeRelativePath(record.path, CONTROL_REPORT_CODE, "files[].path")
+    assertPlainRelativeEntryForReport(relativePath)
+    if (relativePath === BLIND_WORKSPACE_CONFIG_RELATIVE_PATH) {
+      fail(CONTROL_REPORT_CODE, "files must not include the persisted configuration")
+    }
+    files.push({
+      path: relativePath,
+      sha256: assertReportHexSha256(record.sha256, "files[].sha256"),
+    })
+  }
+  for (let index = 1; index < files.length; index += 1) {
+    if (!(files[index - 1].path < files[index].path)) {
+      fail(CONTROL_REPORT_CODE, "files must be sorted and unique")
+    }
+  }
+  return files
+}
+
+function samePaths(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function sameFiles(left: ManuscriptFileHash[], right: ManuscriptFileHash[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (value, index) => value.path === right[index].path && value.sha256 === right[index].sha256,
+    )
+  )
+}
+
+/**
+ * Valida estrutura, identidade e campos permitidos do relatório de controle
+ * contra o workspace materializado. Devolve uma reconstrução sanitizada que é a
+ * única coisa serializada; o objeto recebido nunca é escrito.
+ *
+ * A validação ocorre antes de qualquer `mkdir`/escrita no diretório de controle.
+ */
+function validateControlReport(report: unknown, workspaceRoot: string): BlindCaseControlReport {
+  const record = assertReportObject(report)
+  assertReportAllowedKeys(record)
+
+  if (record.reportVersion !== BLIND_CASE_CONTROL_REPORT_VERSION) {
+    fail(CONTROL_REPORT_CODE, "reportVersion is not the supported control report version")
+  }
+  if (record.workspaceVersion !== BLIND_CASE_WORKSPACE_VERSION) {
+    fail(CONTROL_REPORT_CODE, "workspaceVersion is not the supported workspace version")
+  }
+  // Valida o identificador antes de qualquer derivação de caminho.
+  const caseId = assertSafeCaseId(record.caseId)
+  const corpusVersion = assertReportString(record.corpusVersion, "corpusVersion")
+  if (/[\\/]/.test(corpusVersion) || corpusVersion.includes("..")) {
+    fail(CONTROL_REPORT_CODE, "corpusVersion must not contain path separators or traversal")
+  }
+  const manifestSha256 = assertReportHexSha256(record.manifestSha256, "manifestSha256")
+  const configSha256 = assertReportHexSha256(record.configSha256, "configSha256")
+  if (
+    record.promptVersion !== NEUTRAL_PROMPT.version ||
+    record.promptSha256 !== NEUTRAL_PROMPT.sha256
+  ) {
+    fail(CONTROL_REPORT_CODE, "promptVersion/promptSha256 must be the fixed neutral prompt")
+  }
+  const files = validateControlReportFiles(record.files)
+  const manuscriptFingerprint = assertReportHexSha256(
+    record.manuscriptFingerprint,
+    "manuscriptFingerprint",
+  )
+  if (record.fingerprintVersion !== MANUSCRIPT_FINGERPRINT_VERSION) {
+    fail(CONTROL_REPORT_CODE, "fingerprintVersion is not the supported canonical fingerprint version")
+  }
+  const planId = assertReportHexSha256(record.planId, "planId")
+  const batchCount = assertReportPositiveInteger(record.batchCount, "batchCount")
+  const totalCharacters = assertReportPositiveInteger(record.totalCharacters, "totalCharacters")
+  if (record.coveragePercent !== 100) {
+    fail(CONTROL_REPORT_CODE, "coveragePercent must be exactly 100")
+  }
+  const workspaceFiles = validateControlReportPaths(record.workspaceFiles, "workspaceFiles")
+  const expectedWorkspaceFiles = [
+    ...files.map((file) => file.path),
+    BLIND_WORKSPACE_CONFIG_RELATIVE_PATH,
+  ].sort()
+  if (!samePaths(workspaceFiles, expectedWorkspaceFiles)) {
+    fail(CONTROL_REPORT_CODE, "workspaceFiles must match the validated file inventory plus configuration")
+  }
+  const bancaFiles = validateControlReportPaths(record.bancaFiles, "bancaFiles")
+  if (!samePaths(bancaFiles, [BLIND_WORKSPACE_CONFIG_RELATIVE_PATH])) {
+    fail(CONTROL_REPORT_CODE, "bancaFiles must contain only the persisted configuration")
+  }
+  if (record.status !== "materialized") {
+    fail(CONTROL_REPORT_CODE, "status must be materialized")
+  }
+
+  // Identidade: o relatório precisa corresponder fisicamente ao workspace.
+  assertWorkspaceRootPresent(workspaceRoot)
+  const walked = walkWorkspace(workspaceRoot)
+  const actualWorkspaceFiles = walked.files.map((file) => file.path)
+  if (!samePaths(actualWorkspaceFiles, workspaceFiles)) {
+    fail(CONTROL_REPORT_CODE, "workspaceFiles diverges from the materialized workspace inventory")
+  }
+  const actualManuscriptFiles = walked.files.filter(
+    (file) => file.path !== BLIND_WORKSPACE_CONFIG_RELATIVE_PATH,
+  )
+  if (!sameFiles(actualManuscriptFiles, files)) {
+    fail(CONTROL_REPORT_CODE, "files diverges from the materialized workspace hashes")
+  }
+
+  const configFile = path.join(workspaceRoot, ...BLIND_WORKSPACE_CONFIG_RELATIVE_PATH.split("/"))
+  let configBytes: Buffer
+  try {
+    configBytes = readFileSync(configFile)
+  } catch {
+    fail(CONTROL_REPORT_CODE, "the persisted configuration could not be read")
+  }
+  if (sha256Hex(configBytes) !== configSha256) {
+    fail(CONTROL_REPORT_CODE, "configSha256 diverges from the persisted configuration")
+  }
+  let validation: { valid: boolean; errors: string[] }
+  try {
+    validation = validateConfig(workspaceRoot)
+  } catch {
+    fail(CONTROL_REPORT_CODE, "the persisted configuration could not be validated")
+  }
+  if (!validation.valid) {
+    fail(CONTROL_REPORT_CODE, "the persisted configuration is invalid")
+  }
+  let config: Required<ProjectConfig>
+  try {
+    config = loadConfig(workspaceRoot)
+  } catch {
+    fail(CONTROL_REPORT_CODE, "the persisted configuration could not be loaded")
+  }
+  const maxCharactersPerBatch = config.analysis.maxCharactersPerBatch
+  const loaded = loadCanonicalLatexManuscript(workspaceRoot, config)
+  if (loaded.complete !== true || loaded.diagnostics.length > 0 || loaded.fingerprint === null) {
+    fail(CONTROL_REPORT_CODE, "the workspace manuscript could not be loaded canonically")
+  }
+  const plan = planExhaustiveAnalysisBatches(loaded, maxCharactersPerBatch)
+  if (plan.status !== "complete") {
+    fail(CONTROL_REPORT_CODE, "the workspace exhaustive plan is blocked")
+  }
+  if (loaded.fingerprint !== manuscriptFingerprint) {
+    fail(CONTROL_REPORT_CODE, "manuscriptFingerprint diverges from the materialized workspace")
+  }
+  if (loaded.fingerprintVersion !== record.fingerprintVersion) {
+    fail(CONTROL_REPORT_CODE, "fingerprintVersion diverges from the materialized workspace")
+  }
+  const computedPlanId = computePlanIdentity(plan)
+  if (computedPlanId !== planId) {
+    fail(CONTROL_REPORT_CODE, "planId diverges from the materialized workspace plan")
+  }
+  if (
+    plan.batches.length !== batchCount ||
+    plan.coverage.totalCharacters !== totalCharacters ||
+    plan.coverage.coveragePercent !== 100
+  ) {
+    fail(CONTROL_REPORT_CODE, "batchCount/totalCharacters/coveragePercent diverge from the workspace plan")
+  }
+
+  return {
+    reportVersion: BLIND_CASE_CONTROL_REPORT_VERSION,
+    workspaceVersion: BLIND_CASE_WORKSPACE_VERSION,
+    caseId,
+    corpusVersion,
+    manifestSha256,
+    configSha256,
+    promptVersion: NEUTRAL_PROMPT.version,
+    promptSha256: NEUTRAL_PROMPT.sha256,
+    files,
+    manuscriptFingerprint,
+    fingerprintVersion: MANUSCRIPT_FINGERPRINT_VERSION,
+    planId: computedPlanId,
+    batchCount: plan.batches.length,
+    totalCharacters: plan.coverage.totalCharacters,
+    coveragePercent: plan.coverage.coveragePercent,
+    workspaceFiles,
+    bancaFiles,
+    status: "materialized",
+  }
+}
+
 export interface WriteBlindControlArtifactsOptions {
   /** Diretório de controle novo, fora do workspace do auditor. */
   controlDir: string
-  /** Workspace materializado; usado apenas para provar separação. */
+  /** Workspace materializado; usado para validar identidade e separação. */
   workspaceRoot: string
   report: BlindCaseControlReport
   prompt?: NeutralAuditPrompt
@@ -1677,10 +2106,34 @@ export interface BlindControlArtifacts {
  * Grava o relatório de controle sanitizado e o prompt neutro proposto em um
  * diretório de controle novo, recusando sobreposição com o workspace. O
  * gabarito e seu hash pertencem a outro controlador; este helper não os lê.
+ *
+ * Before any filesystem effect: o `caseId` e o relatório são validados contra o
+ * workspace, o diretório de controle é canonicalizado sem links e o caminho
+ * derivado do relatório é provado como filho direto do diretório de controle.
+ * Entradas inválidas são recusadas sem criar ou modificar artefatos.
  */
 export function writeBlindCaseControlArtifacts(
   options: WriteBlindControlArtifactsOptions,
 ): BlindControlArtifacts {
+  if (typeof options.workspaceRoot !== "string" || !path.isAbsolute(options.workspaceRoot)) {
+    fail("invalid_workspace_root", "workspace root must be an absolute path")
+  }
+  const workspaceRoot = path.resolve(options.workspaceRoot)
+  assertWorkspaceRootPresent(workspaceRoot)
+
+  // Valida identificador, estrutura, campos permitidos e identidade antes de
+  // qualquer mkdir/escrita.
+  const sanitizedReport = validateControlReport(options.report, workspaceRoot)
+
+  const prompt = options.prompt ?? neutralAuditPrompt()
+  if (
+    prompt.sha256 !== sha256Hex(prompt.content) ||
+    prompt.sha256 !== NEUTRAL_PROMPT.sha256 ||
+    prompt.sha256 !== sanitizedReport.promptSha256
+  ) {
+    fail("invalid_prompt", "control artifacts must use the fixed neutral prompt and its recorded hash")
+  }
+
   if (typeof options.controlDir !== "string" || !path.isAbsolute(options.controlDir)) {
     fail("invalid_control_dir", "control directory must be an absolute path")
   }
@@ -1690,14 +2143,7 @@ export function writeBlindCaseControlArtifacts(
   if (controlBase === "" || controlBase === "." || controlBase === "..") {
     fail("invalid_control_dir", "control directory must name a new directory")
   }
-
-  let workspaceReal: string
-  try {
-    workspaceReal = realpathSync(path.resolve(options.workspaceRoot))
-  } catch {
-    fail("workspace_missing", "materialized workspace root does not exist")
-  }
-
+  assertNoSymlinkComponents(controlParent, "control_dir_symlink")
   let parentStat: Stats
   try {
     parentStat = lstatSync(controlParent)
@@ -1716,9 +2162,12 @@ export function writeBlindCaseControlArtifacts(
   } catch {
     fail("control_dir_inspection_failed", "could not resolve the control directory parent")
   }
+  if (parentReal !== controlParent) {
+    fail("control_dir_symlink", "control directory parent resolves through a link or alias")
+  }
   const controlDir = path.join(parentReal, controlBase)
 
-  if (isInsideOrEqual(workspaceReal, controlDir) || isInsideOrEqual(controlDir, workspaceReal)) {
+  if (isInsideOrEqual(workspaceRoot, controlDir) || isInsideOrEqual(controlDir, workspaceRoot)) {
     fail("control_workspace_overlap", "control directory must not overlap the materialized workspace")
   }
   try {
@@ -1731,24 +2180,25 @@ export function writeBlindCaseControlArtifacts(
     }
   }
 
-  const prompt = options.prompt ?? neutralAuditPrompt()
+  // O arquivo derivado precisa ser filho direto do diretório de controle.
+  const reportName = `report-${sanitizedReport.caseId}.json`
+  const reportPath = path.join(controlDir, reportName)
   if (
-    prompt.sha256 !== sha256Hex(prompt.content) ||
-    prompt.sha256 !== NEUTRAL_PROMPT.sha256 ||
-    prompt.sha256 !== options.report.promptSha256
+    path.dirname(reportPath) !== controlDir ||
+    path.basename(reportPath) !== reportName ||
+    path.relative(controlDir, reportPath).includes(path.sep)
   ) {
-    fail("invalid_prompt", "control artifacts must use the fixed neutral prompt and its recorded hash")
+    fail(CONTROL_REPORT_CODE, "derived report path must be a direct child of the control directory")
   }
+  const promptPath = path.join(controlDir, "prompt.txt")
 
   try {
     mkdirSync(controlDir)
   } catch {
     fail("control_dir_creation_failed", "could not create the control directory")
   }
-  const reportPath = path.join(controlDir, `report-${options.report.caseId}.json`)
-  const promptPath = path.join(controlDir, "prompt.txt")
   try {
-    writeFileSync(reportPath, `${JSON.stringify(options.report, null, 2)}\n`, { flag: "wx" })
+    writeFileSync(reportPath, `${JSON.stringify(sanitizedReport, null, 2)}\n`, { flag: "wx" })
     writeFileSync(promptPath, prompt.content, { flag: "wx" })
   } catch {
     try {

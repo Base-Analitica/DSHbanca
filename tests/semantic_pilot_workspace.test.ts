@@ -29,6 +29,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -751,7 +752,7 @@ describe("Contratos negativos — fail-closed sem override", () => {
           caseId: "case-01",
           destinationRoot: path.join(newScratch("dshbanca-180-case-symlink-"), "case-01"),
         }),
-      "case_dir_outside_corpus",
+      "case_path_symlink",
     )
   })
 
@@ -1118,4 +1119,366 @@ describe("Contratos negativos — fail-closed sem override", () => {
       )
     },
   )
+})
+
+describe("Remediação R1 — relatório de controle, hardlinks, links de origem e diretórios", () => {
+  test("P1-A: recusa caseId com traversal, separadores ou identificador inválido antes de qualquer efeito", () => {
+    const workspace = materialize("case-02")
+    const controlRoot = newScratch("dshbanca-180-r1a-ids-")
+    const controlDir = path.join(controlRoot, "control")
+    const invalidIds = [
+      "x/../../workspace/injected",
+      "../escape",
+      "x/y",
+      "..",
+      ".",
+      "",
+      "a\\b",
+      "case-02/..",
+      "case 02",
+    ]
+    for (const caseId of invalidIds) {
+      expectBlindError(
+        () =>
+          writeBlindCaseControlArtifacts({
+            controlDir,
+            workspaceRoot: workspace.workspaceRoot,
+            report: { ...workspace.report, caseId },
+          }),
+        "invalid_case_id",
+      )
+      expect(existsSync(controlDir)).toBe(false)
+      expect(existsSync(path.join(workspace.workspaceRoot, "injected.json"))).toBe(false)
+    }
+    expect(readdirSync(controlRoot)).toEqual([])
+    // Revalidação do workspace após as recusas.
+    expect(() =>
+      verifyBlindCaseWorkspace({ caseId: "case-02", workspaceRoot: workspace.workspaceRoot }),
+    ).not.toThrow()
+  })
+
+  test("P1-A: recusa relatório incompatível, campo extra ou campo ausente sem criar artefatos", () => {
+    const workspace = materialize("case-03")
+    const other = sixWorkspaces.get("case-04")
+    if (other === undefined) throw new Error("workspace case-04 ausente")
+    const controlRoot = newScratch("dshbanca-180-r1a-report-")
+    const controlDir = path.join(controlRoot, "control")
+
+    const missingField = { ...workspace.report } as Record<string, unknown>
+    delete missingField.promptSha256
+
+    const variants: unknown[] = [
+      { ...workspace.report, leaked: "arbitrary" },
+      { ...workspace.report, planId: "0".repeat(64) },
+      { ...workspace.report, manuscriptFingerprint: "0".repeat(64) },
+      { ...workspace.report, configSha256: "0".repeat(64) },
+      { ...workspace.report, status: "verified" },
+      { ...workspace.report, coveragePercent: 99 },
+      {
+        ...workspace.report,
+        files: [...workspace.report.files, { path: "/etc/passwd", sha256: "0".repeat(64) }],
+      },
+      {
+        ...workspace.report,
+        workspaceFiles: [...workspace.report.workspaceFiles, "gabarito.json"],
+      },
+      {
+        ...workspace.report,
+        bancaFiles: [".banca/project.json", ".banca/analysis/checkpoints/x.json"],
+      },
+      missingField,
+      other.report,
+    ]
+    for (const report of variants) {
+      expectBlindError(
+        () =>
+          writeBlindCaseControlArtifacts({
+            controlDir,
+            workspaceRoot: workspace.workspaceRoot,
+            report: report as never,
+          }),
+        "invalid_control_report",
+      )
+      expect(existsSync(controlDir)).toBe(false)
+    }
+    expect(readdirSync(controlRoot)).toEqual([])
+    expect(() =>
+      verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: workspace.workspaceRoot }),
+    ).not.toThrow()
+  })
+
+  test("P1-A: controle positivo preserva relatório sanitizado e reconstrói apenas campos permitidos", () => {
+    const workspace = materialize("case-01")
+    const controlRoot = newScratch("dshbanca-180-r1a-positive-")
+    const controlDir = path.join(controlRoot, "control")
+    const artifacts = writeBlindCaseControlArtifacts({
+      controlDir,
+      workspaceRoot: workspace.workspaceRoot,
+      report: workspace.report,
+    })
+    const written = JSON.parse(readFileSync(artifacts.reportPath, "utf8"))
+    expect(written).toEqual(workspace.report)
+    expect(Object.keys(written).sort()).toEqual(Object.keys(workspace.report).sort())
+    expect(readdirSync(controlDir).sort()).toEqual(["prompt.txt", "report-case-01.json"])
+    expect(path.dirname(artifacts.reportPath)).toBe(controlDir)
+    expect(path.basename(artifacts.reportPath)).toBe("report-case-01.json")
+    expect(() =>
+      verifyBlindCaseWorkspace({ caseId: "case-01", workspaceRoot: workspace.workspaceRoot }),
+    ).not.toThrow()
+  })
+
+  test("P1-B: revalidação recusa hardlink em main.tex e em .banca/project.json", () => {
+    const mainWorkspace = materialize("case-01")
+    const mainPath = path.join(mainWorkspace.workspaceRoot, "main.tex")
+    const movedMain = path.join(newScratch("dshbanca-180-r1b-main-"), "moved-main.tex")
+    renameSync(mainPath, movedMain)
+    linkSync(movedMain, mainPath)
+    expect(lstatSync(mainPath).nlink).toBe(2)
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-01", workspaceRoot: mainWorkspace.workspaceRoot }),
+      "workspace_hardlink",
+    )
+
+    const configWorkspace = materialize("case-01")
+    const configPath = path.join(configWorkspace.workspaceRoot, ".banca/project.json")
+    const movedConfig = path.join(newScratch("dshbanca-180-r1b-config-"), "moved-project.json")
+    renameSync(configPath, movedConfig)
+    linkSync(movedConfig, configPath)
+    expect(lstatSync(configPath).nlink).toBe(2)
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-01", workspaceRoot: configWorkspace.workspaceRoot }),
+      "config_hardlink",
+    )
+
+    // Materializações independentes continuam aceitas e com inodes distintos.
+    const left = materialize("case-01")
+    const right = materialize("case-01")
+    for (const entry of left.workspaceFiles) {
+      expect(lstatSync(path.join(left.workspaceRoot, ...entry.split("/"))).ino).not.toBe(
+        lstatSync(path.join(right.workspaceRoot, ...entry.split("/"))).ino,
+      )
+    }
+  })
+
+  test("P1-B: staging recusa hardlink injetado antes da publicação e limpa artefatos", () => {
+    const root = newScratch("dshbanca-180-r1b-staging-")
+    const destination = path.join(root, "case-01")
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: CORPUS_ROOT,
+          caseId: "case-01",
+          destinationRoot: destination,
+          testHooks: {
+            beforePublish: () => {
+              const staging = readdirSync(root).find((name) =>
+                name.startsWith(".blind-case-staging-"),
+              )
+              if (staging === undefined) throw new Error("staging ausente")
+              const stagingRoot = path.join(root, staging)
+              const target = path.join(stagingRoot, "main.tex")
+              const moved = path.join(stagingRoot, "moved-main.tex")
+              renameSync(target, moved)
+              linkSync(moved, target)
+            },
+          },
+        }),
+      "workspace_hardlink",
+    )
+    expect(existsSync(destination)).toBe(false)
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  test("P1-C: recusa symlink externo, interno e intermediário no caminho do caso e da raiz", () => {
+    // Diretório do caso com symlink externo.
+    const externalCorpus = copyPresentationCorpus()
+    const externalCase = path.join(newScratch("dshbanca-180-r1c-ext-case-"), "case-01")
+    cpSync(path.join(externalCorpus, "manuscripts/case-01"), externalCase, { recursive: true })
+    rmSync(path.join(externalCorpus, "manuscripts/case-01"), { recursive: true, force: true })
+    symlinkSync(externalCase, path.join(externalCorpus, "manuscripts/case-01"))
+    const externalDestination = path.join(newScratch("dshbanca-180-r1c-ext-dest-"), "case-01")
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: externalCorpus,
+          caseId: "case-01",
+          destinationRoot: externalDestination,
+        }),
+      "case_path_symlink",
+    )
+    expect(existsSync(externalDestination)).toBe(false)
+
+    // Symlink interno (alvo dentro do próprio corpus): também recusado.
+    const internalCorpus = copyPresentationCorpus()
+    renameSync(
+      path.join(internalCorpus, "manuscripts/case-01"),
+      path.join(internalCorpus, "manuscripts/case-01-real"),
+    )
+    symlinkSync("case-01-real", path.join(internalCorpus, "manuscripts/case-01"))
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: internalCorpus,
+          caseId: "case-01",
+          destinationRoot: path.join(newScratch("dshbanca-180-r1c-int-dest-"), "case-01"),
+        }),
+      "case_path_symlink",
+    )
+
+    // Componente intermediário (manuscripts) symlinkado.
+    const intermediateCorpus = copyPresentationCorpus()
+    renameSync(
+      path.join(intermediateCorpus, "manuscripts"),
+      path.join(intermediateCorpus, "manuscripts-real"),
+    )
+    symlinkSync("manuscripts-real", path.join(intermediateCorpus, "manuscripts"))
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: intermediateCorpus,
+          caseId: "case-01",
+          destinationRoot: path.join(newScratch("dshbanca-180-r1c-mid-dest-"), "case-01"),
+        }),
+      "case_path_symlink",
+    )
+
+    // Raiz do corpus entregue por symlink.
+    const realCorpus = copyPresentationCorpus()
+    const corpusAlias = path.join(newScratch("dshbanca-180-r1c-alias-"), "corpus-alias")
+    symlinkSync(realCorpus, corpusAlias)
+    expectBlindError(() => loadPresentationCorpus(corpusAlias), "corpus_path_symlink")
+  })
+
+  test("P1-C: recusa manifesto symlink, hardlink e alias, inclusive interno", () => {
+    // Symlink externo para o manifesto.
+    const externalCorpus = copyPresentationCorpus()
+    const externalManifest = path.join(newScratch("dshbanca-180-r1c-manifest-ext-"), "manifest.json")
+    renameSync(path.join(externalCorpus, "manifest.json"), externalManifest)
+    symlinkSync(externalManifest, path.join(externalCorpus, "manifest.json"))
+    const externalDestination = path.join(newScratch("dshbanca-180-r1c-manifest-dest-"), "case-01")
+    expectBlindError(() => loadPresentationCorpus(externalCorpus), "manifest_symlink")
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: externalCorpus,
+          caseId: "case-01",
+          destinationRoot: externalDestination,
+        }),
+      "manifest_symlink",
+    )
+    expect(existsSync(externalDestination)).toBe(false)
+
+    // Symlink interno para o manifesto.
+    const internalCorpus = copyPresentationCorpus()
+    renameSync(
+      path.join(internalCorpus, "manifest.json"),
+      path.join(internalCorpus, "manifest-real.json"),
+    )
+    symlinkSync("manifest-real.json", path.join(internalCorpus, "manifest.json"))
+    expectBlindError(() => loadPresentationCorpus(internalCorpus), "manifest_symlink")
+
+    // Hardlink externo para o manifesto.
+    const hardlinkCorpus = copyPresentationCorpus()
+    const hardlinkSource = path.join(newScratch("dshbanca-180-r1c-manifest-hard-"), "manifest.json")
+    renameSync(path.join(hardlinkCorpus, "manifest.json"), hardlinkSource)
+    linkSync(hardlinkSource, path.join(hardlinkCorpus, "manifest.json"))
+    expectBlindError(() => loadPresentationCorpus(hardlinkCorpus), "manifest_hardlink")
+
+    // Corpus versionado permanece válido.
+    expect(loadPresentationCorpus(CORPUS_ROOT).manifestRawSha256).toBe(corpus.manifestRawSha256)
+  })
+
+  test("P1-C: destino, revalidação e controle recusam links ou aliases em componentes", () => {
+    const root = newScratch("dshbanca-180-r1c-paths-")
+    const realParent = path.join(root, "real-parent")
+    mkdirSync(realParent)
+    const linkParent = path.join(root, "link-parent")
+    symlinkSync(realParent, linkParent)
+    const destinationViaLink = path.join(linkParent, "nested", "case-01")
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: CORPUS_ROOT,
+          caseId: "case-01",
+          destinationRoot: destinationViaLink,
+        }),
+      "destination_symlink",
+    )
+    expect(existsSync(path.join(realParent, "nested"))).toBe(false)
+
+    const workspace = sixWorkspaces.get("case-05")
+    if (workspace === undefined) throw new Error("workspace case-05 ausente")
+    const workspaceAlias = path.join(newScratch("dshbanca-180-r1c-ws-alias-"), "workspace-alias")
+    symlinkSync(workspace.workspaceRoot, workspaceAlias)
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-05", workspaceRoot: workspaceAlias }),
+      "workspace_root_symlink",
+    )
+
+    const controlRoot = newScratch("dshbanca-180-r1c-control-")
+    const controlRealParent = path.join(controlRoot, "real")
+    mkdirSync(controlRealParent)
+    const controlLinkParent = path.join(controlRoot, "link")
+    symlinkSync(controlRealParent, controlLinkParent)
+    expectBlindError(
+      () =>
+        writeBlindCaseControlArtifacts({
+          controlDir: path.join(controlLinkParent, "control"),
+          workspaceRoot: workspace.workspaceRoot,
+          report: workspace.report,
+        }),
+      "control_dir_symlink",
+    )
+    expect(existsSync(path.join(controlRealParent, "control"))).toBe(false)
+  })
+
+  test("P2-D: recusa diretório extra, inclusive vazio e aninhado, no diretório do caso", () => {
+    // Diretório vazio extra na raiz do caso.
+    const emptyRootCorpus = copyPresentationCorpus()
+    mkdirSync(path.join(emptyRootCorpus, "manuscripts/case-01/answer-key"))
+    const emptyRootDestination = path.join(newScratch("dshbanca-180-r1d-empty-"), "case-01")
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: emptyRootCorpus,
+          caseId: "case-01",
+          destinationRoot: emptyRootDestination,
+        }),
+      "unexpected_source_directory",
+    )
+    expect(existsSync(emptyRootDestination)).toBe(false)
+
+    // Diretório vazio extra aninhado em diretório legítimo.
+    const nestedCorpus = copyPresentationCorpus()
+    mkdirSync(path.join(nestedCorpus, "manuscripts/case-01/secoes/empty/deep"), {
+      recursive: true,
+    })
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: nestedCorpus,
+          caseId: "case-01",
+          destinationRoot: path.join(newScratch("dshbanca-180-r1d-nested-"), "case-01"),
+        }),
+      "unexpected_source_directory",
+    )
+
+    // Diretório extra em outro caso do mesmo corpus.
+    const otherCaseCorpus = copyPresentationCorpus()
+    mkdirSync(path.join(otherCaseCorpus, "manuscripts/case-03/outro"))
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          corpusRoot: otherCaseCorpus,
+          caseId: "case-03",
+          destinationRoot: path.join(newScratch("dshbanca-180-r1d-other-"), "case-03"),
+        }),
+      "unexpected_source_directory",
+    )
+
+    // Diretórios legítimos derivados da allowlist continuam aceitos.
+    const valid = materialize("case-01")
+    expect(valid.workspaceFiles).toContain("secoes/objetivo.tex")
+    expect(valid.bancaFiles).toEqual([BLIND_WORKSPACE_CONFIG_RELATIVE_PATH])
+  })
 })

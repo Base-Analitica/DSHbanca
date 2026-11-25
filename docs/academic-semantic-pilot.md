@@ -116,16 +116,16 @@ A materialização do workspace individual é a preparação hermética que falt
 
 | Contrato da materialização | Regra implementada no helper test-only |
 |---|---|
-| Entrada | Manifesto de apresentação validado + `caseId` exato; sem dedução por proximidade e sem leitura do gabarito. |
-| Allowlist | Exatamente os `content.files[]` do caso; arquivo extra no diretório do caso é recusado, inclusive gabarito copiado para dentro dele. |
+| Entrada | Manifesto de apresentação validado, regular, independente (`nlink === 1`) e confinado à raiz autorizada, sem symlink em componente algum + `caseId` exato; sem dedução por proximidade e sem leitura do gabarito. |
+| Allowlist | Exatamente os `content.files[]` do caso e os diretórios derivados deles; arquivo **ou diretório** extra no diretório do caso é recusado, inclusive vazio, aninhado ou gabarito copiado para dentro dele. |
 | Integridade | SHA-256 por arquivo igual ao manifesto; divergência falha antes de publicar. |
-| Física das fontes | Somente arquivo regular, não symlink, `nlink === 1` (hardlink é recusado por precaução) e realpath dentro do diretório do caso. |
+| Física das fontes | Somente arquivo regular, não symlink, `nlink === 1` (hardlink é recusado por precaução) e realpath dentro do diretório do caso; componentes intermediários do caminho do caso, do destino, do workspace e do controle também não podem ser links. |
 | Paths | Relativos POSIX normalizados; absoluto, traversal e diretórios reservados (`.banca/`, `.git/`) na allowlist são recusados. |
 | Destino | Scratch absoluto, novo ou vazio, do próprio usuário, fora da raiz do corpus e sem sobreposição; destino não vazio nunca é sobrescrito. |
-| Publicação | Staging exclusivo ao lado do destino, validação completa do staging e publicação por entrada; falha parcial remove apenas artefatos criados por essa chamada. |
+| Publicação | Staging exclusivo ao lado do destino, validação completa do staging (incluindo regularidade e `nlink === 1` de cada arquivo) e publicação por entrada; falha parcial remove apenas artefatos criados por essa chamada. |
 | Config persistida | `.banca/project.json` é o **único** arquivo inicial em `.banca`; recarregado por `validateConfig`/`loadConfig` reais e comparado ao contrato experimental. |
 | Blindagem | Sem gabarito, cenários, outros casos, manifesto global, helpers, documentação, histórico Git, checkpoint ou findings no workspace. |
-| Controle | Relatório sanitizado (sem caminho absoluto e sem hash de gabarito) e prompt neutro ficam fora do workspace; o hash do gabarito pertence ao controlador separado. |
+| Controle | Relatório sanitizado com estrutura, identidade e campos permitidos validados contra o workspace (sem caminho absoluto e sem hash de gabarito); o arquivo derivado é filho direto do diretório de controle e a serialização é uma reconstrução validada, nunca o objeto recebido. Prompt neutro idem; hash do gabarito pertence ao controlador separado. |
 
 Configuração efetivamente recarregada nos seis casos: `manuscript.root = "."`, `main`/`bib`/`chapters` do caso, `coverageMode = exhaustive`, `maxCharactersPerBatch = 440`, `compile.enabled = false`, `compile.command = []`, `providers.references.primary = "cache"` sem fallbacks, `mcp.crossrefAcademicEnabled = false`, `externalDependencies = []`. O helper falha fechado se a config estiver ausente, inválida, adulterada ou se a leitura efetiva divergir do contrato — inclusive quando `loadConfig` retornaria defaults silenciosamente. `rubricProfile`/`targetScore` transportados pelo contrato **não** são rubrica nem nota ratificada.
 
