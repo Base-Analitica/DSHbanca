@@ -48,6 +48,7 @@ import {
   neutralAuditPrompt,
   verifyBlindCaseWorkspace,
   writeBlindCaseControlArtifacts,
+  type BlindCaseControlReport,
   type BlindCaseWorkspace,
   type PresentationCorpus,
 } from "./fixtures/academic-semantic-pilot/v1/helpers/blind_case_workspace"
@@ -138,6 +139,25 @@ function copyPresentationCorpus(
     })
   }
   return root
+}
+
+function workspaceInventory(root: string): Array<{ path: string; sha256: string }> {
+  const inventory: Array<{ path: string; sha256: string }> = []
+  const walk = (current: string, prefix: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`
+      if (entry.isDirectory()) {
+        walk(path.join(current, entry.name), relative)
+        continue
+      }
+      inventory.push({
+        path: relative,
+        sha256: sha256Hex(readFileSync(path.join(current, entry.name))),
+      })
+    }
+  }
+  walk(root, "")
+  return inventory.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
 }
 
 function readManifestJson(corpusRoot: string): PilotCorpusManifest {
@@ -458,6 +478,9 @@ describe("Materialização dos seis casos", () => {
     const workspace = sixWorkspaces.get("case-01")
     if (workspace === undefined) throw new Error("workspace case-01 ausente")
     const artifacts = writeBlindCaseControlArtifacts({
+      corpusRoot: CORPUS_ROOT,
+      caseId: "case-01",
+      manifestSha256: corpus.manifestRawSha256,
       controlDir: path.join(controlParent, "case-01"),
       workspaceRoot: workspace.workspaceRoot,
       report: workspace.report,
@@ -495,6 +518,7 @@ describe("Materialização dos seis casos", () => {
     expectBlindError(
       () =>
         writeBlindCaseControlArtifacts({
+          caseId: "case-01",
           controlDir: path.join(workspace.workspaceRoot, "control"),
           workspaceRoot: workspace.workspaceRoot,
           report: workspace.report,
@@ -1141,6 +1165,7 @@ describe("Remediação R1 — relatório de controle, hardlinks, links de origem
       expectBlindError(
         () =>
           writeBlindCaseControlArtifacts({
+            caseId: "case-02",
             controlDir,
             workspaceRoot: workspace.workspaceRoot,
             report: { ...workspace.report, caseId },
@@ -1193,6 +1218,7 @@ describe("Remediação R1 — relatório de controle, hardlinks, links de origem
       expectBlindError(
         () =>
           writeBlindCaseControlArtifacts({
+            caseId: "case-03",
             controlDir,
             workspaceRoot: workspace.workspaceRoot,
             report: report as never,
@@ -1212,6 +1238,7 @@ describe("Remediação R1 — relatório de controle, hardlinks, links de origem
     const controlRoot = newScratch("dshbanca-180-r1a-positive-")
     const controlDir = path.join(controlRoot, "control")
     const artifacts = writeBlindCaseControlArtifacts({
+      caseId: "case-01",
       controlDir,
       workspaceRoot: workspace.workspaceRoot,
       report: workspace.report,
@@ -1423,6 +1450,7 @@ describe("Remediação R1 — relatório de controle, hardlinks, links de origem
     expectBlindError(
       () =>
         writeBlindCaseControlArtifacts({
+          caseId: "case-05",
           controlDir: path.join(controlLinkParent, "control"),
           workspaceRoot: workspace.workspaceRoot,
           report: workspace.report,
@@ -1480,5 +1508,158 @@ describe("Remediação R1 — relatório de controle, hardlinks, links de origem
     const valid = materialize("case-01")
     expect(valid.workspaceFiles).toContain("secoes/objetivo.tex")
     expect(valid.bancaFiles).toEqual([BLIND_WORKSPACE_CONFIG_RELATIVE_PATH])
+  })
+})
+
+describe("Remediação R2 — identidade independente do relatório e inventário do escritor", () => {
+  test("P1-E: troca isolada de caseId é recusada e não cria artefatos de controle", () => {
+    const workspace = materialize("case-01")
+    const before = workspaceInventory(workspace.workspaceRoot)
+    const root = newScratch("dshbanca-180-r2-caseid-")
+    const controlDir = path.join(root, "control")
+    expectBlindError(
+      () =>
+        writeBlindCaseControlArtifacts({
+          corpusRoot: CORPUS_ROOT,
+          caseId: "case-01",
+          controlDir,
+          workspaceRoot: workspace.workspaceRoot,
+          report: { ...workspace.report, caseId: "case-04" },
+        }),
+      "invalid_control_report",
+    )
+    expect(existsSync(controlDir)).toBe(false)
+    expect(existsSync(path.join(root, "report-case-04.json"))).toBe(false)
+    expect(readdirSync(root)).toEqual([])
+    expect(workspaceInventory(workspace.workspaceRoot)).toEqual(before)
+    expect(() =>
+      verifyBlindCaseWorkspace({ caseId: "case-01", workspaceRoot: workspace.workspaceRoot }),
+    ).not.toThrow()
+  })
+
+  test("P1-E: hash do manifesto e versão do corpus adulterados são recusados", () => {
+    const workspace = materialize("case-01")
+    const before = workspaceInventory(workspace.workspaceRoot)
+    const root = newScratch("dshbanca-180-r2-manifest-")
+    const variants: Array<{ label: string; report: BlindCaseControlReport }> = [
+      { label: "manifest", report: { ...workspace.report, manifestSha256: "0".repeat(64) } },
+      { label: "version", report: { ...workspace.report, corpusVersion: "not-the-corpus" } },
+    ]
+    for (const [index, variant] of variants.entries()) {
+      const controlDir = path.join(root, `control-${index}`)
+      expectBlindError(
+        () =>
+          writeBlindCaseControlArtifacts({
+            caseId: "case-01",
+            controlDir,
+            workspaceRoot: workspace.workspaceRoot,
+            report: variant.report,
+          }),
+        "invalid_control_report",
+      )
+      expect(existsSync(controlDir)).toBe(false)
+    }
+    expect(readdirSync(root)).toEqual([])
+
+    // Hash congelado divergente do corpus é recusado antes de escrever.
+    expectBlindError(
+      () =>
+        writeBlindCaseControlArtifacts({
+          caseId: "case-01",
+          manifestSha256: "0".repeat(64),
+          controlDir: path.join(root, "control-frozen"),
+          workspaceRoot: workspace.workspaceRoot,
+          report: workspace.report,
+        }),
+      "manifest_hash_mismatch",
+    )
+    expect(readdirSync(root)).toEqual([])
+    expect(workspaceInventory(workspace.workspaceRoot)).toEqual(before)
+  })
+
+  test("P1-E: identidade deriva do corpus/caseId autorizados, não do relatório recebido", () => {
+    const one = sixWorkspaces.get("case-01")
+    const two = sixWorkspaces.get("case-02")
+    if (one === undefined || two === undefined) throw new Error("workspaces case-01/case-02 ausentes")
+    const before = workspaceInventory(one.workspaceRoot)
+    const root = newScratch("dshbanca-180-r2-identity-")
+
+    // Relatório de outro caso contra o workspace autorizado case-01.
+    expectBlindError(
+      () =>
+        writeBlindCaseControlArtifacts({
+          caseId: "case-01",
+          controlDir: path.join(root, "control-foreign"),
+          workspaceRoot: one.workspaceRoot,
+          report: two.report,
+        }),
+      "invalid_control_report",
+    )
+    expect(readdirSync(root)).toEqual([])
+    expect(workspaceInventory(one.workspaceRoot)).toEqual(before)
+
+    // Caminho positivo: corpus/caseId/hash congelado coerentes.
+    const artifacts = writeBlindCaseControlArtifacts({
+      corpusRoot: CORPUS_ROOT,
+      caseId: "case-01",
+      manifestSha256: corpus.manifestRawSha256,
+      controlDir: path.join(root, "control-valid"),
+      workspaceRoot: one.workspaceRoot,
+      report: one.report,
+    })
+    expect(existsSync(artifacts.reportPath)).toBe(true)
+    expect(JSON.parse(readFileSync(artifacts.reportPath, "utf8"))).toEqual(one.report)
+    expect(path.basename(artifacts.reportPath)).toBe("report-case-01.json")
+  })
+
+  test("P2-F: escritor recusa diretório extra vazio e estado contaminado antes de escrever", () => {
+    // Diretório extra vazio no workspace.
+    const workspace = materialize("case-01")
+    mkdirSync(path.join(workspace.workspaceRoot, "answer-key"))
+    const contaminatedInventory = workspaceInventory(workspace.workspaceRoot)
+    const root = newScratch("dshbanca-180-r2-extradir-")
+    const controlDir = path.join(root, "control")
+    expectBlindError(
+      () =>
+        writeBlindCaseControlArtifacts({
+          caseId: "case-01",
+          controlDir,
+          workspaceRoot: workspace.workspaceRoot,
+          report: workspace.report,
+        }),
+      "workspace_extra_directory",
+    )
+    expect(existsSync(controlDir)).toBe(false)
+    expect(readdirSync(root)).toEqual([])
+    expect(workspaceInventory(workspace.workspaceRoot)).toEqual(contaminatedInventory)
+    expect(existsSync(path.join(workspace.workspaceRoot, "answer-key"))).toBe(true)
+
+    // Remover o diretório extra restaura o caminho positivo.
+    rmSync(path.join(workspace.workspaceRoot, "answer-key"), { recursive: true, force: true })
+    const artifacts = writeBlindCaseControlArtifacts({
+      caseId: "case-01",
+      controlDir,
+      workspaceRoot: workspace.workspaceRoot,
+      report: workspace.report,
+    })
+    expect(existsSync(artifacts.reportPath)).toBe(true)
+
+    // Estado acadêmico contaminado sob `.banca` também é recusado.
+    const stateWorkspace = materialize("case-02")
+    mkdirSync(path.join(stateWorkspace.workspaceRoot, ".banca/analysis"), { recursive: true })
+    const stateRoot = newScratch("dshbanca-180-r2-state-")
+    const stateControlDir = path.join(stateRoot, "control")
+    expectBlindError(
+      () =>
+        writeBlindCaseControlArtifacts({
+          caseId: "case-02",
+          controlDir: stateControlDir,
+          workspaceRoot: stateWorkspace.workspaceRoot,
+          report: stateWorkspace.report,
+        }),
+      "academic_state_contaminated",
+    )
+    expect(existsSync(stateControlDir)).toBe(false)
+    expect(readdirSync(stateRoot)).toEqual([])
   })
 })

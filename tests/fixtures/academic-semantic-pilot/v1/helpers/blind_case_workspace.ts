@@ -24,9 +24,11 @@
  *    planejador reais: fingerprint, fontes ordenadas, chunks, lotes,
  *    caracteres, cobertura e `planId`; todo arquivo do workspace precisa ser
  *    regular, com `nlink === 1` e sem link em componente algum.
- * 6. Valida estrutura, identidade e campos permitidos do relatório de controle
- *    contra o workspace e grava uma reconstrução sanitizada (nunca o objeto
- *    recebido), junto do prompt neutro proposto, ambos separados do workspace.
+ * 6. Deriva a identidade esperada do relatório de controle de fonte
+ *    independente (corpus validado + `caseId` autorizado + hash congelado do
+ *    manifesto, quando fornecido), reconstrói a evidência por
+ *    `verifyBlindCaseWorkspace` e grava essa evidência sanitizada — nunca o
+ *    objeto recebido — junto do prompt neutro proposto, ambos fora do workspace.
  *
  * Limites explícitos (não são PASS):
  * - não comprova isolamento de leitura no host, mount namespace, read-only
@@ -76,7 +78,6 @@ import {
   type ProjectConfig,
 } from "../../../../../src/lib/config"
 import {
-  MANUSCRIPT_FINGERPRINT_VERSION,
   loadCanonicalLatexManuscript,
   type CanonicalLatexManuscriptResult,
 } from "../../../../../src/lib/latex_loader"
@@ -1802,8 +1803,8 @@ export function verifyBlindCaseWorkspace(
 
 /**
  * Campos exatos do relatório de controle sanitizado. Qualquer campo extra é
- * recusado e o relatório gravado é reconstruído a partir dos valores validados,
- * nunca serializando o objeto recebido.
+ * recusado. O conjunto é apenas o esquema de entrada: identidade e valores são
+ * derivados de fonte independente, nunca do relatório recebido.
  */
 const CONTROL_REPORT_KEYS = [
   "reportVersion",
@@ -1826,7 +1827,6 @@ const CONTROL_REPORT_KEYS = [
   "status",
 ] as const
 
-const CONTROL_REPORT_FILE_KEYS = ["path", "sha256"] as const
 const CONTROL_REPORT_CODE = "invalid_control_report"
 
 function assertReportObject(value: unknown): Record<string, unknown> {
@@ -1834,30 +1834,6 @@ function assertReportObject(value: unknown): Record<string, unknown> {
     fail(CONTROL_REPORT_CODE, "control report must be a non-null object")
   }
   return value as Record<string, unknown>
-}
-
-function assertReportString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    fail(CONTROL_REPORT_CODE, `${label} must be a non-empty string`)
-  }
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
-    fail(CONTROL_REPORT_CODE, `${label} must not contain control characters`)
-  }
-  return value
-}
-
-function assertReportHexSha256(value: unknown, label: string): string {
-  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
-    fail(CONTROL_REPORT_CODE, `${label} must be a lowercase SHA-256 hex digest`)
-  }
-  return value
-}
-
-function assertReportPositiveInteger(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
-    fail(CONTROL_REPORT_CODE, `${label} must be a positive integer`)
-  }
-  return value
 }
 
 function assertReportAllowedKeys(record: Record<string, unknown>): void {
@@ -1868,229 +1844,23 @@ function assertReportAllowedKeys(record: Record<string, unknown>): void {
   }
 }
 
-function validateControlReportPaths(value: unknown, label: string): string[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    fail(CONTROL_REPORT_CODE, `${label} must be a non-empty array of relative POSIX paths`)
-  }
-  const paths: string[] = []
-  for (const entry of value) {
-    const relativePath = assertSafeRelativePath(entry, CONTROL_REPORT_CODE, `${label}[]`)
-    paths.push(relativePath)
-  }
-  for (let index = 1; index < paths.length; index += 1) {
-    if (!(paths[index - 1] < paths[index])) {
-      fail(CONTROL_REPORT_CODE, `${label} must be sorted and unique`)
-    }
-  }
-  return paths
-}
-
-function assertPlainRelativeEntryForReport(relativePath: string): void {
-  const first = relativePath.split("/")[0]
-  if (first === BLIND_WORKSPACE_CONFIG_DIR || first === ".git") {
-    fail(
-      CONTROL_REPORT_CODE,
-      `control report path must not use the reserved directory ${first}: ${relativePath}`,
-    )
-  }
-}
-
-function validateControlReportFiles(value: unknown): ManuscriptFileHash[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    fail(CONTROL_REPORT_CODE, "files must be a non-empty array")
-  }
-  const files: ManuscriptFileHash[] = []
-  for (const entry of value) {
-    const record = assertReportObject(entry)
-    const keys = Object.keys(record).sort()
-    const allowed = [...CONTROL_REPORT_FILE_KEYS].sort()
-    if (keys.length !== allowed.length || keys.some((key, index) => key !== allowed[index])) {
-      fail(CONTROL_REPORT_CODE, "each file entry must contain exactly path and sha256")
-    }
-    const relativePath = assertSafeRelativePath(record.path, CONTROL_REPORT_CODE, "files[].path")
-    assertPlainRelativeEntryForReport(relativePath)
-    if (relativePath === BLIND_WORKSPACE_CONFIG_RELATIVE_PATH) {
-      fail(CONTROL_REPORT_CODE, "files must not include the persisted configuration")
-    }
-    files.push({
-      path: relativePath,
-      sha256: assertReportHexSha256(record.sha256, "files[].sha256"),
-    })
-  }
-  for (let index = 1; index < files.length; index += 1) {
-    if (!(files[index - 1].path < files[index].path)) {
-      fail(CONTROL_REPORT_CODE, "files must be sorted and unique")
-    }
-  }
-  return files
-}
-
-function samePaths(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index])
-}
-
-function sameFiles(left: ManuscriptFileHash[], right: ManuscriptFileHash[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every(
-      (value, index) => value.path === right[index].path && value.sha256 === right[index].sha256,
-    )
-  )
-}
-
-/**
- * Valida estrutura, identidade e campos permitidos do relatório de controle
- * contra o workspace materializado. Devolve uma reconstrução sanitizada que é a
- * única coisa serializada; o objeto recebido nunca é escrito.
- *
- * A validação ocorre antes de qualquer `mkdir`/escrita no diretório de controle.
- */
-function validateControlReport(report: unknown, workspaceRoot: string): BlindCaseControlReport {
-  const record = assertReportObject(report)
-  assertReportAllowedKeys(record)
-
-  if (record.reportVersion !== BLIND_CASE_CONTROL_REPORT_VERSION) {
-    fail(CONTROL_REPORT_CODE, "reportVersion is not the supported control report version")
-  }
-  if (record.workspaceVersion !== BLIND_CASE_WORKSPACE_VERSION) {
-    fail(CONTROL_REPORT_CODE, "workspaceVersion is not the supported workspace version")
-  }
-  // Valida o identificador antes de qualquer derivação de caminho.
-  const caseId = assertSafeCaseId(record.caseId)
-  const corpusVersion = assertReportString(record.corpusVersion, "corpusVersion")
-  if (/[\\/]/.test(corpusVersion) || corpusVersion.includes("..")) {
-    fail(CONTROL_REPORT_CODE, "corpusVersion must not contain path separators or traversal")
-  }
-  const manifestSha256 = assertReportHexSha256(record.manifestSha256, "manifestSha256")
-  const configSha256 = assertReportHexSha256(record.configSha256, "configSha256")
-  if (
-    record.promptVersion !== NEUTRAL_PROMPT.version ||
-    record.promptSha256 !== NEUTRAL_PROMPT.sha256
-  ) {
-    fail(CONTROL_REPORT_CODE, "promptVersion/promptSha256 must be the fixed neutral prompt")
-  }
-  const files = validateControlReportFiles(record.files)
-  const manuscriptFingerprint = assertReportHexSha256(
-    record.manuscriptFingerprint,
-    "manuscriptFingerprint",
-  )
-  if (record.fingerprintVersion !== MANUSCRIPT_FINGERPRINT_VERSION) {
-    fail(CONTROL_REPORT_CODE, "fingerprintVersion is not the supported canonical fingerprint version")
-  }
-  const planId = assertReportHexSha256(record.planId, "planId")
-  const batchCount = assertReportPositiveInteger(record.batchCount, "batchCount")
-  const totalCharacters = assertReportPositiveInteger(record.totalCharacters, "totalCharacters")
-  if (record.coveragePercent !== 100) {
-    fail(CONTROL_REPORT_CODE, "coveragePercent must be exactly 100")
-  }
-  const workspaceFiles = validateControlReportPaths(record.workspaceFiles, "workspaceFiles")
-  const expectedWorkspaceFiles = [
-    ...files.map((file) => file.path),
-    BLIND_WORKSPACE_CONFIG_RELATIVE_PATH,
-  ].sort()
-  if (!samePaths(workspaceFiles, expectedWorkspaceFiles)) {
-    fail(CONTROL_REPORT_CODE, "workspaceFiles must match the validated file inventory plus configuration")
-  }
-  const bancaFiles = validateControlReportPaths(record.bancaFiles, "bancaFiles")
-  if (!samePaths(bancaFiles, [BLIND_WORKSPACE_CONFIG_RELATIVE_PATH])) {
-    fail(CONTROL_REPORT_CODE, "bancaFiles must contain only the persisted configuration")
-  }
-  if (record.status !== "materialized") {
-    fail(CONTROL_REPORT_CODE, "status must be materialized")
-  }
-
-  // Identidade: o relatório precisa corresponder fisicamente ao workspace.
-  assertWorkspaceRootPresent(workspaceRoot)
-  const walked = walkWorkspace(workspaceRoot)
-  const actualWorkspaceFiles = walked.files.map((file) => file.path)
-  if (!samePaths(actualWorkspaceFiles, workspaceFiles)) {
-    fail(CONTROL_REPORT_CODE, "workspaceFiles diverges from the materialized workspace inventory")
-  }
-  const actualManuscriptFiles = walked.files.filter(
-    (file) => file.path !== BLIND_WORKSPACE_CONFIG_RELATIVE_PATH,
-  )
-  if (!sameFiles(actualManuscriptFiles, files)) {
-    fail(CONTROL_REPORT_CODE, "files diverges from the materialized workspace hashes")
-  }
-
-  const configFile = path.join(workspaceRoot, ...BLIND_WORKSPACE_CONFIG_RELATIVE_PATH.split("/"))
-  let configBytes: Buffer
-  try {
-    configBytes = readFileSync(configFile)
-  } catch {
-    fail(CONTROL_REPORT_CODE, "the persisted configuration could not be read")
-  }
-  if (sha256Hex(configBytes) !== configSha256) {
-    fail(CONTROL_REPORT_CODE, "configSha256 diverges from the persisted configuration")
-  }
-  let validation: { valid: boolean; errors: string[] }
-  try {
-    validation = validateConfig(workspaceRoot)
-  } catch {
-    fail(CONTROL_REPORT_CODE, "the persisted configuration could not be validated")
-  }
-  if (!validation.valid) {
-    fail(CONTROL_REPORT_CODE, "the persisted configuration is invalid")
-  }
-  let config: Required<ProjectConfig>
-  try {
-    config = loadConfig(workspaceRoot)
-  } catch {
-    fail(CONTROL_REPORT_CODE, "the persisted configuration could not be loaded")
-  }
-  const maxCharactersPerBatch = config.analysis.maxCharactersPerBatch
-  const loaded = loadCanonicalLatexManuscript(workspaceRoot, config)
-  if (loaded.complete !== true || loaded.diagnostics.length > 0 || loaded.fingerprint === null) {
-    fail(CONTROL_REPORT_CODE, "the workspace manuscript could not be loaded canonically")
-  }
-  const plan = planExhaustiveAnalysisBatches(loaded, maxCharactersPerBatch)
-  if (plan.status !== "complete") {
-    fail(CONTROL_REPORT_CODE, "the workspace exhaustive plan is blocked")
-  }
-  if (loaded.fingerprint !== manuscriptFingerprint) {
-    fail(CONTROL_REPORT_CODE, "manuscriptFingerprint diverges from the materialized workspace")
-  }
-  if (loaded.fingerprintVersion !== record.fingerprintVersion) {
-    fail(CONTROL_REPORT_CODE, "fingerprintVersion diverges from the materialized workspace")
-  }
-  const computedPlanId = computePlanIdentity(plan)
-  if (computedPlanId !== planId) {
-    fail(CONTROL_REPORT_CODE, "planId diverges from the materialized workspace plan")
-  }
-  if (
-    plan.batches.length !== batchCount ||
-    plan.coverage.totalCharacters !== totalCharacters ||
-    plan.coverage.coveragePercent !== 100
-  ) {
-    fail(CONTROL_REPORT_CODE, "batchCount/totalCharacters/coveragePercent diverge from the workspace plan")
-  }
-
-  return {
-    reportVersion: BLIND_CASE_CONTROL_REPORT_VERSION,
-    workspaceVersion: BLIND_CASE_WORKSPACE_VERSION,
-    caseId,
-    corpusVersion,
-    manifestSha256,
-    configSha256,
-    promptVersion: NEUTRAL_PROMPT.version,
-    promptSha256: NEUTRAL_PROMPT.sha256,
-    files,
-    manuscriptFingerprint,
-    fingerprintVersion: MANUSCRIPT_FINGERPRINT_VERSION,
-    planId: computedPlanId,
-    batchCount: plan.batches.length,
-    totalCharacters: plan.coverage.totalCharacters,
-    coveragePercent: plan.coverage.coveragePercent,
-    workspaceFiles,
-    bancaFiles,
-    status: "materialized",
-  }
-}
-
 export interface WriteBlindControlArtifactsOptions {
+  /** Raiz do corpus de apresentação validado. Default: corpus v1 versionado. */
+  corpusRoot?: string
+  /**
+   * `caseId` autorizado. É a fonte independente da identidade esperada; o
+   * `caseId` declarado dentro do relatório é apenas dado a comparar.
+   */
+  caseId: string
+  /**
+   * Hash congelado do manifesto de apresentação, quando o controlador o
+   * fornece. Precisa coincidir com o corpus validado e, por consequência, com o
+   * relatório derivado.
+   */
+  manifestSha256?: string
   /** Diretório de controle novo, fora do workspace do auditor. */
   controlDir: string
-  /** Workspace materializado; usado para validar identidade e separação. */
+  /** Workspace materializado; identidade e inventário são revalidados. */
   workspaceRoot: string
   report: BlindCaseControlReport
   prompt?: NeutralAuditPrompt
@@ -2107,36 +1877,79 @@ export interface BlindControlArtifacts {
  * diretório de controle novo, recusando sobreposição com o workspace. O
  * gabarito e seu hash pertencem a outro controlador; este helper não os lê.
  *
- * Before any filesystem effect: o `caseId` e o relatório são validados contra o
- * workspace, o diretório de controle é canonicalizado sem links e o caminho
- * derivado do relatório é provado como filho direto do diretório de controle.
- * Entradas inválidas são recusadas sem criar ou modificar artefatos.
+ * A identidade esperada **não** vem do relatório recebido: é derivada do corpus
+ * de apresentação validado + `caseId` autorizado (+ hash congelado do manifesto,
+ * quando fornecido) e reconstruída por `verifyBlindCaseWorkspace`, que já faz a
+ * verificação integral de inventário, configuração e equivalência acadêmica.
+ * O relatório recebido é comparado campo a campo com essa evidência derivada e
+ * qualquer divergência é recusada antes de criar o diretório de controle ou
+ * escrever qualquer arquivo.
  */
 export function writeBlindCaseControlArtifacts(
   options: WriteBlindControlArtifactsOptions,
 ): BlindControlArtifacts {
+  if (typeof options !== "object" || options === null) {
+    fail(CONTROL_REPORT_CODE, "control artifacts options must be a non-null object")
+  }
+  // caseId autorizado é validado antes de qualquer efeito ou derivação de path.
+  const caseId = assertSafeCaseId(options.caseId)
   if (typeof options.workspaceRoot !== "string" || !path.isAbsolute(options.workspaceRoot)) {
     fail("invalid_workspace_root", "workspace root must be an absolute path")
   }
-  const workspaceRoot = path.resolve(options.workspaceRoot)
-  assertWorkspaceRootPresent(workspaceRoot)
-
-  // Valida identificador, estrutura, campos permitidos e identidade antes de
-  // qualquer mkdir/escrita.
-  const sanitizedReport = validateControlReport(options.report, workspaceRoot)
-
-  const prompt = options.prompt ?? neutralAuditPrompt()
-  if (
-    prompt.sha256 !== sha256Hex(prompt.content) ||
-    prompt.sha256 !== NEUTRAL_PROMPT.sha256 ||
-    prompt.sha256 !== sanitizedReport.promptSha256
-  ) {
-    fail("invalid_prompt", "control artifacts must use the fixed neutral prompt and its recorded hash")
-  }
-
   if (typeof options.controlDir !== "string" || !path.isAbsolute(options.controlDir)) {
     fail("invalid_control_dir", "control directory must be an absolute path")
   }
+  if (options.manifestSha256 !== undefined) {
+    if (
+      typeof options.manifestSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(options.manifestSha256)
+    ) {
+      fail("invalid_manifest_hash", "frozen manifest hash must be a lowercase SHA-256 hex digest")
+    }
+  }
+  const workspaceRoot = path.resolve(options.workspaceRoot)
+
+  // Fonte independente da identidade: corpus de apresentação validado.
+  const corpus = loadPresentationCorpus(options.corpusRoot)
+  if (options.manifestSha256 !== undefined && options.manifestSha256 !== corpus.manifestRawSha256) {
+    fail(
+      "manifest_hash_mismatch",
+      "frozen manifest hash does not match the validated presentation corpus",
+    )
+  }
+
+  // Esquema de entrada apenas: conjunto exato de campos e caseId estruturalmente
+  // seguro. Estes valores não são a fonte de verdade da identidade.
+  const record = assertReportObject(options.report)
+  assertReportAllowedKeys(record)
+  assertSafeCaseId(record.caseId)
+
+  const prompt = options.prompt ?? neutralAuditPrompt()
+  if (prompt.sha256 !== sha256Hex(prompt.content) || prompt.sha256 !== NEUTRAL_PROMPT.sha256) {
+    fail("invalid_prompt", "control artifacts must use the fixed neutral prompt")
+  }
+
+  // Evidência esperada reconstruída pela verificação integral já existente.
+  // Não existe segundo verificador paralelo neste caminho.
+  const verification = verifyBlindCaseWorkspace({
+    corpusRoot: options.corpusRoot,
+    caseId,
+    workspaceRoot,
+  })
+  const expectedReport = verification.report
+  const diffs: string[] = []
+  collectValueDiffs(expectedReport, record, "report", diffs)
+  if (diffs.length > 0) {
+    fail(
+      CONTROL_REPORT_CODE,
+      `report is not bound to the authorized experimental identity at: ${diffs.join(", ")}`,
+    )
+  }
+  if (prompt.sha256 !== expectedReport.promptSha256) {
+    fail("invalid_prompt", "control artifacts must use the neutral prompt recorded in the derived report")
+  }
+
+  // Preflight do caminho de controle: nenhum mkdir/escrita antes de validar tudo.
   const lexicalControlDir = path.resolve(options.controlDir)
   const controlParent = path.dirname(lexicalControlDir)
   const controlBase = path.basename(lexicalControlDir)
@@ -2181,7 +1994,7 @@ export function writeBlindCaseControlArtifacts(
   }
 
   // O arquivo derivado precisa ser filho direto do diretório de controle.
-  const reportName = `report-${sanitizedReport.caseId}.json`
+  const reportName = `report-${expectedReport.caseId}.json`
   const reportPath = path.join(controlDir, reportName)
   if (
     path.dirname(reportPath) !== controlDir ||
@@ -2198,7 +2011,8 @@ export function writeBlindCaseControlArtifacts(
     fail("control_dir_creation_failed", "could not create the control directory")
   }
   try {
-    writeFileSync(reportPath, `${JSON.stringify(sanitizedReport, null, 2)}\n`, { flag: "wx" })
+    // Serializa somente a evidência derivada e validada, nunca o objeto recebido.
+    writeFileSync(reportPath, `${JSON.stringify(expectedReport, null, 2)}\n`, { flag: "wx" })
     writeFileSync(promptPath, prompt.content, { flag: "wx" })
   } catch {
     try {
