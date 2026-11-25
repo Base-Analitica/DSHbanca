@@ -38,6 +38,7 @@ tests/fixtures/academic-semantic-pilot/v1/
 │   └── synthetic-submissions.json       # submissões e adjudicações sintéticas
 └── helpers/
     ├── corpus_contract.ts        # contrato test-only: manifesto, integridade, âncoras
+    ├── blind_case_workspace.ts   # materialização hermética do workspace individual cego (#180)
     └── offline_evaluator.ts      # avaliador offline test-only: completude e métricas
 ```
 
@@ -51,6 +52,10 @@ O [manifesto](manifest.json) é um `presentation_manifest` com `presentationOnly
 - Este README e o manifesto apresentam o material sem associar cada `caseId` ao seu papel experimental. A associação entre caso, tipo e categoria unitária existe apenas no gabarito.
 - O arquivo de [cenários sintéticos](scenarios/synthetic-submissions.json) também é separado: contém submissões e adjudicações fabricadas, marcadas `synthetic: true`, para exercitar o avaliador offline — não é saída de modelo nem auditoria real.
 - IDs de caso e de unidade são únicos; os de unidade são opacos (`u-<8 hex>`) e não codificam a classificação esperada. O pareamento da avaliação não pode depender do texto do identificador.
+
+## Workspace individual cego (issue #180)
+
+O helper [blind_case_workspace.ts](helpers/blind_case_workspace.ts) materializa um workspace individual por caso — allowlist explícita, SHA-256 do manifesto e `.banca/project.json` derivado de `buildProjectConfig` — sem ler o gabarito ou os cenários, sem cópia recursiva ampla e sem publicar sobre destino existente. Ele recusa arquivos extras, hashes divergentes, symlinks, hardlinks, traversal, sobreposição origem/destino, configuração ausente/adulterada e estado acadêmico contaminado; a configuração persistida é recarregada com `validateConfig`/`loadConfig` de produção e o loader/planejador reais comprovam a equivalência acadêmica. O teste hermético é `tests/semantic_pilot_workspace.test.ts` e o protocolo de montagem futura está em `docs/academic-semantic-pilot.md` (§3.2 e §7.1).
 
 ## Os seis casos
 
@@ -123,6 +128,8 @@ O protocolo completo, as condições de isolamento e o registro da campanha est�
 - `answer-key/provisional-ground-truth.json` — gabarito provisório e checklist de ratificação.
 - `scenarios/synthetic-submissions.json` — submissões e adjudicações sintéticas explícitas.
 - `helpers/corpus_contract.ts` e `helpers/offline_evaluator.ts` — contratos e métricas test-only.
+- `helpers/blind_case_workspace.ts` — materialização hermética do workspace individual cego por caso (#180).
 - `tests/semantic_pilot_corpus.test.ts` — teste hermético deste corpus.
+- `tests/semantic_pilot_workspace.test.ts` — teste hermético da materialização e equivalência do workspace individual (#180).
 - `docs/academic-semantic-pilot.md` — protocolo da campanha, isolamento e classificação de evidência.
 - `tests/fixtures/academic-coverage/v1/README.md` — precedente do corpus mecânico de cobertura.
