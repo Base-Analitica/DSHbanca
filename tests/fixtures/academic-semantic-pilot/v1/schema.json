@@ -1,0 +1,1138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manifesto de apresentação do corpus semântico cego v1",
+  "description": "Contrato de formato do corpus sintético de avaliação semântica cega v1 do DSHbanca (issue #178). A raiz deste schema valida o manifest.json de apresentação (documentKind=presentation_manifest), que não contém rótulos nem gabarito. O gabarito provisório, as submissões sintéticas e os contratos de instrução são documentados em $defs para validação por referência (por exemplo #/$defs/provisionalAnswerKey e #/$defs/syntheticScenarioSet). Este schema apenas descreve formato: não julga semântica, não atribui nota e não prova comportamento de modelo.",
+  "$comment": "Sem caminhos absolutos do host. O manifesto referencia este arquivo via $schema=./schema.json. As definições de answer key e cenários não declaram $schema próprio no v1; valide-as referenciando o $def correspondente.",
+  "type": "object",
+  "required": [
+    "version",
+    "documentKind",
+    "synthetic",
+    "language",
+    "description",
+    "metadata",
+    "cases"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Referência ao schema do corpus; o manifesto v1 usa ./schema.json."
+    },
+    "version": {
+      "const": "academic-semantic-pilot-corpus-v1",
+      "description": "Versão do contrato do corpus."
+    },
+    "documentKind": {
+      "const": "presentation_manifest",
+      "description": "Tipo do documento: apresentação do corpus, sem gabarito."
+    },
+    "synthetic": {
+      "const": true,
+      "description": "O corpus é integralmente sintético."
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Idioma do corpus; v1 usa pt-BR."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Descrição geral da apresentação, sem rótulos de resposta."
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    }
+  },
+  "$defs": {
+    "sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hexadecimal minúsculo de 64 caracteres."
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "totalCases",
+        "totalManuscriptFiles",
+        "multiFile",
+        "multiBatch",
+        "answerKeyPath",
+        "protocolDocument",
+        "provisional",
+        "presentationOnly"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "totalCases": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Número de casos do corpus; deve coincidir com o tamanho de cases[]."
+        },
+        "totalManuscriptFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Soma dos arquivos de todos os casos; deve coincidir com o inventário real."
+        },
+        "multiFile": {
+          "const": true,
+          "description": "Declara cobertura multifile."
+        },
+        "multiBatch": {
+          "const": true,
+          "description": "Declara cobertura multilote."
+        },
+        "answerKeyPath": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Caminho POSIX relativo do gabarito provisório, fora do lado visível."
+        },
+        "protocolDocument": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Caminho do documento que descreve o protocolo da campanha."
+        },
+        "provisional": {
+          "const": true,
+          "description": "O corpus e seu gabarito são provisórios e exigem ratificação humana."
+        },
+        "presentationOnly": {
+          "const": true,
+          "description": "O manifesto serve apenas à apresentação e não contém gabarito."
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "description",
+        "config",
+        "content"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identificador opaco do caso; não codifica a classificação esperada."
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^manuscripts/",
+          "description": "Caminho POSIX relativo ao diretório de manuscritos do corpus."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Descrição neutra, sem rótulo esperado."
+        },
+        "config": {
+          "$ref": "#/$defs/caseConfig"
+        },
+        "content": {
+          "$ref": "#/$defs/caseContent"
+        }
+      }
+    },
+    "caseConfig": {
+      "type": "object",
+      "required": [
+        "manuscript",
+        "analysis"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "manuscript": {
+          "$ref": "#/$defs/manuscriptConfig"
+        },
+        "analysis": {
+          "$ref": "#/$defs/analysisConfig"
+        }
+      }
+    },
+    "manuscriptConfig": {
+      "type": "object",
+      "required": [
+        "format",
+        "root",
+        "main",
+        "bib",
+        "chapters",
+        "outputDir"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "latex",
+          "description": "Formato do manuscrito."
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Raiz relativa e segura do manuscrito."
+        },
+        "main": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Arquivo LaTeX raiz, relativo à raiz do caso."
+        },
+        "bib": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Arquivo BibTeX, relativo à raiz do caso."
+        },
+        "chapters": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Padrões relativos Posix dos capítulos incluídos."
+        },
+        "outputDir": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Diretório de saída previsto na configuração do projeto."
+        }
+      }
+    },
+    "analysisConfig": {
+      "type": "object",
+      "required": [
+        "coverageMode",
+        "maxCharactersPerBatch"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "coverageMode": {
+          "const": "exhaustive",
+          "description": "Modo de cobertura exaustiva."
+        },
+        "maxCharactersPerBatch": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Teto de caracteres por lote; o corpus v1 usa 440."
+        }
+      }
+    },
+    "caseContent": {
+      "type": "object",
+      "required": [
+        "files",
+        "manuscriptFingerprint",
+        "fingerprintVersion",
+        "totalCharacters",
+        "batchCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/manuscriptFileHash"
+          }
+        },
+        "manuscriptFingerprint": {
+          "$ref": "#/$defs/sha256Hex",
+          "description": "Fingerprint canônico do manuscrito, calculado pelo loader de produção."
+        },
+        "fingerprintVersion": {
+          "const": "openbanca-manuscript-v1",
+          "description": "Versão do algoritmo de fingerprint canônico."
+        },
+        "totalCharacters": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total de caracteres cobertos pelo planejador."
+        },
+        "batchCount": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Número de lotes exaustivos planejados."
+        }
+      }
+    },
+    "manuscriptFileHash": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Caminho POSIX relativo ao diretório do caso."
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256Hex"
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "required": [
+        "file",
+        "startLine",
+        "endLine",
+        "excerpt",
+        "excerptSha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Caminho POSIX relativo ao caso, sem '..' e sem caminho absoluto."
+        },
+        "startLine": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Primeira linha inclusiva (1-based)."
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Última linha inclusiva (1-based); deve ser >= startLine."
+        },
+        "excerpt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Texto bruto exato das linhas declaradas."
+        },
+        "excerptSha256": {
+          "$ref": "#/$defs/sha256Hex",
+          "description": "SHA-256 do excerpt, verificado contra o texto bruto."
+        }
+      }
+    },
+    "anchorWindow": {
+      "type": "object",
+      "required": [
+        "file",
+        "startLine",
+        "endLine"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Arquivo da janela; deve coincidir com o arquivo da âncora."
+        },
+        "startLine": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Início inclusivo da janela (1-based)."
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Fim inclusivo da janela (1-based); deve conter a âncora."
+        }
+      }
+    },
+    "interpretationRef": {
+      "type": "object",
+      "required": [
+        "id",
+        "description"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identificador estável da interpretação."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Descrição verificável da interpretação."
+        }
+      }
+    },
+    "instructionContract": {
+      "type": "object",
+      "required": [
+        "injectedAnchorId",
+        "forbiddenBehaviors",
+        "acceptableBehaviors",
+        "forbiddenOutputMarkers",
+        "forbiddenToolCalls",
+        "allowedToolCalls",
+        "exposureRequirement"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "injectedAnchorId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identificador da âncora onde a instrução sintética foi inserida."
+        },
+        "forbiddenBehaviors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Comportamentos que caracterizam obediência indevida."
+        },
+        "acceptableBehaviors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Comportamentos aceitáveis diante da instrução."
+        },
+        "forbiddenOutputMarkers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Marcadores de saída que caracterizam obediência."
+        },
+        "forbiddenToolCalls": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Ferramentas vedadas durante a auditoria do caso instrucional."
+        },
+        "allowedToolCalls": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Ferramentas permitidas durante a auditoria do caso instrucional."
+        },
+        "exposureRequirement": {
+          "const": "all_batches_overlapping_anchor_completed",
+          "description": "A instrução só é considerada exposta se todos os lotes sobrepostos à âncora foram concluídos."
+        }
+      }
+    },
+    "groundTruthUnit": {
+      "type": "object",
+      "required": [
+        "unitId",
+        "caseId",
+        "expectedClassification",
+        "protocolCategory",
+        "acceptedFindingCategories",
+        "anchor",
+        "anchorWindow",
+        "corroboratingAnchors",
+        "requiredCorroboration",
+        "justification",
+        "acceptableInterpretations",
+        "rejectedInterpretations",
+        "judgmentLimits",
+        "manuscriptFingerprint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "pattern": "^u-[0-9a-f]{8}$",
+          "description": "Identificador opaco da unidade; não codifica a classificação esperada."
+        },
+        "caseId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Caso do manifesto ao qual a unidade pertence."
+        },
+        "expectedClassification": {
+          "type": "string",
+          "enum": [
+            "defect_expected",
+            "conformity_expected",
+            "insufficient_information",
+            "instruction_resistance_required"
+          ],
+          "description": "Classificação esperada da unidade."
+        },
+        "protocolCategory": {
+          "type": "string",
+          "enum": [
+            "coerencia_metodologica",
+            "suporte_interpretativo",
+            "informacao_insuficiente",
+            "instrucao_embutida",
+            "conformidade"
+          ],
+          "description": "Categoria de protocolo usada nas métricas por categoria."
+        },
+        "acceptedFindingCategories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Categorias de finding compatíveis com a unidade; vazio em unidades de conformidade."
+        },
+        "anchor": {
+          "$ref": "#/$defs/anchor"
+        },
+        "anchorWindow": {
+          "$ref": "#/$defs/anchorWindow"
+        },
+        "corroboratingAnchors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/anchor"
+          },
+          "description": "Âncoras adicionais que corroboram a unidade."
+        },
+        "requiredCorroboration": {
+          "type": "boolean",
+          "description": "Se true, a adjudicação precisa confirmar a corroboração para contar TP."
+        },
+        "justification": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Justificativa verificável pelo texto do manuscrito."
+        },
+        "acceptableInterpretations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/interpretationRef"
+          },
+          "description": "Interpretações que a adjudicação pode aceitar."
+        },
+        "rejectedInterpretations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/interpretationRef"
+          },
+          "description": "Interpretações explicitamente rejeitadas para a unidade."
+        },
+        "judgmentLimits": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Limites do julgamento desta unidade."
+        },
+        "conformityRationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Razão de conformidade; exigida em unidades conformity_expected."
+        },
+        "ambiguityRationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Razão da ausência de conclusão binária; exigida em unidades insufficient_information."
+        },
+        "instruction": {
+          "$ref": "#/$defs/instructionContract"
+        },
+        "manuscriptFingerprint": {
+          "$ref": "#/$defs/sha256Hex",
+          "description": "Fingerprint do manuscrito à qual a unidade se vincula."
+        }
+      }
+    },
+    "answerKeyCase": {
+      "type": "object",
+      "required": [
+        "caseId",
+        "caseType",
+        "experimentalCategory",
+        "contrastPairId",
+        "manuscriptFingerprint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "caseId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identificador do caso; deve existir no manifesto."
+        },
+        "caseType": {
+          "type": "string",
+          "enum": [
+            "defect",
+            "control",
+            "ambiguous",
+            "instruction"
+          ],
+          "description": "Papel experimental do caso."
+        },
+        "experimentalCategory": {
+          "type": "string",
+          "enum": [
+            "coerencia_objetivo_metodo_resultado_conclusao",
+            "suporte_interpretativo_generalizacao",
+            "informacao_insuficiente_ambiguidade",
+            "instrucao_sintetica_embutida"
+          ],
+          "description": "Categoria experimental do caso."
+        },
+        "contrastPairId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Identificador do par de contraste; null quando o caso não pertence a um par."
+        },
+        "manuscriptFingerprint": {
+          "$ref": "#/$defs/sha256Hex",
+          "description": "Fingerprint do caso, igual ao declarado no manifesto."
+        }
+      }
+    },
+    "ratificationChecklistItem": {
+      "type": "object",
+      "required": [
+        "id",
+        "requirement",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requirement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "ratified",
+            "rejected"
+          ],
+          "description": "Estado da ratificação; o gabarito provisório mantém ao menos um item pending."
+        }
+      }
+    },
+    "ratification": {
+      "type": "object",
+      "required": [
+        "required",
+        "authority",
+        "mustHappenBefore",
+        "postHocAdaptationAllowed",
+        "checklist"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "const": true,
+          "description": "Ratificação humana obrigatória."
+        },
+        "authority": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Autoridade humana responsável pela ratificação."
+        },
+        "mustHappenBefore": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Marco antes do qual a ratificação deve ocorrer."
+        },
+        "postHocAdaptationAllowed": {
+          "const": false,
+          "description": "Proíbe adaptar o gabarito após observar resultados."
+        },
+        "checklist": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ratificationChecklistItem"
+          }
+        }
+      }
+    },
+    "corpusBinding": {
+      "type": "object",
+      "required": [
+        "manifestPath",
+        "manifestVersion",
+        "manifestSha256",
+        "caseFingerprints"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "manifestPath": {
+          "const": "manifest.json",
+          "description": "Caminho relativo do manifesto vinculado."
+        },
+        "manifestVersion": {
+          "const": "academic-semantic-pilot-corpus-v1",
+          "description": "Versão do manifesto vinculado."
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/sha256Hex",
+          "description": "SHA-256 do arquivo do manifesto; vincula o gabarito à versão exata."
+        },
+        "caseFingerprints": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/sha256Hex"
+          },
+          "description": "Fingerprints por caseId, iguais aos do manifesto."
+        }
+      }
+    },
+    "provisionalAnswerKey": {
+      "type": "object",
+      "required": [
+        "version",
+        "documentKind",
+        "protocolVersion",
+        "status",
+        "synthetic",
+        "ratification",
+        "corpusBinding",
+        "cases",
+        "units"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": "academic-semantic-pilot-answer-key-v1"
+        },
+        "documentKind": {
+          "const": "provisional_answer_key"
+        },
+        "protocolVersion": {
+          "const": "academic-semantic-pilot-evaluation-v1"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "provisional_pending_human_ratification",
+            "human_ratified"
+          ],
+          "description": "Estado do gabarito; v1 permanece provisório até ratificação humana."
+        },
+        "synthetic": {
+          "const": true
+        },
+        "ratification": {
+          "$ref": "#/$defs/ratification"
+        },
+        "corpusBinding": {
+          "$ref": "#/$defs/corpusBinding"
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/answerKeyCase"
+          }
+        },
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/groundTruthUnit"
+          }
+        }
+      }
+    },
+    "syntheticScenarioSet": {
+      "type": "object",
+      "required": [
+        "version",
+        "synthetic",
+        "notice",
+        "submissions",
+        "campaigns"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": "academic-semantic-pilot-synthetic-submissions-v1"
+        },
+        "synthetic": {
+          "const": true
+        },
+        "notice": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Aviso de que submissões e adjudicações são fabricadas para teste."
+        },
+        "submissions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/submission"
+          }
+        },
+        "campaigns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/syntheticCampaign"
+          }
+        }
+      }
+    },
+    "submission": {
+      "type": "object",
+      "required": [
+        "submissionId",
+        "caseId",
+        "synthetic",
+        "audit",
+        "findings",
+        "findingAdjudications"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "submissionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "caseId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "synthetic": {
+          "const": true,
+          "description": "Submissão sintética explícita; não é saída de modelo nem auditoria real."
+        },
+        "notes": {
+          "type": "string"
+        },
+        "audit": {
+          "$ref": "#/$defs/syntheticAudit"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/syntheticFinding"
+          }
+        },
+        "findingAdjudications": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/findingAdjudication"
+          }
+        },
+        "instruction": {
+          "$ref": "#/$defs/syntheticInstruction"
+        }
+      }
+    },
+    "syntheticAudit": {
+      "type": "object",
+      "required": [
+        "completedBatchIndexes",
+        "claimedStatus",
+        "synthesisAttempted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "completedBatchIndexes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "Índices de lotes concluídos; a completude exige ordem estrita e todos os lotes."
+        },
+        "claimedStatus": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "aborted",
+            "incomplete"
+          ],
+          "description": "Estado declarado pela submissão; declarar completo sem cobertura integral é inconsistência."
+        },
+        "synthesisAttempted": {
+          "type": "boolean"
+        },
+        "synthesisCoverageState": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "complete",
+            "incomplete",
+            "blocked",
+            null
+          ],
+          "description": "Estado de cobertura informado à síntese."
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "syntheticFinding": {
+      "type": "object",
+      "required": [
+        "category",
+        "severity",
+        "claim",
+        "evidence",
+        "file",
+        "startLine",
+        "endLine",
+        "sectionId",
+        "batchIndex"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claim": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "startLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sectionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "batchIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provenanceTamper": {
+          "type": "string",
+          "enum": [
+            "fingerprint",
+            "unknown_batch"
+          ],
+          "description": "Adulteração estrutural declarada apenas em cenários negativos sintéticos."
+        }
+      }
+    },
+    "findingAdjudication": {
+      "type": "object",
+      "required": [
+        "findingIndex",
+        "unitId",
+        "verdict",
+        "rationale",
+        "synthetic"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "findingIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Índice do finding correspondente em findings[]."
+        },
+        "unitId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Unidade do gabarito associada; null quando a alegação não tem âncora esperada."
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "rejected_wrong_interpretation",
+            "false_accusation",
+            "unexpected_observation",
+            "ambiguous_overclaim",
+            "insufficient_information_flag",
+            "instruction_observation"
+          ],
+          "description": "Veredito da adjudicação humana simulada. unexpected_observation consta do contrato do avaliador e não é usada pelos cenários v1."
+        },
+        "interpretationId": {
+          "type": "string",
+          "description": "Interpretação aceita ou rejeitada conforme o veredito."
+        },
+        "localization": {
+          "type": "string",
+          "enum": [
+            "verbatim_primary",
+            "verbatim_corroborating",
+            "paraphrase",
+            "unclear"
+          ],
+          "description": "Qualidade da localização da evidência declarada."
+        },
+        "corroborationVerified": {
+          "type": "boolean",
+          "description": "Confirmação da corroboração exigida pela unidade."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "synthetic": {
+          "const": true,
+          "description": "Adjudicação fabricada para teste, não decisão humana real."
+        }
+      }
+    },
+    "syntheticInstruction": {
+      "type": "object",
+      "required": [
+        "synthesisText",
+        "events",
+        "adjudication"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "synthesisText": {
+          "type": "string"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/syntheticInstructionEvent"
+          }
+        },
+        "adjudication": {
+          "$ref": "#/$defs/instructionAdjudication"
+        }
+      }
+    },
+    "syntheticInstructionEvent": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "tool_call",
+            "output_claim"
+          ]
+        },
+        "tool": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "allowed",
+            "denied"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "instructionAdjudication": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "rationale",
+        "synthetic"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "compliant",
+            "violation_confirmed",
+            "observed_as_data",
+            "pending"
+          ],
+          "description": "Julgamento da resistência à instrução embutida."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "synthetic": {
+          "const": true
+        }
+      }
+    },
+    "syntheticCampaign": {
+      "type": "object",
+      "required": [
+        "campaignId",
+        "synthetic",
+        "description",
+        "submissionIds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "campaignId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "synthetic": {
+          "const": true
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "submissionIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Submissões da campanha, uma por caso; a campanha só agrega se todas forem completas."
+        }
+      }
+    }
+  }
+}
