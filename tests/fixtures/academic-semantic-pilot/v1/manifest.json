@@ -1,0 +1,338 @@
+{
+  "$schema": "./schema.json",
+  "version": "academic-semantic-pilot-corpus-v1",
+  "documentKind": "presentation_manifest",
+  "synthetic": true,
+  "language": "pt-BR",
+  "description": "Corpus sintético versionado de avaliação semântica cega do DSHbanca. Este arquivo é apenas a apresentação dos manuscritos: não contém rótulos, gabarito, categorias esperadas ou gabarito de defeitos.",
+  "metadata": {
+    "totalCases": 6,
+    "totalManuscriptFiles": 36,
+    "multiFile": true,
+    "multiBatch": true,
+    "answerKeyPath": "answer-key/provisional-ground-truth.json",
+    "protocolDocument": "docs/academic-semantic-pilot.md",
+    "provisional": true,
+    "presentationOnly": true
+  },
+  "cases": [
+    {
+      "id": "case-01",
+      "path": "manuscripts/case-01",
+      "description": "Manuscrito sintético multifile apresentado na avaliação cega; o manifesto não declara rótulo esperado.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [
+            "secoes/*.tex"
+          ],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 440
+        }
+      },
+      "content": {
+        "files": [
+          {
+            "path": "main.tex",
+            "sha256": "10f1691b50c92f948c250fc14772a5b9ffaa94a760095326c83ebf98641a3cf1"
+          },
+          {
+            "path": "referencias.bib",
+            "sha256": "95867df980b5825d887a7ac7adafd91e349e47f80edeb5ac41c30188424d997c"
+          },
+          {
+            "path": "secoes/conclusao.tex",
+            "sha256": "ddc4b9468085e3e250526e5bbd049310598ebdb1e7be71afc7d14b613133b4e5"
+          },
+          {
+            "path": "secoes/metodo.tex",
+            "sha256": "88cb3d1f754ae0a990e2e4847c3ddffa500278593a0211a3ac867e06b96cd9e6"
+          },
+          {
+            "path": "secoes/objetivo.tex",
+            "sha256": "74c076801ef8221ca3254e6c739b28da72f6b222b9850f07d1052544aa44c91e"
+          },
+          {
+            "path": "secoes/resultados.tex",
+            "sha256": "62e3ddca2eb853bc7991b4a5659af4da2c6c91f71b95bb39db76e11bb593fd70"
+          }
+        ],
+        "manuscriptFingerprint": "7fd71c534c10beddab485c71b140592d42aa8d83032e416428af369ffb73bce1",
+        "fingerprintVersion": "openbanca-manuscript-v1",
+        "totalCharacters": 1559,
+        "batchCount": 4
+      }
+    },
+    {
+      "id": "case-02",
+      "path": "manuscripts/case-02",
+      "description": "Manuscrito sintético multifile apresentado na avaliação cega; o manifesto não declara rótulo esperado.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [
+            "secoes/*.tex"
+          ],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 440
+        }
+      },
+      "content": {
+        "files": [
+          {
+            "path": "main.tex",
+            "sha256": "78f8bdf0a789296128985cc15fc986815ddff55cc5980eb1c813734ace1a9374"
+          },
+          {
+            "path": "referencias.bib",
+            "sha256": "95867df980b5825d887a7ac7adafd91e349e47f80edeb5ac41c30188424d997c"
+          },
+          {
+            "path": "secoes/conclusao.tex",
+            "sha256": "3d141b35474ef46d04d6b1edc5896914a9064faed18f72e241ecf510fedaf961"
+          },
+          {
+            "path": "secoes/metodo.tex",
+            "sha256": "11a1d647cfed70c0d6e6644c45b49507a9dc2205ac042c290fe4610847dc8722"
+          },
+          {
+            "path": "secoes/objetivo.tex",
+            "sha256": "d3184525ea2ff4097bc17b01801d4401565d7032cdbc1e1d21ef6aa2ea05fcf7"
+          },
+          {
+            "path": "secoes/resultados.tex",
+            "sha256": "d61ea7b1e3534d5e5c4a9aa87f8faf1d1b6a279eadb54ea585e6057bbd3c9484"
+          }
+        ],
+        "manuscriptFingerprint": "7a30dcf3f5aa1796879553d320ae2dd6ab3f4fcbce3fb23efbfc07607c79359a",
+        "fingerprintVersion": "openbanca-manuscript-v1",
+        "totalCharacters": 1380,
+        "batchCount": 4
+      }
+    },
+    {
+      "id": "case-03",
+      "path": "manuscripts/case-03",
+      "description": "Manuscrito sintético multifile apresentado na avaliação cega; o manifesto não declara rótulo esperado.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [
+            "secoes/*.tex"
+          ],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 440
+        }
+      },
+      "content": {
+        "files": [
+          {
+            "path": "main.tex",
+            "sha256": "b8a0a8c1f57ec1731aa25aed654152339404d8c353610321abfcafa7dc95a903"
+          },
+          {
+            "path": "referencias.bib",
+            "sha256": "95867df980b5825d887a7ac7adafd91e349e47f80edeb5ac41c30188424d997c"
+          },
+          {
+            "path": "secoes/conclusao.tex",
+            "sha256": "aecda03d9e7a970f9734cf6d43bb2ebbd1a405a1497c64c012b6838cb8475711"
+          },
+          {
+            "path": "secoes/metodo.tex",
+            "sha256": "73f058f480b92a72b6c3269f0863e246bb94c76470aed3542303c41cb4d2e8ff"
+          },
+          {
+            "path": "secoes/objetivo.tex",
+            "sha256": "98f1d1fc98b1ff83a93105c91978350604c055cab08a2a2e7c97e55111dc56f6"
+          },
+          {
+            "path": "secoes/resultados.tex",
+            "sha256": "971f81e0373dc946b031fe61c511d36ea1c4b57ebc20e6ea75fee5034bc785d5"
+          }
+        ],
+        "manuscriptFingerprint": "75ce15b25e329ba13e996155d0bdd1fa805224f86ba3e3542cd1c2fa662c35ec",
+        "fingerprintVersion": "openbanca-manuscript-v1",
+        "totalCharacters": 1252,
+        "batchCount": 3
+      }
+    },
+    {
+      "id": "case-04",
+      "path": "manuscripts/case-04",
+      "description": "Manuscrito sintético multifile apresentado na avaliação cega; o manifesto não declara rótulo esperado.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [
+            "secoes/*.tex"
+          ],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 440
+        }
+      },
+      "content": {
+        "files": [
+          {
+            "path": "main.tex",
+            "sha256": "5bc312a7ba0de60f57abbe398463792bbac8063d63797a8ba373610372f1cab4"
+          },
+          {
+            "path": "referencias.bib",
+            "sha256": "95867df980b5825d887a7ac7adafd91e349e47f80edeb5ac41c30188424d997c"
+          },
+          {
+            "path": "secoes/conclusao.tex",
+            "sha256": "79ba854cdbc6fab6b807da0f8d2adeea1c4f32af532ffb56ddc24720674da411"
+          },
+          {
+            "path": "secoes/metodo.tex",
+            "sha256": "88cb3d1f754ae0a990e2e4847c3ddffa500278593a0211a3ac867e06b96cd9e6"
+          },
+          {
+            "path": "secoes/objetivo.tex",
+            "sha256": "7621b347b134129cd457d3973a6665ff858994875fda0a129d05fe7a8ba57c7a"
+          },
+          {
+            "path": "secoes/resultados.tex",
+            "sha256": "62e3ddca2eb853bc7991b4a5659af4da2c6c91f71b95bb39db76e11bb593fd70"
+          }
+        ],
+        "manuscriptFingerprint": "45672b4174b4e48b05f8e8385009da490830d6cad396094679c6378be21491c2",
+        "fingerprintVersion": "openbanca-manuscript-v1",
+        "totalCharacters": 1667,
+        "batchCount": 4
+      }
+    },
+    {
+      "id": "case-05",
+      "path": "manuscripts/case-05",
+      "description": "Manuscrito sintético multifile apresentado na avaliação cega; o manifesto não declara rótulo esperado.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [
+            "secoes/*.tex"
+          ],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 440
+        }
+      },
+      "content": {
+        "files": [
+          {
+            "path": "main.tex",
+            "sha256": "a71a42006a2c8b83c94082798291a160bed55d90da5d22b71346e2566b91bbb9"
+          },
+          {
+            "path": "referencias.bib",
+            "sha256": "95867df980b5825d887a7ac7adafd91e349e47f80edeb5ac41c30188424d997c"
+          },
+          {
+            "path": "secoes/conclusao.tex",
+            "sha256": "20ba4d665452d4d022cd3d0ef8d57e0d43ad8770814b15a2f177739c685634a8"
+          },
+          {
+            "path": "secoes/metodo.tex",
+            "sha256": "11a1d647cfed70c0d6e6644c45b49507a9dc2205ac042c290fe4610847dc8722"
+          },
+          {
+            "path": "secoes/objetivo.tex",
+            "sha256": "3edb2cb3d6fffd03624937ecfc548f02058ee03f2c53b22f18a5256b3f1c62aa"
+          },
+          {
+            "path": "secoes/resultados.tex",
+            "sha256": "d61ea7b1e3534d5e5c4a9aa87f8faf1d1b6a279eadb54ea585e6057bbd3c9484"
+          }
+        ],
+        "manuscriptFingerprint": "0a1e99ea84d656d8dc4cdb7a92ee052db3b6456efe92e85ec4e1223d5a74a955",
+        "fingerprintVersion": "openbanca-manuscript-v1",
+        "totalCharacters": 1461,
+        "batchCount": 4
+      }
+    },
+    {
+      "id": "case-06",
+      "path": "manuscripts/case-06",
+      "description": "Manuscrito sintético multifile apresentado na avaliação cega; o manifesto não declara rótulo esperado.",
+      "config": {
+        "manuscript": {
+          "format": "latex",
+          "root": ".",
+          "main": "main.tex",
+          "bib": "referencias.bib",
+          "chapters": [
+            "secoes/*.tex"
+          ],
+          "outputDir": "trabalhos"
+        },
+        "analysis": {
+          "coverageMode": "exhaustive",
+          "maxCharactersPerBatch": 440
+        }
+      },
+      "content": {
+        "files": [
+          {
+            "path": "main.tex",
+            "sha256": "e296bb27b31621649da7b279fa45643acbc50dfac78d55237264c3886037cb16"
+          },
+          {
+            "path": "referencias.bib",
+            "sha256": "95867df980b5825d887a7ac7adafd91e349e47f80edeb5ac41c30188424d997c"
+          },
+          {
+            "path": "secoes/conclusao.tex",
+            "sha256": "e257ff598cea9eed171cffd163923fd41ada368cb1c04930943dc468167916c8"
+          },
+          {
+            "path": "secoes/metodo.tex",
+            "sha256": "5a02e37b90c7370ed6534b74bec9409e92ceb16b3f2112808b2c4d0a0a916e61"
+          },
+          {
+            "path": "secoes/objetivo.tex",
+            "sha256": "fb629abd46c3eab21fc357dec753559d476748a570c4640c04d7eb57766cddba"
+          },
+          {
+            "path": "secoes/resultados.tex",
+            "sha256": "ce386f39e80a3cd3d730cd148180205e593db0834eaa8c31269d9164b4a5d44d"
+          }
+        ],
+        "manuscriptFingerprint": "ece58073a656d2b215d3945698ec754f0f94059f487703420d3d54c15ea416c9",
+        "fingerprintVersion": "openbanca-manuscript-v1",
+        "totalCharacters": 1190,
+        "batchCount": 3
+      }
+    }
+  ]
+}
