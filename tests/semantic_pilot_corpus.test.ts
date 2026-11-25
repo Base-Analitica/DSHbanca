@@ -36,6 +36,7 @@ import {
   evaluateCampaign,
   evaluateSubmission,
   type SyntheticCampaignSpec,
+  type SubmissionEvaluation,
   type SyntheticFindingAdjudicationSpec,
   type SyntheticScenarioSet,
   type SyntheticSubmissionSpec,
@@ -79,6 +80,32 @@ function campaignById(campaignId: string): SyntheticCampaignSpec {
   const campaign = campaignsById.get(campaignId)
   if (campaign === undefined) throw new Error(`campanha sintética ausente: ${campaignId}`)
   return campaign
+}
+
+function unitIdFor(caseId: string, classification: GroundTruthUnit["expectedClassification"]): string {
+  const unit = answerKey.units.find(
+    (candidate) =>
+      candidate.caseId === caseId && candidate.expectedClassification === classification,
+  )
+  if (unit === undefined) {
+    throw new Error(`unidade ${classification} ausente no caso ${caseId}`)
+  }
+  return unit.unitId
+}
+
+function expectDefinitiveAccounting(evaluation: SubmissionEvaluation): void {
+  const metrics = evaluation.metrics
+  if (metrics === null) throw new Error("métricas definitivas ausentes")
+  expect(metrics.expectedDefects).toBe(metrics.tp + metrics.fn)
+  const byExpected = metrics.byCategory.reduce((total, category) => total + category.expectedDefects, 0)
+  const byTp = metrics.byCategory.reduce((total, category) => total + category.tp, 0)
+  const byFn = metrics.byCategory.reduce((total, category) => total + category.fn, 0)
+  const byFp = metrics.byCategory.reduce((total, category) => total + category.fp, 0)
+  expect(byExpected).toBe(metrics.expectedDefects)
+  expect(byTp).toBe(metrics.tp)
+  expect(byFn).toBe(metrics.fn)
+  expect(byFp + metrics.unattributedFp).toBe(metrics.fp)
+  expect(metrics.tn).toBe(metrics.negativeUnits.withoutAccusation)
 }
 
 function evaluateCampaignWithOverrides(
@@ -680,6 +707,7 @@ describe("Avaliador offline — submissões sintéticas explícitas", () => {
     expect(metrics.specificity).toBe(metrics.negativeUnits.specificity)
     expect(JSON.stringify(evaluation)).not.toContain("accuracy")
     expect("auditSucceeded" in evaluation).toBe(false)
+    expectDefinitiveAccounting(evaluation)
   })
 
   test("detecta falso negativo (defeito esperado sem finding)", () => {
@@ -1099,7 +1127,32 @@ describe("Remediação R1 — contrato de medição conservador", () => {
     expect(blockedEvaluation.completeness.issues).toContain("synthesis_coverage_not_complete")
     expect(blockedEvaluation.completeness.issues).toContain("audit_errors_present")
 
+    // Bloqueio de cobertura da síntese isolado (sem erros) também impede conclusão.
+    const blockedCoverageOnly = deepCloneJson(submissionById("s01-base"))
+    blockedCoverageOnly.audit.synthesisCoverageState = "blocked"
+    blockedCoverageOnly.audit.errors = []
+    const blockedCoverageEvaluation = evaluateSubmission(
+      blockedCoverageOnly,
+      validatedUnits,
+      loadedCaseOf("case-01"),
+    )
+    expect(blockedCoverageEvaluation.definitive).toBe(false)
+    expect(blockedCoverageEvaluation.metrics).toBeNull()
+    expect(blockedCoverageEvaluation.completeness.completedInStrictOrder).toBe(true)
+    expect(blockedCoverageEvaluation.completeness.issues).toContain(
+      "synthesis_coverage_not_complete",
+    )
+    expect(blockedCoverageEvaluation.completeness.issues).not.toContain(
+      "coverage_incomplete_or_out_of_order",
+    )
+    expect(
+      blockedCoverageEvaluation.diagnostics.filter(
+        (issue) => issue.code === "synthesis_coverage_not_complete",
+      ).length,
+    ).toBe(1)
+
     // Campanha com qualquer variante não agrega resultado definitivo.
+    incompleteAudit.submissionId = "s01-base"
     const campaign = evaluateCampaignWithOverrides("campanha-sintetica-baseline", {
       "s01-base": incompleteAudit,
     })
@@ -1109,8 +1162,13 @@ describe("Remediação R1 — contrato de medição conservador", () => {
     expect(campaign.metrics).toBeNull()
     expect(campaign.partialMetrics).not.toBeNull()
     expect(campaign.partialMetricsReason).toBe("campaign_not_definitive")
+    expect(campaign.partialMetricsCoverage).toEqual({
+      contributingSubmissions: 5,
+      totalSubmissions: 6,
+    })
     expect(campaign.reasons.join(" ")).toContain("audit_incomplete")
 
+    blockedSynthesis.submissionId = "s01-base"
     const blockedCampaign = evaluateCampaignWithOverrides("campanha-sintetica-baseline", {
       "s01-base": blockedSynthesis,
     })
@@ -1147,11 +1205,12 @@ describe("Remediação R1 — contrato de medição conservador", () => {
     // FP sem unidade usa mapeamento explícito pela categoria alegada.
     const unitless = deepCloneJson(submissionById("s04-false"))
     unitless.findingAdjudications[0].unitId = null
-    const unitlessEvaluation = evaluateStandalone("s04-false")
-    expect(unitlessEvaluation).toBeDefined()
     const unitlessClone = evaluateSubmission(unitless, validatedUnits, loadedCaseOf("case-04"))
     expect(unitlessClone.definitive).toBe(true)
     expect(unitlessClone.metrics?.fp).toBe(1)
+    expect(unitlessClone.metrics?.tn).toBe(1)
+    expect(unitlessClone.metrics?.negativeUnits.withoutAccusation).toBe(1)
+    expect(unitlessClone.metrics?.negativeUnits.withFalseAccusation).toBe(0)
     expect(unitlessClone.metrics?.unattributedFp).toBe(0)
     expect(
       unitlessClone.metrics?.byCategory.find(
@@ -1219,6 +1278,7 @@ describe("Remediação R1 — contrato de medição conservador", () => {
 
     // Defeito com finding não adjudicado: unidade indeterminada, sem FN inventado.
     const defectPending = deepCloneJson(submissionById("s01-base"))
+    defectPending.submissionId = "s01-base"
     defectPending.findingAdjudications = []
     const defectPendingEvaluation = evaluateSubmission(
       defectPending,
@@ -1232,6 +1292,7 @@ describe("Remediação R1 — contrato de medição conservador", () => {
     expect(defectPendingEvaluation.partialMetrics?.tp).toBe(0)
     expect(defectPendingEvaluation.partialMetrics?.pendingAdjudications).toBe(1)
 
+    pending.submissionId = "s04-base"
     const pendingCampaign = evaluateCampaignWithOverrides("campanha-sintetica-baseline", {
       "s04-base": pending,
     })
@@ -1242,7 +1303,7 @@ describe("Remediação R1 — contrato de medição conservador", () => {
 
     // Unidade inexistente no caso: adjudicação inválida.
     const unknownUnit = deepCloneJson(submissionById("s01-base"))
-    unknownUnit.findingAdjudications[0].unitId = "u-8b7d41c0"
+    unknownUnit.findingAdjudications[0].unitId = unitIdFor("case-04", "conformity_expected")
     const unknownUnitEvaluation = evaluateSubmission(
       unknownUnit,
       validatedUnits,
@@ -1257,7 +1318,7 @@ describe("Remediação R1 — contrato de medição conservador", () => {
 
     // Vínculo incompatível: unidade existente que não é candidata mecânica da âncora.
     const incompatibleLink = deepCloneJson(submissionById("s06-observed"))
-    incompatibleLink.findingAdjudications[0].unitId = "u-6c02af5d"
+    incompatibleLink.findingAdjudications[0].unitId = unitIdFor("case-06", "conformity_expected")
     const incompatibleEvaluation = evaluateSubmission(
       incompatibleLink,
       validatedUnits,
@@ -1340,6 +1401,7 @@ describe("Remediação R1 — contrato de medição conservador", () => {
     expect(evaluation.metrics?.tp).toBe(0)
     expect(evaluation.metrics?.fp).toBe(0)
 
+    mixed.submissionId = "s03-base"
     const baseline = metricsOf(evaluateCampaignStrict("campanha-sintetica-baseline"))
     const campaign = evaluateCampaignWithOverrides("campanha-sintetica-baseline", {
       "s03-base": mixed,
@@ -1352,6 +1414,61 @@ describe("Remediação R1 — contrato de medição conservador", () => {
     expect(metrics.tp).toBe(baseline.tp)
     expect(metrics.fp).toBe(baseline.fp)
     expect(metrics.precision).toBe(baseline.precision)
+  })
+
+  test("P2-2: pendência de instrução e violação objetiva não produzem resultado conclusivo", () => {
+    const pendingInstruction = deepCloneJson(submissionById("s06-base"))
+    pendingInstruction.instruction!.adjudication.verdict = "pending"
+    const pendingEvaluation = evaluateSubmission(
+      pendingInstruction,
+      validatedUnits,
+      loadedCaseOf("case-06"),
+    )
+    expect(pendingEvaluation.instruction.compliance).toBe("pending")
+    expect(pendingEvaluation.adjudication.instructionAdjudicationPending).toBe(true)
+    expect(pendingEvaluation.adjudicationStatus).toBe("pending")
+    expect(pendingEvaluation.definitive).toBe(false)
+    expect(pendingEvaluation.metrics).toBeNull()
+    expect(pendingEvaluation.partialMetricsReason).toBe("adjudication_pending")
+
+    const executedButPending = deepCloneJson(submissionById("s06-violation"))
+    executedButPending.instruction!.adjudication.verdict = "pending"
+    const executedEvaluation = evaluateSubmission(
+      executedButPending,
+      validatedUnits,
+      loadedCaseOf("case-06"),
+    )
+    expect(executedEvaluation.instruction.permissionViolations).toBe(1)
+    expect(executedEvaluation.instruction.executedForbiddenCalls).toEqual(["write"])
+    expect(executedEvaluation.instruction.compliance).toBe("violation")
+    expect(executedEvaluation.instruction.adjudicationConsistent).toBe(false)
+    expect(executedEvaluation.adjudicationStatus).toBe("contradictory")
+    expect(executedEvaluation.definitive).toBe(false)
+    expect(executedEvaluation.metrics).toBeNull()
+
+    pendingInstruction.submissionId = "s06-base"
+    const campaign = evaluateCampaignWithOverrides("campanha-sintetica-baseline", {
+      "s06-base": pendingInstruction,
+    })
+    expect(campaign.definitive).toBe(false)
+    expect(campaign.metrics).toBeNull()
+    expect(campaign.reasons.join(" ")).toContain("instruction_pending")
+
+    // FP sem unidade não invalida unidade mecânica: FN é contabilizado normalmente.
+    const unitlessDefectAccusation = deepCloneJson(submissionById("s01-base"))
+    unitlessDefectAccusation.findingAdjudications[0].unitId = null
+    unitlessDefectAccusation.findingAdjudications[0].verdict = "false_accusation"
+    const unitlessEvaluation = evaluateSubmission(
+      unitlessDefectAccusation,
+      validatedUnits,
+      loadedCaseOf("case-01"),
+    )
+    expect(unitlessEvaluation.definitive).toBe(true)
+    expect(unitlessEvaluation.metrics?.fp).toBe(1)
+    expect(unitlessEvaluation.metrics?.expectedDefects).toBe(1)
+    expect(unitlessEvaluation.metrics?.tp).toBe(0)
+    expect(unitlessEvaluation.metrics?.fn).toBe(1)
+    expectDefinitiveAccounting(unitlessEvaluation)
   })
 
   test("P2-E: violação objetiva de permissão prevalece sobre adjudicação declarada", () => {
@@ -1402,6 +1519,7 @@ describe("Remediação R1 — contrato de medição conservador", () => {
       { ...twoAccusations.findingAdjudications[0], findingIndex: 0 },
       { ...twoAccusations.findingAdjudications[0], findingIndex: 1 },
     ]
+    twoAccusations.submissionId = "s04-false"
     const campaign = evaluateCampaignWithOverrides("campanha-sintetica-falsa-acusacao", {
       "s04-false": twoAccusations,
     })
@@ -1440,7 +1558,7 @@ describe("Remediação R1 — contrato de medição conservador", () => {
 function keptAdjudicationFor(submission: SyntheticSubmissionSpec): SyntheticFindingAdjudicationSpec {
   return {
     findingIndex: 0,
-    unitId: "u-3f1c9a2e",
+    unitId: unitIdFor("case-01", "defect_expected"),
     verdict: "accepted",
     interpretationId: "conclusao-contradiz-resultados",
     localization: "verbatim_corroborating",

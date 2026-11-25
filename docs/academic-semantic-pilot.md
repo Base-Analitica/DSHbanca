@@ -26,13 +26,13 @@ Separação dos níveis de evidência usados nesta entrega:
 |---|---|
 | **FACT (inspeção read-only)** | Arquivos do repositório na base `7e3e30e` e no HEAD de autoria da branch (SHA final reportado na PR #179) e pacotes instalados do host `0.2.1-rc.5` |
 | **DOCUMENTED CLAIM** | Protocolo acadêmico, guard read-only e comportamento do host descritos nas fontes citadas, ainda não observados em execução desta campanha |
-| **PASS local (autoria)** | Teste hermético do corpus ([`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts)): 31 testes, 0 falhas e 742 expects no ambiente local; CI/revisão no SHA final é o gate válido |
+| **PASS local (autoria)** | Teste hermético do corpus ([`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts)): 32 testes, 0 falhas e 784 expects no ambiente local; CI/revisão no SHA final é o gate válido |
 | **NOT RUN** | E2E DSH e campanha com modelo |
 | **BLOCKED** | Protocolo cego completo, gabarito isolado, teto/custo/retenção/cancelamento e caminho automatizado no preset real |
 
 A fronteira arquitetural é a de sempre: o DSH é o único harness e o Cordis é a integração nativa; o DSHbanca não implementa runner de agente, roteador/seleção de modelo, autenticação de provedor, cliente LLM, *permission engine* ou segundo harness ([README](../README.md#L7), [AGENTS.md](../AGENTS.md#L28-L56)). A futura campanha só pode consumir APIs, eventos, permissões e lifecycle **do host**.
 
-**FACT (inspeção):** os helpers são explicitamente test-only e não importam DSH, rede, subprocesso, modelo ou credencial ([`corpus_contract.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/corpus_contract.ts#L1-L17), [`offline_evaluator.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/offline_evaluator.ts#L1-L18)). O teste hermético do corpus é [`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts); o resultado local de autoria (`PASS`, 31 testes) é evidência de teste hermético reportada no corpo da PR/CI e no checklist da entrega; **não** vale como execução de modelo/DSH nem como `PASS` no SHA final antes do CI.
+**FACT (inspeção):** os helpers são explicitamente test-only e não importam DSH, rede, subprocesso, modelo ou credencial ([`corpus_contract.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/corpus_contract.ts#L1-L17), [`offline_evaluator.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/offline_evaluator.ts#L1-L18)). O teste hermético do corpus é [`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts); o resultado local de autoria (`PASS`, 32 testes) é evidência de teste hermético reportada no corpo da PR/CI e no checklist da entrega; **não** vale como execução de modelo/DSH nem como `PASS` no SHA final antes do CI.
 
 ## 2. Corpus e gabarito
 
@@ -210,7 +210,7 @@ O host instalado foi inspecionado read-only e declara `AgentRegistry.create/disp
 | Retenção verificável | **BLOCKED** | Política e verificação de retenção aprovadas |
 | Cancelamento em voo e watchdog por caso | **BLOCKED** | Comportamento observado no host, sem força maior |
 | Comportamento de modelo | **NOT RUN / BLOCKED** | Autorização específica + execução observada e registrada |
-| Corpus, contrato e gabarito herméticos | **PASS local (autoria; 31 testes herméticos) + BLOCKED até CI/revisão no SHA final** | CI verde e revisão independente no SHA final |
+| Corpus, contrato e gabarito herméticos | **PASS local (autoria; 32 testes herméticos) + BLOCKED até CI/revisão no SHA final** | CI verde e revisão independente no SHA final |
 | E2E DSH sem modelo *nesta PR* | **NOT RUN** | Autorização humana específica e execução no SHA publicado |
 | Campanha com modelo *nesta PR* | **NOT RUN** | Nenhuma autorização; não solicitada |
 
