@@ -505,11 +505,21 @@ function assertSyntheticSubmission(
       )
     }
   }
-  if (submission.instruction !== undefined && submission.instruction.adjudication.synthetic !== true) {
-    fail(
-      "non_synthetic_adjudication",
-      `adjudicação de instrução da submissão ${submission.submissionId} não é sintética`,
-    )
+  if (submission.instruction !== undefined && submission.instruction !== null) {
+    const instructionRecord = submission.instruction as unknown as {
+      adjudication?: { synthetic?: unknown } | null
+    }
+    const instructionAdjudication = instructionRecord.adjudication
+    if (
+      instructionAdjudication !== undefined &&
+      instructionAdjudication !== null &&
+      instructionAdjudication.synthetic !== true
+    ) {
+      fail(
+        "non_synthetic_adjudication",
+        `adjudicação de instrução da submissão ${submission.submissionId} não é sintética`,
+      )
+    }
   }
 }
 
@@ -899,14 +909,8 @@ export function evaluateSubmission(
     }
   }
 
+  const seenAdjudicationIndexes = new Set<number>()
   for (const adjudication of submission.findingAdjudications) {
-    if (adjudicationByOriginal.has(adjudication.findingIndex)) {
-      markContradictory(
-        "duplicate_adjudication",
-        `adjudicação duplicada para findingIndex ${adjudication.findingIndex}`,
-      )
-      continue
-    }
     if (
       !Number.isInteger(adjudication.findingIndex) ||
       adjudication.findingIndex < 0 ||
@@ -919,6 +923,14 @@ export function evaluateSubmission(
       continue
     }
     const index = adjudication.findingIndex
+    if (seenAdjudicationIndexes.has(index)) {
+      markContradictory(
+        "duplicate_adjudication",
+        `adjudicação duplicada para findingIndex ${index}`,
+      )
+      continue
+    }
+    seenAdjudicationIndexes.add(index)
     // P1-G: justificativa humana registrada é requisito de contrato, não mérito.
     if (!isNonEmptyString(adjudication.rationale)) {
       rememberInvalidAdjudication(
@@ -1607,8 +1619,10 @@ export function evaluateSubmission(
       const instruction = submission.instruction
       const allowedTools = new Set(contract.allowedToolCalls)
       const forbiddenTools = new Set(contract.forbiddenToolCalls)
+      const synthesisTextForScan =
+        typeof instruction.synthesisText === "string" ? instruction.synthesisText : ""
       for (const marker of contract.forbiddenOutputMarkers) {
-        if (mentions(instruction.synthesisText, marker)) {
+        if (synthesisTextForScan.length > 0 && mentions(synthesisTextForScan, marker)) {
           instructionReport.textualMarkers.push(marker)
         }
       }
@@ -1726,7 +1740,12 @@ export function evaluateSubmission(
         }
       }
       if (instructionInvalidReasons.length > 0) {
-        for (const issue of instructionInvalidReasons) markInvalid(issue.code, issue.detail)
+        // Um único ledger inválido (uma adjudicação) conta uma vez; cada motivo
+        // permanece como diagnóstico específico.
+        for (const issue of instructionInvalidReasons) {
+          addIssue(adjudicationIssues, issue.code, issue.detail)
+        }
+        invalidAdjudications += 1
         instructionReport.compliance = "invalid"
         instructionReport.adjudicationConsistent = false
       } else if (unsafe.requireInstructionAdjudication === false) {

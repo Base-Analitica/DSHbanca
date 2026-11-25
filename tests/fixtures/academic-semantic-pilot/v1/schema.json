@@ -1056,7 +1056,8 @@
           ]
         },
         "tool": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "outcome": {
           "type": "string",
@@ -1066,12 +1067,50 @@
           ]
         },
         "kind": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "detail": {
           "type": "string"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tool_call"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "tool",
+              "outcome"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "output_claim"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "kind"
+            ]
+          }
+        }
+      ]
     },
     "instructionAdjudication": {
       "type": "object",

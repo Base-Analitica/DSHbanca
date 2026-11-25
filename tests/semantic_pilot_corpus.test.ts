@@ -1845,3 +1845,92 @@ describe("Remediação R2 — rationale, vínculo explícito e validação runti
     expect(metrics.fn).toBe(1)
   })
 })
+
+describe("Remediação R2 — bordas de validação runtime (P3 da revisão interna)", () => {
+  function loadedCaseOf(caseId: string): LoadedPilotCase {
+    const loadedCase = loadedCases.get(caseId)
+    if (loadedCase === undefined) throw new Error(`caso não carregado: ${caseId}`)
+    return loadedCase
+  }
+
+  test("synthesisText não textual falha fechado com diagnóstico, sem TypeError", () => {
+    const evaluation = deepCloneJson(submissionById("s06-base"))
+    ;(evaluation.instruction as unknown as { synthesisText: unknown }).synthesisText = 123
+    let result: SubmissionEvaluation | null = null
+    expect(() => {
+      result = evaluateSubmission(evaluation, validatedUnits, loadedCaseOf("case-06"))
+    }).not.toThrow()
+    expect(result!.instruction.compliance).toBe("invalid")
+    expect(result!.definitive).toBe(false)
+    expect(result!.metrics).toBeNull()
+    expect(
+      result!.diagnostics.some((issue) => issue.code === "invalid_instruction_synthesis_text"),
+    ).toBe(true)
+  })
+
+  test("duplicata de adjudicação é detectada mesmo quando a primeira é inválida", () => {
+    const duplicated = deepCloneJson(submissionById("s01-base"))
+    const invalid = deepCloneJson(duplicated.findingAdjudications[0])
+    invalid.rationale = ""
+    duplicated.findingAdjudications = [invalid, deepCloneJson(duplicated.findingAdjudications[0])]
+    const evaluation = evaluateSubmission(duplicated, validatedUnits, loadedCaseOf("case-01"))
+    expect(evaluation.adjudicationStatus).toBe("contradictory")
+    expect(evaluation.definitive).toBe(false)
+    expect(
+      evaluation.adjudication.issues.some((issue) => issue.code === "duplicate_adjudication"),
+    ).toBe(true)
+    expect(
+      evaluation.adjudication.issues.some(
+        (issue) => issue.code === "invalid_adjudication_rationale",
+      ),
+    ).toBe(true)
+  })
+
+  test("P1-H cobre rejected_wrong_interpretation e campanha de instrução inválida", () => {
+    const rejectedUnitless = deepCloneJson(submissionById("s01-wrong"))
+    rejectedUnitless.findingAdjudications[0].unitId = null
+    const rejectedEvaluation = evaluateSubmission(
+      rejectedUnitless,
+      validatedUnits,
+      loadedCaseOf("case-01"),
+    )
+    expect(rejectedEvaluation.adjudicationStatus).toBe("invalid")
+    expect(
+      rejectedEvaluation.diagnostics.some(
+        (issue) => issue.code === "unitless_accusation_with_mechanical_candidate",
+      ),
+    ).toBe(true)
+
+    const invalidInstruction = deepCloneJson(submissionById("s06-base"))
+    ;(invalidInstruction.instruction!.adjudication as unknown as { verdict: string }).verdict =
+      "unrecognized"
+    invalidInstruction.submissionId = "s06-base"
+    const campaign = evaluateCampaignWithOverrides("campanha-sintetica-baseline", {
+      "s06-base": invalidInstruction,
+    })
+    expect(campaign.definitive).toBe(false)
+    expect(campaign.metrics).toBeNull()
+    expect(campaign.reasons.join(" ")).toContain("instruction_invalid")
+  })
+
+  test("falha de proveniência em unidade ambígua não vira abstenção silenciosa", () => {
+    const ambiguousProvenance = deepCloneJson(submissionById("s03-overclaim"))
+    ambiguousProvenance.findings[0].provenanceTamper = "fingerprint"
+    const evaluation = evaluateSubmission(
+      ambiguousProvenance,
+      validatedUnits,
+      loadedCaseOf("case-03"),
+    )
+    expect(evaluation.adjudicationStatus).toBe("invalid")
+    expect(evaluation.definitive).toBe(false)
+    expect(evaluation.metrics).toBeNull()
+    expect(evaluation.ambiguous.pending).toBe(1)
+    expect(evaluation.ambiguous.silentAbstention).toBe(0)
+    expect(evaluation.ambiguous.overclaims).toBe(0)
+    expect(
+      evaluation.diagnostics.some(
+        (issue) => issue.code === "provenance_failure_at_nondefect_unit",
+      ),
+    ).toBe(true)
+  })
+})
