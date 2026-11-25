@@ -17,16 +17,18 @@
  *    declarados, a ausência de extras, symlinks, aliases, hardlinks e realpaths
  *    fora da raiz do caso, inclusive componentes intermediários.
  * 3. Materializa um scratch novo (sem sobrescrever nada) com os arquivos do
- *    caso e um `.banca/project.json` derivado de `buildProjectConfig`.
+ *    caso, uma cópia **byte a byte** da instrução canônica do preset auditor
+ *    (#184) e um `.banca/project.json` derivado de `buildProjectConfig`.
  * 4. Recarrega a configuração com `validateConfig`/`loadConfig` de produção e
  *    recusa qualquer divergência (inclusive fallback silencioso para defaults).
  * 5. Compara o workspace materializado com o caso original usando o loader e o
  *    planejador reais: fingerprint, fontes ordenadas, chunks, lotes,
  *    caracteres, cobertura e `planId`; todo arquivo do workspace precisa ser
- *    regular, com `nlink === 1` e sem link em componente algum.
+ *    regular, com `nlink === 1` e sem link em componente algum, e os bytes da
+ *    instrução materializada precisam ser idênticos à fonte canônica versionada.
  * 6. Deriva a identidade esperada do relatório de controle de fonte
  *    independente (corpus validado + `caseId` autorizado + hash congelado do
- *    manifesto, quando fornecido), reconstrói a evidência por
+ *    manifesto e da instrução, quando fornecidos), reconstrói a evidência por
  *    `verifyBlindCaseWorkspace` e grava essa evidência sanitizada — nunca o
  *    objeto recebido — junto do prompt neutro proposto, ambos fora do workspace.
  *
@@ -87,14 +89,40 @@ import {
 } from "../../../../../src/lib/analysis_coverage"
 import { computePlanIdentity } from "../../../../../src/lib/analysis_checkpoint"
 
-/** Versões explícitas dos artefatos de workspace e de controle. */
-export const BLIND_CASE_WORKSPACE_VERSION = "academic-semantic-pilot-blind-case-workspace-v1"
-export const BLIND_CASE_CONTROL_REPORT_VERSION = "blind-case-control-report-v1"
+/**
+ * Versões explícitas dos artefatos de workspace, de relatório e do contrato da
+ * instrução canônica (workspace v2, issue #184).
+ */
+export const BLIND_CASE_WORKSPACE_VERSION = "academic-semantic-pilot-blind-case-workspace-v2"
+export const BLIND_CASE_CONTROL_REPORT_VERSION = "blind-case-control-report-v2"
+export const BLIND_INSTRUCTION_CONTRACT_VERSION = "blind-case-auditor-instruction-v1"
 export const NEUTRAL_AUDIT_PROMPT_VERSION = "blind-audit-neutral-prompt-v1"
 
 /** Caminho do único arquivo persistido inicialmente em `.banca`. */
 export const BLIND_WORKSPACE_CONFIG_DIR = ".banca"
 export const BLIND_WORKSPACE_CONFIG_RELATIVE_PATH = ".banca/project.json"
+
+/**
+ * Instrução canônica do preset auditor.
+ *
+ * O workspace cego v2 passa a conter exatamente este arquivo adicional, na
+ * raiz, com o basename que o carregador nativo de instruções do DSH procura
+ * (`instructionFileCandidates` em `cordis.patch.yml`). A fonte é o asset
+ * versionado do produto, resolvido a partir do próprio módulo — nunca do
+ * relatório, do manifesto, do `caseId` ou de conteúdo fornecido pelo workspace.
+ */
+export const BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH = "banca-auditor.md"
+export const BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH = "assets/dsh/agents/banca-auditor.md"
+
+/**
+ * Orçamento declarado pelo loader nativo de instruções (`maxBytes` em
+ * `cordis.patch.yml`). O valor aqui é uma cópia do contrato observado na base;
+ * o teste hermético confere a paridade com o patch em vez de presumi-la.
+ */
+export const BLIND_INSTRUCTION_MAX_BYTES = 65536
+
+/** Raiz do repositório derivada da localização deste módulo test-only. */
+const BLIND_REPOSITORY_ROOT = path.resolve(import.meta.dir, "../../../../..")
 
 /** Erro controlado do helper, com código estável para os testes. */
 export class BlindWorkspaceError extends Error {
@@ -255,11 +283,26 @@ function assertRelativeManuscriptRoot(root: unknown): string {
 }
 
 function assertPlainRelativeEntry(relativePath: string): void {
-  const first = relativePath.split("/")[0]
-  if (first === BLIND_WORKSPACE_CONFIG_DIR || first === ".git") {
+  const segments = relativePath.split("/")
+  const first = segments[0]
+  const reservedDirectories = [BLIND_WORKSPACE_CONFIG_DIR, ".git", ".dsh"]
+  if (reservedDirectories.includes(first)) {
     fail(
       "invalid_allowlist_path",
       `allowlist path must not use the reserved directory ${first}: ${relativePath}`,
+    )
+  }
+  const reservedRootFiles = [BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH, "AGENTS.md", "CLAUDE.md"]
+  if (segments.length === 1 && reservedRootFiles.includes(relativePath)) {
+    fail(
+      "invalid_allowlist_path",
+      `allowlist path must not use the reserved workspace root file ${relativePath}`,
+    )
+  }
+  if (segments[segments.length - 1] === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+    fail(
+      "invalid_allowlist_path",
+      `allowlist path must not declare an auditor instruction copy: ${relativePath}`,
     )
   }
 }
@@ -297,6 +340,191 @@ function assertNoSymlinkComponents(absolutePath: string, code: string): void {
     if (current !== resolved && !stat.isDirectory()) {
       fail(code, "path must not contain non-directory components")
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Instrução canônica do auditor (asset versionado, independente do caso)
+// ---------------------------------------------------------------------------
+
+/** Identidade sanitizada da instrução, derivada da fonte canônica do produto. */
+export interface BlindInstructionIdentity {
+  /** Versão do contrato de proveniência da instrução. */
+  contractVersion: string
+  /** Caminho relativo dentro do workspace (basename procurado pelo loader). */
+  relativePath: string
+  /** Caminho relativo da fonte canônica versionada no produto. */
+  sourceRelativePath: string
+  /** Tamanho da fonte em bytes (igual ao da cópia materializada). */
+  byteLength: number
+  /** SHA-256 da fonte, derivado dos bytes lidos — nunca autodeclarado. */
+  sha256: string
+}
+
+interface CanonicalBlindInstruction extends BlindInstructionIdentity {
+  bytes: Buffer
+}
+
+function assertInstructionDigest(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    fail("invalid_instruction_hash", "authorized instruction hash must be a lowercase SHA-256 hex digest")
+  }
+  return value
+}
+
+function instructionIdentityOf(instruction: CanonicalBlindInstruction): BlindInstructionIdentity {
+  return {
+    contractVersion: instruction.contractVersion,
+    relativePath: instruction.relativePath,
+    sourceRelativePath: instruction.sourceRelativePath,
+    byteLength: instruction.byteLength,
+    sha256: instruction.sha256,
+  }
+}
+
+/**
+ * Lê e valida a instrução canônica do auditor a partir da fonte versionada.
+ *
+ * A fonte padrão é o asset do produto resolvido a partir da localização deste
+ * módulo (`assets/dsh/agents/banca-auditor.md`); ela não depende de relatório,
+ * manifesto ou `caseId` e nunca é lida do workspace do auditor.
+ *
+ * A checagem é fail-closed e acontece antes de qualquer escrita: a fonte tem de
+ * ser arquivo regular, sem symlink em componente algum, `nlink === 1`, com
+ * realpath idêntico ao caminho declarado, não vazia, dentro do orçamento do
+ * loader e — quando o controlador congela um digest autorizado — exatamente
+ * esse digest.
+ *
+ * `instructionSourceRoot` existe **somente para teste** (exercitar recusas de
+ * fonte ausente/adulterada/link) e exige `instructionSha256`: não existe modo
+ * frouxo que aceite Markdown arbitrário sem digest autorizado.
+ */
+function inspectInstructionSource(sourceRoot: string): { bytes: Buffer; sha256: string } {
+  // O caminho é confinado por construção: a constante relativa não contém
+  // traversal, separador absoluto nem segmento reservado, e a raiz é absoluta.
+  const sourcePath = path.join(sourceRoot, ...BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH.split("/"))
+  assertNoSymlinkComponents(sourcePath, "instruction_source_symlink")
+  let sourceStat: Stats
+  try {
+    sourceStat = lstatSync(sourcePath)
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") {
+      fail("instruction_source_missing", "the canonical auditor instruction is missing from the versioned product assets")
+    }
+    fail("instruction_source_inspection_failed", "could not inspect the canonical auditor instruction")
+  }
+  if (sourceStat.isSymbolicLink()) {
+    fail("instruction_source_symlink", "the canonical auditor instruction is a symbolic link")
+  }
+  if (!sourceStat.isFile()) {
+    fail("instruction_source_not_regular", "the canonical auditor instruction is not a regular file")
+  }
+  if (sourceStat.nlink !== 1) {
+    fail(
+      "instruction_source_hardlink",
+      `the canonical auditor instruction has ${sourceStat.nlink} hardlinks and cannot be proven independent`,
+    )
+  }
+  // Limite de bytes conferido antes de ler o conteúdo (fail-closed contra fonte
+  // excessiva); a checagem pós-leitura abaixo confirma o tamanho efetivo.
+  if (sourceStat.size > BLIND_INSTRUCTION_MAX_BYTES) {
+    fail(
+      "instruction_source_too_large",
+      `the canonical auditor instruction exceeds the loader budget of ${BLIND_INSTRUCTION_MAX_BYTES} bytes`,
+    )
+  }
+  let sourceReal: string
+  try {
+    sourceReal = realpathSync(sourcePath)
+  } catch {
+    fail("instruction_source_missing", "the canonical auditor instruction is missing from the versioned product assets")
+  }
+  if (sourceReal !== sourcePath) {
+    fail("instruction_source_alias", "the canonical auditor instruction resolves through a link or alias")
+  }
+  let bytes: Buffer
+  try {
+    bytes = readFileSync(sourceReal)
+  } catch {
+    fail("instruction_source_unreadable", "could not read the canonical auditor instruction")
+  }
+  if (bytes.byteLength === 0) {
+    fail("instruction_source_empty", "the canonical auditor instruction is empty")
+  }
+  if (bytes.byteLength > BLIND_INSTRUCTION_MAX_BYTES) {
+    fail(
+      "instruction_source_too_large",
+      `the canonical auditor instruction exceeds the loader budget of ${BLIND_INSTRUCTION_MAX_BYTES} bytes`,
+    )
+  }
+  return { bytes, sha256: sha256Hex(bytes) }
+}
+
+/**
+ * Lê e valida a instrução canônica do auditor a partir da fonte versionada.
+ *
+ * A fonte é sempre o asset do produto resolvido a partir da localização deste
+ * módulo (`assets/dsh/agents/banca-auditor.md`); ela não depende de relatório,
+ * manifesto ou `caseId` e nunca é lida do workspace do auditor. A checagem é
+ * fail-closed e acontece antes de qualquer escrita: a fonte tem de ser arquivo
+ * regular, sem symlink em componente algum, `nlink === 1`, com realpath
+ * idêntico ao caminho declarado, não vazia, com tamanho conferido antes da
+ * leitura, dentro do orçamento do loader e — quando o controlador congela um
+ * digest autorizado — exatamente esse digest.
+ *
+ * `instructionSourceRoot` existe **somente para teste** (exercitar recusas de
+ * fonte ausente/adulterada/link). Ele não é um modo alternativo de conteúdo:
+ * além de exigir `instructionSha256`, a fonte alternativa precisa conter
+ * **exatamente os mesmos bytes** do asset canônico; qualquer Markdown diferente
+ * é recusado como `instruction_source_hash_mismatch`. Não existe caminho que
+ * aceite instrução arbitrária fornecida pelo chamador, pelo workspace ou pelo
+ * relatório.
+ */
+function loadCanonicalBlindInstruction(params: {
+  instructionSourceRoot?: string
+  instructionSha256?: string
+}): CanonicalBlindInstruction {
+  const canonical = inspectInstructionSource(BLIND_REPOSITORY_ROOT)
+  let source = canonical
+  if (params.instructionSourceRoot !== undefined) {
+    if (
+      typeof params.instructionSourceRoot !== "string" ||
+      params.instructionSourceRoot.length === 0 ||
+      params.instructionSourceRoot.includes("\u0000") ||
+      !path.isAbsolute(params.instructionSourceRoot)
+    ) {
+      fail("invalid_instruction_source_root", "instruction source root must be an absolute path")
+    }
+    if (params.instructionSha256 === undefined) {
+      fail(
+        "invalid_instruction_source_root",
+        "an alternative instruction source root requires the authorized instruction hash; arbitrary Markdown is refused",
+      )
+    }
+    const alternative = inspectInstructionSource(path.resolve(params.instructionSourceRoot))
+    if (alternative.sha256 !== canonical.sha256 || alternative.bytes.byteLength !== canonical.bytes.byteLength) {
+      fail(
+        "instruction_source_hash_mismatch",
+        "the alternative instruction source diverges from the canonical versioned asset; only relocated canonical bytes are accepted",
+      )
+    }
+    source = alternative
+  }
+  const expectedSha256 =
+    params.instructionSha256 === undefined ? null : assertInstructionDigest(params.instructionSha256)
+  if (expectedSha256 !== null && source.sha256 !== expectedSha256) {
+    fail(
+      "instruction_source_hash_mismatch",
+      "the canonical auditor instruction diverges from the authorized frozen digest",
+    )
+  }
+  return {
+    contractVersion: BLIND_INSTRUCTION_CONTRACT_VERSION,
+    relativePath: BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
+    sourceRelativePath: BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH,
+    byteLength: source.bytes.byteLength,
+    sha256: source.sha256,
+    bytes: source.bytes,
   }
 }
 
@@ -931,6 +1159,7 @@ function runFailureHook<T>(hook: ((argument: T) => void) | undefined, argument: 
 function writeStagedWorkspace(
   stagingRoot: string,
   sources: ValidatedCaseSources,
+  instruction: CanonicalBlindInstruction,
   expectedConfig: ProjectConfig,
   hooks: TestHooks | undefined,
 ): void {
@@ -949,6 +1178,13 @@ function writeStagedWorkspace(
     }
     written += 1
     runFailureHook(hooks?.afterStagedFiles, written, "after_staged_files")
+  }
+  // Instrução canônica: bytes exatos da fonte, na raiz, com escrita exclusiva.
+  const instructionTarget = path.join(stagingRoot, BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)
+  try {
+    writeFileSync(instructionTarget, instruction.bytes, { flag: "wx" })
+  } catch {
+    fail("staging_write_failed", `could not stage the canonical auditor instruction: ${instruction.relativePath}`)
   }
   try {
     saveConfig(stagingRoot, expectedConfig)
@@ -1239,6 +1475,9 @@ function walkWorkspace(workspaceRoot: string): WorkspaceInventory {
     for (const entry of entries) {
       const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`
       if (entry.isSymbolicLink()) {
+        if (relative === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+          fail("instruction_symlink", "the materialized auditor instruction is a symbolic link")
+        }
         unsafe.push(relative)
         continue
       }
@@ -1256,16 +1495,28 @@ function walkWorkspace(workspaceRoot: string): WorkspaceInventory {
           fail("workspace_inspection_failed", "could not inspect a materialized workspace file")
         }
         if (fileStat.isSymbolicLink()) {
+          if (relative === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+            fail("instruction_symlink", "the materialized auditor instruction is a symbolic link")
+          }
           unsafe.push(relative)
           continue
         }
         if (!fileStat.isFile()) {
+          if (relative === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+            fail("instruction_not_regular", "the materialized auditor instruction is not a regular file")
+          }
           unsafe.push(relative)
           continue
         }
         // Hardlink compartilha inode com outra árvore e não é fisicamente
         // independente: recusar antes de ler/hashear.
         if (fileStat.nlink !== 1) {
+          if (relative === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+            fail(
+              "instruction_hardlink",
+              `the materialized auditor instruction has ${fileStat.nlink} hardlinks and cannot be proven independent`,
+            )
+          }
           fail(
             "workspace_hardlink",
             `materialized workspace file has ${fileStat.nlink} hardlinks and cannot be proven independent: ${relative}`,
@@ -1279,6 +1530,9 @@ function walkWorkspace(workspaceRoot: string): WorkspaceInventory {
         }
         files.push({ path: relative, sha256: sha256Hex(bytes) })
         continue
+      }
+      if (relative === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+        fail("instruction_not_regular", "the materialized auditor instruction is not a regular file")
       }
       unsafe.push(relative)
     }
@@ -1312,25 +1566,36 @@ interface BlindInventory {
   manuscriptFiles: ManuscriptFileHash[]
   workspaceFiles: string[]
   bancaFiles: string[]
+  instruction: BlindInstructionIdentity
 }
 
 function assertBlindInventory(
   inventory: WorkspaceInventory,
   caseDef: PilotCorpusCase,
+  instruction: CanonicalBlindInstruction,
 ): BlindInventory {
   const expectedManuscript = caseDef.content.files
     .map((file) => ({ path: file.path, sha256: file.sha256 }))
     .sort(byRelativePath)
   const expectedPaths = [
     ...expectedManuscript.map((file) => file.path),
+    BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
     BLIND_WORKSPACE_CONFIG_RELATIVE_PATH,
   ].sort()
   const actualPaths = inventory.files.map((file) => file.path)
 
+  // Um diretório com o nome reservado da instrução é substituição inválida, não
+  // arquivo ausente: classificar antes do inventário de arquivos.
+  if (inventory.dirs.includes(BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)) {
+    fail("instruction_not_regular", "the materialized auditor instruction is not a regular file")
+  }
+
   for (const expectedPath of expectedPaths) {
-    if (!actualPaths.includes(expectedPath)) {
-      fail("workspace_missing_file", `materialized workspace is missing a required file: ${expectedPath}`)
+    if (actualPaths.includes(expectedPath)) continue
+    if (expectedPath === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+      fail("instruction_missing", "materialized workspace is missing the canonical auditor instruction")
     }
+    fail("workspace_missing_file", `materialized workspace is missing a required file: ${expectedPath}`)
   }
   for (const actualPath of actualPaths) {
     if (expectedPaths.includes(actualPath)) continue
@@ -1343,6 +1608,15 @@ function assertBlindInventory(
     if (actualPath === ".git" || actualPath.startsWith(".git/")) {
       fail("git_history_present", `materialized workspace contains git history: ${actualPath}`)
     }
+    if (actualPath === ".dsh" || actualPath.startsWith(".dsh/")) {
+      fail("dsh_state_present", `materialized workspace contains unexpected DSH state: ${actualPath}`)
+    }
+    if (path.posix.basename(actualPath) === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+      fail(
+        "instruction_extra",
+        `materialized workspace contains an unexpected auditor instruction copy: ${actualPath}`,
+      )
+    }
     fail("workspace_extra_file", `materialized workspace contains an unexpected file: ${actualPath}`)
   }
 
@@ -1354,6 +1628,9 @@ function assertBlindInventory(
   }
   for (const actualDir of inventory.dirs) {
     if (expectedDirs.includes(actualDir)) continue
+    if (actualDir === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) {
+      fail("instruction_not_regular", "the materialized auditor instruction is not a regular file")
+    }
     if (actualDir === BLIND_WORKSPACE_CONFIG_DIR || actualDir.startsWith(`${BLIND_WORKSPACE_CONFIG_DIR}/`)) {
       fail(
         "academic_state_contaminated",
@@ -1362,6 +1639,9 @@ function assertBlindInventory(
     }
     if (actualDir === ".git" || actualDir.startsWith(".git/")) {
       fail("git_history_present", `materialized workspace contains git history: ${actualDir}`)
+    }
+    if (actualDir === ".dsh" || actualDir.startsWith(".dsh/")) {
+      fail("dsh_state_present", `materialized workspace contains unexpected DSH state: ${actualDir}`)
     }
     fail("workspace_extra_directory", `materialized workspace contains an unexpected directory: ${actualDir}`)
   }
@@ -1372,11 +1652,45 @@ function assertBlindInventory(
       fail("workspace_hash_mismatch", `materialized workspace hash diverges from the manifest: ${expected.path}`)
     }
   }
+  // A identidade da instrução deriva da fonte canônica independente; a cópia
+  // materializada precisa coincidir com ela, nunca com dado autodeclarado.
+  if (actualHashes.get(BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH) !== instruction.sha256) {
+    fail(
+      "instruction_hash_mismatch",
+      "materialized auditor instruction diverges from the canonical versioned source",
+    )
+  }
 
   return {
     manuscriptFiles: expectedManuscript,
     workspaceFiles: actualPaths,
     bancaFiles: [BLIND_WORKSPACE_CONFIG_RELATIVE_PATH],
+    instruction: instructionIdentityOf(instruction),
+  }
+}
+
+/**
+ * Confere a igualdade byte a byte da instrução materializada com a fonte
+ * canônica. A verificação de inventário já cobre digest, regularidade e
+ * ausência de hardlink; esta checagem adicional exige a igualdade integral dos
+ * bytes, sem adaptação, geração, interpolação ou fallback textual.
+ */
+function assertWorkspaceInstructionBytes(
+  workspaceRoot: string,
+  instruction: CanonicalBlindInstruction,
+): void {
+  const target = path.join(workspaceRoot, BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)
+  let bytes: Buffer
+  try {
+    bytes = readFileSync(target)
+  } catch {
+    fail("workspace_inspection_failed", "could not read the materialized auditor instruction")
+  }
+  if (bytes.byteLength !== instruction.byteLength || !bytes.equals(instruction.bytes)) {
+    fail(
+      "instruction_content_mismatch",
+      "materialized auditor instruction is not byte-for-byte identical to the canonical versioned source",
+    )
   }
 }
 
@@ -1535,6 +1849,8 @@ function compareAcademicStates(
 export interface BlindCaseControlReport {
   reportVersion: string
   workspaceVersion: string
+  /** Identidade da instrução canônica, derivada da fonte independente. */
+  instruction: BlindInstructionIdentity
   caseId: string
   corpusVersion: string
   manifestSha256: string
@@ -1559,6 +1875,7 @@ interface VerificationCore {
   inventory: ManuscriptFileHash[]
   workspaceFiles: string[]
   bancaFiles: string[]
+  instruction: BlindInstructionIdentity
   loaded: CanonicalLatexManuscriptResult
   plan: ExhaustiveAnalysisPlan
   planId: string
@@ -1572,11 +1889,13 @@ function verifyWorkspaceCore(params: {
   caseDef: PilotCorpusCase
   original: PresentationCaseAcademicState
   expectedConfig: ProjectConfig
+  instruction: CanonicalBlindInstruction
 }): VerificationCore {
   assertWorkspaceRootPresent(params.workspaceRoot)
   const persisted = loadPersistedBlindWorkspaceConfig(params.workspaceRoot, params.expectedConfig)
   const walked = walkWorkspace(params.workspaceRoot)
-  const blind = assertBlindInventory(walked, params.caseDef)
+  const blind = assertBlindInventory(walked, params.caseDef, params.instruction)
+  assertWorkspaceInstructionBytes(params.workspaceRoot, params.instruction)
 
   const loaded = loadCanonicalLatexManuscript(params.workspaceRoot, persisted.config)
   if (loaded.complete !== true) {
@@ -1596,6 +1915,7 @@ function verifyWorkspaceCore(params: {
   const report: BlindCaseControlReport = {
     reportVersion: BLIND_CASE_CONTROL_REPORT_VERSION,
     workspaceVersion: BLIND_CASE_WORKSPACE_VERSION,
+    instruction: blind.instruction,
     caseId: params.caseDef.id,
     corpusVersion: params.corpus.manifest.version,
     manifestSha256: params.corpus.manifestRawSha256,
@@ -1620,6 +1940,7 @@ function verifyWorkspaceCore(params: {
     inventory: blind.manuscriptFiles,
     workspaceFiles: blind.workspaceFiles,
     bancaFiles: blind.bancaFiles,
+    instruction: blind.instruction,
     loaded,
     plan,
     planId: equivalence.planId,
@@ -1639,6 +1960,17 @@ export interface MaterializeBlindCaseWorkspaceOptions {
   caseId: string
   /** Scratch novo (ou diretório vazio pertencente ao chamador) para o caso. */
   destinationRoot: string
+  /**
+   * TEST-ONLY: raiz alternativa para localizar a fonte canônica da instrução,
+   * usada apenas para exercitar recusas de fonte ausente/adulterada/link.
+   * Exige `instructionSha256`; nunca usar em campanha.
+   */
+  instructionSourceRoot?: string
+  /**
+   * SHA-256 autorizado do asset canônico do auditor, quando o controlador
+   * congela a identidade do produto. A fonte precisa coincidir exatamente.
+   */
+  instructionSha256?: string
   /** TEST-ONLY: injeção de falha para testar limpeza. Nunca usar em campanha. */
   testHooks?: TestHooks
 }
@@ -1653,6 +1985,7 @@ export interface BlindCaseWorkspace {
   inventory: ManuscriptFileHash[]
   workspaceFiles: string[]
   bancaFiles: string[]
+  instruction: BlindInstructionIdentity
   loaded: CanonicalLatexManuscriptResult
   plan: ExhaustiveAnalysisPlan
   planId: string
@@ -1664,16 +1997,23 @@ export interface BlindCaseWorkspace {
 /**
  * Materializa **um** caso do corpus de apresentação em um scratch exclusivo.
  *
- * Ordem: validar manifesto → resolver caseId → validar fontes/hashes (sem
- * publicar) → carregar estado acadêmico original → staging exclusivo →
- * persistir `.banca/project.json` via contrato de produção → recarregar e
- * comparar config/loader/planner → publicar por rename em destino vazio →
- * verificar o workspace publicado. Falha em qualquer etapa remove somente
- * artefatos criados por esta chamada.
+ * Ordem: validar a fonte canônica da instrução (antes de qualquer escrita) →
+ * validar manifesto → resolver caseId → validar fontes/hashes (sem publicar) →
+ * carregar estado acadêmico original → staging exclusivo → persistir
+ * `.banca/project.json` via contrato de produção → recarregar e comparar
+ * config/loader/planner → publicar por rename em destino vazio → verificar o
+ * workspace publicado. Falha em qualquer etapa remove somente artefatos criados
+ * por esta chamada.
  */
 export function materializeBlindCaseWorkspace(
   options: MaterializeBlindCaseWorkspaceOptions,
 ): BlindCaseWorkspace {
+  // Fail-closed: a instrução canônica precisa existir e ser válida antes de
+  // qualquer efeito no destino ou no staging.
+  const instruction = loadCanonicalBlindInstruction({
+    instructionSourceRoot: options.instructionSourceRoot,
+    instructionSha256: options.instructionSha256,
+  })
   const corpus = loadPresentationCorpus(options.corpusRoot)
   const caseDef = findPresentationCase(corpus, options.caseId)
   const sources = validateCaseSources(corpus, caseDef)
@@ -1692,17 +2032,18 @@ export function materializeBlindCaseWorkspace(
   try {
     const stagingRoot = createStagingRoot(destination.parentReal)
     cleanup.stagingRoot = stagingRoot
-    writeStagedWorkspace(stagingRoot, sources, expectedConfig, options.testHooks)
+    writeStagedWorkspace(stagingRoot, sources, instruction, expectedConfig, options.testHooks)
     runFailureHook(options.testHooks?.beforePublish, undefined, "before_publish")
 
     // Verifica o staging completo antes de publicar: config recarregada,
-    // inventário cego e equivalência acadêmica.
+    // inventário cego (incluindo a instrução canônica) e equivalência acadêmica.
     verifyWorkspaceCore({
       workspaceRoot: stagingRoot,
       corpus,
       caseDef,
       original,
       expectedConfig,
+      instruction,
     })
 
     publishStagedWorkspace(stagingRoot, destination, options.testHooks, cleanup)
@@ -1714,6 +2055,7 @@ export function materializeBlindCaseWorkspace(
       caseDef,
       original,
       expectedConfig,
+      instruction,
     })
 
     return {
@@ -1726,6 +2068,7 @@ export function materializeBlindCaseWorkspace(
       inventory: verified.inventory,
       workspaceFiles: verified.workspaceFiles,
       bancaFiles: verified.bancaFiles,
+      instruction: verified.instruction,
       loaded: verified.loaded,
       plan: verified.plan,
       planId: verified.planId,
@@ -1743,6 +2086,10 @@ export interface VerifyBlindCaseWorkspaceOptions {
   corpusRoot?: string
   caseId: string
   workspaceRoot: string
+  /** TEST-ONLY: raiz alternativa da fonte da instrução; exige `instructionSha256`. */
+  instructionSourceRoot?: string
+  /** SHA-256 autorizado do asset canônico do auditor, quando fornecido. */
+  instructionSha256?: string
 }
 
 export interface BlindCaseVerification {
@@ -1753,6 +2100,7 @@ export interface BlindCaseVerification {
   inventory: ManuscriptFileHash[]
   workspaceFiles: string[]
   bancaFiles: string[]
+  instruction: BlindInstructionIdentity
   loaded: CanonicalLatexManuscriptResult
   plan: ExhaustiveAnalysisPlan
   planId: string
@@ -1764,8 +2112,9 @@ export interface BlindCaseVerification {
 /**
  * Revalida um workspace já materializado contra o manifesto validado e o caso
  * original. Detecta configuração ausente/adulterada/substituída por defaults,
- * estado acadêmico contaminado, arquivos extras, vazamento de outros casos e
- * divergência acadêmica. É a função usada para detectar contaminação.
+ * estado acadêmico contaminado, arquivos extras, instrução ausente/adulterada/
+ * substituída/vinculada externamente, vazamento de outros casos e divergência
+ * acadêmica. É a função usada para detectar contaminação.
  */
 export function verifyBlindCaseWorkspace(
   options: VerifyBlindCaseWorkspaceOptions,
@@ -1774,12 +2123,23 @@ export function verifyBlindCaseWorkspace(
     fail("invalid_workspace_root", "workspace root must be an absolute path")
   }
   const workspaceRoot = path.resolve(options.workspaceRoot)
+  const instruction = loadCanonicalBlindInstruction({
+    instructionSourceRoot: options.instructionSourceRoot,
+    instructionSha256: options.instructionSha256,
+  })
   const corpus = loadPresentationCorpus(options.corpusRoot)
   const caseDef = findPresentationCase(corpus, options.caseId)
   const sources = validateCaseSources(corpus, caseDef)
   const original = buildAcademicState(caseDef, sources)
   const expectedConfig = expectedProjectConfigFor(caseDef)
-  const verified = verifyWorkspaceCore({ workspaceRoot, corpus, caseDef, original, expectedConfig })
+  const verified = verifyWorkspaceCore({
+    workspaceRoot,
+    corpus,
+    caseDef,
+    original,
+    expectedConfig,
+    instruction,
+  })
   return {
     caseId: caseDef.id,
     workspaceRoot,
@@ -1788,6 +2148,7 @@ export function verifyBlindCaseWorkspace(
     inventory: verified.inventory,
     workspaceFiles: verified.workspaceFiles,
     bancaFiles: verified.bancaFiles,
+    instruction: verified.instruction,
     loaded: verified.loaded,
     plan: verified.plan,
     planId: verified.planId,
@@ -1809,6 +2170,7 @@ export function verifyBlindCaseWorkspace(
 const CONTROL_REPORT_KEYS = [
   "reportVersion",
   "workspaceVersion",
+  "instruction",
   "caseId",
   "corpusVersion",
   "manifestSha256",
@@ -1862,6 +2224,16 @@ export interface WriteBlindControlArtifactsOptions {
   controlDir: string
   /** Workspace materializado; identidade e inventário são revalidados. */
   workspaceRoot: string
+  /**
+   * TEST-ONLY: raiz alternativa para localizar a fonte canônica da instrução,
+   * usada apenas para exercitar recusas. Exige `instructionSha256`.
+   */
+  instructionSourceRoot?: string
+  /**
+   * SHA-256 autorizado do asset canônico do auditor, quando o controlador
+   * congela a identidade do produto. A fonte precisa coincidir exatamente.
+   */
+  instructionSha256?: string
   report: BlindCaseControlReport
   prompt?: NeutralAuditPrompt
 }
@@ -1917,6 +2289,12 @@ export function writeBlindCaseControlArtifacts(
       "frozen manifest hash does not match the validated presentation corpus",
     )
   }
+  // Fonte independente da instrução: asset versionado do produto (nunca o
+  // relatório recebido). Validada antes de qualquer criação de artefato.
+  loadCanonicalBlindInstruction({
+    instructionSourceRoot: options.instructionSourceRoot,
+    instructionSha256: options.instructionSha256,
+  })
 
   // Esquema de entrada apenas: conjunto exato de campos e caseId estruturalmente
   // seguro. Estes valores não são a fonte de verdade da identidade.
@@ -1935,6 +2313,8 @@ export function writeBlindCaseControlArtifacts(
     corpusRoot: options.corpusRoot,
     caseId,
     workspaceRoot,
+    instructionSourceRoot: options.instructionSourceRoot,
+    instructionSha256: options.instructionSha256,
   })
   const expectedReport = verification.report
   const diffs: string[] = []
