@@ -57,7 +57,7 @@ Os nomes `banca_*` abaixo identificam **ferramentas acadêmicas registradas nati
 
 | Operação e fonte | Comportamento no código e pré-requisitos |
 |---|---|
-| [banca_context](../src/tools/banca_context.ts) | Carrega o manuscrito canônico e plano exaustivo, persiste checkpoint/context pack e seleciona o próximo lote. Omitir `completedBatchId` retoma sem avançar; fornecê-lo registra conclusão. Esse registro não comprova leitura ou análise acadêmica. |
+| [banca_context](../src/tools/banca_context.ts) | Carrega o manuscrito canônico e plano exaustivo, persiste checkpoint/context pack e seleciona o próximo lote. Omitir `completedBatchId` retoma sem avançar; fornecê-lo registra conclusão. O avanço do lote esperado exige confirmação de auditoria coerente **e** revalidação da proveniência de todos os findings persistidos contra o plano atual (mesma validação canônica de `banca_auditar`/`banca_sintese`); proveniência incompatível recusa com `invalid_stored_finding` sem avançar o checkpoint, regravar findings/confirmações ou produzir pack de sucesso. Esse registro não comprova leitura, análise acadêmica, execução de modelo ou inferência. |
 | [banca_auditar](../src/tools/banca_auditar.ts) | Exige `manuscriptFingerprint`, `batchId` e `findings` do plano atual; valida proveniência e persiste findings por lote. Não executa modelo, não calcula nota, não avança checkpoint nem faz síntese. |
 | [banca_sintese](../src/tools/banca_sintese.ts) | Read-only: exige plano atual, checkpoint persistido completo e findings compatíveis; retorna JSON de **entrada** de síntese global. Não produz síntese semântica, score ou parecer e não chama modelo. |
 

@@ -5,10 +5,12 @@ import {
   writeFileSync,
   rmSync,
   readFileSync,
+  readdirSync,
   existsSync,
   symlinkSync,
   chmodSync,
 } from "node:fs"
+import { createHash } from "node:crypto"
 import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import { bancaContext } from "../src/tools/banca_context"
@@ -22,19 +24,30 @@ import {
   createAnalysisCheckpoint,
   completeAnalysisBatch,
 } from "../src/lib/analysis_checkpoint"
-import { createAnalysisFinding } from "../src/lib/analysis_findings"
+import {
+  AnalysisFindingError,
+  computeFindingIdentity,
+  createAnalysisFinding,
+  validateAnalysisFindingsForPlan,
+  type AnalysisFinding,
+} from "../src/lib/analysis_findings"
 import {
   createBatchAuditConfirmation,
+  verifyBatchConfirmationCoherence,
   BATCH_AUDIT_CONFIRMATION_VERSION,
   type BatchAuditConfirmation,
 } from "../src/lib/analysis_audit_confirmation"
 import {
   ANALYSIS_FINDINGS_STORE_VERSION,
   ANALYSIS_AUDIT_CONFIRMATIONS_STORE_VERSION,
+  getAnalysisCheckpointRelativePath,
+  getAnalysisFindingsRelativePath,
+  getAnalysisAuditConfirmationsRelativePath,
   loadAnalysisCheckpoint,
   saveAnalysisCheckpoint,
   loadAnalysisFindings,
   loadAnalysisAuditConfirmations,
+  loadBatchAuditConfirmation,
   saveAnalysisAuditConfirmations,
   recordBatchAuditConfirmation,
   saveAnalysisFindings,
@@ -1273,5 +1286,429 @@ describe("Issue #44: Batch audit evidence gate", () => {
     const parsed = JSON.parse(finalSynthRes)
     expect(parsed.coverage.state).toBe("complete")
     expect(parsed.coverage.completedBatches).toBe(6)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #175: persisted finding provenance must be revalidated against the live
+// plan before `banca_context` durably advances the expected batch.
+//
+// The fixtures below use the real loader, planner, checkpoint, findings store,
+// audit confirmation helpers and the real `banca_context` tool. Nothing is
+// mocked and no permissive validator replaces the production gates.
+// ---------------------------------------------------------------------------
+
+/** Marker texts proving the refusal diagnostic never echoes finding content. */
+const PROVENANCE_SECRET_CLAIM = "claim-marked-secret-175"
+const PROVENANCE_SECRET_EVIDENCE = "evidence-marked-secret-175"
+
+function sha256OfFile(abs: string): string | null {
+  if (!existsSync(abs)) return null
+  return createHash("sha256").update(readFileSync(abs)).digest("hex")
+}
+
+function projectRelativeAbs(projectRoot: string, relativePath: string): string {
+  return join(projectRoot, ...relativePath.split("/"))
+}
+
+function filesInBatch(batch: {
+  chunks: Array<{ source: { file: string } }>
+}): Set<string> {
+  return new Set(batch.chunks.map((chunk) => chunk.source.file))
+}
+
+function maxEndLineForFile(
+  batch: {
+    chunks: Array<{ source: { file: string; startLine: number; endLine: number } }>
+  },
+  file: string,
+): number {
+  let max = 0
+  for (const chunk of batch.chunks) {
+    if (chunk.source.file === file) {
+      max = Math.max(max, chunk.source.endLine)
+    }
+  }
+  return max
+}
+
+/**
+ * Change only the provenance fields of an otherwise valid finding and
+ * recompute the deterministic `findingId`, preserving every other contract.
+ */
+function forgeFindingProvenance(
+  base: AnalysisFinding,
+  patch: Partial<
+    Pick<AnalysisFinding, "batchId" | "file" | "startLine" | "endLine">
+  >,
+): AnalysisFinding {
+  const merged = { ...base, ...patch }
+  return {
+    ...merged,
+    findingId: computeFindingIdentity({
+      version: merged.version,
+      planId: merged.planId,
+      manuscriptFingerprint: merged.manuscriptFingerprint,
+      batchId: merged.batchId,
+      category: merged.category,
+      severity: merged.severity,
+      claim: merged.claim,
+      evidence: merged.evidence,
+      file: merged.file,
+      startLine: merged.startLine,
+      endLine: merged.endLine,
+      sectionId: merged.sectionId,
+    }),
+  }
+}
+
+/** Digests and context-pack inventory proving a refusal did not mutate state. */
+function snapshotPersistentState(projectRoot: string, planId: string) {
+  const contextDir = join(projectRoot, ".banca", "context")
+  const contextPacks = existsSync(contextDir)
+    ? readdirSync(contextDir)
+        .sort()
+        .map((name) => `${name}:${sha256OfFile(join(contextDir, name))}`)
+    : []
+  return {
+    checkpoint: sha256OfFile(
+      projectRelativeAbs(projectRoot, getAnalysisCheckpointRelativePath(planId)),
+    ),
+    findingsStore: sha256OfFile(
+      projectRelativeAbs(projectRoot, getAnalysisFindingsRelativePath(planId)),
+    ),
+    confirmationsStore: sha256OfFile(
+      projectRelativeAbs(
+        projectRoot,
+        getAnalysisAuditConfirmationsRelativePath(planId),
+      ),
+    ),
+    manuscript: {
+      "main.tex": sha256OfFile(join(projectRoot, "main.tex")),
+      "capitulos/intro.tex": sha256OfFile(
+        join(projectRoot, "capitulos", "intro.tex"),
+      ),
+      "capitulos/metodo.tex": sha256OfFile(
+        join(projectRoot, "capitulos", "metodo.tex"),
+      ),
+      "refs.bib": sha256OfFile(join(projectRoot, "refs.bib")),
+    },
+    contextPacks,
+  }
+}
+
+type ForgedProvenanceKind =
+  | "file_outside_batch"
+  | "lines_outside_batch"
+  | "invalid_other_batch"
+
+describe("Issue #175: persisted finding provenance before checkpoint advance", () => {
+  let projectRoot: string
+
+  beforeEach(() => {
+    projectRoot = mkdtempSync(join(tmpdir(), "gate-175-"))
+  })
+
+  afterEach(() => {
+    rmSync(projectRoot, { recursive: true, force: true })
+  })
+
+  /**
+   * Build the RED fixture entirely with production helpers:
+   * - real canonical plan from a synthetic LaTeX/BibTeX project;
+   * - real persisted pending checkpoint created by `banca_context`;
+   * - one valid finding created by `createAnalysisFinding`;
+   * - a provenance-only forged copy with recomputed `findingId`;
+   * - structurally valid findings store and coherent audit confirmation.
+   */
+  async function seedForgedStore(kind: ForgedProvenanceKind) {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    expect(plan.status).toBe("complete")
+    expect(plan.batches.length).toBeGreaterThanOrEqual(3)
+
+    const ctx = { directory: projectRoot } as any
+    const initRes = await bancaContext.execute({ projectRoot }, ctx)
+    expect(initRes).toMatch(/^context → /)
+    const initialCheckpoint = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(initialCheckpoint?.state).toBe("pending")
+    expect(initialCheckpoint?.completedBatches).toBe(0)
+
+    const expectedBatch = plan.batches[0]
+    const expectedFile = expectedBatch.chunks[0].source.file
+    const validFinding = createAnalysisFinding(plan, {
+      category: "estrutura",
+      severity: "media",
+      claim: PROVENANCE_SECRET_CLAIM,
+      evidence: PROVENANCE_SECRET_EVIDENCE,
+      file: expectedFile,
+      startLine: 1,
+      endLine: 1,
+      sectionId: "sec-175",
+      manuscriptFingerprint: plan.fingerprint!,
+      batchId: expectedBatch.batchId,
+    })
+
+    let forged: AnalysisFinding
+    let confirmationFindings: AnalysisFinding[]
+    if (kind === "file_outside_batch") {
+      const expectedFiles = filesInBatch(expectedBatch)
+      const foreignFile = plan.batches
+        .flatMap((batch) => batch.chunks)
+        .map((chunk) => chunk.source.file)
+        .find((file) => !expectedFiles.has(file))
+      expect(foreignFile).toBeDefined()
+      forged = forgeFindingProvenance(validFinding, {
+        batchId: expectedBatch.batchId,
+        file: foreignFile!,
+        startLine: 1,
+        endLine: 1,
+      })
+      confirmationFindings = [forged]
+    } else if (kind === "lines_outside_batch") {
+      const maxEnd = maxEndLineForFile(expectedBatch, expectedFile)
+      expect(maxEnd).toBeGreaterThanOrEqual(1)
+      forged = forgeFindingProvenance(validFinding, {
+        batchId: expectedBatch.batchId,
+        file: expectedFile,
+        startLine: 1,
+        endLine: maxEnd + 1,
+      })
+      confirmationFindings = [forged]
+    } else {
+      let otherIndex = -1
+      for (let index = plan.batches.length - 1; index >= 1; index--) {
+        const otherFiles = filesInBatch(plan.batches[index])
+        const hasForeignFile = plan.batches.some((batch) =>
+          batch.chunks.some((chunk) => !otherFiles.has(chunk.source.file)),
+        )
+        if (hasForeignFile) {
+          otherIndex = index
+          break
+        }
+      }
+      expect(otherIndex).toBeGreaterThan(0)
+      const otherBatch = plan.batches[otherIndex]
+      const otherFiles = filesInBatch(otherBatch)
+      const foreignFile = plan.batches
+        .flatMap((batch) => batch.chunks)
+        .map((chunk) => chunk.source.file)
+        .find((file) => !otherFiles.has(file))
+      expect(foreignFile).toBeDefined()
+      forged = forgeFindingProvenance(validFinding, {
+        batchId: otherBatch.batchId,
+        file: foreignFile!,
+        startLine: 1,
+        endLine: 1,
+      })
+      // The expected batch itself has no findings in the store.
+      confirmationFindings = []
+    }
+
+    saveAnalysisFindings(projectRoot, {
+      version: ANALYSIS_FINDINGS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint!,
+      findings: [forged],
+    })
+    recordBatchAuditConfirmation(
+      projectRoot,
+      createBatchAuditConfirmation(plan, expectedBatch, {
+        findings: confirmationFindings,
+      }),
+    )
+
+    return { plan, planId, expectedBatch, forged }
+  }
+
+  async function expectAdvanceRefusedWithoutMutation(
+    kind: ForgedProvenanceKind,
+  ) {
+    const { plan, planId, expectedBatch, forged } = await seedForgedStore(kind)
+    const ctx = { directory: projectRoot } as any
+
+    // Structural load and identity contract accept the forged store.
+    const loadedStore = loadAnalysisFindings(projectRoot, planId)
+    expect(loadedStore).not.toBeNull()
+    expect(loadedStore!.findings).toHaveLength(1)
+    expect(loadedStore!.findings[0].findingId).toBe(forged.findingId)
+
+    // The coherent confirmation passes the existing coherence verifier.
+    const loadedConfirmation = loadBatchAuditConfirmation(
+      projectRoot,
+      planId,
+      expectedBatch.batchId,
+    )
+    expect(loadedConfirmation).not.toBeNull()
+    const expectedBatchFindings = loadedStore!.findings.filter(
+      (finding) => finding.batchId === expectedBatch.batchId,
+    )
+    expect(() =>
+      verifyBatchConfirmationCoherence(
+        loadedConfirmation!,
+        expectedBatchFindings,
+      ),
+    ).not.toThrow()
+
+    // The canonical revalidation rejects the provenance in the live plan.
+    let canonicalError: unknown = null
+    try {
+      validateAnalysisFindingsForPlan(plan, loadedStore!.findings)
+    } catch (error) {
+      canonicalError = error
+    }
+    expect(canonicalError).toBeInstanceOf(AnalysisFindingError)
+    expect(["file_not_in_batch", "line_range_not_covered"]).toContain(
+      (canonicalError as AnalysisFindingError).code,
+    )
+
+    const beforeState = snapshotPersistentState(projectRoot, planId)
+    const checkpointBefore = loadAnalysisCheckpoint(projectRoot, planId)
+
+    const result = String(
+      await bancaContext.execute(
+        { projectRoot, completedBatchId: expectedBatch.batchId },
+        ctx,
+      ),
+    )
+
+    // Controlled, sanitized refusal: no success pack and no untrusted content.
+    expect(result).toContain("context checkpoint error")
+    expect(result).toContain("code=invalid_stored_finding")
+    expect(result).not.toMatch(/^context → /)
+    expect(result).not.toContain(projectRoot)
+    expect(result).not.toContain(PROVENANCE_SECRET_CLAIM)
+    expect(result).not.toContain(PROVENANCE_SECRET_EVIDENCE)
+    expect(result).not.toMatch(/(^|\n)(\/tmp\/|\/home\/|\/var\/)/)
+
+    // Checkpoint did not advance and persisted state is byte-identical.
+    const checkpointAfter = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(checkpointAfter).toEqual(checkpointBefore)
+    expect(checkpointAfter?.state).toBe("pending")
+    expect(checkpointAfter?.completedBatches).toBe(0)
+    const afterState = snapshotPersistentState(projectRoot, planId)
+    expect(afterState).toEqual(beforeState)
+    expect(afterState.findingsStore).not.toBeNull()
+    expect(afterState.confirmationsStore).not.toBeNull()
+    expect(afterState.contextPacks).toEqual(beforeState.contextPacks)
+
+    return { plan, planId, expectedBatch }
+  }
+
+  test("RED: finding file outside the expected batch cannot advance the checkpoint", async () => {
+    await expectAdvanceRefusedWithoutMutation("file_outside_batch")
+  })
+
+  test("RED: finding line range outside the expected batch cannot advance the checkpoint", async () => {
+    await expectAdvanceRefusedWithoutMutation("lines_outside_batch")
+  })
+
+  test("RED: invalid finding belonging to another batch of the same store cannot advance", async () => {
+    await expectAdvanceRefusedWithoutMutation("invalid_other_batch")
+  })
+
+  test("GREEN: legitimate findings pass whole-store revalidation and advance in order", async () => {
+    writeProject(projectRoot, { maxCharactersPerBatch: 100 })
+    const { plan, planId } = getPlan(projectRoot)
+    const ctx = { directory: projectRoot } as any
+
+    for (let index = 0; index < 2; index++) {
+      const batch = plan.batches[index]
+      const file = batch.chunks[0].source.file
+      const auditRes = await bancaAuditar.execute(
+        {
+          projectRoot,
+          manuscriptFingerprint: plan.fingerprint!,
+          batchId: batch.batchId,
+          findings: [
+            {
+              category: "estrutura",
+              severity: "media",
+              claim: `legitimate claim ${index}`,
+              evidence: `legitimate evidence ${index}`,
+              file,
+              startLine: 1,
+              endLine: 1,
+              sectionId: `sec-legit-${index}`,
+            },
+          ],
+        },
+        ctx,
+      )
+      expect(auditRes).not.toContain("audit validation error")
+
+      const advanceRes = String(
+        await bancaContext.execute(
+          { projectRoot, completedBatchId: batch.batchId },
+          ctx,
+        ),
+      )
+      expect(advanceRes).toMatch(/^context → /)
+      expect(advanceRes).not.toContain("context checkpoint error")
+    }
+
+    const checkpoint = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(checkpoint?.completedBatches).toBe(2)
+    expect(checkpoint?.state).toBe("running")
+
+    const store = loadAnalysisFindings(projectRoot, planId)
+    expect(store?.findings).toHaveLength(2)
+    expect(validateAnalysisFindingsForPlan(plan, store!.findings)).toHaveLength(
+      2,
+    )
+  })
+
+  test("GREEN: refusal is recoverable by replacing forged evidence with legitimate findings", async () => {
+    const { plan, planId, expectedBatch } = await seedForgedStore(
+      "file_outside_batch",
+    )
+    const ctx = { directory: projectRoot } as any
+
+    const refused = String(
+      await bancaContext.execute(
+        { projectRoot, completedBatchId: expectedBatch.batchId },
+        ctx,
+      ),
+    )
+    expect(refused).toContain("code=invalid_stored_finding")
+    expect(loadAnalysisCheckpoint(projectRoot, planId)?.completedBatches).toBe(0)
+
+    // Replace the forged store/confirmation with a legitimate submission.
+    const legitimateFinding = createAnalysisFinding(plan, {
+      category: "estrutura",
+      severity: "media",
+      claim: "legitimate claim after refusal",
+      evidence: "legitimate evidence after refusal",
+      file: expectedBatch.chunks[0].source.file,
+      startLine: 1,
+      endLine: 1,
+      sectionId: "sec-recovered",
+      manuscriptFingerprint: plan.fingerprint!,
+      batchId: expectedBatch.batchId,
+    })
+    saveAnalysisFindings(projectRoot, {
+      version: ANALYSIS_FINDINGS_STORE_VERSION,
+      planId,
+      manuscriptFingerprint: plan.fingerprint!,
+      findings: [legitimateFinding],
+    })
+    recordBatchAuditConfirmation(
+      projectRoot,
+      createBatchAuditConfirmation(plan, expectedBatch, {
+        findings: [legitimateFinding],
+      }),
+    )
+
+    const recovered = String(
+      await bancaContext.execute(
+        { projectRoot, completedBatchId: expectedBatch.batchId },
+        ctx,
+      ),
+    )
+    expect(recovered).toMatch(/^context → /)
+    expect(recovered).not.toContain("context checkpoint error")
+    const checkpoint = loadAnalysisCheckpoint(projectRoot, planId)
+    expect(checkpoint?.completedBatches).toBe(1)
+    expect(checkpoint?.state).toBe("running")
   })
 })
