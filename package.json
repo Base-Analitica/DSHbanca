@@ -24,7 +24,8 @@
     "assets",
     "docs",
     "skills",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "!docs/academic-semantic-pilot.md"
   ],
   "dsh": {
     "bundle": {
