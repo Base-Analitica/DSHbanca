@@ -23,6 +23,11 @@ import {
   saveAnalysisCheckpoint,
 } from "../lib/state"
 import { verifyBatchConfirmationCoherence } from "../lib/analysis_audit_confirmation"
+import {
+  AnalysisFindingError,
+  validateAnalysisFindingsForPlan,
+  type AnalysisFinding,
+} from "../lib/analysis_findings"
 
 /**
  * Format checkpoint errors for the tool surface.
@@ -373,7 +378,34 @@ export const bancaContext = defineBancaTool({
             )
           }
 
-          const batchFindings = findingsStore.findings.filter(
+          // Revalidate the provenance of the ENTIRE persisted findings store
+          // against the live plan before any durable advance (issue #175).
+          // The structural load only proves the stored contract/identity, and
+          // the confirmation only binds counts/digests/submissionId: neither
+          // proves that every stored file and line range still belongs to the
+          // current plan. Reuse the canonical validator already applied by
+          // banca_auditar and banca_sintese; never duplicate its grammar.
+          let validatedFindings: AnalysisFinding[]
+          try {
+            validatedFindings = validateAnalysisFindingsForPlan(
+              plan,
+              findingsStore.findings,
+            )
+          } catch (err) {
+            if (err instanceof AnalysisFindingError) {
+              // Controlled, sanitized diagnostic: no claim/evidence, file,
+              // raw validator text or host path is surfaced.
+              throw new AnalysisCheckpointError(
+                "invalid_stored_finding",
+                "persisted findings are not valid against the current plan",
+              )
+            }
+            throw err
+          }
+
+          // The coherence check consumes the validated findings, never the raw
+          // store records, so both gates attest the same payload.
+          const batchFindings = validatedFindings.filter(
             (f) => f.batchId === expectedNext.batchId,
           )
           try {
