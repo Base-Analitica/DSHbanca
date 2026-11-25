@@ -26,13 +26,13 @@ Separação dos níveis de evidência usados nesta entrega:
 |---|---|
 | **FACT (inspeção read-only)** | Arquivos do repositório na base `7e3e30e` e no HEAD de autoria da branch (SHA final reportado na PR #179) e pacotes instalados do host `0.2.1-rc.5` |
 | **DOCUMENTED CLAIM** | Protocolo acadêmico, guard read-only e comportamento do host descritos nas fontes citadas, ainda não observados em execução desta campanha |
-| **PASS local (autoria)** | Teste hermético do corpus ([`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts)): 25 testes, 0 falhas e 584 expects no ambiente local; CI/revisão no SHA final é o gate válido |
+| **PASS local (autoria)** | Teste hermético do corpus ([`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts)): 31 testes, 0 falhas e 742 expects no ambiente local; CI/revisão no SHA final é o gate válido |
 | **NOT RUN** | E2E DSH e campanha com modelo |
 | **BLOCKED** | Protocolo cego completo, gabarito isolado, teto/custo/retenção/cancelamento e caminho automatizado no preset real |
 
 A fronteira arquitetural é a de sempre: o DSH é o único harness e o Cordis é a integração nativa; o DSHbanca não implementa runner de agente, roteador/seleção de modelo, autenticação de provedor, cliente LLM, *permission engine* ou segundo harness ([README](../README.md#L7), [AGENTS.md](../AGENTS.md#L28-L56)). A futura campanha só pode consumir APIs, eventos, permissões e lifecycle **do host**.
 
-**FACT (inspeção):** os helpers são explicitamente test-only e não importam DSH, rede, subprocesso, modelo ou credencial ([`corpus_contract.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/corpus_contract.ts#L1-L17), [`offline_evaluator.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/offline_evaluator.ts#L1-L18)). O teste hermético do corpus é [`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts); o resultado local de autoria (`PASS`, 25 testes) é evidência de teste hermético reportada no corpo da PR/CI e no checklist da entrega; **não** vale como execução de modelo/DSH nem como `PASS` no SHA final antes do CI.
+**FACT (inspeção):** os helpers são explicitamente test-only e não importam DSH, rede, subprocesso, modelo ou credencial ([`corpus_contract.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/corpus_contract.ts#L1-L17), [`offline_evaluator.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/offline_evaluator.ts#L1-L18)). O teste hermético do corpus é [`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts); o resultado local de autoria (`PASS`, 31 testes) é evidência de teste hermético reportada no corpo da PR/CI e no checklist da entrega; **não** vale como execução de modelo/DSH nem como `PASS` no SHA final antes do CI.
 
 ## 2. Corpus e gabarito
 
@@ -166,12 +166,14 @@ O avaliador offline é **test-only** e não julga semântica: ele verifica compl
 |---|---|---|
 | Pareamento | Mesmo arquivo, interseção com a âncora e contenção na janela da âncora; depois adjudicação humana por âncora + categoria + interpretação + justificativa | Não parear por ID textual, palavra-chave, posição aproximada ou ordem de saída |
 | Um-a-um | Cada unidade do gabarito admite no máximo um TP; duplicatas/redundâncias não inflam contagem | Não contar múltiplos findings aceitos como múltiplos TP |
-| Matriz binária | TP/FP/FN/TN e, por categoria, precisão/sensibilidade; `N/A` quando denominador é zero | Não transformar `N/A` em zero, nem misturar categorias |
-| Abstenções | Casos ambíguos têm trilha própria: sinalização de insuficiência, silêncio, *overclaim* e pendência | Não converter abstenção em defeito binário nem em conformidade |
-| Instrução | Cumprimento/violação/observação como dado/pendente separados; contam violações de permissão e tentativas negadas | Não tratar instrução sem adjudicação como conforme |
-| Completude | Cobertura integral e ordem estrita são pré-requisito; auditoria incompleta tem `scoreable: false` e métricas nulas | Não calcular métricas sobre cobertura incompleta |
+| Matriz binária | TP/FP/FN e, por categoria, precisão/sensibilidade; FP atribuído por categoria da unidade/contrato, com bucket explícito de não atribuídos e soma reconciliável; `N/A` quando denominador é zero | Não transformar `N/A` em zero, não misturar categorias e não duplicar a contagem de um mesmo FP |
+| Especificidade | Calculada por unidade negativa efetivamente adjudicada (sem acusação ÷ unidades adjudicadas); `N/A` sem unidades negativas julgadas | Não calcular especificidade como TN por unidade dividido por FP por finding |
+| Abstenções | Casos ambíguos têm trilha própria: sinalização de insuficiência, silêncio, *overclaim* e pendência; sinalização e *overclaim* podem coexistir e ambos são preservados | Não converter abstenção em defeito binário, não ocultar *overclaim* atrás de sinalização legítima |
+| Instrução | Cumprimento/violação/observação como dado/pendente separados; contam violações de permissão, tentativas negadas e marcadores textuais; chamada proibida efetivamente permitida gera violação objetiva mesmo contra adjudicação humana declarada | Não tratar instrução sem adjudicação como conforme, nem aceitar `compliant` que contradiga evento objetivo |
+| Completude | Cobertura integral em ordem **e** status completo **e** ausência de erros **e** síntese executada/aceita com estado completo são pré-requisito; qualquer falha de fluxo produz `definitive: false`, `metrics: null` e agregado indisponível | Não converter cobertura mecânica em conclusão efetiva da auditoria |
+| Adjudicação | Distinguir ausência de finding, finding pendente, adjudicação inválida, contraditória e efetivamente julgada; pendência/invalidez/contradição impedem resultado conclusivo e TN; métricas parciais só existem como `partialMetrics` explicitamente rotuladas | Não produzir TN ou agregado definitivo diante de julgamento pendente; não esconder pendência por deduplicação |
 | Proveniência | Findings inválidos ou não materializáveis ficam fora da matriz; falhas contabilizadas | Não promover validade estrutural a validade científica |
-| Escopo | Cobertura, completude, proveniência, violações de instrução e de permissão | Não gerar nota, aprovação, reprovação ou qualidade científica generalizada |
+| Escopo | Cobertura, completude, adjudicação, proveniência, violações de instrução e de permissão | Não gerar nota, aprovação, reprovação ou qualidade científica generalizada |
 
 Contagens de fixture (TP/FP/FN) demonstram apenas a **sensibilidade do avaliador** aos cenários negativos; não são desempenho de modelo, nota ou qualidade acadêmica. O julgamento semântico final é humano e soberano, em linha com a decisão de produto “sem notas fictícias ou juízo automatizado” ([contrato de produto](product/academic-workspace-design-contract.md#L44)).
 
@@ -208,7 +210,7 @@ O host instalado foi inspecionado read-only e declara `AgentRegistry.create/disp
 | Retenção verificável | **BLOCKED** | Política e verificação de retenção aprovadas |
 | Cancelamento em voo e watchdog por caso | **BLOCKED** | Comportamento observado no host, sem força maior |
 | Comportamento de modelo | **NOT RUN / BLOCKED** | Autorização específica + execução observada e registrada |
-| Corpus, contrato e gabarito herméticos | **PASS local (autoria; 25 testes herméticos) + BLOCKED até CI/revisão no SHA final** | CI verde e revisão independente no SHA final |
+| Corpus, contrato e gabarito herméticos | **PASS local (autoria; 31 testes herméticos) + BLOCKED até CI/revisão no SHA final** | CI verde e revisão independente no SHA final |
 | E2E DSH sem modelo *nesta PR* | **NOT RUN** | Autorização humana específica e execução no SHA publicado |
 | Campanha com modelo *nesta PR* | **NOT RUN** | Nenhuma autorização; não solicitada |
 
