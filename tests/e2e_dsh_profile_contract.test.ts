@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -47,6 +47,153 @@ import {
   run as runControlledProcess,
   terminateOwnedDshChild,
 } from "../scripts/e2e-dsh-profile.js"
+
+const blindProbeDigest = (seed: string) => createHash("sha256").update(`blind-probe:${seed}`).digest("hex")
+const blindProbeContractExpected = {
+  caseId: "case-01",
+  manifestSha256: blindProbeDigest("manifest"),
+  instructionSha256: blindProbeDigest("instruction-sha256"),
+  instructionSha1: createHash("sha1").update("blind-probe-instruction").digest("hex"),
+  manuscriptFingerprint: blindProbeDigest("fingerprint"),
+  planId: blindProbeDigest("plan-id"),
+  batchIds: ["batch-1", "batch-2"],
+  scratchRelativePath: "workspace",
+  controlPresetId: e2eControlPresetId,
+  contextPackRelativePath: ".banca/context/context-1700000000000.md",
+  contextPackSha256: blindProbeDigest("context-pack"),
+  protectedInventory: { "main.tex": blindProbeDigest("protected-main") },
+}
+const blindProbeOperations = [
+  "banca_context", "banca_init", "banca_corrigir", "banca_snapshot", "banca_compile",
+  "banca_restore", "banca_loop", "write", "edit",
+]
+const blindProbeContractEvidence = () => ({
+  version: "blind-case-observer-probe-v2",
+  mode: "simulated-context-only",
+  simulation: {
+    dshRuntimeImported: false,
+    dshCliInvocations: 0,
+    agentSendCalls: 0,
+    modelCalls: 0,
+    credentialsUsed: false,
+    hostIsolationProven: false,
+    hostEnforcementProven: false,
+  },
+  identity: {
+    auditor: {
+      agentIdSha256: blindProbeDigest("auditor-id"),
+      sessionIdSha256: blindProbeDigest("auditor-id"),
+      idsMatch: true,
+      agentRegistryMatch: true,
+      sessionRegistryMatch: true,
+      composedPreset: "banca-auditor",
+      sessionProjectionPreset: "banca-auditor",
+    },
+    control: {
+      agentIdSha256: blindProbeDigest("control-id"),
+      sessionIdSha256: blindProbeDigest("control-id"),
+      idsMatch: true,
+      agentRegistryMatch: true,
+      sessionRegistryMatch: true,
+      composedPreset: "dshbanca-e2e-control-neutral",
+      sessionProjectionPreset: "dshbanca-e2e-control-neutral",
+    },
+  },
+  projection: {
+    auditor: { count: 1, paths: ["banca-auditor.md"], role: "user", sourceKind: "agent-instructions", digestSha1: blindProbeContractExpected.instructionSha1 },
+    control: { count: 0, paths: [] },
+    simulatedMessages: 2,
+  },
+  runtimeHooks: {
+    preStep: { calls: 2, rejected: 2 },
+    agentRequest: { calls: 2, rejected: 2 },
+  },
+  persistedSessionEvents: {
+    auditor: { "step/start": 0, "request/header": 0, "assistant/message": 0 },
+    control: { "step/start": 0, "request/header": 0, "assistant/message": 0 },
+  },
+  workspace: {
+    scratchRelativePath: blindProbeContractExpected.scratchRelativePath,
+    caseId: blindProbeContractExpected.caseId,
+    manifestSha256: blindProbeContractExpected.manifestSha256,
+    instructionSha256: blindProbeContractExpected.instructionSha256,
+    manuscriptFingerprint: blindProbeContractExpected.manuscriptFingerprint,
+    planId: blindProbeContractExpected.planId,
+    batchIds: [...blindProbeContractExpected.batchIds],
+    completedBatchesBefore: 0,
+    completedBatchesAfter: 0,
+    contextPack: {
+      relativePath: blindProbeContractExpected.contextPackRelativePath,
+      sha256: blindProbeContractExpected.contextPackSha256,
+    },
+    allowedWrites: [
+      `.banca/analysis/checkpoints/${blindProbeContractExpected.planId}.json`,
+      blindProbeContractExpected.contextPackRelativePath,
+    ],
+    protectedBefore: { ...blindProbeContractExpected.protectedInventory },
+    protectedAfter: { ...blindProbeContractExpected.protectedInventory },
+    findings: 0,
+    receipts: 0,
+    confirmations: 0,
+    synthesisInvocations: 0,
+  },
+  dispatch: {
+    sequence: [...blindProbeOperations],
+    deniedPreBody: ["banca_init", "banca_corrigir", "banca_snapshot", "banca_compile", "banca_restore", "banca_loop"],
+    stubRefusals: ["write", "edit"],
+    bodyExecutions: 0,
+    unexpectedDispatches: 0,
+    canarySha256Before: blindProbeDigest("canary-before"),
+    canarySha256After: blindProbeDigest("canary-before"),
+  },
+  teardown: {
+    hookDisposers: 2,
+    handlesCreated: 2,
+    handlesDisposed: 2,
+    hooksRemoved: true,
+    agentsUnregistered: true,
+    sessionsUnregistered: true,
+    complete: true,
+  },
+})
+
+test("blind-case evidence contract rejects identity, projection, event, dispatch, plan, mutation, teardown and isolation claims", () => {
+  const validate = Reflect.get(profileEvidenceContract, "validateBlindCaseObserverProbeEvidence") as (value: unknown, expected: unknown) => string[]
+  expect(typeof validate).toBe("function")
+  const valid = blindProbeContractEvidence()
+  expect(validate(valid, blindProbeContractExpected)).toEqual([])
+
+  const invalidCases: Array<[string, (evidence: ReturnType<typeof blindProbeContractEvidence>) => void]> = [
+    ["missing identity", (evidence) => { evidence.identity.auditor.agentIdSha256 = "" }],
+    ["contradictory identity", (evidence) => { evidence.identity.auditor.sessionIdSha256 = blindProbeDigest("other-session") }],
+    ["cross-role identity collision", (evidence) => {
+      evidence.identity.control.agentIdSha256 = evidence.identity.auditor.agentIdSha256
+      evidence.identity.control.sessionIdSha256 = evidence.identity.auditor.sessionIdSha256
+    }],
+    ["duplicate instruction projection", (evidence) => { evidence.projection.auditor.count = 2; evidence.projection.auditor.paths.push("banca-auditor.md") }],
+    ["extra global instruction projection", (evidence) => { evidence.projection.auditor.count = 2; evidence.projection.auditor.paths.push("global.md") }],
+    ["contaminated control", (evidence) => { evidence.projection.control.count = 1; evidence.projection.control.paths.push("banca-auditor.md") }],
+    ["missing hook count", (evidence) => { Reflect.deleteProperty(evidence.runtimeHooks.agentRequest, "calls") }],
+    ["inconsistent hook count", (evidence) => { evidence.runtimeHooks.preStep.rejected = 1 }],
+    ["forbidden persisted event", (evidence) => { evidence.persistedSessionEvents.auditor["step/start"] = 1 }],
+    ["agent/request misclassified as persisted event", (evidence) => { Reflect.set(evidence.persistedSessionEvents.auditor, "agent/request", 0) }],
+    ["dispatch outside allowlist", (evidence) => { evidence.dispatch.sequence.push("banca_status") }],
+    ["synthetic canary mutation", (evidence) => { evidence.dispatch.canarySha256After = blindProbeDigest("canary-after-mutated") }],
+    ["plan divergence", (evidence) => { evidence.workspace.planId = blindProbeDigest("other-plan") }],
+    ["fingerprint divergence", (evidence) => { evidence.workspace.manuscriptFingerprint = blindProbeDigest("other-fingerprint") }],
+    ["context pack divergence", (evidence) => { evidence.workspace.contextPack.sha256 = blindProbeDigest("other-pack") }],
+    ["protected canary mutation", (evidence) => { evidence.workspace.protectedAfter["main.tex"] = blindProbeDigest("mutated-main") }],
+    ["incomplete teardown", (evidence) => { evidence.teardown.handlesDisposed = 1; evidence.teardown.complete = false }],
+    ["workspace escapes expected scratch path", (evidence) => { evidence.workspace.scratchRelativePath = "../outside" }],
+    ["self-declared isolation", (evidence) => { evidence.simulation.hostIsolationProven = true }],
+    ["nested array self-declared enforcement", (evidence) => { Reflect.set(evidence, "claims", [{ nested: [{ hostEnforcementProven: true }] }]) }],
+  ]
+  for (const [label, mutate] of invalidCases) {
+    const candidate = blindProbeContractEvidence()
+    mutate(candidate)
+    expect(validate(candidate, blindProbeContractExpected), label).not.toEqual([])
+  }
+})
 
 const completeAuditorMarkdownEvidence = {
   sourcePath: "assets/dsh/agents/banca-auditor.md",
@@ -6759,6 +6906,46 @@ describe("R8 terminal report planner wiring", () => {
   })
 })
 
+
+test("experimental phase with generic lifecycle opt-in is BLOCKED before any DSH CLI invocation", () => {
+  const root = mkdtempSync(join(tmpdir(), "dshbanca-blind-phase-preflight-"))
+  const bin = join(root, "bin")
+  const marker = join(root, "dsh-invoked.marker")
+  const reportPath = join(root, "blocked-report.json")
+  mkdirSync(bin)
+  const dshStub = join(bin, "dsh")
+  writeFileSync(dshStub, `#!/bin/sh\nprintf invoked > ${JSON.stringify(marker)}\nexit 0\n`)
+  chmodSync(dshStub, 0o700)
+  try {
+    const result = spawnSync(process.execPath, [join(process.cwd(), "scripts/e2e-dsh-profile.ts")], {
+      cwd: process.cwd(),
+      env: {
+        PATH: [bin, process.env.PATH ?? "/usr/bin:/bin"].join(":"),
+        HOME: root,
+        TMPDIR: root,
+        LANG: "C.UTF-8",
+        NO_COLOR: "1",
+        DSH_BIN: dshStub,
+        DSHBANCA_DSH_PROFILE_PHASE: "blind-case-v2",
+        DSHBANCA_DSH_PROFILE_LIFECYCLE_AUTHORIZED: "yes",
+        DSHBANCA_DSH_PROFILE_REPORT_PATH: reportPath,
+      },
+      encoding: "utf8",
+      timeout: 30_000,
+    })
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(2)
+    expect(`${result.stdout ?? ""}\n${result.stderr ?? ""}`).toContain("BLOCKED")
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(reportPath)).toBe(true)
+    const report = JSON.parse(readFileSync(reportPath, "utf8"))
+    expect(report.status).toBe("BLOCKED")
+    expect(report.failures[0]).toContain("experimental phase selection is disabled")
+    expect(report.stages.profileBoot).toMatchObject({ started: false, dshCliInvocations: 0 })
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Issue #107 R9: legitimate zero-PGID kernel threads in /proc must not turn a

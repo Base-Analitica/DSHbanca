@@ -128,6 +128,12 @@ const maxOutputBytes = 8_000_000
 const defaultRunDependencies: RunDependencies = { spawn, setTimeout, clearTimeout }
 const profileName = `dshbanca-e2e-${process.pid}-${Date.now()}`
 const observerName = "dshbanca-e2e-observer"
+const operationalProfilePhases = ["first", "resume", "drift-initial", "drift-resume", "abrupt-initial", "abrupt-resume"] as const
+
+function operationalPhaseSelectionBlocker(phase: string | undefined): string | null {
+  if (phase === undefined || operationalProfilePhases.includes(phase as (typeof operationalProfilePhases)[number])) return null
+  return "BLOCKED: experimental phase selection is disabled; no DSH CLI or profile boot is permitted"
+}
 
 interface CommandResult {
   exitCode: number | null
@@ -2134,12 +2140,16 @@ function createObserverPackage(
   }, null, 2) + "\n")
   copyRequiredAcademicDecisionModule(repositoryRoot, observerRoot)
   const observerSource = `import { createHash, createHmac, randomBytes } from "node:crypto";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const name = ${JSON.stringify(observerName)};
 export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections", "userQuestions", "approval"];
+const operationalProfilePhases = ["first", "resume", "drift-initial", "drift-resume", "abrupt-initial", "abrupt-resume"];
+export function isOperationalProfilePhase(phase) {
+  return typeof phase === "string" && operationalProfilePhases.includes(phase);
+}
 const expected = ${JSON.stringify(expectedTools)};
 const expectedNativeSkillsList = [
   "banca-avaliacao",
@@ -2302,6 +2312,384 @@ const parseContextMeta = async (contextOutput) => {
   const jsonStr = content.slice(start + startMarker.length, end);
   return JSON.parse(jsonStr);
 };
+
+const parseBlindContextMetadata = (content) => {
+  const fence = String.fromCharCode(96, 96, 96);
+  const lineBreak = String.fromCharCode(10);
+  const startMarker = fence + "json" + lineBreak;
+  const endMarker = lineBreak + fence;
+  const start = content.indexOf(startMarker);
+  if (start < 0) fail("blind-case context metadata is missing");
+  const end = content.indexOf(endMarker, start + startMarker.length);
+  if (end < 0) fail("blind-case context metadata is incomplete");
+  return JSON.parse(content.slice(start + startMarker.length, end));
+};
+
+/**
+ * Test-only simulated probe. It is deliberately not called from apply/main and
+ * refuses any context that is not an explicitly marked test double. Its output
+ * is never evidence of DSH/Cordis lifecycle, isolation, or native enforcement.
+ */
+export async function runBlindCaseWorkspaceProbe(ctx, input) {
+  const failProbe = (reason) => fail("blind-case simulated probe: " + reason);
+  if (ctx?.__testOnly?.mode !== "simulated-context") failProbe("an explicit simulated context is required");
+  if (typeof input?.scratchRoot !== "string" || typeof input?.workspaceRoot !== "string" || !isAbsolute(input.scratchRoot) || !isAbsolute(input.workspaceRoot)) failProbe("private scratch/workspace roots must be absolute");
+  const scratchRoot = resolve(input.scratchRoot);
+  const workspaceRoot = resolve(input.workspaceRoot);
+  if (scratchRoot !== input.scratchRoot || await realpath(scratchRoot) !== scratchRoot) failProbe("private scratch root is not canonical");
+  if (workspaceRoot !== input.workspaceRoot || await realpath(workspaceRoot) !== workspaceRoot) failProbe("workspace root is not canonical");
+  const scratchStat = await lstat(scratchRoot);
+  const workspaceStat = await lstat(workspaceRoot);
+  const workspaceFromScratch = relative(scratchRoot, workspaceRoot);
+  if (!scratchStat.isDirectory() || scratchStat.isSymbolicLink() || (scratchStat.mode & 0o077) !== 0) failProbe("scratch root is not a private regular directory");
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() || !workspaceFromScratch || workspaceFromScratch === ".." || workspaceFromScratch.startsWith(".." + sep) || isAbsolute(workspaceFromScratch)) {
+    failProbe("workspace is not a regular directory strictly below the private scratch root");
+  }
+  const expected = input.expected;
+  const isDigest = (value) => typeof value === "string" && value.length === 64 && Array.from(value).every((char) => "0123456789abcdef".includes(char));
+  if (
+    expected?.caseId !== "case-01" ||
+    !isDigest(expected.manifestSha256) ||
+    !isDigest(expected.instructionSha256) ||
+    typeof expected.instructionSha1 !== "string" || expected.instructionSha1.length !== 40 ||
+    !isDigest(expected.manuscriptFingerprint) || !isDigest(expected.planId) ||
+    !Array.isArray(expected.batchIds) || expected.batchIds.length < 1 ||
+    expected.batchIds.some((id) => typeof id !== "string" || id.length === 0) ||
+    new Set(expected.batchIds).size !== expected.batchIds.length
+  ) failProbe("independent case identity is incomplete");
+
+  const plannedOperations = [
+    { name: "banca_context", arguments: {} },
+    { name: "banca_init", arguments: { projectRoot: workspaceRoot, force: false } },
+    { name: "banca_corrigir", arguments: { projectRoot: workspaceRoot, corrections: [{ file: "main.tex", oldText: "SYNTHETIC_BEFORE", newText: "SYNTHETIC_AFTER", expectedOccurrences: 1 }] } },
+    { name: "banca_snapshot", arguments: { projectRoot: workspaceRoot, label: "blind-probe-synthetic" } },
+    { name: "banca_compile", arguments: { projectRoot: workspaceRoot } },
+    { name: "banca_restore", arguments: { projectRoot: workspaceRoot, snapshotId: "blind-probe-never-created", confirm: false } },
+    { name: "banca_loop", arguments: { projectRoot: workspaceRoot, maxIterations: 1, targetScore: 1, phase: "preparatory" } },
+    { name: "write", arguments: { file: "blind-probe-canary.txt", content: "SYNTHETIC_CANARY_WRITE_ATTEMPT" } },
+    { name: "edit", arguments: { file: "blind-probe-canary.txt", oldText: "SYNTHETIC_CANARY_BEFORE", newText: "SYNTHETIC_CANARY_AFTER", expectedOccurrences: 1 } },
+  ];
+  const requestedOperations = input.requestedOperations ?? plannedOperations;
+  if (JSON.stringify(requestedOperations) !== JSON.stringify(plannedOperations)) failProbe("dispatch sequence or arguments are outside the exact allowlist");
+  const allowedNames = new Set(plannedOperations.map((operation) => operation.name));
+  if (plannedOperations.some((operation) => !allowedNames.has(operation.name))) failProbe("dispatch operation is outside the allowlist");
+
+  const handles = [];
+  const disposers = [];
+  const agents = {};
+  const identity = {};
+  const projection = { auditor: null, control: null };
+  const runtimeHooks = { preStep: { calls: 0, rejected: 0 }, agentRequest: { calls: 0, rejected: 0 } };
+  let output = null;
+  let probeFailure = null;
+  let teardown = {
+    hookDisposers: 0,
+    handlesCreated: 0,
+    handlesDisposed: 0,
+    hooksRemoved: false,
+    agentsUnregistered: false,
+    sessionsUnregistered: false,
+    complete: false,
+  };
+  try {
+    const auditorHandle = await ctx.agents.create({ sessionId: "blind-case-simulated-auditor", meta: { cwd: workspaceRoot } });
+    if (auditorHandle) handles.push(auditorHandle);
+    const auditorAgent = auditorHandle?.agent;
+    if (!auditorAgent || !auditorAgent.session) failProbe("auditor Agent/Session creation failed");
+    agents.auditor = auditorAgent;
+    await ctx.agentPresets.select(auditorAgent, "banca-auditor");
+
+    const controlHandle = await ctx.agents.create({ sessionId: "blind-case-simulated-control", meta: { cwd: workspaceRoot } });
+    if (controlHandle) handles.push(controlHandle);
+    const controlAgent = controlHandle?.agent;
+    if (!controlAgent || !controlAgent.session) failProbe("control Agent/Session creation failed");
+    agents.control = controlAgent;
+    await selectControlPreset(ctx, controlAgent);
+
+    const digestId = (value) => createHash("sha256").update(String(value), "utf8").digest("hex");
+    for (const role of ["auditor", "control"]) {
+      const agent = agents[role];
+      const session = agent.session;
+      const preset = role === "auditor" ? "banca-auditor" : e2eControlPresetId;
+      const composedPreset = ctx.agentPresets.composedPreset(agent.ctx);
+      const sessionProjectionPreset = ctx.sessionProjections.stateOf(session, "agentPreset");
+      if (
+        typeof agent.id !== "string" || agent.id.length === 0 ||
+        typeof session.id !== "string" || session.id !== agent.id ||
+        ctx.agents.get(agent.id) !== agent || ctx.sessions.get(agent.id) !== session ||
+        composedPreset !== preset || sessionProjectionPreset !== preset ||
+        agent.ctx?.meta?.cwd !== workspaceRoot
+      ) failProbe(role + " simulated identity is incomplete or contradictory");
+      identity[role] = {
+        agentIdSha256: digestId(agent.id),
+        sessionIdSha256: digestId(session.id),
+        idsMatch: true,
+        agentRegistryMatch: true,
+        sessionRegistryMatch: true,
+        composedPreset: preset,
+        sessionProjectionPreset: preset,
+      };
+    }
+
+    if (await sha(join(workspaceRoot, "banca-auditor.md")) !== expected.instructionSha256 ||
+        await sha1(join(workspaceRoot, "banca-auditor.md")) !== expected.instructionSha1) {
+      failProbe("materialized instruction identity diverges from the authorized source");
+    }
+    const syntheticInstruction = {
+      id: "blind-case-simulated-instruction",
+      role: "user",
+      source: { kind: "agent-instructions", changes: [{ path: "banca-auditor.md", sha1: expected.instructionSha1 }] },
+    };
+    const syntheticControlMessage = {
+      id: "blind-case-simulated-control-message",
+      role: "user",
+      content: "synthetic neutral control sentinel",
+    };
+    const preStepHandler = (event) => {
+      runtimeHooks.preStep.calls++;
+      const role = event?.agent === agents.auditor ? "auditor" : event?.agent === agents.control ? "control" : null;
+      if (!role || event.session !== event.agent.session) failProbe("simulated pre-step identity is contradictory");
+      const projected = captureNativeInstructionMessages(event.decisionMessages, event.queuedMessages, null);
+      if (role === "auditor") {
+        if (projected.length !== 1) failProbe("auditor instruction projection is missing, duplicated, or unexpected");
+        const message = projected[0].message;
+        const paths = message?.source?.changes?.map((change) => change?.path) ?? [];
+        const digests = message?.source?.changes?.map((change) => change?.sha1) ?? [];
+        if (message?.role !== "user" || message?.source?.kind !== "agent-instructions" ||
+            JSON.stringify(paths) !== JSON.stringify(["banca-auditor.md"]) ||
+            JSON.stringify(digests) !== JSON.stringify([expected.instructionSha1])) {
+          failProbe("auditor instruction projection identity is invalid");
+        }
+        projection.auditor = { count: projected.length, paths, role: message.role, sourceKind: message.source.kind, digestSha1: digests[0] };
+      } else {
+        if (projected.length !== 0) failProbe("neutral control contains an academic instruction projection");
+        projection.control = { count: 0, paths: [] };
+      }
+      return { kind: "reject" };
+    };
+    const requestHandler = (event) => {
+      runtimeHooks.agentRequest.calls++;
+      if (!event || (event.agent !== agents.auditor && event.agent !== agents.control) || event.session !== event.agent.session) {
+        failProbe("simulated agent/request identity is contradictory");
+      }
+      throw new Error("simulated agent/request rejected before provider request");
+    };
+    const preStepDisposer = ctx.on("agent/pre-step", preStepHandler);
+    if (typeof preStepDisposer !== "function") failProbe("pre-step hook did not return a disposable handle");
+    disposers.push(preStepDisposer);
+    const requestDisposer = ctx.on("agent/request", requestHandler);
+    if (typeof requestDisposer !== "function") failProbe("agent/request hook did not return a disposable handle");
+    disposers.push(requestDisposer);
+    if (typeof ctx.__testOnly.invokeHook !== "function") failProbe("simulated hook dispatcher is unavailable");
+
+    const auditorDecision = await ctx.__testOnly.invokeHook("agent/pre-step", {
+      agent: agents.auditor,
+      session: agents.auditor.session,
+      decisionMessages: [syntheticInstruction],
+      queuedMessages: [],
+    });
+    const controlDecision = await ctx.__testOnly.invokeHook("agent/pre-step", {
+      agent: agents.control,
+      session: agents.control.session,
+      decisionMessages: [syntheticControlMessage],
+      queuedMessages: [],
+    });
+    if (JSON.stringify(auditorDecision) !== JSON.stringify({ kind: "reject" }) ||
+        JSON.stringify(controlDecision) !== JSON.stringify({ kind: "reject" })) {
+      failProbe("pre-step did not return the exact reject decision");
+    }
+    runtimeHooks.preStep.rejected = 2;
+    for (const agent of [agents.auditor, agents.control]) {
+      try {
+        await ctx.__testOnly.invokeHook("agent/request", { agent, session: agent.session });
+        failProbe("simulated agent/request was not rejected");
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "simulated agent/request rejected before provider request") throw error;
+        runtimeHooks.agentRequest.rejected++;
+      }
+    }
+
+    const persistedSessionEvents = {};
+    for (const role of ["auditor", "control"]) {
+      const session = agents[role].session;
+      if (typeof session.snapshotEvents !== "function") failProbe(role + " Session event snapshot is missing");
+      const events = session.snapshotEvents();
+      if (!Array.isArray(events) || events.length !== 0) failProbe(role + " simulated Session unexpectedly persisted events");
+      if (events.some((event) => event?.type === "agent/request")) failProbe("agent/request hook was incorrectly treated as a persisted Session event");
+      persistedSessionEvents[role] = { "step/start": 0, "request/header": 0, "assistant/message": 0 };
+    }
+
+    const before = await inventory(workspaceRoot);
+    const configPath = ".banca/project.json";
+    if (!before[configPath] || Object.keys(before).some((path) => path === ".git" || path.startsWith(".git/"))) failProbe("workspace preflight found a missing config or synthetic Git metadata");
+    const checkpointRelativePath = ".banca/analysis/checkpoints/" + expected.planId + ".json";
+    if (before[checkpointRelativePath] !== undefined) failProbe("fresh workspace already contains an analysis checkpoint");
+    if (typeof ctx.tools?.execute !== "function" || typeof ctx.__testOnly.refuseBeforeBody !== "function") {
+      failProbe("simulated local tool dispatcher or refusal stubs are missing");
+    }
+    const contextOperation = plannedOperations[0];
+    if (contextOperation.name !== "banca_context" || JSON.stringify(contextOperation.arguments) !== "{}") {
+      failProbe("only banca_context({}) is permitted to execute a local academic tool body");
+    }
+    let contextOutcome;
+    try {
+      contextOutcome = await runTool(ctx, "blind-case-context", "banca_context", {}, agents.auditor);
+    } catch {
+      failProbe("local banca_context dispatch failed");
+    }
+    if (contextOutcome?.result?.isError === true || !contextOutcome?.message?.startsWith("context → ")) {
+      failProbe("banca_context did not return a context pack");
+    }
+
+    const outputPathText = contextOutcome.message.slice("context → ".length).trim();
+    const contextDirectory = resolve(workspaceRoot, ".banca", "context");
+    if (await realpath(contextDirectory) !== contextDirectory) failProbe("context directory is not canonical");
+    const outputPath = resolve(outputPathText);
+    if (outputPath !== outputPathText) failProbe("context pack path is not canonical");
+    const packRelativeToContext = relative(contextDirectory, outputPath);
+    if (!packRelativeToContext || packRelativeToContext.startsWith("..") || packRelativeToContext.includes(sep) ||
+        basename(outputPath) !== packRelativeToContext || !basename(outputPath).startsWith("context-") || !basename(outputPath).endsWith(".md")) {
+      failProbe("context pack path is outside the canonical workspace context directory");
+    }
+    const packStat = await lstat(outputPath);
+    if (!packStat.isFile() || packStat.isSymbolicLink() || await realpath(outputPath) !== outputPath) {
+      failProbe("context pack is not a canonical regular file");
+    }
+    const packBytes = await readFile(outputPath);
+    const contextPackSha256 = createHash("sha256").update(packBytes).digest("hex");
+    const contextMetadata = parseBlindContextMetadata(packBytes.toString("utf8"));
+    if (
+      contextMetadata?.kind !== "openbanca-context-pack-v1" ||
+      contextMetadata?.manuscript?.fingerprint !== expected.manuscriptFingerprint ||
+      contextMetadata?.plan?.planId !== expected.planId ||
+      contextMetadata?.checkpoint?.planId !== expected.planId ||
+      contextMetadata?.plan?.batchCount !== expected.batchIds.length ||
+      contextMetadata?.checkpoint?.totalBatches !== expected.batchIds.length ||
+      contextMetadata?.checkpoint?.completedBatches !== 0 ||
+      contextMetadata?.checkpoint?.state !== "pending" ||
+      contextMetadata?.checkpoint?.coveragePercent !== 0 ||
+      contextMetadata?.checkpoint?.path !== checkpointRelativePath ||
+      contextMetadata?.batch?.batchId !== expected.batchIds[0] ||
+      contextMetadata?.batch?.index !== 0 ||
+      contextMetadata?.chunks?.length < 1
+    ) failProbe("context pack plan, order, fingerprint, or initial checkpoint diverges");
+    const checkpoint = JSON.parse(await readFile(join(workspaceRoot, checkpointRelativePath), "utf8"));
+    if (checkpoint.planId !== expected.planId || checkpoint.fingerprint !== expected.manuscriptFingerprint ||
+        checkpoint.totalBatches !== expected.batchIds.length || checkpoint.completedBatches !== 0 || checkpoint.state !== "pending") {
+      failProbe("persisted checkpoint advanced or diverges from the canonical plan");
+    }
+
+    const refusalNames = plannedOperations.slice(1).map((operation) => operation.name);
+    const refused = [];
+    const canaryBefore = await ctx.__testOnly.canarySha256();
+    if (!isDigest(canaryBefore)) failProbe("synthetic canary identity is unavailable");
+    for (const operation of plannedOperations.slice(1)) {
+      if (!allowedNames.has(operation.name)) failProbe("unexpected operation reached the allowlist dispatcher");
+      let decision;
+      try {
+        decision = await ctx.__testOnly.refuseBeforeBody(operation, agents.auditor);
+      } catch {
+        failProbe("simulated pre-body refusal stub failed");
+      }
+      if (decision?.kind !== "reject" || await ctx.__testOnly.wasRefusedBeforeBody(operation.name) !== true) {
+        failProbe("mutation/write/edit operation was not refused before its body");
+      }
+      refused.push(operation.name);
+    }
+    const canaryAfter = await ctx.__testOnly.canarySha256();
+    if (canaryAfter !== canaryBefore) failProbe("synthetic write/edit canary changed");
+
+    const after = await inventory(workspaceRoot);
+    const changedProtectedFiles = Object.keys(before).filter((path) => after[path] !== before[path]);
+    const protectedAfter = Object.fromEntries(Object.keys(before).map((path) => [path, after[path]]));
+    const addedFiles = Object.keys(after).filter((path) => before[path] === undefined).sort();
+    const packRelativePath = relative(workspaceRoot, outputPath).split(sep).join("/");
+    const allowedWrites = [checkpointRelativePath, packRelativePath].sort();
+    const expectedAdded = [...allowedWrites].sort();
+    if (changedProtectedFiles.length !== 0 || JSON.stringify(addedFiles) !== JSON.stringify(expectedAdded)) {
+      failProbe("workspace inventory contains a protected mutation or unexpected write");
+    }
+    const forbiddenArtifact = Object.keys(after).some((path) => /findings|confirmation|receipt/i.test(path));
+    if (forbiddenArtifact) failProbe("findings, confirmations, or receipts were unexpectedly created");
+
+    output = {
+      version: "blind-case-observer-probe-v2",
+      mode: "simulated-context-only",
+      simulation: {
+        dshRuntimeImported: false,
+        dshCliInvocations: 0,
+        agentSendCalls: 0,
+        modelCalls: 0,
+        credentialsUsed: false,
+        hostIsolationProven: false,
+        hostEnforcementProven: false,
+      },
+      identity,
+      projection: { ...projection, simulatedMessages: 2 },
+      runtimeHooks,
+      persistedSessionEvents,
+      workspace: {
+        scratchRelativePath: workspaceFromScratch.split(sep).join("/"),
+        caseId: expected.caseId,
+        manifestSha256: expected.manifestSha256,
+        instructionSha256: expected.instructionSha256,
+        manuscriptFingerprint: expected.manuscriptFingerprint,
+        planId: expected.planId,
+        batchIds: [...expected.batchIds],
+        completedBatchesBefore: 0,
+        completedBatchesAfter: checkpoint.completedBatches,
+        contextPack: { relativePath: packRelativePath, sha256: contextPackSha256 },
+        allowedWrites,
+        protectedBefore: before,
+        protectedAfter,
+        findings: 0,
+        receipts: 0,
+        confirmations: 0,
+        synthesisInvocations: 0,
+      },
+      dispatch: {
+        sequence: plannedOperations.map((operation) => operation.name),
+        deniedPreBody: refused.slice(0, refusalNames.length - 2),
+        stubRefusals: refused.slice(-2),
+        bodyExecutions: 0,
+        unexpectedDispatches: 0,
+        canarySha256Before: canaryBefore,
+        canarySha256After: canaryAfter,
+      },
+      teardown: null,
+    };
+  } catch (error) {
+    probeFailure = error instanceof Error && error.message.startsWith("DSHbanca profile E2E observer: ")
+      ? error.message
+      : "DSHbanca profile E2E observer: blind-case simulated probe failed";
+  } finally {
+    const cleanupErrors = [];
+    for (const dispose of [...disposers].reverse()) {
+      try { await dispose(); } catch { cleanupErrors.push("hook"); }
+    }
+    let handlesDisposed = 0;
+    for (const handle of [...handles].reverse()) {
+      try { await handle.dispose(); handlesDisposed++; } catch { cleanupErrors.push("handle"); }
+    }
+    const hooksRemoved = cleanupErrors.every((kind) => kind !== "hook");
+    const agentsUnregistered = Object.values(agents).every((agent) => ctx.agents.get(agent.id) === undefined);
+    const sessionsUnregistered = Object.values(agents).every((agent) => ctx.sessions.get(agent.id) === undefined);
+    teardown = {
+      hookDisposers: disposers.length,
+      handlesCreated: handles.length,
+      handlesDisposed,
+      hooksRemoved,
+      agentsUnregistered,
+      sessionsUnregistered,
+      complete: cleanupErrors.length === 0 && hooksRemoved && agentsUnregistered && sessionsUnregistered && handlesDisposed === handles.length,
+    };
+    if (output) output.teardown = teardown;
+    if (!teardown.complete && probeFailure === null) probeFailure = "DSHbanca profile E2E observer: blind-case simulated teardown incomplete";
+    if (!teardown.complete && probeFailure !== null) probeFailure += "; teardown incomplete";
+  }
+  if (probeFailure !== null) throw new Error(probeFailure);
+  return output;
+}
 
 export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   const configPath = join(workspace, ".banca", "project.json");
@@ -4821,6 +5209,7 @@ export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
   const reportPath = ${JSON.stringify(observerResult)};
   const restartPhase = process.env.DSHBANCA_DSH_PROFILE_PHASE ?? "first";
+  if (!isOperationalProfilePhase(restartPhase)) fail("unknown cross-process phase selector");
   const abruptRestartMode = restartPhase === "abrupt-initial" || restartPhase === "abrupt-resume";
   const driftMode = restartPhase === "drift-initial" || restartPhase === "drift-resume";
   const abruptRestartWorkspace = ${JSON.stringify(abruptRestartWorkspace)};
@@ -5850,6 +6239,24 @@ export default { name, inject, apply };
 }
 
 async function main(): Promise<void> {
+  const phaseBlocker = operationalPhaseSelectionBlocker(process.env.DSHBANCA_DSH_PROFILE_PHASE)
+  if (phaseBlocker) {
+    report.stages.profileBoot = {
+      status: "BLOCKED",
+      started: false,
+      dshCliInvocations: 0,
+      agentHandlesCreated: 0,
+      sessionsCreated: 0,
+      academicProjectInitialized: false,
+    }
+    report.stages.crossProcessBatchAudit = {
+      status: "BLOCKED",
+      processLaunches: 0,
+      reason: "Unsupported experimental phase selection was refused before any DSH process.",
+    }
+    fail(phaseBlocker, "BLOCKED")
+    return
+  }
   // Created before any subprocess so every #107 stage can corroborate the
   // kernel-start identity of the direct child it may need to contain.
   const processIdentityKey = randomBytes(32)

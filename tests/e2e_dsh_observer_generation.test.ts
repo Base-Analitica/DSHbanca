@@ -1,14 +1,19 @@
 import { expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, relative, sep } from "node:path"
 import { pathToFileURL } from "node:url"
 import { readFileSync, readdirSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { loadConfig } from "../src/lib/config.js"
 import { loadCanonicalLatexManuscript } from "../src/lib/latex_loader.js"
 import { planExhaustiveAnalysisBatches } from "../src/lib/analysis_coverage.js"
-import { computePlanIdentity } from "../src/lib/analysis_checkpoint.js"
+import {
+  computePlanIdentity,
+  createAnalysisCheckpoint,
+  nextAnalysisBatch,
+} from "../src/lib/analysis_checkpoint.js"
+import { getAnalysisCheckpointRelativePath } from "../src/lib/state.js"
 import { bancaContext } from "../src/tools/banca_context.js"
 import { bancaAuditar } from "../src/tools/banca_auditar.js"
 import { bancaSintese } from "../src/tools/banca_sintese.js"
@@ -22,6 +27,457 @@ import {
 import * as profileEvidenceContract from "../scripts/lib/dsh-profile-e2e-contract.js"
 import { e2eControlPresetId } from "../scripts/lib/dsh-profile-e2e-presets.js"
 import { renderControlPresetSelector } from "../scripts/lib/dsh-profile-e2e-observer-control.js"
+import {
+  materializeBlindCaseWorkspace,
+  verifyBlindCaseWorkspace,
+} from "./fixtures/academic-semantic-pilot/v1/helpers/blind_case_workspace.js"
+import { MANIFEST_RELATIVE_PATH, PILOT_CORPUS_ROOT } from "./fixtures/academic-semantic-pilot/v1/helpers/corpus_contract.js"
+
+async function loadGeneratedObserverModule() {
+  const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
+  const templateStart = runnerSource.indexOf("const observerSource = `")
+  const contentStart = templateStart + "const observerSource = `".length
+  const contentEnd = runnerSource.indexOf("\n`\n  writeFileSync(join(observerRoot, \"index.js\"), observerSource", contentStart)
+  expect(templateStart).toBeGreaterThanOrEqual(0)
+  expect(contentEnd).toBeGreaterThan(contentStart)
+  const template = runnerSource.slice(contentStart, contentEnd)
+  const renderObserver = new Function(
+    "observerName", "expectedTools", "auditorMarkdownSourceSha256", "auditorMarkdownSourceSha1",
+    "workspace", "observerResult", "restartWorkspace", "restartObserverResultOne", "restartObserverResultTwo",
+    "restartTeardownMarkerOne", "restartTeardownMarkerTwo", "abruptRestartWorkspace", "abruptObserverResultOne",
+    "abruptObserverResultTwo", "abruptTeardownMarkerOne", "abruptTeardownMarkerTwo", "abruptParentDecisionToken",
+    "renderControlPresetSelector", "e2eControlPresetId",
+    `return \`${template}\`;`,
+  ) as (...args: unknown[]) => string
+  const source = renderObserver(
+    "dshbanca-e2e-observer", expectedTools, canonicalAuditorMarkdownSha256, canonicalAuditorMarkdownSha1,
+    "/tmp/synthetic-workspace", "/tmp/observer-result.json", "/tmp/restart-workspace",
+    "/tmp/process-a-result.json", "/tmp/process-b-result.json", "/tmp/process-a-shutdown.json", "/tmp/process-b-shutdown.json",
+    "/tmp/abrupt-restart-workspace", "/tmp/abrupt-process-a-result.json", "/tmp/abrupt-process-b-result.json",
+    "/tmp/abrupt-process-a-shutdown.json", "/tmp/abrupt-process-b-shutdown.json", "test-parent-decision-token",
+    renderControlPresetSelector, e2eControlPresetId,
+  )
+  const directory = mkdtempSync(join(tmpdir(), "dshbanca-observer-generated-module-"))
+  const modulePath = join(directory, "observer.mjs")
+  writeFileSync(modulePath, source, { mode: 0o600 })
+  const module = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}-${Math.random()}`)
+  return { directory, modulePath, source, module }
+}
+
+function scratchInventory(root: string, prefix = ""): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
+    const absolutePath = join(root, entry.name)
+    if (entry.isDirectory()) Object.assign(result, scratchInventory(absolutePath, relativePath))
+    else if (entry.isFile()) result[relativePath] = createHash("sha256").update(readFileSync(absolutePath)).digest("hex")
+    else throw new Error("unexpected symlink or special file in isolated scratch")
+  }
+  return result
+}
+
+function prepareBlindCaseWorkspaceForProbe(parentRoot: string) {
+  const workspaceRoot = join(parentRoot, "workspace")
+  const materialized = materializeBlindCaseWorkspace({
+    caseId: "case-01",
+    destinationRoot: workspaceRoot,
+    instructionSha256: canonicalAuditorMarkdownSha256,
+  })
+  const config = loadConfig(workspaceRoot)
+  const manuscript = loadCanonicalLatexManuscript(workspaceRoot, config)
+  const plan = planExhaustiveAnalysisBatches(manuscript, config.analysis.maxCharactersPerBatch)
+  const independentlyComputedPlanId = computePlanIdentity(plan)
+  const manifestSha256 = createHash("sha256").update(readFileSync(join(PILOT_CORPUS_ROOT, MANIFEST_RELATIVE_PATH))).digest("hex")
+  const verified = verifyBlindCaseWorkspace({ caseId: "case-01", workspaceRoot, instructionSha256: canonicalAuditorMarkdownSha256 })
+  expect(materialized.report.manifestSha256).toBe(manifestSha256)
+  expect(materialized.planId).toBe(independentlyComputedPlanId)
+  expect(verified.planId).toBe(independentlyComputedPlanId)
+  const caseSourceHashes = materialized.sources.map((source) => {
+    const actualSha256 = createHash("sha256").update(readFileSync(join(PILOT_CORPUS_ROOT, "manuscripts", "case-01", source.path))).digest("hex")
+    expect(actualSha256).toBe(source.sha256)
+    return { path: source.path, sha256: actualSha256 }
+  })
+  const expected = {
+    caseId: "case-01",
+    scratchRelativePath: relative(parentRoot, workspaceRoot).split(sep).join("/"),
+    manifestSha256,
+    instructionSha256: canonicalAuditorMarkdownSha256,
+    instructionSha1: canonicalAuditorMarkdownSha1,
+    manuscriptFingerprint: manuscript.fingerprint!,
+    planId: independentlyComputedPlanId,
+    batchIds: plan.batches.map((batch) => batch.batchId),
+  }
+  return { workspaceRoot, materialized, config, manuscript, plan, expected, verified, caseSourceHashes }
+}
+
+function createSimulatedBlindProbeContext(workspaceRoot: string, canaryPath: string, options: any = {}) {
+  const agentRegistry = new Map<string, any>()
+  const sessionRegistry = new Map<string, any>()
+  const presetProjection = new Map<any, string>()
+  const hooks = new Map<string, Set<(event: any) => unknown>>()
+  const state = {
+    createCalls: 0,
+    createdHandles: [] as any[],
+    disposeAttempts: 0,
+    registeredHooks: [] as string[],
+    disposedHooks: [] as string[],
+    actualToolDispatches: [] as string[],
+    refusalAttempts: [] as string[],
+    refusedBeforeBody: [] as string[],
+    bodyExecutions: 0,
+    unexpectedToolDispatches: 0,
+    simulatedMessageCount: 0,
+  }
+  const context: any = {
+    __testOnly: {
+      mode: "simulated-context",
+      async invokeHook(name: string, event: any) {
+        let simulatedEvent = event
+        const role = event?.agent?.id?.endsWith("auditor") ? "auditor" : event?.agent?.id?.endsWith("control") ? "control" : null
+        if (name === "agent/pre-step" && options.extraInstructionProjectionFor === role) {
+          const extraInstruction = {
+            id: "blind-case-simulated-extra-instruction",
+            role: "user",
+            source: { kind: "agent-instructions", changes: [{ path: "global.md", sha1: "a".repeat(40) }] },
+          }
+          simulatedEvent = { ...event, queuedMessages: [...(event.queuedMessages ?? []), extraInstruction] }
+        }
+        state.simulatedMessageCount += (simulatedEvent?.decisionMessages?.length ?? 0) + (simulatedEvent?.queuedMessages?.length ?? 0)
+        const listeners = hooks.get(name)
+        if (!listeners || listeners.size !== 1) throw new Error("simulated hook listener cardinality mismatch")
+        let result: unknown
+        for (const listener of listeners) result = await listener(simulatedEvent)
+        return result
+      },
+      async refuseBeforeBody(operation: any) {
+        state.refusalAttempts.push(operation.name)
+        if (options.failRefusalAt === operation.name) throw new Error("simulated refusal stub fault")
+        const args = operation.arguments
+        if (["banca_init", "banca_corrigir", "banca_snapshot", "banca_compile", "banca_restore", "banca_loop"].includes(operation.name)) {
+          if (args.projectRoot !== workspaceRoot) throw new Error("refusal stub received a different scratch root")
+        } else if ((operation.name === "write" || operation.name === "edit") && args.file !== "blind-probe-canary.txt") {
+          throw new Error("write/edit stub received a non-synthetic target")
+        }
+        if (operation.name === "banca_corrigir" && (args.corrections?.[0]?.oldText !== "SYNTHETIC_BEFORE" || args.corrections?.[0]?.newText !== "SYNTHETIC_AFTER")) {
+          throw new Error("correction refusal did not receive a synthetic canary")
+        }
+        if (operation.name === "write" && args.content !== "SYNTHETIC_CANARY_WRITE_ATTEMPT") throw new Error("write refusal did not receive synthetic content")
+        if (operation.name === "edit" && (args.oldText !== "SYNTHETIC_CANARY_BEFORE" || args.newText !== "SYNTHETIC_CANARY_AFTER")) {
+          throw new Error("edit refusal did not receive synthetic text")
+        }
+        state.refusedBeforeBody.push(operation.name)
+        return { kind: "reject" }
+      },
+      async wasRefusedBeforeBody(name: string) { return state.refusedBeforeBody.includes(name) },
+      async canarySha256() { return createHash("sha256").update(readFileSync(canaryPath)).digest("hex") },
+    },
+    agents: {
+      async create({ sessionId, meta }: { sessionId: string; meta: { cwd: string } }) {
+        state.createCalls++
+        const callNumber = state.createCalls
+        if (options.failCreateAt === callNumber) throw new Error("simulated Agent creation failure")
+        const session = {
+          id: sessionId,
+          header: { cwd: meta.cwd },
+          snapshotEvents: () => structuredClone(options.persistedEvents?.[sessionId.endsWith("auditor") ? "auditor" : "control"] ?? []),
+        }
+        const agent = { id: sessionId, ctx: { meta, composedPreset: "" }, session }
+        agentRegistry.set(agent.id, agent)
+        sessionRegistry.set(session.id, session)
+        const handle = {
+          agent,
+          async dispose() {
+            state.disposeAttempts++
+            agentRegistry.delete(agent.id)
+            sessionRegistry.delete(session.id)
+            if (options.failDisposeAt === callNumber) throw new Error("simulated disposal failure after release")
+          },
+        }
+        state.createdHandles.push(handle)
+        return handle
+      },
+      get(id: string) { return agentRegistry.get(id) },
+    },
+    sessions: { get(id: string) { return sessionRegistry.get(id) } },
+    agentPresets: {
+      async select(agent: any, preset: string) {
+        agent.ctx.composedPreset = preset
+        presetProjection.set(agent.session, preset)
+        return preset
+      },
+      composedPreset(agentContext: any) { return agentContext.composedPreset },
+    },
+    sessionProjections: {
+      stateOf(session: any, field: string) { return field === "agentPreset" ? presetProjection.get(session) : undefined },
+    },
+    on(name: string, listener: (event: any) => unknown) {
+      if (options.failHookRegistrationAt === name) throw new Error("simulated hook registration failure")
+      const listeners = hooks.get(name) ?? new Set()
+      listeners.add(listener)
+      hooks.set(name, listeners)
+      state.registeredHooks.push(name)
+      return () => {
+        listeners.delete(listener)
+        state.disposedHooks.push(name)
+        if (options.failHookDisposeAt === name) throw new Error("simulated hook disposal failure after release")
+      }
+    },
+    tools: {
+      async execute(request: any) {
+        state.actualToolDispatches.push(request.name)
+        if (options.failDispatch) throw new Error("simulated local tool dispatch failure")
+        if (request.name !== "banca_context" || JSON.stringify(request.arguments) !== "{}") {
+          state.unexpectedToolDispatches++
+          throw new Error("unexpected simulated tool dispatch")
+        }
+        const text = await bancaContext.execute(request.arguments, { directory: workspaceRoot } as any)
+        return { isError: false, content: [{ type: "text", text }] }
+      },
+    },
+  }
+  return { context, state, hooks, agentRegistry, sessionRegistry }
+}
+
+test("the generated observer exports only a testable restricted blind-case probe and preserves old phase selection", async () => {
+  const generated = await loadGeneratedObserverModule()
+  try {
+    expect(typeof generated.module.runBlindCaseWorkspaceProbe).toBe("function")
+    expect(typeof generated.module.isOperationalProfilePhase).toBe("function")
+    for (const phase of ["first", "resume", "drift-initial", "drift-resume", "abrupt-initial", "abrupt-resume"]) {
+      expect(generated.module.isOperationalProfilePhase(phase)).toBe(true)
+    }
+    expect(generated.module.isOperationalProfilePhase("blind-case-v2")).toBe(false)
+  } finally {
+    rmSync(generated.directory, { recursive: true, force: true })
+  }
+})
+
+test("generated apply rejects the experimental selector before context access", async () => {
+  const generated = await loadGeneratedObserverModule()
+  const priorPhase = process.env.DSHBANCA_DSH_PROFILE_PHASE
+  const priorIdentityKey = process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
+  let contextAccesses = 0
+  try {
+    process.env.DSHBANCA_DSH_PROFILE_PHASE = "blind-case-v2"
+    delete process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
+    const ctx = new Proxy({}, { get() { contextAccesses++; return undefined } })
+    await expect(generated.module.apply(ctx)).rejects.toThrow("unknown cross-process phase selector")
+    expect(contextAccesses).toBe(0)
+  } finally {
+    if (priorPhase === undefined) delete process.env.DSHBANCA_DSH_PROFILE_PHASE
+    else process.env.DSHBANCA_DSH_PROFILE_PHASE = priorPhase
+    if (priorIdentityKey === undefined) delete process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY
+    else process.env.DSHBANCA_DSH_PROFILE_PROCESS_IDENTITY_KEY = priorIdentityKey
+    rmSync(generated.directory, { recursive: true, force: true })
+  }
+})
+
+test("generated-module probe uses case-01, a confined context pack, exact refusals and full simulated teardown", async () => {
+  const parentRoot = mkdtempSync(join(tmpdir(), "dshbanca-blind-case-v2-"))
+  const canaryPath = join(parentRoot, "blind-probe-canary.txt")
+  writeFileSync(canaryPath, "SYNTHETIC_CANARY_BASELINE\n", { mode: 0o600 })
+  const fixture = prepareBlindCaseWorkspaceForProbe(parentRoot)
+  const generated = await loadGeneratedObserverModule()
+  try {
+    const { workspaceRoot, expected, config, manuscript, plan, caseSourceHashes } = fixture
+    expect(existsSync(join(workspaceRoot, ".git"))).toBe(false)
+    const protectedBefore = scratchInventory(workspaceRoot)
+    const beforeCanarySha256 = createHash("sha256").update(readFileSync(canaryPath)).digest("hex")
+    const { context, state, hooks, agentRegistry, sessionRegistry } = createSimulatedBlindProbeContext(workspaceRoot, canaryPath)
+
+    const evidence = await generated.module.runBlindCaseWorkspaceProbe(context, { scratchRoot: parentRoot, workspaceRoot, expected })
+
+    expect(evidence.mode).toBe("simulated-context-only")
+    expect(evidence.simulation).toMatchObject({ dshRuntimeImported: false, dshCliInvocations: 0, agentSendCalls: 0, modelCalls: 0, credentialsUsed: false, hostIsolationProven: false, hostEnforcementProven: false })
+    expect(evidence.identity.auditor.agentIdSha256).toBe(evidence.identity.auditor.sessionIdSha256)
+    expect(evidence.identity.auditor.composedPreset).toBe("banca-auditor")
+    expect(evidence.identity.control.composedPreset).toBe(e2eControlPresetId)
+    expect(evidence.projection).toMatchObject({
+      auditor: { count: 1, paths: ["banca-auditor.md"], role: "user", sourceKind: "agent-instructions", digestSha1: canonicalAuditorMarkdownSha1 },
+      control: { count: 0, paths: [] },
+      simulatedMessages: 2,
+    })
+    expect(evidence.runtimeHooks).toEqual({ preStep: { calls: 2, rejected: 2 }, agentRequest: { calls: 2, rejected: 2 } })
+    expect(evidence.persistedSessionEvents).toEqual({
+      auditor: { "step/start": 0, "request/header": 0, "assistant/message": 0 },
+      control: { "step/start": 0, "request/header": 0, "assistant/message": 0 },
+    })
+    expect(evidence.workspace).toMatchObject({
+      scratchRelativePath: expected.scratchRelativePath,
+      caseId: "case-01",
+      manifestSha256: expected.manifestSha256,
+      instructionSha256: canonicalAuditorMarkdownSha256,
+      manuscriptFingerprint: manuscript.fingerprint,
+      planId: computePlanIdentity(plan),
+      batchIds: plan.batches.map((batch) => batch.batchId),
+      completedBatchesBefore: 0,
+      completedBatchesAfter: 0,
+    })
+    expect(evidence.dispatch.sequence).toEqual(["banca_context", "banca_init", "banca_corrigir", "banca_snapshot", "banca_compile", "banca_restore", "banca_loop", "write", "edit"])
+    expect(evidence.dispatch.deniedPreBody).toEqual(["banca_init", "banca_corrigir", "banca_snapshot", "banca_compile", "banca_restore", "banca_loop"])
+    expect(evidence.dispatch.stubRefusals).toEqual(["write", "edit"])
+    expect(evidence.dispatch.bodyExecutions).toBe(0)
+    expect(state.actualToolDispatches).toEqual(["banca_context"])
+    expect(state.unexpectedToolDispatches).toBe(0)
+    expect(state.simulatedMessageCount).toBe(2)
+    expect(state.refusalAttempts).toEqual(evidence.dispatch.sequence.slice(1))
+    expect(state.refusedBeforeBody).toEqual(evidence.dispatch.sequence.slice(1))
+
+    const checkpoint = createAnalysisCheckpoint(plan)
+    const nextBatch = nextAnalysisBatch(plan, checkpoint)
+    expect(nextBatch).not.toBeNull()
+    const checkpointRelativePath = getAnalysisCheckpointRelativePath(expected.planId)
+    const contextPackRelativePath = evidence.workspace.contextPack.relativePath
+    const contextPackPath = join(workspaceRoot, contextPackRelativePath)
+    const contextPackContent = readFileSync(contextPackPath, "utf8")
+    const fence = String.fromCharCode(96, 96, 96)
+    const startMarker = fence + "json\n"
+    const endMarker = "\n" + fence
+    const metaStart = contextPackContent.indexOf(startMarker)
+    const metaEnd = contextPackContent.indexOf(endMarker, metaStart + startMarker.length)
+    expect(metaStart).toBeGreaterThanOrEqual(0)
+    expect(metaEnd).toBeGreaterThan(metaStart)
+    const metadata = JSON.parse(contextPackContent.slice(metaStart + startMarker.length, metaEnd))
+    expect(Number.isFinite(Date.parse(metadata.generatedAt))).toBe(true)
+
+    const independentlyDerivedMetadata = {
+      kind: "openbanca-context-pack-v1",
+      generatedAt: metadata.generatedAt,
+      manuscript: { fingerprint: manuscript.fingerprint, complete: manuscript.complete, rootFile: manuscript.rootFile },
+      plan: {
+        status: plan.status,
+        strategy: plan.strategy,
+        planId: expected.planId,
+        batchCount: plan.coverage.batchCount,
+        totalCharacters: plan.coverage.totalCharacters,
+        plannedCharacters: plan.coverage.plannedCharacters,
+        coveragePercent: plan.coverage.coveragePercent,
+      },
+      checkpoint: {
+        version: checkpoint.version,
+        planId: checkpoint.planId,
+        state: checkpoint.state,
+        totalBatches: checkpoint.totalBatches,
+        completedBatches: checkpoint.completedBatches,
+        totalCharacters: checkpoint.totalCharacters,
+        completedCharacters: checkpoint.completedCharacters,
+        coveragePercent: checkpoint.coveragePercent,
+        path: checkpointRelativePath,
+        persisted: true,
+      },
+      batch: {
+        batchId: nextBatch!.batchId,
+        index: nextBatch!.index,
+        totalBatches: plan.coverage.batchCount,
+        characters: nextBatch!.characters,
+        coveragePercent: checkpoint.coveragePercent,
+      },
+      chunks: nextBatch!.chunks.map((chunk) => ({
+        index: chunk.index,
+        file: chunk.source.file,
+        startLine: chunk.source.startLine,
+        endLine: chunk.source.endLine,
+        sourceSpanIndex: chunk.source.sourceSpanIndex,
+        startOffset: chunk.source.startOffset,
+        endOffset: chunk.source.endOffset,
+        characters: chunk.text.length,
+      })),
+      diagnostics: plan.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+      analysis: { coverageMode: config.analysis.coverageMode, maxCharactersPerBatch: config.analysis.maxCharactersPerBatch },
+    }
+    expect(metadata).toEqual(independentlyDerivedMetadata)
+    const coverageDisclaimer = "This reports checkpoint/coverage progress only; it does not prove model run, findings, or academic analysis."
+    const expectedParts = [
+      `# Context Pack — ${metadata.generatedAt}\n`,
+      "## Canonical analysis metadata\n",
+      `${fence}json\n${JSON.stringify(independentlyDerivedMetadata, null, 2)}\n${fence}\n`,
+      `## Next exhaustive batch (${nextBatch!.batchId})\n`,
+      `_Checkpoint pending: completed 0/${plan.coverage.batchCount} batches, coverage 0%. Persisted at \`${checkpointRelativePath}\`. ${coverageDisclaimer}_\n`,
+      ...nextBatch!.chunks.map((chunk) =>
+        `### chunk ${chunk.index} — ${chunk.source.file} L${chunk.source.startLine}-${chunk.source.endLine} off ${chunk.source.startOffset}-${chunk.source.endOffset}\n\n` +
+        `${fence}latex\n${chunk.text}\n${fence}\n`,
+      ),
+    ]
+    const expectedContextPackContent = expectedParts.join("\n")
+    expect(contextPackContent).toBe(expectedContextPackContent)
+    const independentContextPackSha256 = createHash("sha256").update(expectedContextPackContent, "utf8").digest("hex")
+    expect(evidence.workspace.contextPack.sha256).toBe(independentContextPackSha256)
+    expect(evidence.workspace.allowedWrites).toEqual([checkpointRelativePath, contextPackRelativePath].sort())
+    expect(JSON.parse(readFileSync(join(workspaceRoot, checkpointRelativePath), "utf8"))).toEqual(checkpoint)
+
+    const protectedAfter = scratchInventory(workspaceRoot)
+    const expectedAfterPaths = [...Object.keys(protectedBefore), checkpointRelativePath, contextPackRelativePath].sort()
+    expect(Object.keys(protectedAfter).sort()).toEqual(expectedAfterPaths)
+    for (const [path, digest] of Object.entries(protectedBefore)) expect(protectedAfter[path]).toBe(digest)
+    expect(evidence.workspace.protectedBefore).toEqual(protectedBefore)
+    expect(evidence.workspace.protectedAfter).toEqual(protectedBefore)
+    expect(createHash("sha256").update(readFileSync(canaryPath)).digest("hex")).toBe(beforeCanarySha256)
+    expect(createHash("sha256").update(readFileSync(join(PILOT_CORPUS_ROOT, MANIFEST_RELATIVE_PATH))).digest("hex")).toBe(expected.manifestSha256)
+    for (const source of caseSourceHashes) {
+      expect(createHash("sha256").update(readFileSync(join(PILOT_CORPUS_ROOT, "manuscripts", "case-01", source.path))).digest("hex")).toBe(source.sha256)
+    }
+    expect(createHash("sha256").update(readFileSync("assets/dsh/agents/banca-auditor.md")).digest("hex")).toBe(canonicalAuditorMarkdownSha256)
+    expect(state.disposedHooks.sort()).toEqual(["agent/pre-step", "agent/request"])
+    expect(state.disposeAttempts).toBe(2)
+    expect(agentRegistry.size).toBe(0)
+    expect(sessionRegistry.size).toBe(0)
+    expect([...hooks.values()].every((listeners) => listeners.size === 0)).toBe(true)
+    expect(evidence.teardown).toEqual({ hookDisposers: 2, handlesCreated: 2, handlesDisposed: 2, hooksRemoved: true, agentsUnregistered: true, sessionsUnregistered: true, complete: true })
+    expect(JSON.stringify(evidence)).not.toContain(workspaceRoot)
+
+    const validate = profileEvidenceContract.validateBlindCaseObserverProbeEvidence
+    expect(validate(evidence, {
+      ...expected,
+      controlPresetId: e2eControlPresetId,
+      contextPackRelativePath,
+      contextPackSha256: independentContextPackSha256,
+      protectedInventory: protectedBefore,
+    })).toEqual([])
+  } finally {
+    rmSync(generated.directory, { recursive: true, force: true })
+    rmSync(parentRoot, { recursive: true, force: true })
+  }
+})
+
+test("blind-case probe fails closed on unexpected dispatch and tears down partial Agent/Session/hook resources", async () => {
+  const generated = await loadGeneratedObserverModule()
+  const parentRoot = mkdtempSync(join(tmpdir(), "dshbanca-blind-case-failure-v2-"))
+  try {
+    const scenarioOptions = [
+      { name: "unexpected dispatch", options: {}, requestedOperations: [{ name: "banca_status", arguments: {} }], expectedCreateCalls: 0, expectedDisposeAttempts: 0, expectedToolDispatches: [] },
+      { name: "workspace outside private scratch", options: {}, expectedCreateCalls: 0, expectedDisposeAttempts: 0, expectedToolDispatches: [] },
+      { name: "second Agent creation", options: { failCreateAt: 2 }, expectedCreateCalls: 2, expectedDisposeAttempts: 1, expectedToolDispatches: [] },
+      { name: "request hook registration", options: { failHookRegistrationAt: "agent/request" }, expectedCreateCalls: 2, expectedDisposeAttempts: 2, expectedToolDispatches: [] },
+      { name: "extra global auditor instruction projection", options: { extraInstructionProjectionFor: "auditor" }, expectedCreateCalls: 2, expectedDisposeAttempts: 2, expectedToolDispatches: [] },
+      { name: "instruction projection on neutral control", options: { extraInstructionProjectionFor: "control" }, expectedCreateCalls: 2, expectedDisposeAttempts: 2, expectedToolDispatches: [] },
+      { name: "local context dispatch", options: { failDispatch: true }, expectedCreateCalls: 2, expectedDisposeAttempts: 2, expectedToolDispatches: ["banca_context"] },
+      { name: "handle disposal", options: { failDisposeAt: 1 }, expectedCreateCalls: 2, expectedDisposeAttempts: 2, expectedToolDispatches: ["banca_context"] },
+      { name: "hook disposal", options: { failHookDisposeAt: "agent/request" }, expectedCreateCalls: 2, expectedDisposeAttempts: 2, expectedToolDispatches: ["banca_context"] },
+    ]
+    for (let index = 0; index < scenarioOptions.length; index++) {
+      const scenario = scenarioOptions[index]!
+      const scenarioRoot = join(parentRoot, `scenario-${index}`)
+      mkdirSync(scenarioRoot)
+      const fixture = prepareBlindCaseWorkspaceForProbe(scenarioRoot)
+      const canaryPath = join(scenarioRoot, "blind-probe-canary.txt")
+      writeFileSync(canaryPath, "SYNTHETIC_CANARY_BASELINE\n", { mode: 0o600 })
+      const simulated = createSimulatedBlindProbeContext(fixture.workspaceRoot, canaryPath, scenario.options)
+      const scratchRoot = scenario.name === "workspace outside private scratch" ? mkdtempSync(join(parentRoot, `other-scratch-${index}-`)) : parentRoot
+      const input = { scratchRoot, workspaceRoot: fixture.workspaceRoot, expected: fixture.expected, requestedOperations: scenario.requestedOperations }
+      await expect(generated.module.runBlindCaseWorkspaceProbe(simulated.context, input), scenario.name).rejects.toThrow()
+      expect(simulated.state.createCalls, scenario.name).toBe(scenario.expectedCreateCalls)
+      expect(simulated.state.actualToolDispatches, scenario.name).toEqual(scenario.expectedToolDispatches)
+      expect(simulated.state.bodyExecutions, scenario.name).toBe(0)
+      expect(simulated.agentRegistry.size, scenario.name).toBe(0)
+      expect(simulated.sessionRegistry.size, scenario.name).toBe(0)
+      expect([...simulated.hooks.values()].every((listeners) => listeners.size === 0), scenario.name).toBe(true)
+      expect(simulated.state.disposeAttempts, scenario.name).toBe(scenario.expectedDisposeAttempts)
+    }
+  } finally {
+    rmSync(generated.directory, { recursive: true, force: true })
+    rmSync(parentRoot, { recursive: true, force: true })
+  }
+})
 
 test("unauthorized E2E returns before any DSH CLI or academic project setup", () => {
   const runnerSource = readFileSync("scripts/e2e-dsh-profile.ts", "utf8")
