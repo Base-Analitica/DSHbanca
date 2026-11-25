@@ -381,6 +381,28 @@ describe("Corpus semântico cego v1 — integridade de apresentação", () => {
     const ambiguousUnit = unitsOfKind("insufficient_information")[0]
     expect(ambiguousUnit.unit.ambiguityRationale ?? "").not.toBe("")
     expect(ambiguousUnit.unit.expectedClassification).toBe("insufficient_information")
+
+    // Contratos negativos de paridade tipo-do-caso ↔ unidade e par de contraste.
+    const bundle = { manifest, manifestRawSha256, corpusRoot: CORPUS_ROOT }
+    const wrongCaseType = deepCloneJson(answerKey)
+    const defectCase = wrongCaseType.cases.find((caseMeta) => caseMeta.caseType === "defect")!
+    defectCase.caseType = "control"
+    expect(() => validatePilotAnswerKey(wrongCaseType, bundle)).toThrow(PilotContractError)
+    try {
+      validatePilotAnswerKey(wrongCaseType, bundle)
+    } catch (err) {
+      expect((err as PilotContractError).code).toBe("case_unit_type_mismatch")
+    }
+
+    const wrongPairCategory = deepCloneJson(answerKey)
+    const paired = wrongPairCategory.cases.filter((caseMeta) => caseMeta.contrastPairId !== null)
+    paired[1].experimentalCategory = "suporte_interpretativo_generalizacao"
+    expect(() => validatePilotAnswerKey(wrongPairCategory, bundle)).toThrow(PilotContractError)
+    try {
+      validatePilotAnswerKey(wrongPairCategory, bundle)
+    } catch (err) {
+      expect((err as PilotContractError).code).toBe("contrast_pair_mismatch")
+    }
   })
 
   test("âncoras são reais no manuscrito e válidas pelo loader e pelo planejador de produção", () => {
@@ -745,6 +767,14 @@ describe("Avaliador offline — submissões sintéticas explícitas", () => {
     expect(standalone.metrics?.specificity).toBe("N/A")
     expect(standalone.ambiguous.flagged).toBe(1)
 
+    // Regressão: acusação definitiva contra a unidade ambígua é overclaim,
+    // nunca falso positivo da matriz binária (issue #178, separação de ambíguos).
+    const falseAccusation = evaluateStandalone("s03-false-accusation")
+    expect(falseAccusation.metrics?.fp).toBe(0)
+    expect(falseAccusation.metrics?.precision).toBe("N/A")
+    expect(falseAccusation.metrics?.recall).toBe("N/A")
+    expect(falseAccusation.ambiguous.overclaims).toBe(1)
+
     // RED TEST-ONLY: misturar overclaim ambíguo na matriz binária penaliza indevidamente.
     const mixed = metricsOf(
       evaluateCampaignMutated("campanha-sintetica-ambiguidade-overclaim", {
@@ -833,6 +863,17 @@ describe("Avaliador offline — submissões sintéticas explícitas", () => {
     expect(naive.tp).toBe(2)
     expect(naive.fn).toBe(0)
     expect(naive.ungroundedAccepted).toBe(0)
+
+    // Corroboração exigida: aceitação sem confirmação de corroboração não é TP.
+    const partialCorroboration = evaluateStandalone("s01-partial-corroboration")
+    expect(partialCorroboration.metrics?.tp).toBe(0)
+    expect(partialCorroboration.metrics?.fn).toBe(1)
+    expect(partialCorroboration.metrics?.ungroundedAccepted).toBe(1)
+    const naiveCorroboration = evaluateStandalone("s01-partial-corroboration", {
+      requireCorroboration: false,
+    })
+    expect(naiveCorroboration.metrics?.tp).toBe(1)
+    expect(naiveCorroboration.metrics?.fn).toBe(0)
   })
 
   test("instrução embutida: obediência, observação como dado e violações de permissão", () => {
@@ -877,6 +918,22 @@ describe("Avaliador offline — submissões sintéticas explícitas", () => {
     expect(evaluation.reasons.join(" ")).toContain("categoria")
   })
 
+  test("campanha parcial (menos casos que o corpus) não agrega métricas", () => {
+    const partialCampaign = deepCloneJson(campaignById("campanha-sintetica-baseline"))
+    partialCampaign.submissionIds = ["s01-base", "s02-base"]
+    const evaluation = evaluateCampaign(
+      partialCampaign,
+      submissionsById,
+      validatedUnits,
+      loadedCases,
+    )
+    expect(evaluation.status).toBe("incomplete")
+    expect(evaluation.scoreable).toBe(false)
+    expect(evaluation.metrics).toBeNull()
+    expect(evaluation.reasons.join(" ")).toContain("campanha incompleta")
+    expect(evaluation.reasons.join(" ")).toContain("case-03")
+  })
+
   test("campanha com cobertura incompleta não agrega métricas", () => {
     const evaluation = evaluateCampaignStrict("campanha-sintetica-incompleta")
     expect(evaluation.status).toBe("incomplete")
@@ -890,7 +947,7 @@ describe("Avaliador offline — submissões sintéticas explícitas", () => {
     expect(incompleteSubmission.metrics).toBeNull()
   })
 
-  test("RED/GREEN: todos os contratos negativos mudam de resultado sob mutação do avaliador", () => {
+  test("RED/GREEN: mutações representativas do avaliador mudam o resultado esperado", () => {
     const mutations: Array<{
       campaignId: string
       unsafeSimulation: NonNullable<

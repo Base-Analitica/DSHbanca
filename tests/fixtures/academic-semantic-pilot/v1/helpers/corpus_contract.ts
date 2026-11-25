@@ -870,6 +870,86 @@ export function validatePilotAnswerKey(
     }
   }
 
+  // Coerência entre tipo do caso e classificações das unidades.
+  const unitsByCase = new Map<string, GroundTruthUnit[]>()
+  for (const unit of units as GroundTruthUnit[]) {
+    const list = unitsByCase.get(unit.caseId) ?? []
+    list.push(unit)
+    unitsByCase.set(unit.caseId, list)
+  }
+  for (const rawCase of cases) {
+    const c = rawCase as Record<string, unknown>
+    const caseId = c.caseId as string
+    const caseType = c.caseType as string
+    const caseUnits = unitsByCase.get(caseId) ?? []
+    const classifications = new Set(caseUnits.map((unit) => unit.expectedClassification))
+    const required: Array<[string, GroundTruthUnit["expectedClassification"]]> = [
+      ["defect", "defect_expected"],
+      ["control", "conformity_expected"],
+      ["ambiguous", "insufficient_information"],
+      ["instruction", "instruction_resistance_required"],
+    ]
+    for (const [expectedCaseType, expectedClassification] of required) {
+      if (caseType === expectedCaseType && !classifications.has(expectedClassification)) {
+        fail(
+          "case_unit_type_mismatch",
+          `caso ${caseId} do tipo ${caseType} exige unidade ${expectedClassification}`,
+        )
+      }
+      if (
+        caseType !== expectedCaseType &&
+        caseType !== "instruction" &&
+        classifications.has(expectedClassification)
+      ) {
+        fail(
+          "case_unit_type_mismatch",
+          `caso ${caseId} do tipo ${caseType} não pode conter unidade ${expectedClassification}`,
+        )
+      }
+    }
+    if (caseType === "defect" && !caseUnits.some((unit) => unit.expectedClassification === "defect_expected")) {
+      fail("case_unit_type_mismatch", `caso de defeito ${caseId} sem unidade de defeito`)
+    }
+  }
+
+  // Pares de contraste: um defeito e um controle, mesma categoria experimental.
+  const pairCases = new Map<string, Array<Record<string, unknown>>>()
+  for (const rawCase of cases) {
+    const c = rawCase as Record<string, unknown>
+    const pairId = c.contrastPairId
+    if (typeof pairId !== "string") continue
+    const list = pairCases.get(pairId) ?? []
+    list.push(c)
+    pairCases.set(pairId, list)
+  }
+  const pairedCaseIds = new Set<string>()
+  for (const [pairId, pairMembers] of pairCases) {
+    if (pairMembers.length !== 2) {
+      fail("contrast_pair_mismatch", `par de contraste ${pairId} deve ter exatamente dois casos`)
+    }
+    const caseTypes = pairMembers.map((member) => String(member.caseType)).sort()
+    if (caseTypes[0] !== "control" || caseTypes[1] !== "defect") {
+      fail("contrast_pair_mismatch", `par ${pairId} deve combinar um defeito e um controle`)
+    }
+    const categories = new Set(pairMembers.map((member) => String(member.experimentalCategory)))
+    if (categories.size !== 1) {
+      fail("contrast_pair_mismatch", `par ${pairId} deve compartilhar a categoria experimental`)
+    }
+    for (const member of pairMembers) pairedCaseIds.add(String(member.caseId))
+  }
+  for (const rawCase of cases) {
+    const c = rawCase as Record<string, unknown>
+    const caseType = c.caseType as string
+    const caseId = c.caseId as string
+    const expectsPair = caseType === "defect" || caseType === "control"
+    if (expectsPair !== pairedCaseIds.has(caseId)) {
+      fail(
+        "contrast_pair_mismatch",
+        `caso ${caseId} (${caseType}) incoerente com participação em par de contraste`,
+      )
+    }
+  }
+
   if (options.verifyCorpusBinding !== false) {
     if (binding.manifestSha256 !== bundle.manifestRawSha256) {
       fail("answer_key_binding_mismatch", "gabarito não vincula o SHA-256 do manifesto atual")

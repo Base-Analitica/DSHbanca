@@ -835,6 +835,88 @@
           "synthetic": true
         }
       }
+    },
+    {
+      "submissionId": "s03-false-accusation",
+      "caseId": "case-03",
+      "synthetic": true,
+      "notes": "Submissão sintética fabricada exclusivamente para testar o avaliador offline; não é saída de modelo nem auditoria real.",
+      "audit": {
+        "completedBatchIndexes": [
+          0,
+          1,
+          2
+        ],
+        "claimedStatus": "complete",
+        "synthesisAttempted": true,
+        "synthesisCoverageState": "complete",
+        "errors": []
+      },
+      "findings": [
+        {
+          "category": "coerencia_metodologica",
+          "severity": "alta",
+          "claim": "O percentual de 42% está incorreto e invalida os resultados do estudo.",
+          "evidence": "Resultados: \"O primeiro registro relata aumento médio de 42\\% em uma medida de produtividade não especificada.\nO segundo registro não apresenta valores numéricos e descreve apenas impressões gerais dos responsáveis.\"",
+          "file": "secoes/resultados.tex",
+          "startLine": 2,
+          "endLine": 3,
+          "sectionId": "Resultados",
+          "batchIndex": 1
+        }
+      ],
+      "findingAdjudications": [
+        {
+          "findingIndex": 0,
+          "unitId": "u-9a3d2f60",
+          "verdict": "false_accusation",
+          "rationale": "Acusação definitiva sobre o caso ambíguo: deve ser contabilizada como overclaim separado, nunca como FP binário.",
+          "synthetic": true
+        }
+      ]
+    },
+    {
+      "submissionId": "s01-partial-corroboration",
+      "caseId": "case-01",
+      "synthetic": true,
+      "notes": "Submissão sintética fabricada exclusivamente para testar o avaliador offline; não é saída de modelo nem auditoria real.",
+      "audit": {
+        "completedBatchIndexes": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "claimedStatus": "complete",
+        "synthesisAttempted": true,
+        "synthesisCoverageState": "complete",
+        "errors": []
+      },
+      "findings": [
+        {
+          "category": "coerencia_metodologica",
+          "severity": "alta",
+          "claim": "A conclusão afirma redução da taxa de abandono e superioridade nos dois critérios, contradizendo o resultado que registra aumento de 3,1% para 11,2% e o objetivo de não elevar o abandono.",
+          "evidence": "Conclusão: \"Conclui-se que a política P2 reduz o tempo médio de espera e também reduz a taxa de abandono, sendo superior à política FIFO nos dois critérios avaliados.\nOs resultados sustentam que a adoção da política P2 é vantajosa para o sistema simulado.\" Resultados: \"No cenário FIFO, o tempo médio de espera foi de 12,4 minutos e a taxa de abandono foi de 3,1\\%.\nNo cenário P2, o tempo médio de espera caiu para 9,1 minutos, enquanto a taxa de abandono subiu para 11,2\\%.\" Objetivo: \"Este estudo avalia se uma política de prioridade de duas classes reduz o tempo médio de espera em um sistema de filas simulado, sem elevar a taxa de abandono das solicitações.\"",
+          "file": "secoes/conclusao.tex",
+          "startLine": 2,
+          "endLine": 3,
+          "sectionId": "Conclusão",
+          "batchIndex": 3
+        }
+      ],
+      "findingAdjudications": [
+        {
+          "findingIndex": 0,
+          "unitId": "u-3f1c9a2e",
+          "verdict": "accepted",
+          "rationale": "Aceito semanticamente, mas sem confirmação de corroboração exigida pela unidade.",
+          "synthetic": true,
+          "interpretationId": "conclusao-contradiz-resultados",
+          "localization": "verbatim_corroborating",
+          "corroborationVerified": false
+        }
+      ]
     }
   ],
   "campaigns": [

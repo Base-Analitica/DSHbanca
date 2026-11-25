@@ -1,6 +1,6 @@
 # Piloto de avaliação semântica cega — corpus v1 e protocolo de campanha
 
-**Issue:** [#178](https://github.com/Base-Analitica/DSHbanca/issues/178) · **SHA de referência desta documentação:** `7e3e30e` · **Branch:** `test/academic-semantic-pilot-v1`
+**Issue:** [#178](https://github.com/Base-Analitica/DSHbanca/issues/178) · **Base autorizada:** `7e3e30e` · **Branch:** `test/academic-semantic-pilot-v1` (HEAD final reportado na PR #179)
 **Estado:** entrega preparatória e hermética. **Zero modelos, zero credenciais, zero custo, zero sessão/lifecycle DSH e zero rede de inferência nesta entrega.** A campanha com modelo é **`NOT RUN`** e permanece **`BLOCKED`**.
 
 Este documento descreve o corpus sintético v1 e o protocolo de uma futura campanha de avaliação semântica cega. Ele **não é** execução, **não é** parecer acadêmico e **não autoriza** uso de modelo, provedor, credencial ou custo.
@@ -24,15 +24,15 @@ Separação dos níveis de evidência usados nesta entrega:
 
 | Nível de evidência desta entrega | Abrangência |
 |---|---|
-| **FACT (inspeção read-only)** | Arquivos do repositório no SHA `7e3e30e` e pacotes instalados do host `0.2.1-rc.5` |
+| **FACT (inspeção read-only)** | Arquivos do repositório na base `7e3e30e` e no HEAD de autoria da branch (SHA final reportado na PR #179) e pacotes instalados do host `0.2.1-rc.5` |
 | **DOCUMENTED CLAIM** | Protocolo acadêmico, guard read-only e comportamento do host descritos nas fontes citadas, ainda não observados em execução desta campanha |
-| **PASS local (autoria)** | Teste hermético do corpus ([`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts)): 24 testes, 0 falhas e 562 expects no ambiente local; CI/revisão no SHA final é o gate válido |
+| **PASS local (autoria)** | Teste hermético do corpus ([`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts)): 25 testes, 0 falhas e 584 expects no ambiente local; CI/revisão no SHA final é o gate válido |
 | **NOT RUN** | E2E DSH e campanha com modelo |
 | **BLOCKED** | Protocolo cego completo, gabarito isolado, teto/custo/retenção/cancelamento e caminho automatizado no preset real |
 
 A fronteira arquitetural é a de sempre: o DSH é o único harness e o Cordis é a integração nativa; o DSHbanca não implementa runner de agente, roteador/seleção de modelo, autenticação de provedor, cliente LLM, *permission engine* ou segundo harness ([README](../README.md#L7), [AGENTS.md](../AGENTS.md#L28-L56)). A futura campanha só pode consumir APIs, eventos, permissões e lifecycle **do host**.
 
-**FACT (inspeção):** os helpers são explicitamente test-only e não importam DSH, rede, subprocesso, modelo ou credencial ([`corpus_contract.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/corpus_contract.ts#L1-L17), [`offline_evaluator.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/offline_evaluator.ts#L1-L18)). O teste hermético do corpus é [`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts); o resultado local de autoria (`PASS`, 24 testes) será reportado no corpo da PR/CI, não é incorporado a este documento e **não** vale como execução de modelo/DSH nem como `PASS` no SHA final antes do CI.
+**FACT (inspeção):** os helpers são explicitamente test-only e não importam DSH, rede, subprocesso, modelo ou credencial ([`corpus_contract.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/corpus_contract.ts#L1-L17), [`offline_evaluator.ts`](../tests/fixtures/academic-semantic-pilot/v1/helpers/offline_evaluator.ts#L1-L18)). O teste hermético do corpus é [`tests/semantic_pilot_corpus.test.ts`](../tests/semantic_pilot_corpus.test.ts); o resultado local de autoria (`PASS`, 25 testes) é evidência de teste hermético reportada no corpo da PR/CI e no checklist da entrega; **não** vale como execução de modelo/DSH nem como `PASS` no SHA final antes do CI.
 
 ## 2. Corpus e gabarito
 
@@ -146,7 +146,7 @@ Cada execução futura precisa produzir um relatório sanitizado, com hashes e c
 
 | Campo | Conteúdo | Estado nesta entrega |
 |---|---|---|
-| Produto | SHA do checkout, branch, versões DSH/Cordis/pacotes instalados | FACT: SHA `7e3e30e`; host instalado inspecionado read-only é `@deepseek-ai/dsh` 0.2.1-rc.5 (o bundle instalado declara `@deepseek-ai/cordis` ~4.0.5; inspeção local de `package.json`, sem runtime); o registro histórico do gate E2E pertence a DSH 0.2.0-rc.2/Cordis 4.0.4 ([dsh-profile-e2e.md](dsh-profile-e2e.md#L7)) |
+| Produto | SHA do checkout, branch, versões DSH/Cordis/pacotes instalados | FACT: base `7e3e30e`; HEAD de autoria na branch (SHA final na PR #179); host instalado inspecionado read-only é `@deepseek-ai/dsh` 0.2.1-rc.5 (o bundle instalado declara `@deepseek-ai/cordis` ~4.0.5; inspeção local de `package.json`, sem runtime); o registro histórico do gate E2E pertence a DSH 0.2.0-rc.2/Cordis 4.0.4 ([dsh-profile-e2e.md](dsh-profile-e2e.md#L7)) |
 | Corpus/gabarito | Versões `academic-semantic-pilot-*`, SHA-256 do manifesto e do gabarito, fingerprints por caso | FACT: contrato definido nos helpers |
 | Configuração | Config sanitizada, hashes de prompts e de contexto, modelo/provedor exatos | NOT RUN (campanha não executada) |
 | Fluxo acadêmico | Hashes de packs, recibos, findings, confirmações e entrada de síntese | NOT RUN |
@@ -208,7 +208,7 @@ O host instalado foi inspecionado read-only e declara `AgentRegistry.create/disp
 | Retenção verificável | **BLOCKED** | Política e verificação de retenção aprovadas |
 | Cancelamento em voo e watchdog por caso | **BLOCKED** | Comportamento observado no host, sem força maior |
 | Comportamento de modelo | **NOT RUN / BLOCKED** | Autorização específica + execução observada e registrada |
-| Corpus, contrato e gabarito herméticos | **PASS local (autoria; 24 testes herméticos) + BLOCKED até CI/revisão no SHA final** | CI verde e revisão independente no SHA final |
+| Corpus, contrato e gabarito herméticos | **PASS local (autoria; 25 testes herméticos) + BLOCKED até CI/revisão no SHA final** | CI verde e revisão independente no SHA final |
 | E2E DSH sem modelo *nesta PR* | **NOT RUN** | Autorização humana específica e execução no SHA publicado |
 | Campanha com modelo *nesta PR* | **NOT RUN** | Nenhuma autorização; não solicitada |
 

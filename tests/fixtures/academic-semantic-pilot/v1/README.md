@@ -58,13 +58,13 @@ O corpus reúne seis manuscritos LaTeX multifile, todos com cobertura exaustiva 
 
 | Caso | Arquivos | `totalCharacters` | `batchCount` |
 |---|---:|---:|---:|
-| `case-01` | 6 | 1679 | 4 |
+| `case-01` | 6 | 1559 | 4 |
 | `case-02` | 6 | 1380 | 4 |
 | `case-03` | 6 | 1252 | 3 |
 | `case-04` | 6 | 1667 | 4 |
 | `case-05` | 6 | 1461 | 4 |
 | `case-06` | 6 | 1190 | 3 |
-| **Total** | **36** | **8629** | **22** |
+| **Total** | **36** | **8509** | **22** |
 
 Numeração dos casos é apenas identificação neutra; a ordem de apresentação não corresponde à categoria experimental. Os totais da tabela são os declarados no [manifesto](manifest.json), e o contrato test-only exige que correspondam ao loader canônico e ao planejador de cobertura de produção.
 

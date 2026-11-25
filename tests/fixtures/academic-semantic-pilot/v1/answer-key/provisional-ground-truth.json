@@ -50,9 +50,9 @@
   "corpusBinding": {
     "manifestPath": "manifest.json",
     "manifestVersion": "academic-semantic-pilot-corpus-v1",
-    "manifestSha256": "e1cee61d5b45261e391b0d2230977e4f2de2bbde8719b25be4f1eb2b760095b6",
+    "manifestSha256": "d62769bbbf8bcda48ca82f6391edd7dffbf51273ca72a8a0b9c79d697903274f",
     "caseFingerprints": {
-      "case-01": "a1c493b196cd9ca367268819a9c99c187f06ce5f58eb62a359d706ae42a7d40c",
+      "case-01": "7fd71c534c10beddab485c71b140592d42aa8d83032e416428af369ffb73bce1",
       "case-02": "7a30dcf3f5aa1796879553d320ae2dd6ab3f4fcbce3fb23efbfc07607c79359a",
       "case-03": "75ce15b25e329ba13e996155d0bdd1fa805224f86ba3e3542cd1c2fa662c35ec",
       "case-04": "45672b4174b4e48b05f8e8385009da490830d6cad396094679c6378be21491c2",
@@ -66,7 +66,7 @@
       "caseType": "defect",
       "experimentalCategory": "coerencia_objetivo_metodo_resultado_conclusao",
       "contrastPairId": "par-contraste-coerencia",
-      "manuscriptFingerprint": "a1c493b196cd9ca367268819a9c99c187f06ce5f58eb62a359d706ae42a7d40c"
+      "manuscriptFingerprint": "7fd71c534c10beddab485c71b140592d42aa8d83032e416428af369ffb73bce1"
     },
     {
       "caseId": "case-04",
@@ -175,7 +175,7 @@
         }
       ],
       "judgmentLimits": "A unidade avalia somente coerência interna entre objetivo, resultados e conclusão. Não avalia correção estatística da simulação, revisão bibliográfica, ABNT, severidade ou mérito acadêmico. Interpretações alternativas sobre a robustez da simulação não substituem a evidência da contradição textual.",
-      "manuscriptFingerprint": "a1c493b196cd9ca367268819a9c99c187f06ce5f58eb62a359d706ae42a7d40c"
+      "manuscriptFingerprint": "7fd71c534c10beddab485c71b140592d42aa8d83032e416428af369ffb73bce1"
     },
     {
       "unitId": "u-8b7d41c0",
@@ -343,7 +343,7 @@
       },
       "corroboratingAnchors": [],
       "requiredCorroboration": false,
-      "justification": "O percentual de 42% é relatado sem denominador e sem medida de produtividade especificada, e o manuscrito declara que o documento original não estava disponível. Sem a fonte, não é possível distinguir erro de relato, denominador de subgrupo legítimo ou lacuna da própria síntese. A conclusão do próprio manuscrito já se declara inconclusiva. Um veredito binário de defeito ou de conformidade não é responsável com a informação disponível.",
+      "justification": "O percentual de 42% é relatado sem denominador e sem medida de produtividade especificada, e o manuscrito declara que o documento original não estava disponível. O julgamento desta unidade recai sobre o relato do resultado, não sobre a conclusão: mesmo que a conclusão seja prudente, não é possível decidir se o percentual é erro de relato, denominador de subgrupo legítimo ou lacuna da própria síntese. Portanto não há veredito binário responsável para o relato; sinalizar insuficiência ou abster-se é aceitável, e declarar defeito ou conformidade definitivos sem a fonte é overclaim. A classificação final deste caso é decisão da ratificação humana.",
       "acceptableInterpretations": [
         {
           "id": "insuficiencia-informacao",
@@ -364,8 +364,8 @@
           "description": "Declarar o trecho conforme sem verificar a fonte; a ausência de informação impede a conclusão positiva."
         }
       ],
-      "judgmentLimits": "A unidade não admite conclusão binária responsável. Sinalizar insuficiência e abster-se com cobertura completa são ambos aceitáveis; acusações definitivas ou declarações de conformidade sem fonte são registradas separadamente como overclaim, fora da matriz binária.",
-      "ambiguityRationale": "O denominador e a medida do percentual de 42% não estão disponíveis; a fonte original não pode ser consultada. A ausência de informação impede distinguir defeito de relato, subgrupo legítimo ou lacuna da síntese, e o próprio manuscrito declara a limitação.",
+      "judgmentLimits": "A unidade não admite conclusão binária responsável enquanto o denominador e a medida do percentual de 42% não estiverem disponíveis. Sinalizar insuficiência e abster-se com cobertura completa são ambos aceitáveis; acusações definitivas ou declarações de conformidade sem fonte são registradas separadamente como overclaim, fora da matriz binária. A decisão final sobre manter este caso como ambíguo pertence à ratificação humana do gabarito.",
+      "ambiguityRationale": "A ambiguidade está no relato do resultado (percentual de 42% sem denominador nem medida) e não na conclusão, que já se declara inconclusiva. Sem a fonte original, a conformidade do relato não pode ser afirmada nem negada; por isso não existe conclusão binária responsável. A ratificação humana deve confirmar ou reclassificar este caso antes de qualquer campanha.",
       "manuscriptFingerprint": "75ce15b25e329ba13e996155d0bdd1fa805224f86ba3e3542cd1c2fa662c35ec"
     },
     {
