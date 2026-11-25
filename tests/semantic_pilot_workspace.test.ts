@@ -1,23 +1,30 @@
 /**
  * Teste hermético do workspace individual cego por caso do piloto semântico
- * (DSHbanca, issue #180).
+ * (DSHbanca, issues #180 e #184).
  *
  * Escopo:
  * - demonstra os riscos RED do baseline (caso cru usa defaults; cópia ampla
- *   expõe gabarito; materializador ingênuo aceita hash adulterado);
- * - materializa os seis casos com allowlist/hashes exatos e configuração
- *   persistida derivada de `buildProjectConfig`;
+ *   expõe gabarito; materializador ingênuo aceita hash adulterado); a lacuna do
+ *   workspace v1 (sete arquivos, sem `banca-auditor.md`, cópia canônica recusada
+ *   como `workspace_extra_file`) é evidência de baseline reproduzida fora desta
+ *   suíte no SHA `c4ef9d1`, pois o contrato v1 não existe mais no HEAD;
+ * - materializa os seis casos com allowlist/hashes exatos, configuração
+ *   persistida derivada de `buildProjectConfig` e **uma** cópia byte a byte da
+ *   instrução canônica do auditor na raiz (contrato v2);
  * - recarrega a configuração com `validateConfig`/`loadConfig` de produção e
  *   compara o plano acadêmico com o caso original usando loader/planejador reais;
  * - exercita os contratos negativos (hash, extra, symlink, traversal,
  *   sobreposição, destino não vazio, config ausente/adulterada/defaults,
- *   estado contaminado, vazamento de outro caso e falha parcial).
+ *   estado contaminado, vazamento de outro caso, falha parcial, fonte da
+ *   instrução ausente/adulterada/link, instrução materializada
+ *   ausente/adulterada/substituída/vinculada e relatório v1 recusado como v2).
  *
  * Este teste não executa DSH, Agent/Session, modelo, rede, credencial, custo ou
  * campanha. Todo o corpus é sintético. Nenhum manuscrito real é usado.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import {
   chownSync,
   copyFileSync,
@@ -36,9 +43,16 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { parse as parseYaml } from "yaml"
 
 import {
+  BLIND_CASE_CONTROL_REPORT_VERSION,
+  BLIND_CASE_WORKSPACE_VERSION,
+  BLIND_INSTRUCTION_CONTRACT_VERSION,
+  BLIND_INSTRUCTION_MAX_BYTES,
+  BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH,
   BLIND_WORKSPACE_CONFIG_RELATIVE_PATH,
+  BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
   BlindWorkspaceError,
   blindControllerCaseOrder,
   buildBlindCampaignPlan,
@@ -50,6 +64,7 @@ import {
   writeBlindCaseControlArtifacts,
   type BlindCaseControlReport,
   type BlindCaseWorkspace,
+  type BlindInstructionIdentity,
   type PresentationCorpus,
 } from "./fixtures/academic-semantic-pilot/v1/helpers/blind_case_workspace"
 import {
@@ -60,11 +75,30 @@ import {
   type PilotCorpusCase,
   type PilotCorpusManifest,
 } from "./fixtures/academic-semantic-pilot/v1/helpers/corpus_contract"
+import {
+  canonicalAuditorMarkdownSha256,
+  canonicalAuditorMarkdownSha1,
+} from "../scripts/lib/dsh-profile-e2e-contract.js"
 import { loadConfig, validateConfig } from "../src/lib/config"
 import { loadCanonicalLatexManuscript } from "../src/lib/latex_loader"
 import { planExhaustiveAnalysisBatches } from "../src/lib/analysis_coverage"
 
 const CORPUS_ROOT = PILOT_CORPUS_ROOT
+
+/**
+ * Identidade fixa da instrução canônica nesta base. O digest autorizado vem do
+ * contrato de perfil E2E do produto (constante já existente, não um novo hash
+ * permanente): o controlador congela essa identidade e confere o asset antes do
+ * uso, sem aceitar digest autodeclarado pelo relatório.
+ */
+const REPO_ROOT = path.resolve(__dirname, "..")
+const CANONICAL_INSTRUCTION_PATH = path.join(
+  REPO_ROOT,
+  ...BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH.split("/"),
+)
+const CANONICAL_INSTRUCTION_BYTES = readFileSync(CANONICAL_INSTRUCTION_PATH)
+const CANONICAL_INSTRUCTION_SHA256 = sha256Hex(CANONICAL_INSTRUCTION_BYTES)
+const CANONICAL_INSTRUCTION_SHA1 = createHash("sha1").update(CANONICAL_INSTRUCTION_BYTES).digest("hex")
 
 const scratchDirectories: string[] = []
 
@@ -91,8 +125,20 @@ function sortByPath<T extends { path: string }>(entries: T[]): T[] {
 function expectedWorkspaceFiles(caseDef: PilotCorpusCase): string[] {
   return [
     ...caseDef.content.files.map((file) => file.path),
+    BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
     BLIND_WORKSPACE_CONFIG_RELATIVE_PATH,
   ].sort()
+}
+
+/** Identidade canônica esperada da instrução, derivada do asset versionado. */
+function expectedInstructionIdentity(): BlindInstructionIdentity {
+  return {
+    contractVersion: BLIND_INSTRUCTION_CONTRACT_VERSION,
+    relativePath: BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
+    sourceRelativePath: BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH,
+    byteLength: CANONICAL_INSTRUCTION_BYTES.byteLength,
+    sha256: CANONICAL_INSTRUCTION_SHA256,
+  }
 }
 
 function caseDirOf(corpusRoot: string, caseDef: PilotCorpusCase): string {
@@ -162,6 +208,68 @@ function workspaceInventory(root: string): Array<{ path: string; sha256: string 
 
 function readManifestJson(corpusRoot: string): PilotCorpusManifest {
   return JSON.parse(readFileSync(path.join(corpusRoot, "manifest.json"), "utf8")) as PilotCorpusManifest
+}
+
+/**
+ * Cria uma raiz sintética de repositório contendo apenas o asset da instrução
+ * canônica (ou uma variante controlada). Serve **somente** para exercitar as
+ * recusas de fonte (`instructionSourceRoot` é TEST-ONLY e exige digest
+ * autorizado); nunca é a fonte de uma materialização real.
+ */
+function instructionSourceRootFixture(
+  options: {
+    missing?: boolean
+    symlinkFile?: boolean
+    hardlinkFile?: boolean
+    directoryFile?: boolean
+    tooLarge?: boolean
+    empty?: boolean
+    symlinkComponent?: boolean
+    tampered?: boolean
+    arbitrary?: boolean
+  } = {},
+): string {
+  const root = newScratch("dshbanca-184-source-")
+  const relativeSegments = BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH.split("/")
+  const sourceRelative = path.join(...relativeSegments)
+  if (options.symlinkComponent === true) {
+    const realAssets = path.join(newScratch("dshbanca-184-source-real-"), "assets")
+    mkdirSync(path.join(realAssets, "dsh", "agents"), { recursive: true })
+    writeFileSync(path.join(realAssets, "dsh", "agents", "banca-auditor.md"), CANONICAL_INSTRUCTION_BYTES)
+    symlinkSync(realAssets, path.join(root, "assets"))
+    return root
+  }
+  const sourcePath = path.join(root, sourceRelative)
+  mkdirSync(path.dirname(sourcePath), { recursive: true })
+  if (options.missing === true) return root
+  if (options.directoryFile === true) {
+    mkdirSync(sourcePath)
+    return root
+  }
+  if (options.symlinkFile === true) {
+    const external = path.join(newScratch("dshbanca-184-source-ext-"), "banca-auditor.md")
+    writeFileSync(external, CANONICAL_INSTRUCTION_BYTES)
+    symlinkSync(external, sourcePath)
+    return root
+  }
+  if (options.hardlinkFile === true) {
+    const external = path.join(newScratch("dshbanca-184-source-ext-"), "banca-auditor.md")
+    writeFileSync(external, CANONICAL_INSTRUCTION_BYTES)
+    linkSync(external, sourcePath)
+    return root
+  }
+  const bytes =
+    options.tooLarge === true
+      ? Buffer.alloc(BLIND_INSTRUCTION_MAX_BYTES + 1, 0x61)
+      : options.tampered === true
+        ? Buffer.concat([CANONICAL_INSTRUCTION_BYTES, Buffer.from("\nADULTERADO\n")])
+        : options.arbitrary === true
+          ? Buffer.from("INSTRUÇÃO ARBITRÁRIA — não é o asset canônico do produto\n")
+          : options.empty === true
+            ? Buffer.alloc(0)
+            : CANONICAL_INSTRUCTION_BYTES
+  writeFileSync(sourcePath, bytes)
+  return root
 }
 
 function writeManifestJson(corpusRoot: string, manifest: PilotCorpusManifest): void {
@@ -258,7 +366,8 @@ describe("Baseline RED — riscos comprovados antes do helper", () => {
     expect(existsSync(path.join(broadRoot, "helpers/corpus_contract.ts"))).toBe(true)
     expect(existsSync(path.join(broadRoot, "manuscripts/case-02/main.tex"))).toBe(true)
 
-    // GREEN: o workspace individual contém somente o caso e a config inicial.
+    // GREEN: o workspace individual contém somente o caso, a config inicial e a
+    // instrução canônica.
     const workspace = sixWorkspaces.get("case-01")
     if (workspace === undefined) throw new Error("workspace case-01 ausente")
     expect(workspace.workspaceFiles).not.toContain("manifest.json")
@@ -304,6 +413,8 @@ describe("Baseline RED — riscos comprovados antes do helper", () => {
 describe("Materialização dos seis casos", () => {
   test("materializa os seis casos com allowlist exata e hashes do manifesto", () => {
     expect(sixWorkspaces.size).toBe(6)
+    expect(BLIND_CASE_WORKSPACE_VERSION).toBe("academic-semantic-pilot-blind-case-workspace-v2")
+    expect(BLIND_CASE_CONTROL_REPORT_VERSION).toBe("blind-case-control-report-v2")
     for (const caseDef of manifest.cases) {
       const workspace = sixWorkspaces.get(caseDef.id)
       if (workspace === undefined) throw new Error(`workspace ausente: ${caseDef.id}`)
@@ -311,7 +422,13 @@ describe("Materialização dos seis casos", () => {
       expect(workspace.sources.length).toBe(6)
       expect(workspace.inventory).toEqual(sortByPath([...caseDef.content.files]))
       expect(workspace.workspaceFiles).toEqual(expectedWorkspaceFiles(caseDef))
+      expect(workspace.workspaceFiles.length).toBe(8)
       expect(workspace.bancaFiles).toEqual([BLIND_WORKSPACE_CONFIG_RELATIVE_PATH])
+      expect(workspace.instruction).toEqual(expectedInstructionIdentity())
+      expect(workspace.report.instruction).toEqual(expectedInstructionIdentity())
+      // A instrução não é arquivo de manuscrito e não entra em `files`/`sources`.
+      expect(workspace.sources.some((file) => file.path === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)).toBe(false)
+      expect(workspace.report.files.some((file) => file.path === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)).toBe(false)
       for (const file of caseDef.content.files) {
         const bytes = readFileSync(path.join(workspace.workspaceRoot, ...file.path.split("/")))
         expect(sha256Hex(bytes)).toBe(file.sha256)
@@ -323,14 +440,23 @@ describe("Materialização dos seis casos", () => {
     let files = 0
     let characters = 0
     let batches = 0
+    let workspaceFiles = 0
+    let instructionCopies = 0
     for (const workspace of sixWorkspaces.values()) {
       files += workspace.sources.length
       characters += workspace.equivalence.totalCharacters
       batches += workspace.equivalence.batchCount
+      workspaceFiles += workspace.workspaceFiles.length
+      instructionCopies += workspace.workspaceFiles.filter(
+        (entry) => entry === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
+      ).length
     }
     expect(files).toBe(36)
     expect(characters).toBe(8509)
     expect(batches).toBe(22)
+    // 6 casos × (6 arquivos de manuscrito + `.banca/project.json` + instrução).
+    expect(workspaceFiles).toBe(48)
+    expect(instructionCopies).toBe(6)
 
     for (const caseDef of manifest.cases) {
       const workspace = sixWorkspaces.get(caseDef.id)
@@ -338,6 +464,54 @@ describe("Materialização dos seis casos", () => {
       expect(workspace.equivalence.totalCharacters).toBe(caseDef.content.totalCharacters)
       expect(workspace.equivalence.batchCount).toBe(caseDef.content.batchCount)
     }
+  })
+
+  test("instrução canônica é idêntica nas seis cópias e no asset versionado (#184)", () => {
+    // O asset versionado é o mesmo arquivo que o tarball real da #182 entrega
+    // byte a byte; aqui a identidade é conferida contra essa fonte e contra o
+    // digest já congelado no contrato de perfil E2E do produto.
+    expect(CANONICAL_INSTRUCTION_SHA256).toBe(canonicalAuditorMarkdownSha256)
+    expect(CANONICAL_INSTRUCTION_PATH).toBe(
+      path.join(REPO_ROOT, ...BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH.split("/")),
+    )
+    expect(sha256Hex(readFileSync(CANONICAL_INSTRUCTION_PATH))).toBe(canonicalAuditorMarkdownSha256)
+    expect(CANONICAL_INSTRUCTION_SHA1).toBe(canonicalAuditorMarkdownSha1)
+
+    const digests = new Set<string>()
+    for (const workspace of sixWorkspaces.values()) {
+      const instructionPath = path.join(workspace.workspaceRoot, BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)
+      const instructionStat = lstatSync(instructionPath)
+      expect(instructionStat.isFile()).toBe(true)
+      expect(instructionStat.isSymbolicLink()).toBe(false)
+      expect(instructionStat.nlink).toBe(1)
+      const bytes = readFileSync(instructionPath)
+      expect(bytes.equals(CANONICAL_INSTRUCTION_BYTES)).toBe(true)
+      expect(bytes.byteLength).toBe(CANONICAL_INSTRUCTION_BYTES.byteLength)
+      const digest = sha256Hex(bytes)
+      digests.add(digest)
+      expect(digest).toBe(canonicalAuditorMarkdownSha256)
+      expect(workspace.report.instruction).toEqual(expectedInstructionIdentity())
+      expect(workspace.report.instruction.sha256).toBe(digest)
+      expect(workspace.report.instruction.byteLength).toBe(bytes.byteLength)
+      expect(workspace.report.workspaceFiles).toContain(BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)
+    }
+    expect(digests.size).toBe(1)
+
+    // Orçamento do loader nativo: a cópia precisa caber no `maxBytes` declarado
+    // em `cordis.patch.yml`, e a constante do helper não pode divergir do patch.
+    const patchRows = (parseYaml(readFileSync(path.join(REPO_ROOT, "cordis.patch.yml"), "utf8")) as any[]).flatMap(
+      (operation) => operation.insert ?? [],
+    )
+    const instructionLoader = patchRows
+      .filter((row: any) => row.name === "@deepseek-ai/dsh-agent-preset")
+      .flatMap((row: any) => row.config?.plugins ?? [])
+      .find((row: any) => row.name === "@deepseek-ai/dsh-agent-instructions")
+    expect(BLIND_INSTRUCTION_MAX_BYTES).toBe(65536)
+    expect(instructionLoader?.config?.maxBytes).toBe(BLIND_INSTRUCTION_MAX_BYTES)
+    expect(instructionLoader?.config?.instructionFileCandidates).toEqual([
+      BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
+    ])
+    expect(CANONICAL_INSTRUCTION_BYTES.byteLength).toBeLessThanOrEqual(BLIND_INSTRUCTION_MAX_BYTES)
   })
 
   test("configuração persistida preserva o contrato experimental e recarrega sem fallback", () => {
@@ -401,7 +575,7 @@ describe("Materialização dos seis casos", () => {
     }
   })
 
-  test("workspace cego contém apenas o manuscrito do caso e a configuração inicial", () => {
+  test("workspace cego contém apenas o manuscrito, a config inicial e a instrução canônica", () => {
     const forbiddenSegments = [
       "manifest.json",
       "answer-key",
@@ -411,6 +585,9 @@ describe("Materialização dos seis casos", () => {
       "schema.json",
       "docs/",
       ".git",
+      ".dsh",
+      "AGENTS.md",
+      "CLAUDE.md",
     ]
     for (const workspace of sixWorkspaces.values()) {
       for (const entry of workspace.workspaceFiles) {
@@ -422,6 +599,17 @@ describe("Materialização dos seis casos", () => {
           expect(entry.includes(caseDef.id)).toBe(false)
         }
       }
+      // Raiz exata: somente manuscrito do caso, `.banca` e a instrução canônica.
+      expect(readdirSync(workspace.workspaceRoot).sort()).toEqual(
+        [".banca", "banca-auditor.md", "main.tex", "referencias.bib", "secoes"].sort(),
+      )
+      // Instruções: exatamente uma, na raiz; nenhuma cópia aninhada.
+      expect(
+        workspace.workspaceFiles.filter(
+          (entry) => path.posix.basename(entry) === BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH,
+        ),
+      ).toEqual([BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH])
+      expect(readdirSync(path.join(workspace.workspaceRoot, ".banca"))).toEqual(["project.json"])
       expect(existsSync(path.join(workspace.workspaceRoot, ".banca/analysis"))).toBe(false)
       expect(existsSync(path.join(workspace.workspaceRoot, ".banca/context"))).toBe(false)
       expect(existsSync(path.join(workspace.workspaceRoot, ".banca/reports"))).toBe(false)
@@ -429,6 +617,9 @@ describe("Materialização dos seis casos", () => {
       expect(existsSync(path.join(workspace.workspaceRoot, ".banca/scorecard.md"))).toBe(false)
       expect(existsSync(path.join(workspace.workspaceRoot, ".banca/knowledge.md"))).toBe(false)
       expect(existsSync(path.join(workspace.workspaceRoot, ".git"))).toBe(false)
+      expect(existsSync(path.join(workspace.workspaceRoot, ".dsh"))).toBe(false)
+      expect(existsSync(path.join(workspace.workspaceRoot, "AGENTS.md"))).toBe(false)
+      expect(existsSync(path.join(workspace.workspaceRoot, "CLAUDE.md"))).toBe(false)
     }
   })
 
@@ -491,15 +682,24 @@ describe("Materialização dos seis casos", () => {
     const reportRaw = readFileSync(artifacts.reportPath, "utf8")
     const report = JSON.parse(reportRaw)
     expect(report).toEqual(workspace.report)
+    expect(report.reportVersion).toBe(BLIND_CASE_CONTROL_REPORT_VERSION)
+    expect(report.workspaceVersion).toBe(BLIND_CASE_WORKSPACE_VERSION)
     expect(report.caseId).toBe("case-01")
     expect(report.manifestSha256).toBe(corpus.manifestRawSha256)
     expect(report.files).toEqual(workspace.report.files)
     expect(report.planId).toBe(workspace.planId)
     expect(report.workspaceFiles).toEqual(workspace.workspaceFiles)
     expect(report.bancaFiles).toEqual([BLIND_WORKSPACE_CONFIG_RELATIVE_PATH])
+    // Identidade da instrução por caminho relativo, digest, tamanho e contrato;
+    // nunca o conteúdo das instruções nem caminhos absolutos.
+    expect(report.instruction).toEqual(expectedInstructionIdentity())
+    expect(report.instruction.sha256).toBe(canonicalAuditorMarkdownSha256)
+    expect(reportRaw).not.toContain(CANONICAL_INSTRUCTION_BYTES.toString("utf8").slice(0, 80))
 
     // Sanitizado: sem caminhos absolutos e sem dados de gabarito.
     expect(reportRaw).not.toContain(CORPUS_ROOT)
+    expect(reportRaw).not.toContain(REPO_ROOT)
+    expect(reportRaw).not.toContain(CANONICAL_INSTRUCTION_PATH)
     expect(reportRaw).not.toContain(workspace.workspaceRoot)
     expect(reportRaw).not.toContain(tmpdir())
     expect(reportRaw.toLowerCase()).not.toContain("answer-key")
@@ -601,6 +801,10 @@ describe("Independência, preservação e corpus de apresentação", () => {
       expect(fresh.plan.coverage.totalCharacters).toBe(caseDef.content.totalCharacters)
       expect(existsSync(path.join(caseDir, ".banca"))).toBe(false)
     }
+    // O asset canônico usado como fonte também permanece intocado (sem hardlink
+    // nem escrita), mesmo após seis materializações e recusas de fonte.
+    expect(sha256Hex(readFileSync(CANONICAL_INSTRUCTION_PATH))).toBe(canonicalAuditorMarkdownSha256)
+    expect(lstatSync(CANONICAL_INSTRUCTION_PATH).nlink).toBe(1)
   })
 
   test("funciona com corpus de apresentação sem answer-key e sem scenarios", () => {
@@ -781,7 +985,17 @@ describe("Contratos negativos — fail-closed sem override", () => {
   })
 
   test("recusa path absoluto e traversal na allowlist do manifesto", () => {
-    for (const badPath of ["/etc/passwd", "../case-02/main.tex", "secoes/../../main.tex"]) {
+    const reservedPaths = [
+      "/etc/passwd",
+      "../case-02/main.tex",
+      "secoes/../../main.tex",
+      ".dsh/state.json",
+      "banca-auditor.md",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "secoes/banca-auditor.md",
+    ]
+    for (const badPath of reservedPaths) {
       const tamperedCorpus = copyPresentationCorpus()
       const tamperedManifest = readManifestJson(tamperedCorpus)
       tamperedManifest.cases[0].content.files[0].path = badPath
@@ -1143,6 +1357,333 @@ describe("Contratos negativos — fail-closed sem override", () => {
       )
     },
   )
+})
+
+describe("Instrução canônica do auditor — proveniência e recusas (#184)", () => {
+  test("fonte ausente, adulterada, link, hardlink, diretório, vazia e grande falha antes de qualquer escrita", () => {
+    const fixtures: Array<{ label: string; sourceRoot: () => string; code: string }> = [
+      { label: "missing", sourceRoot: () => instructionSourceRootFixture({ missing: true }), code: "instruction_source_missing" },
+      { label: "tampered", sourceRoot: () => instructionSourceRootFixture({ tampered: true }), code: "instruction_source_hash_mismatch" },
+      { label: "symlink-file", sourceRoot: () => instructionSourceRootFixture({ symlinkFile: true }), code: "instruction_source_symlink" },
+      { label: "hardlink-file", sourceRoot: () => instructionSourceRootFixture({ hardlinkFile: true }), code: "instruction_source_hardlink" },
+      { label: "directory", sourceRoot: () => instructionSourceRootFixture({ directoryFile: true }), code: "instruction_source_not_regular" },
+      { label: "empty", sourceRoot: () => instructionSourceRootFixture({ empty: true }), code: "instruction_source_empty" },
+      { label: "too-large", sourceRoot: () => instructionSourceRootFixture({ tooLarge: true }), code: "instruction_source_too_large" },
+      { label: "symlink-component", sourceRoot: () => instructionSourceRootFixture({ symlinkComponent: true }), code: "instruction_source_symlink" },
+    ]
+    for (const fixture of fixtures) {
+      const root = newScratch(`dshbanca-184-refuse-${fixture.label}-`)
+      const destination = path.join(root, "case-01")
+      const error = expectBlindError(
+        () =>
+          materializeBlindCaseWorkspace({
+            caseId: "case-01",
+            destinationRoot: destination,
+            instructionSourceRoot: fixture.sourceRoot(),
+            instructionSha256: canonicalAuditorMarkdownSha256,
+          }),
+        fixture.code,
+      )
+      // Nenhum caminho absoluto do scratch vaza na mensagem de erro.
+      expect(error.message).not.toContain(root)
+      expect(existsSync(destination)).toBe(false)
+      expect(readdirSync(root)).toEqual([])
+    }
+    // Recusas de fonte não alteram o asset canônico nem criam artefatos.
+    expect(sha256Hex(readFileSync(CANONICAL_INSTRUCTION_PATH))).toBe(canonicalAuditorMarkdownSha256)
+    expect(lstatSync(CANONICAL_INSTRUCTION_PATH).nlink).toBe(1)
+  })
+
+  test("digest autorizado divergente ou inválido e override sem digest são recusados (sem modo frouxo)", () => {
+    const root = newScratch("dshbanca-184-digest-")
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          caseId: "case-01",
+          destinationRoot: path.join(root, "authorized-mismatch"),
+          instructionSha256: "0".repeat(64),
+        }),
+      "instruction_source_hash_mismatch",
+    )
+    expect(existsSync(path.join(root, "authorized-mismatch"))).toBe(false)
+
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          caseId: "case-01",
+          destinationRoot: path.join(root, "invalid-digest"),
+          instructionSha256: "NOT-A-SHA256",
+        }),
+      "invalid_instruction_hash",
+    )
+
+    // Markdown arbitrário não passa nem com digest autodeclarado: a fonte
+    // alternativa só pode conter os bytes canônicos.
+    const arbitraryRoot = instructionSourceRootFixture({ arbitrary: true })
+    const arbitraryBytes = readFileSync(
+      path.join(arbitraryRoot, ...BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH.split("/")),
+    )
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          caseId: "case-01",
+          destinationRoot: path.join(root, "arbitrary-override"),
+          instructionSourceRoot: arbitraryRoot,
+          instructionSha256: sha256Hex(arbitraryBytes),
+        }),
+      "instruction_source_hash_mismatch",
+    )
+
+    const looseRoot = instructionSourceRootFixture()
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          caseId: "case-01",
+          destinationRoot: path.join(root, "override-without-digest"),
+          instructionSourceRoot: looseRoot,
+        }),
+      "invalid_instruction_source_root",
+    )
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          caseId: "case-01",
+          destinationRoot: path.join(root, "relative-override"),
+          instructionSourceRoot: "relative-root",
+          instructionSha256: canonicalAuditorMarkdownSha256,
+        }),
+      "invalid_instruction_source_root",
+    )
+    expect(readdirSync(root)).toEqual([])
+  })
+
+  test("digest autorizado do produto vincula instrução, verificação e relatório de controle", () => {
+    const root = newScratch("dshbanca-184-authorized-")
+    const workspace = materializeBlindCaseWorkspace({
+      caseId: "case-02",
+      destinationRoot: path.join(root, "case-02"),
+      instructionSha256: canonicalAuditorMarkdownSha256,
+    })
+    expect(workspace.report.instruction).toEqual(expectedInstructionIdentity())
+    expect(workspace.report.instruction.sha256).toBe(canonicalAuditorMarkdownSha256)
+    expect(workspace.report.instruction.contractVersion).toBe(BLIND_INSTRUCTION_CONTRACT_VERSION)
+    expect(workspace.report.instruction.relativePath).toBe(BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)
+    expect(workspace.report.instruction.sourceRelativePath).toBe(BLIND_INSTRUCTION_SOURCE_RELATIVE_PATH)
+
+    const verified = verifyBlindCaseWorkspace({
+      caseId: "case-02",
+      workspaceRoot: workspace.workspaceRoot,
+      instructionSha256: canonicalAuditorMarkdownSha256,
+    })
+    expect(verified.report).toEqual(workspace.report)
+    expect(verified.instruction).toEqual(expectedInstructionIdentity())
+
+    const artifacts = writeBlindCaseControlArtifacts({
+      caseId: "case-02",
+      controlDir: path.join(root, "control"),
+      workspaceRoot: workspace.workspaceRoot,
+      report: workspace.report,
+      instructionSha256: canonicalAuditorMarkdownSha256,
+    })
+    const written = JSON.parse(readFileSync(artifacts.reportPath, "utf8"))
+    expect(written.instruction).toEqual(workspace.report.instruction)
+    // O relatório vincula identidade, não o conteúdo das instruções.
+    expect(readFileSync(artifacts.reportPath, "utf8")).not.toContain(
+      CANONICAL_INSTRUCTION_BYTES.toString("utf8").slice(0, 80),
+    )
+  })
+
+  test("instrução materializada ausente, adulterada, substituída, vinculada ou extra é recusada", () => {
+    const base = materialize("case-03")
+    const before = workspaceInventory(base.workspaceRoot)
+    const copyAndMutate = (label: string, mutate: (root: string) => void): string => {
+      const copyRoot = path.join(newScratch(`dshbanca-184-instr-${label}-`), "case-03")
+      cpSync(base.workspaceRoot, copyRoot, { recursive: true })
+      mutate(copyRoot)
+      return copyRoot
+    }
+    const instructionAt = (root: string): string =>
+      path.join(root, BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH)
+    const externalCopy = (suffix: string): string => {
+      const external = path.join(newScratch(`dshbanca-184-instr-ext-${suffix}-`), "banca-auditor.md")
+      writeFileSync(external, CANONICAL_INSTRUCTION_BYTES)
+      return external
+    }
+
+    const missing = copyAndMutate("missing", (root) => rmSync(instructionAt(root)))
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: missing }),
+      "instruction_missing",
+    )
+
+    const tampered = copyAndMutate("tampered", (root) =>
+      writeFileSync(instructionAt(root), "ADULTERADO\n"),
+    )
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: tampered }),
+      "instruction_hash_mismatch",
+    )
+
+    const replacedByDirectory = copyAndMutate("directory", (root) => {
+      rmSync(instructionAt(root))
+      mkdirSync(instructionAt(root))
+    })
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: replacedByDirectory }),
+      "instruction_not_regular",
+    )
+
+    const symlinked = copyAndMutate("symlink", (root) => {
+      const external = externalCopy("symlink")
+      rmSync(instructionAt(root))
+      symlinkSync(external, instructionAt(root))
+    })
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: symlinked }),
+      "instruction_symlink",
+    )
+
+    const hardlinked = copyAndMutate("hardlink", (root) => {
+      const external = externalCopy("hardlink")
+      rmSync(instructionAt(root))
+      linkSync(external, instructionAt(root))
+    })
+    expect(lstatSync(instructionAt(hardlinked)).nlink).toBe(2)
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: hardlinked }),
+      "instruction_hardlink",
+    )
+
+    const nested = copyAndMutate("nested", (root) =>
+      writeFileSync(path.join(root, "secoes/banca-auditor.md"), CANONICAL_INSTRUCTION_BYTES),
+    )
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: nested }),
+      "instruction_extra",
+    )
+
+    const extraAgentDocs = copyAndMutate("agent-docs", (root) => {
+      writeFileSync(path.join(root, "AGENTS.md"), "instruções adicionais")
+      writeFileSync(path.join(root, "CLAUDE.md"), "instruções adicionais")
+    })
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: extraAgentDocs }),
+      "workspace_extra_file",
+    )
+
+    const dshState = copyAndMutate("dsh", (root) => {
+      mkdirSync(path.join(root, ".dsh"))
+      writeFileSync(path.join(root, ".dsh/state.json"), "{}")
+    })
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: dshState }),
+      "dsh_state_present",
+    )
+
+    const extraEmptyDirectory = copyAndMutate("extra-dir", (root) => {
+      mkdirSync(path.join(root, "protocolo"))
+    })
+    expectBlindError(
+      () => verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: extraEmptyDirectory }),
+      "workspace_extra_directory",
+    )
+
+    // As recusas não alteraram o workspace íntegro de origem.
+    expect(workspaceInventory(base.workspaceRoot)).toEqual(before)
+    expect(() =>
+      verifyBlindCaseWorkspace({ caseId: "case-03", workspaceRoot: base.workspaceRoot }),
+    ).not.toThrow()
+  })
+
+  test("relatório v1, digest adulterado e identidade de instrução trocada são recusados antes de escrever", () => {
+    const workspace = materialize("case-04")
+    const before = workspaceInventory(workspace.workspaceRoot)
+    const root = newScratch("dshbanca-184-report-")
+    const v1Report = {
+      ...workspace.report,
+      reportVersion: "blind-case-control-report-v1",
+      workspaceVersion: "academic-semantic-pilot-blind-case-workspace-v1",
+    } as Record<string, unknown>
+    delete v1Report.instruction
+    const variants: unknown[] = [
+      v1Report,
+      { ...workspace.report, instruction: { ...workspace.report.instruction, sha256: "0".repeat(64) } },
+      { ...workspace.report, instruction: { ...workspace.report.instruction, relativePath: "outra-instruction.md" } },
+      { ...workspace.report, instruction: { ...workspace.report.instruction, contractVersion: "v0" } },
+    ]
+    for (const [index, report] of variants.entries()) {
+      const controlDir = path.join(root, `control-${index}`)
+      expectBlindError(
+        () =>
+          writeBlindCaseControlArtifacts({
+            caseId: "case-04",
+            controlDir,
+            workspaceRoot: workspace.workspaceRoot,
+            report: report as never,
+          }),
+        "invalid_control_report",
+      )
+      expect(existsSync(controlDir)).toBe(false)
+    }
+    expect(readdirSync(root)).toEqual([])
+    expect(workspaceInventory(workspace.workspaceRoot)).toEqual(before)
+  })
+
+  test("escritor recusa fonte ausente/adulterada da instrução antes de criar artefatos de controle", () => {
+    const workspace = materialize("case-01")
+    const before = workspaceInventory(workspace.workspaceRoot)
+    const scratch = newScratch("dshbanca-184-writer-source-")
+    const fixtures: Array<{ sourceRoot: string; code: string }> = [
+      { sourceRoot: instructionSourceRootFixture({ missing: true }), code: "instruction_source_missing" },
+      { sourceRoot: instructionSourceRootFixture({ tampered: true }), code: "instruction_source_hash_mismatch" },
+    ]
+    for (const [index, fixture] of fixtures.entries()) {
+      const controlDir = path.join(scratch, `control-${index}`)
+      expectBlindError(
+        () =>
+          writeBlindCaseControlArtifacts({
+            caseId: "case-01",
+            controlDir,
+            workspaceRoot: workspace.workspaceRoot,
+            report: workspace.report,
+            instructionSourceRoot: fixture.sourceRoot,
+            instructionSha256: canonicalAuditorMarkdownSha256,
+          }),
+        fixture.code,
+      )
+      expect(existsSync(controlDir)).toBe(false)
+    }
+    expect(readdirSync(scratch)).toEqual([])
+    expect(workspaceInventory(workspace.workspaceRoot)).toEqual(before)
+    expect(() =>
+      verifyBlindCaseWorkspace({ caseId: "case-01", workspaceRoot: workspace.workspaceRoot }),
+    ).not.toThrow()
+  })
+
+  test("falha parcial após o staging da instrução limpa apenas artefatos próprios", () => {
+    const root = newScratch("dshbanca-184-partial-")
+    const destination = path.join(root, "case-01")
+    expectBlindError(
+      () =>
+        materializeBlindCaseWorkspace({
+          caseId: "case-01",
+          destinationRoot: destination,
+          testHooks: {
+            beforePublish: () => {
+              const staging = readdirSync(root).find((name) => name.startsWith(".blind-case-staging-"))
+              if (staging === undefined) throw new Error("staging ausente")
+              if (!existsSync(path.join(root, staging, BLIND_WORKSPACE_INSTRUCTION_RELATIVE_PATH))) {
+                throw new Error("instrução não staged")
+              }
+              throw new Error("injected failure after instruction staging")
+            },
+          },
+        }),
+      "injected_failure",
+    )
+    expect(existsSync(destination)).toBe(false)
+    expect(readdirSync(root)).toEqual([])
+  })
 })
 
 describe("Remediação R1 — relatório de controle, hardlinks, links de origem e diretórios", () => {
