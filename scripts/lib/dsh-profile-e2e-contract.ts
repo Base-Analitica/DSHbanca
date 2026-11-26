@@ -4464,9 +4464,12 @@ export interface BlindCaseObserverProbeExpected {
   batchIds: string[]
   scratchRelativePath: string
   controlPresetId: string
+  checkpointSha256: string
   contextPackRelativePath: string
   contextPackSha256: string
+  canarySha256: string
   protectedInventory: Record<string, string>
+  protectedDirectories: string[]
 }
 
 const blindCaseDispatchSequence = [
@@ -4501,6 +4504,12 @@ export function validateBlindCaseObserverProbeEvidence(
 ): string[] {
   const errors: string[] = []
   if (!isRecord(value)) return ["blind-case probe evidence is missing or not an object"]
+  if (!isSha256Digest(expected.checkpointSha256) || !isSha256Digest(expected.canarySha256) ||
+      !Array.isArray(expected.protectedDirectories) || expected.protectedDirectories.some((path) => typeof path !== "string" || !path || path.startsWith("/") || path.includes("\\") ||
+        path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) ||
+      new Set(expected.protectedDirectories).size !== expected.protectedDirectories.length) {
+    return ["independent checkpoint, canary, or directory baseline is invalid"]
+  }
   if (value.version !== "blind-case-observer-probe-v2") errors.push("blind-case probe version is invalid")
   if (value.mode !== "simulated-context-only") errors.push("blind-case probe must be marked simulated-context-only")
 
@@ -4570,6 +4579,7 @@ export function validateBlindCaseObserverProbeEvidence(
   if (
     !auditorProjection ||
     auditorProjection.count !== 1 ||
+    !["pre-step-decision", "post-reject-inbox"].includes(String(auditorProjection.channel)) ||
     !evidenceDeepEqual(auditorProjection.paths, ["banca-auditor.md"]) ||
     auditorProjection.role !== "user" ||
     auditorProjection.sourceKind !== "agent-instructions" ||
@@ -4591,9 +4601,13 @@ export function validateBlindCaseObserverProbeEvidence(
   const agentRequest = hooks && isRecord(hooks.agentRequest) ? hooks.agentRequest : undefined
   if (preStep?.calls !== 2 || preStep.rejected !== 2) errors.push("pre-step hook count/rejection count is absent or inconsistent")
   if (agentRequest?.calls !== 2 || agentRequest.rejected !== 2) errors.push("agent/request hook count/rejection count is absent or inconsistent")
+  const deliberate = isRecord(value.deliberateBarrierCalls) ? value.deliberateBarrierCalls : undefined
+  if (deliberate?.preStep !== 2 || deliberate.agentRequest !== 2) errors.push("deliberate test-barrier calls are missing or inconsistent")
+  const spontaneous = isRecord(value.spontaneousHookCalls) ? value.spontaneousHookCalls : undefined
+  if (spontaneous?.preStep !== 0 || spontaneous.agentRequest !== 0) errors.push("a spontaneous hook invocation was observed")
 
   const persistedEvents = isRecord(value.persistedSessionEvents) ? value.persistedSessionEvents : undefined
-  const persistedEventTypes = ["step/start", "request/header", "assistant/message"]
+  const persistedEventTypes = ["total", "step/start", "request/header", "assistant/message"]
   if (!persistedEvents) {
     errors.push("persisted Session event counts are missing")
   } else {
@@ -4634,12 +4648,16 @@ export function validateBlindCaseObserverProbeEvidence(
       ["instructionSha256", expected.instructionSha256],
       ["manuscriptFingerprint", expected.manuscriptFingerprint],
       ["planId", expected.planId],
+      ["checkpointSha256", expected.checkpointSha256],
     ] as const) {
       if (workspace[key] !== expectedValue) errors.push(`workspace ${key} diverges from independent expectation`)
     }
     if (!evidenceDeepEqual(workspace.batchIds, expected.batchIds) || new Set(expected.batchIds).size !== expected.batchIds.length) {
       errors.push("workspace plan batch order diverges from independent expectation")
     }
+    const allowedDirectoriesAfter = [...new Set([...expected.protectedDirectories, ".banca/analysis", ".banca/analysis/checkpoints", ".banca/context"])].sort()
+    if (!evidenceDeepEqual(workspace.directoriesBefore, expected.protectedDirectories)) errors.push("workspace directory structure before probe diverges from independent baseline")
+    if (!evidenceDeepEqual(workspace.directoriesAfter, allowedDirectoriesAfter)) errors.push("workspace directory structure changed outside authorized context artifacts")
     if (workspace.completedBatchesBefore !== 0 || workspace.completedBatchesAfter !== 0) {
       errors.push("initial context query must leave checkpoint at 0/N")
     }
@@ -4685,6 +4703,8 @@ export function validateBlindCaseObserverProbeEvidence(
     if (
       !isSha256Digest(dispatch.canarySha256Before) ||
       !isSha256Digest(dispatch.canarySha256After) ||
+      dispatch.canarySha256Before !== expected.canarySha256 ||
+      dispatch.canarySha256After !== expected.canarySha256 ||
       dispatch.canarySha256Before !== dispatch.canarySha256After
     ) errors.push("synthetic write/edit canary changed or its before/after digests are missing")
   }
@@ -4695,6 +4715,10 @@ export function validateBlindCaseObserverProbeEvidence(
     teardown.hookDisposers !== 2 ||
     teardown.handlesCreated !== 2 ||
     teardown.handlesDisposed !== 2 ||
+    !evidenceDeepEqual(teardown.hooksAtAgentTermination, { preStep: 1, agentRequest: 1 }) ||
+    !evidenceDeepEqual(teardown.hooksRemaining, { preStep: 0, agentRequest: 0 }) ||
+    teardown.agentsRemaining !== 0 ||
+    teardown.sessionsRemaining !== 0 ||
     teardown.hooksRemoved !== true ||
     teardown.agentsUnregistered !== true ||
     teardown.sessionsUnregistered !== true ||
