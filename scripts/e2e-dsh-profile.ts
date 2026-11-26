@@ -128,6 +128,12 @@ const maxOutputBytes = 8_000_000
 const defaultRunDependencies: RunDependencies = { spawn, setTimeout, clearTimeout }
 const profileName = `dshbanca-e2e-${process.pid}-${Date.now()}`
 const observerName = "dshbanca-e2e-observer"
+const operationalProfilePhases = ["first", "resume", "drift-initial", "drift-resume", "abrupt-initial", "abrupt-resume"] as const
+
+function operationalPhaseSelectionBlocker(phase: string | undefined): string | null {
+  if (phase === undefined || operationalProfilePhases.includes(phase as (typeof operationalProfilePhases)[number])) return null
+  return "BLOCKED: experimental phase selection is disabled; no DSH CLI or profile boot is permitted"
+}
 
 interface CommandResult {
   exitCode: number | null
@@ -2134,12 +2140,16 @@ function createObserverPackage(
   }, null, 2) + "\n")
   copyRequiredAcademicDecisionModule(repositoryRoot, observerRoot)
   const observerSource = `import { createHash, createHmac, randomBytes } from "node:crypto";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const name = ${JSON.stringify(observerName)};
 export const inject = ["tools", "skills", "sessions", "agents", "agentPresets", "sessionProjections", "userQuestions", "approval"];
+const operationalProfilePhases = ["first", "resume", "drift-initial", "drift-resume", "abrupt-initial", "abrupt-resume"];
+export function isOperationalProfilePhase(phase) {
+  return typeof phase === "string" && operationalProfilePhases.includes(phase);
+}
 const expected = ${JSON.stringify(expectedTools)};
 const expectedNativeSkillsList = [
   "banca-avaliacao",
@@ -2215,6 +2225,55 @@ const inventory = async (root, prefix = "") => {
     if (entry.isDirectory()) Object.assign(result, await inventory(path, rel));
     else if (entry.isFile()) result[rel] = await sha(path);
     else throw new Error("unexpected symlink/special file in synthetic workspace");
+  }
+  return result;
+};
+const scanBlindWorkspaceStructure = async (root) => {
+  const files = [];
+  const directories = [];
+  const absolutePaths = {};
+  const visit = async (directory, prefix = "") => {
+    const directoryStat = await lstat(directory);
+    if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory() || await realpath(directory) !== directory) {
+      throw new Error("noncanonical directory in simulated workspace");
+    }
+    const entries = (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const rel = prefix ? prefix + "/" + entry.name : entry.name;
+      const path = join(directory, entry.name);
+      const stat = await lstat(path);
+      if (stat.isSymbolicLink() || await realpath(path) !== path) throw new Error("noncanonical path in simulated workspace");
+      if (stat.isDirectory()) {
+        directories.push(rel);
+        await visit(path, rel);
+      } else if (stat.isFile()) {
+        files.push(rel);
+        absolutePaths[rel] = path;
+      } else {
+        throw new Error("special file in simulated workspace");
+      }
+    }
+  };
+  await visit(root);
+  files.sort();
+  directories.sort();
+  return { files, directories, absolutePaths };
+};
+const hashBlindWorkspaceFiles = async (structure) => {
+  const result = {};
+  for (const relativePath of structure.files) {
+    const path = structure.absolutePaths[relativePath];
+    const before = await lstat(path);
+    if (before.isSymbolicLink() || !before.isFile() || await realpath(path) !== path) {
+      throw new Error("noncanonical file before simulated workspace read");
+    }
+    const bytes = await readFile(path);
+    const after = await lstat(path);
+    if (after.isSymbolicLink() || !after.isFile() || await realpath(path) !== path ||
+        String(before.dev) !== String(after.dev) || String(before.ino) !== String(after.ino)) {
+      throw new Error("simulated workspace file changed while being read");
+    }
+    result[relativePath] = createHash("sha256").update(bytes).digest("hex");
   }
   return result;
 };
@@ -2302,6 +2361,646 @@ const parseContextMeta = async (contextOutput) => {
   const jsonStr = content.slice(start + startMarker.length, end);
   return JSON.parse(jsonStr);
 };
+
+const parseBlindContextMetadata = (content) => {
+  const fence = String.fromCharCode(96, 96, 96);
+  const lineBreak = String.fromCharCode(10);
+  const startMarker = fence + "json" + lineBreak;
+  const endMarker = lineBreak + fence;
+  const start = content.indexOf(startMarker);
+  if (start < 0) fail("blind-case context metadata is missing");
+  const end = content.indexOf(endMarker, start + startMarker.length);
+  if (end < 0) fail("blind-case context metadata is incomplete");
+  return JSON.parse(content.slice(start + startMarker.length, end));
+};
+
+/**
+ * Test-only simulated probe. It is deliberately not called from apply/main and
+ * refuses any context that is not an explicitly marked test double. Its output
+ * is never evidence of DSH/Cordis lifecycle, isolation, or native enforcement.
+ */
+export async function runBlindCaseWorkspaceProbe(ctx, input) {
+  const failProbe = (reason) => fail("blind-case simulated probe: " + reason);
+  if (ctx?.__testOnly?.mode !== "simulated-context") failProbe("an explicit simulated context is required");
+  if (typeof input?.scratchRoot !== "string" || typeof input?.workspaceRoot !== "string" || !isAbsolute(input.scratchRoot) || !isAbsolute(input.workspaceRoot)) failProbe("private scratch/workspace roots must be absolute");
+  const scratchRoot = resolve(input.scratchRoot);
+  const workspaceRoot = resolve(input.workspaceRoot);
+  if (scratchRoot !== input.scratchRoot || await realpath(scratchRoot) !== scratchRoot) failProbe("private scratch root is not canonical");
+  if (workspaceRoot !== input.workspaceRoot || await realpath(workspaceRoot) !== workspaceRoot) failProbe("workspace root is not canonical");
+  const scratchStat = await lstat(scratchRoot);
+  const workspaceStat = await lstat(workspaceRoot);
+  const workspaceFromScratch = relative(scratchRoot, workspaceRoot);
+  if (!scratchStat.isDirectory() || scratchStat.isSymbolicLink() || (scratchStat.mode & 0o077) !== 0) failProbe("scratch root is not a private regular directory");
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() || !workspaceFromScratch || workspaceFromScratch === ".." || workspaceFromScratch.startsWith(".." + sep) || isAbsolute(workspaceFromScratch)) {
+    failProbe("workspace is not a regular directory strictly below the private scratch root");
+  }
+  const expected = input.expected;
+  const isDigest = (value) => typeof value === "string" && value.length === 64 && Array.from(value).every((char) => "0123456789abcdef".includes(char));
+  const isSha1 = (value) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
+  const isSafeRelativePath = (value) => typeof value === "string" && value.length > 0 && !value.startsWith("/") &&
+    !value.includes(String.fromCharCode(92)) && !value.split("/").some((segment) => segment === "" || segment === "." || segment === "..") && !isAbsolute(value);
+  if (
+    expected?.caseId !== "case-01" ||
+    expected.scratchRelativePath !== workspaceFromScratch.split(sep).join("/") ||
+    !isDigest(expected.manifestSha256) ||
+    !isDigest(expected.instructionSha256) || !isSha1(expected.instructionSha1) ||
+    !isDigest(expected.manuscriptFingerprint) || !isDigest(expected.planId) ||
+    !isDigest(expected.checkpointSha256) || !isDigest(expected.canarySha256) ||
+    !Array.isArray(expected.batchIds) || expected.batchIds.length < 1 ||
+    expected.batchIds.some((id) => typeof id !== "string" || id.length === 0) ||
+    new Set(expected.batchIds).size !== expected.batchIds.length ||
+    !expected.protectedInventory || typeof expected.protectedInventory !== "object" || Array.isArray(expected.protectedInventory) ||
+    Object.entries(expected.protectedInventory).some(([path, digest]) => !isSafeRelativePath(path) || !isDigest(digest)) ||
+    !Array.isArray(expected.protectedDirectories) || expected.protectedDirectories.some((path) => !isSafeRelativePath(path)) ||
+    new Set(expected.protectedDirectories).size !== expected.protectedDirectories.length
+  ) failProbe("independent case identity or protected inventory is incomplete");
+
+  const sorted = (values) => [...values].sort();
+  const exactArray = (left, right) => JSON.stringify(sorted(left)) === JSON.stringify(sorted(right));
+  const exactRecord = (left, right) => {
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return JSON.stringify(leftKeys) === JSON.stringify(rightKeys) && leftKeys.every((key) => left[key] === right[key]);
+  };
+  const configPath = ".banca/project.json";
+  const checkpointRelativePath = ".banca/analysis/checkpoints/" + expected.planId + ".json";
+  const initialStructure = await scanBlindWorkspaceStructure(workspaceRoot).catch(() => failProbe("workspace structure is noncanonical before Agent creation"));
+  const expectedInitialFiles = Object.keys(expected.protectedInventory).sort();
+  const expectedInitialDirectories = sorted(expected.protectedDirectories);
+  if (!exactArray(initialStructure.files, expectedInitialFiles) || !exactArray(initialStructure.directories, expectedInitialDirectories) ||
+      initialStructure.files.some((path) => path === ".git" || path.startsWith(".git/")) ||
+      initialStructure.directories.some((path) => path === ".git" || path.startsWith(".git/")) ||
+      !expected.protectedInventory[configPath] || initialStructure.files.includes(checkpointRelativePath)) {
+    failProbe("workspace preflight found a structural change, missing config, or synthetic Git/checkpoint artifact before Agent creation");
+  }
+  const baselineInventory = await hashBlindWorkspaceFiles(initialStructure).catch(() => failProbe("workspace file inventory is noncanonical before Agent creation"));
+  if (!exactRecord(baselineInventory, expected.protectedInventory)) failProbe("pre-Agent workspace inventory differs from the independent protected baseline");
+  if (typeof ctx.__testOnly.canarySha256 !== "function" || typeof ctx.__testOnly.hookRegistrySnapshot !== "function" ||
+      typeof ctx.__testOnly.recoverHookDisposers !== "function" || typeof ctx.__testOnly.registrySnapshot !== "function" ||
+      typeof ctx.__testOnly.recoverHandle !== "function" || typeof ctx.__testOnly.invokeBarrier !== "function") {
+    failProbe("simulated inspection and barrier APIs are incomplete");
+  }
+  const canaryBefore = await ctx.__testOnly.canarySha256();
+  if (!isDigest(canaryBefore) || canaryBefore !== expected.canarySha256) failProbe("synthetic canary does not match the independent baseline");
+  const hookRegistrySnapshot = () => {
+    const snapshot = ctx.__testOnly.hookRegistrySnapshot();
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) ||
+        Object.entries(snapshot).some(([name, count]) => typeof name !== "string" || !Number.isSafeInteger(count) || count < 0 ||
+          (!['agent/pre-step', 'agent/request'].includes(name) && count !== 0))) {
+      failProbe("simulated hook registry snapshot is invalid or contains an unexpected active hook");
+    }
+    return { preStep: snapshot["agent/pre-step"] ?? 0, agentRequest: snapshot["agent/request"] ?? 0 };
+  };
+  const registrySnapshot = () => {
+    const snapshot = ctx.__testOnly.registrySnapshot();
+    if (!snapshot || !Array.isArray(snapshot.agentIds) || !Array.isArray(snapshot.sessionIds) ||
+        snapshot.agentIds.some((id) => typeof id !== "string") || snapshot.sessionIds.some((id) => typeof id !== "string")) {
+      failProbe("simulated Agent/Session registry snapshot is invalid");
+    }
+    return { agentIds: sorted(snapshot.agentIds), sessionIds: sorted(snapshot.sessionIds) };
+  };
+  const initialRegistries = registrySnapshot();
+  const initialHooks = hookRegistrySnapshot();
+  if (initialRegistries.agentIds.length !== 0 || initialRegistries.sessionIds.length !== 0 ||
+      initialHooks.preStep !== 0 || initialHooks.agentRequest !== 0) {
+    failProbe("simulated context already contains Agent, Session, or hook registrations");
+  }
+  const authorizedContextDirectories = [".banca/analysis", ".banca/analysis/checkpoints", ".banca/context"];
+  const verifyWorkspaceState = async (stage, artifactDigests = null) => {
+    const allowedFiles = { ...expected.protectedInventory, ...(artifactDigests ?? {}) };
+    const allowedDirectories = artifactDigests === null
+      ? expected.protectedDirectories
+      : [...new Set([...expected.protectedDirectories, ...authorizedContextDirectories])];
+    const structure = await scanBlindWorkspaceStructure(workspaceRoot).catch(() => failProbe("workspace structure became noncanonical during " + stage));
+    if (!exactArray(structure.files, Object.keys(allowedFiles)) || !exactArray(structure.directories, allowedDirectories)) {
+      failProbe("workspace structure changed outside the authorized baseline during " + stage);
+    }
+    const files = await hashBlindWorkspaceFiles(structure).catch(() => failProbe("workspace files became noncanonical during " + stage));
+    if (!exactRecord(files, allowedFiles)) failProbe("protected workspace or authorized artifact digest changed during " + stage);
+    const canary = await ctx.__testOnly.canarySha256();
+    if (canary !== canaryBefore) failProbe("synthetic canary changed during " + stage);
+    return { files, directories: structure.directories };
+  };
+  const captureContextArtifacts = async (packRelativePath) => {
+    const expectedDirectories = [...new Set([...expected.protectedDirectories, ...authorizedContextDirectories])];
+    const expectedFilePaths = [...Object.keys(expected.protectedInventory), checkpointRelativePath, packRelativePath];
+    const structure = await scanBlindWorkspaceStructure(workspaceRoot).catch(() => failProbe("context artifact structure is noncanonical before reads"));
+    if (!exactArray(structure.files, expectedFilePaths) || !exactArray(structure.directories, expectedDirectories)) {
+      failProbe("context artifact paths or workspace structure diverged before reads");
+    }
+    const files = await hashBlindWorkspaceFiles(structure).catch(() => failProbe("context artifacts are noncanonical before reads"));
+    for (const [path, digest] of Object.entries(expected.protectedInventory)) {
+      if (files[path] !== digest) failProbe("protected file changed during banca_context dispatch");
+    }
+    if (files[checkpointRelativePath] !== expected.checkpointSha256 || !isDigest(files[packRelativePath])) {
+      failProbe("new checkpoint digest diverges or context pack digest is invalid");
+    }
+    return { files, directories: structure.directories, packSha256: files[packRelativePath] };
+  };
+  const readCanonicalWorkspaceFile = async (relativePath) => {
+    if (!isSafeRelativePath(relativePath)) failProbe("workspace artifact path is not a safe relative path");
+    const path = resolve(workspaceRoot, relativePath);
+    const fromRoot = relative(workspaceRoot, path);
+    if (fromRoot !== relativePath || fromRoot === ".." || fromRoot.startsWith(".." + sep) || isAbsolute(fromRoot)) {
+      failProbe("workspace artifact path escapes the canonical workspace");
+    }
+    const before = await lstat(path);
+    if (before.isSymbolicLink() || !before.isFile() || await realpath(path) !== path) failProbe("workspace artifact is not a canonical regular file");
+    const bytes = await readFile(path);
+    const after = await lstat(path);
+    if (after.isSymbolicLink() || !after.isFile() || await realpath(path) !== path ||
+        String(before.dev) !== String(after.dev) || String(before.ino) !== String(after.ino)) {
+      failProbe("workspace artifact changed during its canonical read");
+    }
+    return bytes;
+  };
+  const sessionIds = { auditor: "blind-case-simulated-auditor", control: "blind-case-simulated-control" };
+  const sessionRefs = {};
+  const persistedEventCounts = {
+    auditor: { total: 0, "step/start": 0, "request/header": 0, "assistant/message": 0 },
+    control: { total: 0, "step/start": 0, "request/header": 0, "assistant/message": 0 },
+  };
+  const samplePersistedSessionEvents = async (stage) => {
+    for (const role of ["auditor", "control"]) {
+      const session = sessionRefs[role] ?? ctx.sessions.get(sessionIds[role]);
+      if (!session) continue;
+      if (typeof session.snapshotEvents !== "function") failProbe(role + " Session event snapshot is missing during " + stage);
+      const events = session.snapshotEvents();
+      if (!Array.isArray(events)) failProbe(role + " Session event snapshot is malformed during " + stage);
+      persistedEventCounts[role].total = Math.max(persistedEventCounts[role].total, events.length);
+      for (const event of events) {
+        if (!event || typeof event.type !== "string") failProbe(role + " Session event snapshot contains an invalid event during " + stage);
+        if (Object.prototype.hasOwnProperty.call(persistedEventCounts[role], event.type)) persistedEventCounts[role][event.type]++;
+        if (event.type === "agent/request") failProbe("agent/request hook was persisted as a Session event during " + stage);
+      }
+      if (events.length !== 0) failProbe(role + " simulated Session persisted an event during " + stage);
+    }
+  };
+  const deliberateBarrierCalls = { preStep: 0, agentRequest: 0 };
+  const assertHookAccounting = (stage) => {
+    if (runtimeHooks.preStep.calls !== deliberateBarrierCalls.preStep || runtimeHooks.agentRequest.calls !== deliberateBarrierCalls.agentRequest) {
+      failProbe("spontaneous simulated hook invocation observed during " + stage);
+    }
+  };
+
+  const plannedOperations = [
+    { name: "banca_context", arguments: {} },
+    { name: "banca_init", arguments: { projectRoot: workspaceRoot, force: false } },
+    { name: "banca_corrigir", arguments: { projectRoot: workspaceRoot, corrections: [{ file: "main.tex", oldText: "SYNTHETIC_BEFORE", newText: "SYNTHETIC_AFTER", expectedOccurrences: 1 }] } },
+    { name: "banca_snapshot", arguments: { projectRoot: workspaceRoot, label: "blind-probe-synthetic" } },
+    { name: "banca_compile", arguments: { projectRoot: workspaceRoot } },
+    { name: "banca_restore", arguments: { projectRoot: workspaceRoot, snapshotId: "blind-probe-never-created", confirm: false } },
+    { name: "banca_loop", arguments: { projectRoot: workspaceRoot, maxIterations: 1, targetScore: 1, phase: "preparatory" } },
+    { name: "write", arguments: { file: "blind-probe-canary.txt", content: "SYNTHETIC_CANARY_WRITE_ATTEMPT" } },
+    { name: "edit", arguments: { file: "blind-probe-canary.txt", oldText: "SYNTHETIC_CANARY_BEFORE", newText: "SYNTHETIC_CANARY_AFTER", expectedOccurrences: 1 } },
+  ];
+  const requestedOperations = input.requestedOperations ?? plannedOperations;
+  if (JSON.stringify(requestedOperations) !== JSON.stringify(plannedOperations)) failProbe("dispatch sequence or arguments are outside the exact allowlist");
+  const allowedNames = new Set(plannedOperations.map((operation) => operation.name));
+  if (plannedOperations.some((operation) => !allowedNames.has(operation.name))) failProbe("dispatch operation is outside the allowlist");
+
+  const handles = [];
+  const disposers = [];
+  const agents = {};
+  const identity = {};
+  const projection = { auditor: null, control: null };
+  const runtimeHooks = { preStep: { calls: 0, rejected: 0 }, agentRequest: { calls: 0, rejected: 0 } };
+  let authorizedArtifactDigests = null;
+  let contextPackRelativePath = null;
+  let contextPackSha256 = null;
+  let checkpoint = null;
+  let refused = [];
+  let output = null;
+  let probeFailure = null;
+  let hooksAtAgentTermination = { preStep: 0, agentRequest: 0 };
+  let teardown = {
+    hookDisposers: 0,
+    handlesCreated: 0,
+    handlesDisposed: 0,
+    hooksAtAgentTermination,
+    hooksRemaining: { preStep: 0, agentRequest: 0 },
+    agentsRemaining: 0,
+    sessionsRemaining: 0,
+    hooksRemoved: false,
+    agentsUnregistered: false,
+    sessionsUnregistered: false,
+    complete: false,
+  };
+  try {
+    await verifyWorkspaceState("before Agent creation");
+    const auditorHandle = await ctx.agents.create({ sessionId: sessionIds.auditor, meta: { cwd: workspaceRoot } });
+    if (auditorHandle) handles.push(auditorHandle);
+    const auditorAgent = auditorHandle?.agent;
+    if (auditorAgent) {
+      agents.auditor = auditorAgent;
+      if (auditorAgent.session) sessionRefs.auditor = auditorAgent.session;
+    }
+    await samplePersistedSessionEvents("auditor creation");
+    await verifyWorkspaceState("after auditor creation");
+    if (!auditorAgent || !auditorAgent.session) failProbe("auditor Agent/Session creation failed");
+    await ctx.agentPresets.select(auditorAgent, "banca-auditor");
+    await samplePersistedSessionEvents("auditor preset selection");
+    await verifyWorkspaceState("after auditor preset selection");
+
+    const controlHandle = await ctx.agents.create({ sessionId: sessionIds.control, meta: { cwd: workspaceRoot } });
+    if (controlHandle) handles.push(controlHandle);
+    const controlAgent = controlHandle?.agent;
+    if (controlAgent) {
+      agents.control = controlAgent;
+      if (controlAgent.session) sessionRefs.control = controlAgent.session;
+    }
+    await samplePersistedSessionEvents("control creation");
+    await verifyWorkspaceState("after control creation");
+    if (!controlAgent || !controlAgent.session) failProbe("control Agent/Session creation failed");
+    await selectControlPreset(ctx, controlAgent);
+    await samplePersistedSessionEvents("control preset selection");
+    await verifyWorkspaceState("after control preset selection");
+
+    const digestId = (value) => createHash("sha256").update(String(value), "utf8").digest("hex");
+    for (const role of ["auditor", "control"]) {
+      const agent = agents[role];
+      const session = agent.session;
+      const preset = role === "auditor" ? "banca-auditor" : e2eControlPresetId;
+      const composedPreset = ctx.agentPresets.composedPreset(agent.ctx);
+      const sessionProjectionPreset = ctx.sessionProjections.stateOf(session, "agentPreset");
+      if (
+        typeof agent.id !== "string" || agent.id.length === 0 ||
+        typeof session.id !== "string" || session.id !== agent.id ||
+        ctx.agents.get(agent.id) !== agent || ctx.sessions.get(agent.id) !== session ||
+        composedPreset !== preset || sessionProjectionPreset !== preset ||
+        agent.ctx?.meta?.cwd !== workspaceRoot
+      ) failProbe(role + " simulated identity is incomplete or contradictory");
+      identity[role] = {
+        agentIdSha256: digestId(agent.id),
+        sessionIdSha256: digestId(session.id),
+        idsMatch: true,
+        agentRegistryMatch: true,
+        sessionRegistryMatch: true,
+        composedPreset: preset,
+        sessionProjectionPreset: preset,
+      };
+    }
+    if (agents.auditor.id === agents.control.id || agents.auditor.session === agents.control.session ||
+        identity.auditor.agentIdSha256 === identity.control.agentIdSha256 ||
+        identity.auditor.sessionIdSha256 === identity.control.sessionIdSha256) {
+      failProbe("auditor and control simulated identities are not distinct");
+    }
+
+    const instructionBytes = await readCanonicalWorkspaceFile("banca-auditor.md");
+    if (createHash("sha256").update(instructionBytes).digest("hex") !== expected.instructionSha256 ||
+        createHash("sha1").update(instructionBytes).digest("hex") !== expected.instructionSha1) {
+      failProbe("materialized instruction identity diverges from the authorized source");
+    }
+    const syntheticInstruction = {
+      id: "blind-case-simulated-instruction",
+      role: "user",
+      source: { kind: "agent-instructions", changes: [{ path: "banca-auditor.md", digest: expected.instructionSha1 }] },
+    };
+    const syntheticControlMessage = {
+      id: "blind-case-simulated-control-message",
+      role: "user",
+      content: "synthetic neutral control sentinel",
+    };
+    const preStepHandler = (event) => {
+      runtimeHooks.preStep.calls++;
+      const role = event?.agent === agents.auditor ? "auditor" : event?.agent === agents.control ? "control" : null;
+      if (!role || event.session !== event.agent.session) failProbe("simulated pre-step identity is contradictory");
+      const projected = captureNativeInstructionMessages(event.decisionMessages, event.queuedMessages, null);
+      if (role === "auditor") {
+        if (projected.length !== 1) failProbe("auditor instruction projection is missing, duplicated, or unexpected");
+        const message = projected[0].message;
+        const paths = message?.source?.changes?.map((change) => change?.path) ?? [];
+        const digests = message?.source?.changes?.map((change) => change?.digest) ?? [];
+        if (message?.role !== "user" || message?.source?.kind !== "agent-instructions" ||
+            JSON.stringify(paths) !== JSON.stringify(["banca-auditor.md"]) ||
+            JSON.stringify(digests) !== JSON.stringify([expected.instructionSha1])) {
+          failProbe("auditor instruction projection identity is invalid");
+        }
+        projection.auditor = { count: projected.length, channel: projected[0].channel, paths, role: message.role, sourceKind: message.source.kind, digestSha1: digests[0] };
+      } else {
+        if (projected.length !== 0) failProbe("neutral control contains an academic instruction projection");
+        projection.control = { count: 0, paths: [] };
+      }
+      runtimeHooks.preStep.rejected++;
+      return { kind: "reject" };
+    };
+    const requestHandler = (event) => {
+      runtimeHooks.agentRequest.calls++;
+      if (!event || (event.agent !== agents.auditor && event.agent !== agents.control) || event.session !== event.agent.session) {
+        failProbe("simulated agent/request identity is contradictory");
+      }
+      runtimeHooks.agentRequest.rejected++;
+      throw new Error("simulated agent/request rejected before provider request");
+    };
+    const preStepDisposer = ctx.on("agent/pre-step", preStepHandler);
+    if (typeof preStepDisposer !== "function") failProbe("pre-step hook did not return a disposable handle");
+    disposers.push(preStepDisposer);
+    await verifyWorkspaceState("after pre-step hook registration");
+    const requestDisposer = ctx.on("agent/request", requestHandler);
+    if (typeof requestDisposer !== "function") failProbe("agent/request hook did not return a disposable handle");
+    disposers.push(requestDisposer);
+    const registeredHooks = hookRegistrySnapshot();
+    if (registeredHooks.preStep !== 1 || registeredHooks.agentRequest !== 1) failProbe("simulated hook registry does not contain exactly the two probe barriers");
+    await samplePersistedSessionEvents("hook registration");
+    await verifyWorkspaceState("after hook registration");
+
+    const invokeDeliberateBarrier = async (name, key, event) => {
+      deliberateBarrierCalls[key]++;
+      const result = await ctx.__testOnly.invokeBarrier(name, event);
+      await samplePersistedSessionEvents("deliberate " + name + " barrier");
+      assertHookAccounting("deliberate " + name + " barrier");
+      await verifyWorkspaceState("deliberate " + name + " barrier");
+      return result;
+    };
+    const auditorDecision = await invokeDeliberateBarrier("agent/pre-step", "preStep", {
+      agent: agents.auditor,
+      session: agents.auditor.session,
+      decisionMessages: [syntheticInstruction],
+      queuedMessages: [],
+    });
+    const controlDecision = await invokeDeliberateBarrier("agent/pre-step", "preStep", {
+      agent: agents.control,
+      session: agents.control.session,
+      decisionMessages: [syntheticControlMessage],
+      queuedMessages: [],
+    });
+    if (JSON.stringify(auditorDecision) !== JSON.stringify({ kind: "reject" }) ||
+        JSON.stringify(controlDecision) !== JSON.stringify({ kind: "reject" })) {
+      failProbe("pre-step did not return the exact reject decision");
+    }
+    for (const agent of [agents.auditor, agents.control]) {
+      try {
+        await invokeDeliberateBarrier("agent/request", "agentRequest", { agent, session: agent.session });
+        failProbe("simulated agent/request was not rejected");
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "simulated agent/request rejected before provider request") throw error;
+      }
+    }
+    assertHookAccounting("pre-dispatch barriers");
+    await samplePersistedSessionEvents("pre-dispatch baseline");
+    await verifyWorkspaceState("pre-dispatch baseline");
+    if (typeof ctx.tools?.execute !== "function" || typeof ctx.__testOnly.refuseBeforeBody !== "function") {
+      failProbe("simulated local tool dispatcher or refusal stubs are missing");
+    }
+    const contextOperation = plannedOperations[0];
+    if (contextOperation.name !== "banca_context" || JSON.stringify(contextOperation.arguments) !== "{}") {
+      failProbe("only banca_context({}) is permitted to execute a local academic tool body");
+    }
+    let contextOutcome;
+    try {
+      contextOutcome = await runTool(ctx, "blind-case-context", "banca_context", {}, agents.auditor);
+    } catch {
+      failProbe("local banca_context dispatch failed");
+    }
+    await samplePersistedSessionEvents("banca_context dispatch");
+    assertHookAccounting("banca_context dispatch");
+    if (contextOutcome?.result?.isError === true || !contextOutcome?.message?.startsWith("context → ")) {
+      failProbe("banca_context did not return a context pack");
+    }
+
+    const outputPathText = contextOutcome.message.slice("context → ".length).trim();
+    const contextDirectory = resolve(workspaceRoot, ".banca", "context");
+    if (await realpath(contextDirectory) !== contextDirectory) failProbe("context directory is not canonical");
+    const outputPath = resolve(outputPathText);
+    if (outputPath !== outputPathText) failProbe("context pack path is not canonical");
+    const packRelativeToContext = relative(contextDirectory, outputPath);
+    if (!packRelativeToContext || packRelativeToContext.startsWith("..") || packRelativeToContext.includes(sep) ||
+        basename(outputPath) !== packRelativeToContext || !basename(outputPath).startsWith("context-") || !basename(outputPath).endsWith(".md")) {
+      failProbe("context pack path is outside the canonical workspace context directory");
+    }
+    contextPackRelativePath = relative(workspaceRoot, outputPath).split(sep).join("/");
+    if (!isSafeRelativePath(contextPackRelativePath)) failProbe("context pack relative path is not canonical");
+    const capturedArtifacts = await captureContextArtifacts(contextPackRelativePath);
+    contextPackSha256 = capturedArtifacts.packSha256;
+    authorizedArtifactDigests = { [checkpointRelativePath]: expected.checkpointSha256, [contextPackRelativePath]: contextPackSha256 };
+    const contextDirectoryStat = await lstat(contextDirectory);
+    const packStat = await lstat(outputPath);
+    if (contextDirectoryStat.isSymbolicLink() || !contextDirectoryStat.isDirectory() || await realpath(contextDirectory) !== contextDirectory ||
+        !packStat.isFile() || packStat.isSymbolicLink() || await realpath(outputPath) !== outputPath) {
+      failProbe("context pack path is not canonical regular structure");
+    }
+    const packBytes = await readCanonicalWorkspaceFile(contextPackRelativePath);
+    if (createHash("sha256").update(packBytes).digest("hex") !== contextPackSha256) failProbe("context pack changed after its path/digest scan");
+    const contextMetadata = parseBlindContextMetadata(packBytes.toString("utf8"));
+    if (
+      contextMetadata?.kind !== "openbanca-context-pack-v1" ||
+      contextMetadata?.manuscript?.fingerprint !== expected.manuscriptFingerprint ||
+      contextMetadata?.plan?.planId !== expected.planId ||
+      contextMetadata?.checkpoint?.planId !== expected.planId ||
+      contextMetadata?.plan?.batchCount !== expected.batchIds.length ||
+      contextMetadata?.checkpoint?.totalBatches !== expected.batchIds.length ||
+      contextMetadata?.checkpoint?.completedBatches !== 0 ||
+      contextMetadata?.checkpoint?.state !== "pending" ||
+      contextMetadata?.checkpoint?.coveragePercent !== 0 ||
+      contextMetadata?.checkpoint?.path !== checkpointRelativePath ||
+      contextMetadata?.batch?.batchId !== expected.batchIds[0] ||
+      contextMetadata?.batch?.index !== 0 ||
+      contextMetadata?.chunks?.length < 1
+    ) failProbe("context pack plan, order, fingerprint, or initial checkpoint diverges");
+    const checkpointBytes = await readCanonicalWorkspaceFile(checkpointRelativePath);
+    if (createHash("sha256").update(checkpointBytes).digest("hex") !== expected.checkpointSha256) failProbe("checkpoint digest diverges from the independent baseline");
+    checkpoint = JSON.parse(checkpointBytes.toString("utf8"));
+    if (checkpoint.planId !== expected.planId || checkpoint.fingerprint !== expected.manuscriptFingerprint ||
+        checkpoint.totalBatches !== expected.batchIds.length || checkpoint.completedBatches !== 0 || checkpoint.state !== "pending") {
+      failProbe("persisted checkpoint advanced or diverges from the canonical plan");
+    }
+    await verifyWorkspaceState("after banca_context artifacts", authorizedArtifactDigests);
+
+    const refusalNames = plannedOperations.slice(1).map((operation) => operation.name);
+    refused = [];
+    for (const operation of plannedOperations.slice(1)) {
+      if (!allowedNames.has(operation.name)) failProbe("unexpected operation reached the allowlist dispatcher");
+      let decision;
+      try {
+        decision = await ctx.__testOnly.refuseBeforeBody(operation, agents.auditor);
+      } catch {
+        failProbe("simulated pre-body refusal stub failed");
+      }
+      await samplePersistedSessionEvents("refusal " + operation.name);
+      assertHookAccounting("refusal " + operation.name);
+      await verifyWorkspaceState("refusal " + operation.name, authorizedArtifactDigests);
+      if (decision?.kind !== "reject" || await ctx.__testOnly.wasRefusedBeforeBody(operation.name) !== true) {
+        failProbe("mutation/write/edit operation was not refused before its body");
+      }
+      refused.push(operation.name);
+    }
+    const canaryAfter = await ctx.__testOnly.canarySha256();
+    if (canaryAfter !== canaryBefore) failProbe("synthetic write/edit canary changed");
+    const afterRefusals = await verifyWorkspaceState("after all refusals", authorizedArtifactDigests);
+    const forbiddenArtifact = Object.keys(afterRefusals.files).some((path) => /findings|confirmation|receipt/i.test(path));
+    if (forbiddenArtifact) failProbe("findings, confirmations, or receipts were unexpectedly created");
+
+    output = {
+      version: "blind-case-observer-probe-v2",
+      mode: "simulated-context-only",
+      simulation: {
+        dshRuntimeImported: false,
+        dshCliInvocations: 0,
+        agentSendCalls: 0,
+        modelCalls: 0,
+        credentialsUsed: false,
+        hostIsolationProven: false,
+        hostEnforcementProven: false,
+      },
+      identity,
+      projection: { ...projection, simulatedMessages: 2 },
+      deliberateBarrierCalls,
+      spontaneousHookCalls: {
+        preStep: runtimeHooks.preStep.calls - deliberateBarrierCalls.preStep,
+        agentRequest: runtimeHooks.agentRequest.calls - deliberateBarrierCalls.agentRequest,
+      },
+      runtimeHooks,
+      persistedSessionEvents: persistedEventCounts,
+      workspace: {
+        scratchRelativePath: workspaceFromScratch.split(sep).join("/"),
+        caseId: expected.caseId,
+        manifestSha256: expected.manifestSha256,
+        instructionSha256: expected.instructionSha256,
+        manuscriptFingerprint: expected.manuscriptFingerprint,
+        planId: expected.planId,
+        batchIds: [...expected.batchIds],
+        checkpointSha256: expected.checkpointSha256,
+        completedBatchesBefore: 0,
+        completedBatchesAfter: checkpoint.completedBatches,
+        directoriesBefore: [...initialStructure.directories],
+        directoriesAfter: afterRefusals.directories,
+        contextPack: { relativePath: contextPackRelativePath, sha256: contextPackSha256 },
+        allowedWrites: [checkpointRelativePath, contextPackRelativePath].sort(),
+        protectedBefore: { ...baselineInventory },
+        protectedAfter: Object.fromEntries(Object.keys(expected.protectedInventory).map((path) => [path, afterRefusals.files[path]])),
+        findings: 0,
+        receipts: 0,
+        confirmations: 0,
+        synthesisInvocations: 0,
+      },
+      dispatch: {
+        sequence: plannedOperations.map((operation) => operation.name),
+        deniedPreBody: refused.slice(0, refusalNames.length - 2),
+        stubRefusals: refused.slice(-2),
+        bodyExecutions: 0,
+        unexpectedDispatches: 0,
+        canarySha256Before: canaryBefore,
+        canarySha256After: canaryAfter,
+      },
+      teardown: null,
+    };
+  } catch (error) {
+    probeFailure = error instanceof Error && error.message.startsWith("DSHbanca profile E2E observer: ")
+      ? error.message
+      : "DSHbanca profile E2E observer: blind-case simulated probe failed";
+  } finally {
+    const cleanupErrors = [];
+    const cleanupStep = async (kind, action) => {
+      try { return await action(); }
+      catch (error) {
+        cleanupErrors.push(kind);
+        if (probeFailure === null) {
+          probeFailure = error instanceof Error && error.message.startsWith("DSHbanca profile E2E observer: ")
+            ? error.message
+            : "DSHbanca profile E2E observer: blind-case simulated " + kind + " cleanup verification failed";
+        }
+        return undefined;
+      }
+    };
+    for (const sessionId of Object.values(sessionIds)) {
+      await cleanupStep("handle-recovery", async () => {
+        const recovered = await ctx.__testOnly.recoverHandle(sessionId);
+        if (recovered && !handles.includes(recovered)) handles.push(recovered);
+      });
+    }
+    let handlesDisposed = 0;
+    for (const handle of [...handles].reverse()) {
+      await cleanupStep("session-events", () => samplePersistedSessionEvents("before Agent/Session termination"));
+      await cleanupStep("hook-barrier", async () => {
+        const active = hookRegistrySnapshot();
+        if (disposers.length > 0 && (active.preStep !== 1 || active.agentRequest !== 1)) failProbe("probe barriers were not active through Agent/Session termination");
+      });
+      await cleanupStep("workspace-integrity", () => verifyWorkspaceState("before Agent/Session termination", authorizedArtifactDigests));
+      await cleanupStep("hook-accounting", async () => assertHookAccounting("Agent/Session termination"));
+      await cleanupStep("handle", async () => {
+        if (!handle || typeof handle.dispose !== "function") failProbe("partially acquired Agent handle has no disposer");
+        await handle.dispose();
+        handlesDisposed++;
+      });
+      await cleanupStep("session-events", () => samplePersistedSessionEvents("after Agent/Session termination"));
+      await cleanupStep("workspace-integrity", () => verifyWorkspaceState("after Agent/Session termination", authorizedArtifactDigests));
+    }
+    await cleanupStep("hook-recovery", async () => {
+      const recovered = await ctx.__testOnly.recoverHookDisposers();
+      if (!Array.isArray(recovered) || recovered.some((dispose) => typeof dispose !== "function")) {
+        failProbe("orphaned simulated hook disposer recovery is invalid");
+      }
+      for (const dispose of recovered) if (!disposers.includes(dispose)) disposers.push(dispose);
+    });
+    hooksAtAgentTermination = await cleanupStep("hook-registry", async () => hookRegistrySnapshot()) ?? { preStep: 0, agentRequest: 0 };
+    if (handles.length > 0 && (hooksAtAgentTermination.preStep !== 1 || hooksAtAgentTermination.agentRequest !== 1)) {
+      cleanupErrors.push("hook-barrier");
+      if (probeFailure === null) probeFailure = "DSHbanca profile E2E observer: probe barriers were not retained until Agent/Session termination";
+    }
+    const hookCountsBeforeRemoval = hooksAtAgentTermination;
+    for (const dispose of [...disposers].reverse()) {
+      await cleanupStep("hook", async () => {
+        if (typeof dispose !== "function") failProbe("simulated hook disposer is invalid");
+        await dispose();
+      });
+    }
+    const hooksRemaining = await cleanupStep("hook-registry", async () => hookRegistrySnapshot()) ?? { preStep: -1, agentRequest: -1 };
+    const registryRemaining = await cleanupStep("registry", async () => registrySnapshot()) ?? { agentIds: ["unknown"], sessionIds: ["unknown"] };
+    await cleanupStep("session-events", () => samplePersistedSessionEvents("after hook teardown"));
+    await cleanupStep("hook-accounting", async () => assertHookAccounting("after hook teardown"));
+    await cleanupStep("workspace-integrity", () => verifyWorkspaceState("after full teardown", authorizedArtifactDigests));
+    const hooksRemoved = hooksRemaining.preStep === 0 && hooksRemaining.agentRequest === 0;
+    const agentsUnregistered = registryRemaining.agentIds.length === 0 && Object.values(sessionIds).every((id) => ctx.agents.get(id) === undefined);
+    const sessionsUnregistered = registryRemaining.sessionIds.length === 0 && Object.values(sessionIds).every((id) => ctx.sessions.get(id) === undefined);
+    teardown = {
+      hookDisposers: disposers.length,
+      handlesCreated: handles.length,
+      handlesDisposed,
+      hooksAtAgentTermination: hookCountsBeforeRemoval,
+      hooksRemaining,
+      agentsRemaining: registryRemaining.agentIds.length,
+      sessionsRemaining: registryRemaining.sessionIds.length,
+      hooksRemoved,
+      agentsUnregistered,
+      sessionsUnregistered,
+      complete: cleanupErrors.length === 0 && hooksRemoved && agentsUnregistered && sessionsUnregistered && handlesDisposed === handles.length,
+    };
+    if (!teardown.complete && probeFailure === null) probeFailure = "DSHbanca profile E2E observer: blind-case simulated teardown incomplete";
+    if (cleanupErrors.length > 0 && probeFailure !== null) {
+      probeFailure += "; cleanup errors: " + [...new Set(cleanupErrors)].sort().join(",");
+    }
+    if (probeFailure !== null && !probeFailure.endsWith("teardown incomplete")) probeFailure += "; teardown incomplete";
+  }
+  if (probeFailure !== null) throw new Error(probeFailure);
+  if (!output || !authorizedArtifactDigests) failProbe("simulated probe did not produce complete workspace evidence");
+  const finalWorkspace = await verifyWorkspaceState("final post-teardown evidence", authorizedArtifactDigests);
+  const finalCheckpointBytes = await readCanonicalWorkspaceFile(checkpointRelativePath);
+  const finalCheckpointSha256 = createHash("sha256").update(finalCheckpointBytes).digest("hex");
+  if (finalCheckpointSha256 !== expected.checkpointSha256) failProbe("final checkpoint digest diverges from the independent baseline");
+  const finalCheckpoint = JSON.parse(finalCheckpointBytes.toString("utf8"));
+  if (finalCheckpoint.planId !== expected.planId || finalCheckpoint.fingerprint !== expected.manuscriptFingerprint ||
+      finalCheckpoint.totalBatches !== expected.batchIds.length || finalCheckpoint.completedBatches !== 0 || finalCheckpoint.state !== "pending") {
+    failProbe("final checkpoint state advanced or diverges from the canonical plan");
+  }
+  const canaryAfter = await ctx.__testOnly.canarySha256();
+  if (canaryAfter !== canaryBefore || canaryAfter !== expected.canarySha256) failProbe("synthetic canary changed by the end of teardown");
+  assertHookAccounting("final evidence");
+  await samplePersistedSessionEvents("final evidence");
+  output.deliberateBarrierCalls = deliberateBarrierCalls;
+  output.spontaneousHookCalls = {
+    preStep: runtimeHooks.preStep.calls - deliberateBarrierCalls.preStep,
+    agentRequest: runtimeHooks.agentRequest.calls - deliberateBarrierCalls.agentRequest,
+  };
+  output.persistedSessionEvents = persistedEventCounts;
+  output.workspace.checkpointSha256 = finalCheckpointSha256;
+  output.workspace.completedBatchesAfter = finalCheckpoint.completedBatches;
+  output.workspace.directoriesAfter = finalWorkspace.directories;
+  output.workspace.protectedAfter = Object.fromEntries(Object.keys(expected.protectedInventory).map((path) => [path, finalWorkspace.files[path]]));
+  output.workspace.contextPack.sha256 = finalWorkspace.files[contextPackRelativePath];
+  output.dispatch.canarySha256After = canaryAfter;
+  output.teardown = teardown;
+  return output;
+}
 
 export async function runAcademicBatchAuditProbe(ctx, workspace, agent) {
   const configPath = join(workspace, ".banca", "project.json");
@@ -4821,6 +5520,7 @@ export async function apply(ctx) {
   const workspace = ${JSON.stringify(workspace)};
   const reportPath = ${JSON.stringify(observerResult)};
   const restartPhase = process.env.DSHBANCA_DSH_PROFILE_PHASE ?? "first";
+  if (!isOperationalProfilePhase(restartPhase)) fail("unknown cross-process phase selector");
   const abruptRestartMode = restartPhase === "abrupt-initial" || restartPhase === "abrupt-resume";
   const driftMode = restartPhase === "drift-initial" || restartPhase === "drift-resume";
   const abruptRestartWorkspace = ${JSON.stringify(abruptRestartWorkspace)};
@@ -5850,6 +6550,24 @@ export default { name, inject, apply };
 }
 
 async function main(): Promise<void> {
+  const phaseBlocker = operationalPhaseSelectionBlocker(process.env.DSHBANCA_DSH_PROFILE_PHASE)
+  if (phaseBlocker) {
+    report.stages.profileBoot = {
+      status: "BLOCKED",
+      started: false,
+      dshCliInvocations: 0,
+      agentHandlesCreated: 0,
+      sessionsCreated: 0,
+      academicProjectInitialized: false,
+    }
+    report.stages.crossProcessBatchAudit = {
+      status: "BLOCKED",
+      processLaunches: 0,
+      reason: "Unsupported experimental phase selection was refused before any DSH process.",
+    }
+    fail(phaseBlocker, "BLOCKED")
+    return
+  }
   // Created before any subprocess so every #107 stage can corroborate the
   // kernel-start identity of the direct child it may need to contain.
   const processIdentityKey = randomBytes(32)

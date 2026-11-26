@@ -4454,6 +4454,281 @@ export function classifyAbruptEvidencePairStatus(input: {
   return receipt.status === "PASS" && input.observedExitCode === 0 ? "PASS" : "FAIL"
 }
 
+export interface BlindCaseObserverProbeExpected {
+  caseId: string
+  manifestSha256: string
+  instructionSha256: string
+  instructionSha1: string
+  manuscriptFingerprint: string
+  planId: string
+  batchIds: string[]
+  scratchRelativePath: string
+  controlPresetId: string
+  checkpointSha256: string
+  contextPackRelativePath: string
+  contextPackSha256: string
+  canarySha256: string
+  protectedInventory: Record<string, string>
+  protectedDirectories: string[]
+}
+
+const blindCaseDispatchSequence = [
+  "banca_context",
+  "banca_init",
+  "banca_corrigir",
+  "banca_snapshot",
+  "banca_compile",
+  "banca_restore",
+  "banca_loop",
+  "write",
+  "edit",
+] as const
+const blindCaseMutationRefusals = [
+  "banca_init",
+  "banca_corrigir",
+  "banca_snapshot",
+  "banca_compile",
+  "banca_restore",
+  "banca_loop",
+] as const
+
+/**
+ * Structural/sensitivity contract for the Issue #188 hermetic observer probe.
+ * A valid result is explicitly simulated evidence; this validator cannot prove
+ * Cordis registration, DSH identity, host isolation, read-only enforcement, or
+ * any other live-runtime property.
+ */
+export function validateBlindCaseObserverProbeEvidence(
+  value: unknown,
+  expected: BlindCaseObserverProbeExpected,
+): string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) return ["blind-case probe evidence is missing or not an object"]
+  if (!isSha256Digest(expected.checkpointSha256) || !isSha256Digest(expected.canarySha256) ||
+      !Array.isArray(expected.protectedDirectories) || expected.protectedDirectories.some((path) => typeof path !== "string" || !path || path.startsWith("/") || path.includes("\\") ||
+        path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) ||
+      new Set(expected.protectedDirectories).size !== expected.protectedDirectories.length) {
+    return ["independent checkpoint, canary, or directory baseline is invalid"]
+  }
+  if (value.version !== "blind-case-observer-probe-v2") errors.push("blind-case probe version is invalid")
+  if (value.mode !== "simulated-context-only") errors.push("blind-case probe must be marked simulated-context-only")
+
+  const simulation = isRecord(value.simulation) ? value.simulation : undefined
+  if (!simulation) {
+    errors.push("explicit simulated-runtime limits are missing")
+  } else {
+    if (simulation.dshRuntimeImported !== false) errors.push("DSH runtime import must remain false")
+    if (simulation.dshCliInvocations !== 0) errors.push("DSH CLI invocations must remain zero")
+    if (simulation.agentSendCalls !== 0) errors.push("real Agent.send calls must remain zero")
+    if (simulation.modelCalls !== 0) errors.push("model calls must remain zero")
+    if (simulation.credentialsUsed !== false) errors.push("credential use must remain false")
+    if (simulation.hostIsolationProven !== false) errors.push("host isolation cannot be self-declared by simulated evidence")
+    if (simulation.hostEnforcementProven !== false) errors.push("host enforcement cannot be self-declared by simulated evidence")
+  }
+  const inspectIsolationClaims = (candidate: unknown, path = "evidence"): void => {
+    if (Array.isArray(candidate)) {
+      candidate.forEach((nested, index) => inspectIsolationClaims(nested, `${path}[${index}]`))
+      return
+    }
+    if (!isRecord(candidate)) return
+    for (const [key, nested] of Object.entries(candidate)) {
+      if (nested === true && /isolat|contain|egress|read.?only|enforc/i.test(key)) {
+        errors.push(`${path}.${key} is an unsupported self-declared isolation/enforcement claim`)
+      } else {
+        inspectIsolationClaims(nested, `${path}.${key}`)
+      }
+    }
+  }
+  inspectIsolationClaims(value)
+
+  const identity = isRecord(value.identity) ? value.identity : undefined
+  if (!identity) {
+    errors.push("auditor/control identity evidence is missing")
+  } else {
+    for (const [role, expectedPreset] of [["auditor", "banca-auditor"], ["control", expected.controlPresetId]] as const) {
+      const item = isRecord(identity[role]) ? identity[role] : undefined
+      if (
+        !item ||
+        !isSha256Digest(item.agentIdSha256) ||
+        !isSha256Digest(item.sessionIdSha256) ||
+        item.idsMatch !== true ||
+        item.agentRegistryMatch !== true ||
+        item.sessionRegistryMatch !== true ||
+        item.agentIdSha256 !== item.sessionIdSha256 ||
+        item.composedPreset !== expectedPreset ||
+        item.sessionProjectionPreset !== expectedPreset
+      ) {
+        errors.push(`${role} identity is missing or contradictory in the simulated context`)
+      }
+    }
+    const auditorIdentity = isRecord(identity.auditor) ? identity.auditor : undefined
+    const controlIdentity = isRecord(identity.control) ? identity.control : undefined
+    if (
+      auditorIdentity && controlIdentity &&
+      isSha256Digest(auditorIdentity.agentIdSha256) && isSha256Digest(auditorIdentity.sessionIdSha256) &&
+      isSha256Digest(controlIdentity.agentIdSha256) && isSha256Digest(controlIdentity.sessionIdSha256) &&
+      (auditorIdentity.agentIdSha256 === controlIdentity.agentIdSha256 || auditorIdentity.sessionIdSha256 === controlIdentity.sessionIdSha256)
+    ) errors.push("auditor and control must have distinct simulated Agent and Session identities")
+  }
+
+  const projection = isRecord(value.projection) ? value.projection : undefined
+  if (!projection || projection.simulatedMessages !== 2) {
+    errors.push("exactly two simulated messages must be recorded")
+  }
+  const auditorProjection = projection && isRecord(projection.auditor) ? projection.auditor : undefined
+  if (
+    !auditorProjection ||
+    auditorProjection.count !== 1 ||
+    !["pre-step-decision", "post-reject-inbox"].includes(String(auditorProjection.channel)) ||
+    !evidenceDeepEqual(auditorProjection.paths, ["banca-auditor.md"]) ||
+    auditorProjection.role !== "user" ||
+    auditorProjection.sourceKind !== "agent-instructions" ||
+    auditorProjection.digestSha1 !== expected.instructionSha1
+  ) {
+    errors.push("auditor projection must be one canonical relative user instruction")
+  }
+  const controlProjection = projection && isRecord(projection.control) ? projection.control : undefined
+  if (
+    !controlProjection ||
+    controlProjection.count !== 0 ||
+    !evidenceDeepEqual(controlProjection.paths, [])
+  ) {
+    errors.push("neutral control projection must contain no instruction messages")
+  }
+
+  const hooks = isRecord(value.runtimeHooks) ? value.runtimeHooks : undefined
+  const preStep = hooks && isRecord(hooks.preStep) ? hooks.preStep : undefined
+  const agentRequest = hooks && isRecord(hooks.agentRequest) ? hooks.agentRequest : undefined
+  if (preStep?.calls !== 2 || preStep.rejected !== 2) errors.push("pre-step hook count/rejection count is absent or inconsistent")
+  if (agentRequest?.calls !== 2 || agentRequest.rejected !== 2) errors.push("agent/request hook count/rejection count is absent or inconsistent")
+  const deliberate = isRecord(value.deliberateBarrierCalls) ? value.deliberateBarrierCalls : undefined
+  if (deliberate?.preStep !== 2 || deliberate.agentRequest !== 2) errors.push("deliberate test-barrier calls are missing or inconsistent")
+  const spontaneous = isRecord(value.spontaneousHookCalls) ? value.spontaneousHookCalls : undefined
+  if (spontaneous?.preStep !== 0 || spontaneous.agentRequest !== 0) errors.push("a spontaneous hook invocation was observed")
+
+  const persistedEvents = isRecord(value.persistedSessionEvents) ? value.persistedSessionEvents : undefined
+  const persistedEventTypes = ["total", "step/start", "request/header", "assistant/message"]
+  if (!persistedEvents) {
+    errors.push("persisted Session event counts are missing")
+  } else {
+    for (const role of ["auditor", "control"]) {
+      const session = isRecord(persistedEvents[role]) ? persistedEvents[role] : undefined
+      if (!session) {
+        errors.push(`${role} persisted Session event counts are missing`)
+        continue
+      }
+      if (Object.prototype.hasOwnProperty.call(session, "agent/request")) {
+        errors.push("agent/request is a Cordis hook, not a persisted Session event count")
+      }
+      if (!evidenceDeepEqual(Object.keys(session).sort(), [...persistedEventTypes].sort())) {
+        errors.push(`${role} persisted Session event types are incomplete or unexpected`)
+      }
+      for (const type of persistedEventTypes) {
+        if (session[type] !== 0) errors.push(`${role} persisted prohibited event ${type} was observed`)
+      }
+    }
+  }
+
+  const workspace = isRecord(value.workspace) ? value.workspace : undefined
+  if (!workspace) {
+    errors.push("workspace identity and inventory evidence are missing")
+  } else {
+    const scratchRelativePath = workspace.scratchRelativePath
+    if (
+      typeof scratchRelativePath !== "string" ||
+      scratchRelativePath !== expected.scratchRelativePath ||
+      scratchRelativePath.startsWith("/") ||
+      /^[a-z]:/i.test(scratchRelativePath) ||
+      scratchRelativePath.includes("\\") ||
+      scratchRelativePath.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+    ) errors.push("workspace path must be the expected relative path beneath private scratch")
+    for (const [key, expectedValue] of [
+      ["caseId", expected.caseId],
+      ["manifestSha256", expected.manifestSha256],
+      ["instructionSha256", expected.instructionSha256],
+      ["manuscriptFingerprint", expected.manuscriptFingerprint],
+      ["planId", expected.planId],
+      ["checkpointSha256", expected.checkpointSha256],
+    ] as const) {
+      if (workspace[key] !== expectedValue) errors.push(`workspace ${key} diverges from independent expectation`)
+    }
+    if (!evidenceDeepEqual(workspace.batchIds, expected.batchIds) || new Set(expected.batchIds).size !== expected.batchIds.length) {
+      errors.push("workspace plan batch order diverges from independent expectation")
+    }
+    const allowedDirectoriesAfter = [...new Set([...expected.protectedDirectories, ".banca/analysis", ".banca/analysis/checkpoints", ".banca/context"])].sort()
+    if (!evidenceDeepEqual(workspace.directoriesBefore, expected.protectedDirectories)) errors.push("workspace directory structure before probe diverges from independent baseline")
+    if (!evidenceDeepEqual(workspace.directoriesAfter, allowedDirectoriesAfter)) errors.push("workspace directory structure changed outside authorized context artifacts")
+    if (workspace.completedBatchesBefore !== 0 || workspace.completedBatchesAfter !== 0) {
+      errors.push("initial context query must leave checkpoint at 0/N")
+    }
+    const pack = isRecord(workspace.contextPack) ? workspace.contextPack : undefined
+    if (
+      !pack ||
+      pack.relativePath !== expected.contextPackRelativePath ||
+      typeof pack.relativePath !== "string" ||
+      !pack.relativePath.startsWith(".banca/context/") ||
+      pack.relativePath.includes("..") ||
+      isSha256Digest(pack.sha256) !== true ||
+      pack.sha256 !== expected.contextPackSha256
+    ) {
+      errors.push("context pack path/digest diverges from the independently derived expectation")
+    }
+    const expectedWrites = [
+      `.banca/analysis/checkpoints/${expected.planId}.json`,
+      expected.contextPackRelativePath,
+    ]
+    if (!evidenceDeepEqual(workspace.allowedWrites, expectedWrites)) {
+      errors.push("workspace writes include a prohibited or missing artifact")
+    }
+    if (!evidenceDeepEqual(workspace.protectedBefore, expected.protectedInventory)) {
+      errors.push("protected workspace inventory before probe diverges from independent inventory")
+    }
+    if (!evidenceDeepEqual(workspace.protectedAfter, expected.protectedInventory)) {
+      errors.push("protected workspace file mutation was observed")
+    }
+    if (workspace.findings !== 0 || workspace.receipts !== 0 || workspace.confirmations !== 0 || workspace.synthesisInvocations !== 0) {
+      errors.push("probe must not fabricate findings, receipts, confirmations, or synthesis")
+    }
+  }
+
+  const dispatch = isRecord(value.dispatch) ? value.dispatch : undefined
+  if (!dispatch) {
+    errors.push("dispatch allowlist evidence is missing")
+  } else {
+    if (!evidenceDeepEqual(dispatch.sequence, [...blindCaseDispatchSequence])) errors.push("dispatch sequence is outside the exact allowlist")
+    if (!evidenceDeepEqual(dispatch.deniedPreBody, [...blindCaseMutationRefusals])) errors.push("mutation tools were not all refused before body dispatch")
+    if (!evidenceDeepEqual(dispatch.stubRefusals, ["write", "edit"])) errors.push("write/edit refusal stubs are missing")
+    if (dispatch.bodyExecutions !== 0) errors.push("a refused operation body was executed")
+    if (dispatch.unexpectedDispatches !== 0) errors.push("an unexpected operation reached dispatch")
+    if (
+      !isSha256Digest(dispatch.canarySha256Before) ||
+      !isSha256Digest(dispatch.canarySha256After) ||
+      dispatch.canarySha256Before !== expected.canarySha256 ||
+      dispatch.canarySha256After !== expected.canarySha256 ||
+      dispatch.canarySha256Before !== dispatch.canarySha256After
+    ) errors.push("synthetic write/edit canary changed or its before/after digests are missing")
+  }
+
+  const teardown = isRecord(value.teardown) ? value.teardown : undefined
+  if (
+    !teardown ||
+    teardown.hookDisposers !== 2 ||
+    teardown.handlesCreated !== 2 ||
+    teardown.handlesDisposed !== 2 ||
+    !evidenceDeepEqual(teardown.hooksAtAgentTermination, { preStep: 1, agentRequest: 1 }) ||
+    !evidenceDeepEqual(teardown.hooksRemaining, { preStep: 0, agentRequest: 0 }) ||
+    teardown.agentsRemaining !== 0 ||
+    teardown.sessionsRemaining !== 0 ||
+    teardown.hooksRemoved !== true ||
+    teardown.agentsUnregistered !== true ||
+    teardown.sessionsUnregistered !== true ||
+    teardown.complete !== true
+  ) {
+    errors.push("simulated hook/Agent/Session teardown is incomplete")
+  }
+  return errors
+}
+
 /**
  * Aggregates the regular controls with the #107 subgate. A #107 that was not
  * requested is explicitly NOT_REQUESTED and never blocks a normal authorized
