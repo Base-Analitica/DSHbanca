@@ -6978,7 +6978,7 @@ test("experimental phase with generic lifecycle opt-in is BLOCKED before any DSH
 // invalid/ambiguous/unreadable row must still fail closed and no signal is sent.
 // ---------------------------------------------------------------------------
 
-describe("R9 procfs process-group interpretation", () => {
+describe("R9 procfs process-group interpretation — deterministic fixtures", () => {
   const pfKthread = 0x00200000
 
   function procStat(
@@ -7118,29 +7118,275 @@ describe("R9 procfs process-group interpretation", () => {
     }
   })
 
-  test("hermetic real /proc observation: absence of an impossible positive group, member of own group, no signals", async () => {
-    if (process.platform !== "linux") return
-    const runner = await r9Api()
-    // Impossible positive group: legitimate zero-PGID kernel threads must not
-    // make the absence observation false.
+})
+
+describe("R9 procfs process-group interpretation — real procfs environment contract", () => {
+  const pfKthread = 0x00200000
+
+  type ProcfsEnvironmentStatus = "compatible" | "incompatible" | "unclassifiable"
+  type ProcfsEnvironmentReason =
+    | "compatible"
+    | "unsupported-platform"
+    | "zero-pgid-without-proven-PF_KTHREAD"
+    | "empty-inventory"
+    | "unclassifiable-procfs-row"
+    | "procfs-read-error"
+
+  interface ProcfsEnvironmentSummary {
+    numericEntries: number
+    scannedRows: number
+    positiveGroupRows: number
+    kernelThreadRows: number
+    zeroGroupRowsWithoutPFKthread: number
+    invalidRows: number
+    unreadableRows: number
+    vanishedRows: number
+  }
+
+  interface ProcfsEnvironmentAssessment {
+    status: ProcfsEnvironmentStatus
+    reason: ProcfsEnvironmentReason
+    summary: ProcfsEnvironmentSummary
+  }
+
+  interface ProcfsEnvironmentRow {
+    directoryName: string
+    stat: string
+  }
+
+  interface ProcfsInventoryCounts {
+    numericEntries: number
+    unreadableRows: number
+    vanishedRows: number
+  }
+
+  function classifyIndependentProcStatRow(directoryName: string, stat: string):
+    "positive-group" | "kernel-thread" | "zero-pgid-without-kthread" | "invalid" {
+    const commandStart = stat.indexOf("(")
+    const commandEnd = stat.lastIndexOf(")")
+    if (commandStart <= 0 || commandEnd <= commandStart || !/^\d+$/.test(directoryName)) return "invalid"
+    const pidText = stat.slice(0, commandStart).trim()
+    if (!/^\d+$/.test(pidText) || pidText !== directoryName) return "invalid"
+    const fields = stat.slice(commandEnd + 1).trim().split(/\s+/)
+    if (fields.length < 7 || !/^[A-Za-z]$/.test(fields[0])) return "invalid"
+    if (!/^\d+$/.test(fields[2]) || !/^(?:0x[0-9a-f]+|\d+)$/i.test(fields[6])) return "invalid"
+    const groupId = Number(fields[2])
+    const flags = Number(fields[6])
+    if (!Number.isSafeInteger(groupId) || groupId < 0 || !Number.isSafeInteger(flags) || flags < 0) return "invalid"
+    if (groupId > 0) return "positive-group"
+    return (flags & pfKthread) !== 0 ? "kernel-thread" : "zero-pgid-without-kthread"
+  }
+
+  function classifyProcfsEnvironment(
+    platform: string,
+    rows: ProcfsEnvironmentRow[],
+    inventory: ProcfsInventoryCounts = {
+      numericEntries: rows.length,
+      unreadableRows: 0,
+      vanishedRows: 0,
+    },
+  ): ProcfsEnvironmentAssessment {
+    const summary: ProcfsEnvironmentSummary = {
+      numericEntries: inventory.numericEntries,
+      scannedRows: 0,
+      positiveGroupRows: 0,
+      kernelThreadRows: 0,
+      zeroGroupRowsWithoutPFKthread: 0,
+      invalidRows: 0,
+      unreadableRows: inventory.unreadableRows,
+      vanishedRows: inventory.vanishedRows,
+    }
+
+    if (platform !== "linux") return { status: "incompatible", reason: "unsupported-platform", summary }
+
+    for (const row of rows) {
+      summary.scannedRows += 1
+      const classification = classifyIndependentProcStatRow(row.directoryName, row.stat)
+      if (classification === "invalid") summary.invalidRows += 1
+      else if (classification === "positive-group") summary.positiveGroupRows += 1
+      else if (classification === "kernel-thread") summary.kernelThreadRows += 1
+      else summary.zeroGroupRowsWithoutPFKthread += 1
+    }
+
+    if (summary.unreadableRows > 0) return { status: "unclassifiable", reason: "procfs-read-error", summary }
+    if (summary.invalidRows > 0) return { status: "unclassifiable", reason: "unclassifiable-procfs-row", summary }
+    if (summary.numericEntries === 0 || summary.scannedRows === 0) return { status: "unclassifiable", reason: "empty-inventory", summary }
+    if (summary.zeroGroupRowsWithoutPFKthread > 0) {
+      return { status: "incompatible", reason: "zero-pgid-without-proven-PF_KTHREAD", summary }
+    }
+    return { status: "compatible", reason: "compatible", summary }
+  }
+
+  function observeRealProcfsEnvironment(): ProcfsEnvironmentAssessment {
+    if (process.platform !== "linux") return classifyProcfsEnvironment(process.platform, [])
+
+    const entries = readdirSync("/proc", { withFileTypes: true })
+    const rows: ProcfsEnvironmentRow[] = []
+    const inventory: ProcfsInventoryCounts = { numericEntries: 0, unreadableRows: 0, vanishedRows: 0 }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
+      inventory.numericEntries += 1
+      try {
+        rows.push({ directoryName: entry.name, stat: readFileSync(`/proc/${entry.name}/stat`, "utf8") })
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === "ENOENT" || code === "ESRCH") inventory.vanishedRows += 1
+        else inventory.unreadableRows += 1
+      }
+    }
+    return classifyProcfsEnvironment(process.platform, rows, inventory)
+  }
+
+  function summaryText(assessment: ProcfsEnvironmentAssessment): string {
+    const { summary } = assessment
+    return `numeric=${summary.numericEntries}, scanned=${summary.scannedRows}, positive=${summary.positiveGroupRows}, kernelThread=${summary.kernelThreadRows}, zeroWithoutPF_KTHREAD=${summary.zeroGroupRowsWithoutPFKthread}, invalid=${summary.invalidRows}, unreadable=${summary.unreadableRows}, vanished=${summary.vanishedRows}`
+  }
+
+  const sanitizedObservationKeys = [
+    "absent",
+    "kernelThreadRows",
+    "positiveGroupRows",
+    "reason",
+    "rowsScanned",
+    "targetGroupId",
+  ]
+
+  function isSanitizedGroupObservation(
+    observation: unknown,
+    expectedAbsent: boolean,
+    expectedReason: string,
+    expectedTargetGroupId: number,
+  ): boolean {
+    if (typeof observation !== "object" || observation === null || Array.isArray(observation)) return false
+    const result = observation as Record<string, unknown>
+    if (Object.keys(result).sort().join("\0") !== sanitizedObservationKeys.join("\0")) return false
+
+    const { rowsScanned, kernelThreadRows, positiveGroupRows } = result
+    if (
+      typeof rowsScanned !== "number" || !Number.isSafeInteger(rowsScanned) || rowsScanned < 0 ||
+      (rowsScanned === 0 && expectedReason !== "invalid-target") ||
+      typeof kernelThreadRows !== "number" || !Number.isSafeInteger(kernelThreadRows) || kernelThreadRows < 0 ||
+      typeof positiveGroupRows !== "number" || !Number.isSafeInteger(positiveGroupRows) || positiveGroupRows < 0
+    ) return false
+
+    return result.absent === expectedAbsent &&
+      result.reason === expectedReason &&
+      result.targetGroupId === expectedTargetGroupId &&
+      kernelThreadRows + positiveGroupRows === rowsScanned &&
+      (expectedReason !== "member-observed" || positiveGroupRows > 0)
+  }
+
+  function shouldSkipLiveProcfsObservation(assessment: ProcfsEnvironmentAssessment): boolean {
+    // GitHub Actions must never convert an incompatible host into a green skip.
+    return assessment.status === "incompatible" && process.env.GITHUB_ACTIONS !== "true"
+  }
+
+  const realProcfsAssessment = observeRealProcfsEnvironment()
+  const skipLiveProcfsObservation = shouldSkipLiveProcfsObservation(realProcfsAssessment)
+  const liveProcfsTestTitle = realProcfsAssessment.status === "incompatible"
+    ? `hermetic real /proc observation: absence of an impossible positive group, member of own group, no signals [${skipLiveProcfsObservation ? "BLOCKED/SKIP" : "CI REQUIRED"}: ${realProcfsAssessment.reason}; ${summaryText(realProcfsAssessment)}]`
+    : `hermetic real /proc observation: absence of an impossible positive group, member of own group, no signals [${realProcfsAssessment.status}/${realProcfsAssessment.reason}; ${summaryText(realProcfsAssessment)}]`
+
+  test("independent environment classifier distinguishes incompatibility from unproven inventory", () => {
+    const fixtureStat = (pid: number, groupId: number, flags = 4194304, state = "S") =>
+      `${pid} (synthetic-worker) ${state} 1 ${groupId} 1 0 -1 ${flags} 4194304 0 0 0 0 0 0 0 0 0 0 0 0 0 0`
+    const incompatible = classifyProcfsEnvironment("linux", [
+      { directoryName: "9401", stat: fixtureStat(9401, 0) },
+    ])
+    expect(incompatible).toMatchObject({
+      status: "incompatible",
+      reason: "zero-pgid-without-proven-PF_KTHREAD",
+      summary: { zeroGroupRowsWithoutPFKthread: 1, invalidRows: 0, unreadableRows: 0 },
+    })
+
+    const compatible = classifyProcfsEnvironment("linux", [
+      { directoryName: "9402", stat: fixtureStat(9402, 0, pfKthread) },
+      { directoryName: "9403", stat: fixtureStat(9403, 9404) },
+    ])
+    expect(compatible).toMatchObject({
+      status: "compatible",
+      reason: "compatible",
+      summary: { kernelThreadRows: 1, positiveGroupRows: 1, zeroGroupRowsWithoutPFKthread: 0 },
+    })
+
+    const malformed = classifyProcfsEnvironment("linux", [{ directoryName: "9405", stat: "malformed" }])
+    expect(malformed).toMatchObject({ status: "unclassifiable", reason: "unclassifiable-procfs-row" })
+    const identityMismatch = classifyProcfsEnvironment("linux", [
+      { directoryName: "9406", stat: fixtureStat(9999, 9407) },
+    ])
+    expect(identityMismatch).toMatchObject({ status: "unclassifiable", reason: "unclassifiable-procfs-row" })
+    const empty = classifyProcfsEnvironment("linux", [], { numericEntries: 0, unreadableRows: 0, vanishedRows: 0 })
+    expect(empty).toMatchObject({ status: "unclassifiable", reason: "empty-inventory" })
+    const unreadable = classifyProcfsEnvironment("linux", [
+      { directoryName: "9407", stat: fixtureStat(9407, 9408) },
+    ], { numericEntries: 2, unreadableRows: 1, vanishedRows: 0 })
+    expect(unreadable).toMatchObject({ status: "unclassifiable", reason: "procfs-read-error" })
+
+    // Only independently incompatible observations can be skipped locally;
+    // malformed, divergent, unreadable, empty, and apt inventories never skip.
+    expect(shouldSkipLiveProcfsObservation(incompatible)).toBe(process.env.GITHUB_ACTIONS !== "true")
+    expect(shouldSkipLiveProcfsObservation(compatible)).toBe(false)
+    expect(shouldSkipLiveProcfsObservation(malformed)).toBe(false)
+    expect(shouldSkipLiveProcfsObservation(identityMismatch)).toBe(false)
+    expect(shouldSkipLiveProcfsObservation(empty)).toBe(false)
+    expect(shouldSkipLiveProcfsObservation(unreadable)).toBe(false)
+  })
+
+  test("observer aggregate guard rejects raw or malformed process data", () => {
+    const safeObservation = {
+      absent: true,
+      reason: "absent",
+      rowsScanned: 2,
+      kernelThreadRows: 1,
+      positiveGroupRows: 1,
+      targetGroupId: 2147483647,
+    }
+    expect(isSanitizedGroupObservation(safeObservation, true, "absent", 2147483647)).toBe(true)
+    expect(isSanitizedGroupObservation({
+      ...safeObservation,
+      absent: false,
+      reason: "invalid-target",
+      rowsScanned: 0,
+      kernelThreadRows: 0,
+      positiveGroupRows: 0,
+      targetGroupId: 0,
+    }, false, "invalid-target", 0)).toBe(true)
+    expect(isSanitizedGroupObservation({ ...safeObservation, comm: "synthetic-worker" }, true, "absent", 2147483647)).toBe(false)
+    expect(isSanitizedGroupObservation({ ...safeObservation, rawStat: "synthetic-stat" }, true, "absent", 2147483647)).toBe(false)
+    expect(isSanitizedGroupObservation({ ...safeObservation, reason: "synthetic-worker" }, true, "absent", 2147483647)).toBe(false)
+    expect(isSanitizedGroupObservation({ ...safeObservation, targetGroupId: "synthetic-pid" }, true, "absent", 2147483647)).toBe(false)
+    expect(isSanitizedGroupObservation({ ...safeObservation, rowsScanned: "synthetic-pid" }, true, "absent", 2147483647)).toBe(false)
+    expect(isSanitizedGroupObservation({ ...safeObservation, positiveGroupRows: Number.MAX_SAFE_INTEGER }, true, "absent", 2147483647)).toBe(false)
+  })
+
+  test.skipIf(skipLiveProcfsObservation)(liveProcfsTestTitle, async () => {
+    if (realProcfsAssessment.status !== "compatible") {
+      throw new Error(`live procfs observation requires an independently compatible inventory; observed ${realProcfsAssessment.status}/${realProcfsAssessment.reason}; ${summaryText(realProcfsAssessment)}`)
+    }
+    const runner = await import("../scripts/e2e-dsh-profile.js") as any
+    for (const name of ["parseLinuxProcStatGroupMembership", "processGroupAbsenceAfterCloseObservation"]) {
+      expect(typeof runner[name], name).toBe("function")
+    }
+
+    // A real positive group absent from the independently apt procfs inventory
+    // must be proven absent by the observer; any failure here is a test failure.
     const impossible = runner.processGroupAbsenceAfterCloseObservation(2147483647)
-    expect(impossible.absent).toBe(true)
-    expect(impossible.reason).toBe("absent")
-    expect(impossible.rowsScanned).toBeGreaterThan(0)
-    expect(JSON.stringify(impossible)).not.toMatch(/sanitized-worker|comm|\|"/)
-    // The runner's own process is a real member of its own positive group, so the
-    // same reader must refuse absence instead of hiding it.
+    // Validate both keys and safe scalar/count values without echoing raw data on failure.
+    expect(isSanitizedGroupObservation(impossible, true, "absent", 2147483647)).toBe(true)
+
+    // The live process must be positively identified in its own group; the
+    // deterministic fixtures separately prove that zombie members are retained.
     const selfStat = readFileSync("/proc/self/stat", "utf8")
     const selfMembership = runner.parseLinuxProcStatGroupMembership(selfStat, process.pid)
-    if (selfMembership.kind === "positive") {
-      const ownGroup = runner.processGroupAbsenceAfterCloseObservation(selfMembership.groupId)
-      expect(ownGroup.absent).toBe(false)
-      expect(ownGroup.reason).toBe("member-observed")
+    if (selfMembership.kind !== "positive") {
+      throw new Error("current test process did not provide a positive process-group identity")
     }
-    // A vanishing row (read error ENOENT) is handled inside the reader; invalid
-    // targets fail closed.
-    expect(runner.processGroupAbsenceAfterCloseObservation(0)).toMatchObject({ absent: false, reason: "invalid-target" })
-    expect(runner.processGroupAbsenceAfterCloseObservation(-1)).toMatchObject({ absent: false, reason: "invalid-target" })
+    const ownGroup = runner.processGroupAbsenceAfterCloseObservation(selfMembership.groupId)
+    expect(isSanitizedGroupObservation(ownGroup, false, "member-observed", selfMembership.groupId)).toBe(true)
+
+    // Invalid targets remain fail-closed; this live test sends no signals.
+    expect(isSanitizedGroupObservation(runner.processGroupAbsenceAfterCloseObservation(0), false, "invalid-target", 0)).toBe(true)
+    expect(isSanitizedGroupObservation(runner.processGroupAbsenceAfterCloseObservation(-1), false, "invalid-target", -1)).toBe(true)
   })
 })
 
